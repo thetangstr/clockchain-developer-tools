@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clockchain Developer Tools - Overview</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<style>
+  :root {
+    --bg: #f6f4ee;
+    --paper: #fffdf8;
+    --ink: #21201c;
+    --muted: #6a675f;
+    --line: #ddd8cc;
+    --ink-soft: #46443d;
+    --a-identity: #355070;   /* slate blue  - Product A */
+    --a-sdk: #6d597a;        /* muted plum  - Product B */
+    --a-oracle: #3a6b43;     /* green       - oracle */
+    --a-warn: #9a3b27;
+    --r-background-color: var(--bg);
+  }
+  .reveal { font-family: 'Inter', -apple-system, Helvetica, Arial, sans-serif; font-size: 26px; color: var(--ink); }
+  .reveal .slides section { text-align: left; }
+  .reveal h1 { font-size: 2.0em; font-weight: 800; letter-spacing: -0.02em; line-height: 1.05; color: var(--ink); }
+  .reveal h2 { font-size: 1.35em; font-weight: 800; letter-spacing: -0.01em; color: var(--ink); margin-bottom: 26px; }
+  .reveal p { line-height: 1.5; }
+  .reveal strong { font-weight: 700; }
+  .kicker { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 0.58em; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }
+  .lead { color: var(--muted); font-size: 1.0em; }
+  .big { font-size: 1.15em; line-height: 1.35; font-weight: 600; }
+  .note { color: var(--muted); font-size: 0.72em; line-height: 1.45; }
+  .reveal .controls { color: var(--ink); }
+  .reveal .progress { color: var(--ink); height: 3px; }
+  .reveal .slide-number { background: none; color: var(--muted); font-family: ui-monospace, monospace; }
+
+  /* ---- infographic primitives ---- */
+  .stack { display: grid; gap: 14px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .tier { background: var(--paper); border: 1.5px solid var(--line); border-radius: 14px; padding: 18px 22px; }
+  .tier.center { text-align: center; }
+  .tier-label { font-family: ui-monospace, monospace; font-size: 0.58em; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .tier-main { font-size: 0.92em; font-weight: 700; }
+  .tier-sub { font-size: 0.66em; color: var(--muted); margin-top: 4px; }
+  .arrow { text-align: center; color: var(--muted); font-size: 0.8em; margin: -4px 0; }
+
+  .pill { display: inline-block; border-radius: 999px; padding: 4px 14px; font-size: 0.62em; font-weight: 700; letter-spacing: 0.02em; color: #fff; }
+  .pill-a { background: var(--a-identity); }
+  .pill-b { background: var(--a-sdk); }
+  .pill-o { background: var(--a-oracle); }
+
+  .card { background: var(--paper); border: 1.5px solid var(--line); border-radius: 16px; padding: 26px 28px; height: 100%; box-sizing: border-box; }
+  .card.a { border-top: 6px solid var(--a-identity); }
+  .card.b { border-top: 6px solid var(--a-sdk); }
+  .card h3 { font-size: 1.0em; font-weight: 800; margin: 8px 0 4px; }
+  .card .who { font-size: 0.66em; color: var(--muted); font-family: ui-monospace, monospace; letter-spacing: 0.04em; }
+  .card .what { font-size: 0.8em; color: var(--ink-soft); margin: 14px 0; line-height: 1.5; }
+  .card .rev { font-size: 0.7em; font-weight: 700; }
+  .card.a .rev { color: var(--a-identity); }
+  .card.b .rev { color: var(--a-sdk); }
+
+  .threecol { display: grid; grid-template-columns: repeat(3,1fr); gap: 16px; }
+  .chip { background: var(--paper); border: 1.5px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .chip .n { font-family: ui-monospace, monospace; font-size: 0.6em; color: var(--muted); }
+  .chip .t { font-size: 0.82em; font-weight: 700; margin-top: 4px; }
+  .chip .d { font-size: 0.66em; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+
+  /* timeline */
+  .tl { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 10px; }
+  .tl-seg { position: relative; padding: 0 14px; }
+  .tl-bar { height: 8px; border-radius: 4px; background: var(--a-identity); }
+  .tl-seg:nth-child(2) .tl-bar { background: var(--a-sdk); }
+  .tl-seg:nth-child(3) .tl-bar { background: var(--a-oracle); }
+  .tl-seg:nth-child(4) .tl-bar { background: var(--muted); }
+  .tl-wk { font-family: ui-monospace, monospace; font-size: 0.58em; color: var(--muted); margin: 10px 0 4px; }
+  .tl-t { font-size: 0.74em; font-weight: 700; }
+  .tl-d { font-size: 0.62em; color: var(--muted); margin-top: 2px; }
+
+  .stat-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 22px; margin-top: 8px; }
+  .stat .num { font-size: 2.6em; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
+  .stat .lab { font-size: 0.66em; color: var(--muted); margin-top: 8px; }
+
+  .ba { display: grid; grid-template-columns: 1fr auto 1fr; gap: 20px; align-items: center; }
+  .ba-box { background: var(--paper); border: 1.5px solid var(--line); border-radius: 14px; padding: 22px; }
+  .ba-box.before { border-style: dashed; }
+  .ba-arrow { font-size: 1.4em; color: var(--muted); }
+  .ba-h { font-family: ui-monospace, monospace; font-size: 0.58em; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  hr.rule { border: none; border-top: 1px solid var(--line); margin: 20px 0; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- 1 - TITLE -->
+<section>
+  <p class="kicker">Clockchain · Product overview</p>
+  <h1>Making the time oracle<br>something developers and<br>AI agents can actually use.</h1>
+  <hr class="rule">
+  <p class="lead">A CLI and an MCP server that turn Clockchain's working time oracle into a product developers reach in minutes - and the foundation for agent identity and the Agent-SDK.</p>
+</section>
+
+<!-- 2 - THE GAP (before/after infographic) -->
+<section>
+  <h2>The gap today</h2>
+  <div class="ba">
+    <div class="ba-box before">
+      <p class="ba-h">Now</p>
+      <p class="big" style="margin:10px 0 6px;">A working oracle<br>no one can reach.</p>
+      <p class="note">Patented time consensus, live testnet - but the only way in is hand-written HTTP calls. No CLI, no SDK, no agent path.</p>
+    </div>
+    <div class="ba-arrow">&rarr;</div>
+    <div class="ba-box">
+      <p class="ba-h">After</p>
+      <p class="big" style="margin:10px 0 6px;">Install, then build<br>in five minutes.</p>
+      <p class="note">A developer or an AI agent goes from nothing to a timestamped, on-chain record in one short sitting.</p>
+    </div>
+  </div>
+  <hr class="rule">
+  <p class="note">The assessment set a target of "time-to-first-log under <em>x</em> minutes" and left <em>x</em> blank. This fills it in - and makes it small.</p>
+</section>
+
+<!-- 3 - THE STACK (infographic) -->
+<section>
+  <h2>One foundation, three ways in</h2>
+  <div class="stack">
+    <div class="row">
+      <div class="tier center"><div class="tier-label">Developers</div><div class="tier-main">Command line</div><div class="tier-sub">scripts, CI, the terminal</div></div>
+      <div class="tier center"><div class="tier-label">AI agents</div><div class="tier-main">MCP server</div><div class="tier-sub">Claude, Cursor, LangChain</div></div>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="tier center" style="background:#efece4;"><div class="tier-label">Shared client</div><div class="tier-main">One library underneath both</div></div>
+    <div class="arrow">&darr;</div>
+    <div class="tier center" style="border-color:var(--a-oracle);"><div class="tier-label">Clockchain</div><div class="tier-main">The time oracle &amp; ledger</div><div class="tier-sub">already live</div></div>
+  </div>
+</section>
+
+<!-- 4 - THE BUSINESS (two products infographic) -->
+<section>
+  <h2>Why it matters to the business</h2>
+  <div class="row" style="grid-template-columns:1fr 1fr; gap:24px;">
+    <div class="card a">
+      <span class="pill pill-a">Product A</span>
+      <h3>Agent identity</h3>
+      <p class="who">mint · verify · revoke</p>
+      <p class="what">Every AI agent gets an on-chain "birth certificate" and a tamper-evident record of what it did.</p>
+      <p class="rev">Revenue: a fee on every identity minted.</p>
+    </div>
+    <div class="card b">
+      <span class="pill pill-b">Product B</span>
+      <h3>Agent-SDK</h3>
+      <p class="who">log · prove · read time</p>
+      <p class="what">The path agent builders use to put Clockchain inside their tools - the MCP server is how they plug in.</p>
+      <p class="rev">Revenue: adoption drives token utility.</p>
+    </div>
+  </div>
+  <hr class="rule">
+  <p class="note">These tools are how both products reach a developer. No tooling, no adoption.</p>
+</section>
+
+<!-- 5 - THE BET -->
+<section>
+  <h2>The bet</h2>
+  <p class="big" style="margin-bottom:24px;">Be the default <span style="color:var(--a-identity);">identity</span> and <span style="color:var(--a-oracle);">time</span> layer that AI agents reach for - before a competitor sets the pattern.</p>
+  <div class="threecol">
+    <div class="chip"><div class="n">01</div><div class="t">Agents need provable identity</div><div class="d">Non-human identity is becoming an enterprise requirement, not a research topic.</div></div>
+    <div class="chip"><div class="n">02</div><div class="t">And an auditable trail</div><div class="d">"What did the agent do, and when" is a compliance question every buyer will ask.</div></div>
+    <div class="chip"><div class="n">03</div><div class="t">Clockchain answers both</div><div class="d">Time provenance is the wedge no competitor is anchoring identity on.</div></div>
+  </div>
+  <hr class="rule">
+  <p class="note">The window is the differentiator. The tooling is what turns the wedge into adoption.</p>
+</section>
+
+<!-- 6 - PLAN + ASK -->
+<section>
+  <h2>Five weeks to first adopters</h2>
+  <div class="tl">
+    <div class="tl-seg"><div class="tl-bar"></div><div class="tl-wk">WK 1-2</div><div class="tl-t">Foundation</div><div class="tl-d">shared client</div></div>
+    <div class="tl-seg"><div class="tl-bar"></div><div class="tl-wk">WK 2-3</div><div class="tl-t">CLI</div><div class="tl-d">developer path</div></div>
+    <div class="tl-seg"><div class="tl-bar"></div><div class="tl-wk">WK 3-4</div><div class="tl-t">MCP server</div><div class="tl-d">agent path</div></div>
+    <div class="tl-seg"><div class="tl-bar"></div><div class="tl-wk">WK 4-5</div><div class="tl-t">Launch</div><div class="tl-d">docs, listings</div></div>
+  </div>
+  <hr class="rule">
+  <div class="stat-row">
+    <div class="stat"><div class="num" style="color:var(--a-identity);">&lt;5 min</div><div class="lab">From install to first on-chain record</div></div>
+    <div class="stat"><div class="num" style="color:var(--a-sdk);">5</div><div class="lab">Outside developers testing it by week 4</div></div>
+    <div class="stat"><div class="num" style="color:var(--a-oracle);">~$20</div><div class="lab">Monthly hosting once a remote endpoint is needed</div></div>
+  </div>
+  <p class="note" style="margin-top:22px;">Built entirely on the existing oracle - no blockchain changes. Identity-resolution and smart-contract triggers depend on two backend additions, tracked separately so we don't oversell what ships first.</p>
+</section>
+
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({ hash: true, slideNumber: 'c/t', width: 1180, height: 720, margin: 0.06, transition: 'fade', transitionSpeed: 'fast', controlsLayout: 'edges', center: false });
+</script>
+</body>
+</html>

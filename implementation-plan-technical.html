@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clockchain Developer Tools - Implementation Plan</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<style>
+  :root {
+    --bg: #f6f4ee;
+    --ink: #21201c;
+    --muted: #6a675f;
+    --line: #d9d5ca;
+    --accent: #355070;
+    --warn: #9a3b27;
+    --ok: #3a6b43;
+    --r-background-color: var(--bg);
+  }
+  .reveal { font-family: Georgia, 'Iowan Old Style', 'Times New Roman', serif; font-size: 26px; color: var(--ink); }
+  .reveal .slides section { text-align: left; }
+  .reveal h1 { font-size: 1.9em; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; line-height: 1.1; }
+  .reveal h2 { font-size: 1.35em; font-weight: 700; color: var(--ink); border-bottom: 2px solid var(--ink); padding-bottom: 8px; margin-bottom: 22px; letter-spacing: -0.01em; }
+  .reveal h3 { font-size: 1.05em; font-weight: 700; color: var(--accent); }
+  .reveal p, .reveal li { line-height: 1.55; }
+  .reveal ul { margin-left: 1.1em; }
+  .reveal li { margin: 6px 0; }
+  .reveal strong { font-weight: 700; }
+  .reveal em { color: var(--muted); }
+  .reveal a { color: var(--accent); }
+
+  .reveal code { font-family: 'SF Mono', ui-monospace, 'Cascadia Code', Menlo, monospace; background: #ebe8e0; padding: 1px 6px; border-radius: 3px; font-size: 0.82em; color: #2a2823; }
+  .reveal pre { box-shadow: none; border: 1px solid var(--line); border-radius: 4px; background: #fbfaf6; width: 100%; }
+  .reveal pre code { font-family: 'SF Mono', ui-monospace, Menlo, monospace; background: none; padding: 16px 18px; color: #2a2823; font-size: 0.62em; line-height: 1.5; }
+
+  .reveal table { font-size: 0.7em; border-collapse: collapse; margin: 0; width: 100%; }
+  .reveal th { text-align: left; font-weight: 700; padding: 7px 12px; border-bottom: 1.5px solid var(--ink); }
+  .reveal td { padding: 6px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+
+  .lead { font-size: 0.95em; color: var(--muted); margin-top: 0; }
+  .kicker { font-size: 0.6em; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-family: 'SF Mono', monospace; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  .note { color: var(--muted); font-size: 0.8em; }
+  .tag { font-family: 'SF Mono', monospace; font-size: 0.62em; padding: 1px 6px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); }
+  .tag-ok { color: var(--ok); border-color: var(--ok); }
+  .tag-warn { color: var(--warn); border-color: var(--warn); }
+  .mono { font-family: 'SF Mono', monospace; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .reveal section[data-state] { }
+  .reveal .controls { color: var(--accent); }
+  .reveal .progress { color: var(--accent); height: 3px; }
+  .reveal .slide-number { background: none; color: var(--muted); font-family: 'SF Mono', monospace; }
+  hr.rule { border: none; border-top: 1px solid var(--line); margin: 18px 0; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- TITLE -->
+<section>
+  <p class="kicker">Internal engineering review · draft</p>
+  <h1>Clockchain developer tools</h1>
+  <p class="lead">A CLI and an MCP server over the existing D4 node API, so developers and AI agents can use the time oracle without writing raw HTTP calls.</p>
+  <hr class="rule">
+  <p class="note">Yang Tang · June 2026 · companion to <span class="mono">specs/implementation-plan.md</span></p>
+</section>
+
+<!-- WHERE WE ARE -->
+<section>
+  <h2>Where things stand today</h2>
+  <ul>
+    <li>The time oracle works. The public gateway answers three time endpoints with an API key.</li>
+    <li>There is no CLI, no SDK, no MCP server. The only way in is <span class="mono">curl</span>.</li>
+    <li>The assessment sets a goal of "time-to-first-log under <em>x</em> minutes" and leaves <em>x</em> blank. The job here is to make that number real and small.</li>
+  </ul>
+  <pre><code># the entire current developer experience
+curl -H "x-api-key: ..." https://node.clockchain.network/api/time/time</code></pre>
+</section>
+
+<!-- WHAT WE BUILD -->
+<section>
+  <h2>What this builds</h2>
+  <p>Three npm packages over one shared client. Nothing here changes the blockchain protocol.</p>
+  <hr class="rule">
+  <table>
+    <tr><td class="mono">@clockchain/core</td><td>HTTP client, types, DID helpers, evidence assembly. Everything else depends on it.</td></tr>
+    <tr><td class="mono">@clockchain/cli</td><td>For developers at a terminal. <span class="mono">npx @clockchain/cli</span>.</td></tr>
+    <tr><td class="mono">@clockchain/mcp-server</td><td>For AI agents. The integration surface for the Agent-SDK (Product B).</td></tr>
+  </table>
+  <p class="note" style="margin-top:18px;">All TypeScript: the MCP SDK and LangChain.js live in that ecosystem, and one language keeps the team's surface area small.</p>
+</section>
+
+<!-- TWO PRODUCTS -->
+<section>
+  <h2>The two products these serve</h2>
+  <div class="two-col">
+    <div>
+      <h3>Product A - Agent identity</h3>
+      <p class="note">On-chain DIDs for agents: mint, verify, revoke. A "birth certificate" an agent can point to.</p>
+    </div>
+    <div>
+      <h3>Product B - Agent-SDK</h3>
+      <p class="note">The path for LangChain / AutoGPT / CrewAI agents to log actions and read consensus time. The MCP server is how they connect.</p>
+    </div>
+  </div>
+  <hr class="rule">
+  <p class="note">Both are built as a convention layer on the existing <span class="mono">/log</span> and <span class="mono">/searchAsset</span> APIs. See the status slide for what that convention can and cannot do yet.</p>
+</section>
+
+<!-- VERIFIED API SURFACE - the honest core -->
+<section>
+  <h2>What the gateway actually exposes</h2>
+  <p class="note">Probed against <span class="mono">node.clockchain.network</span> with a live key, 2026-06-02. This is the ground the plan stands on.</p>
+  <table>
+    <tr><th>Endpoint</th><th>Result</th></tr>
+    <tr><td class="mono">/api/time/time, /timestamp, /block</td><td><span class="tag tag-ok">confirmed</span> wrapped in {success,data,meta}</td></tr>
+    <tr><td class="mono">/searchAsset</td><td><span class="tag tag-ok">confirmed</span> bare array, scoped to caller's clientId</td></tr>
+    <tr><td class="mono">/getValidationBlock/{h}</td><td><span class="tag tag-ok">confirmed</span> no envelope; testnet votes are all zero</td></tr>
+    <tr><td class="mono">/ledger/{id}, /log</td><td><span class="tag">present</span> not verified end-to-end (writes need a walletId)</td></tr>
+    <tr><td class="mono">/schedule</td><td><span class="tag tag-warn">404</span> not on the gateway - smart-contract triggers are blocked</td></tr>
+  </table>
+  <p class="note" style="margin-top:16px;">Response envelopes are inconsistent across endpoints. The client normalizes per-endpoint rather than assuming one wrapper.</p>
+</section>
+
+<!-- OPEN QUESTIONS -->
+<section>
+  <h2>Three things to settle with the D4 team</h2>
+  <ol>
+    <li><strong>Where does a <span class="mono">walletId</span> come from?</strong> The dashboard shows a client ID and an API key but no wallet. Every write path (<span class="mono">/log</span>) needs one.</li>
+    <li><strong>Cross-client lookup.</strong> <span class="mono">searchAsset</span> only sees your own records. Two agents on different clients can't verify each other's identity, which is the point of a handshake. Needs a public <span class="mono">/did/{id}</span> resolver.</li>
+    <li><strong>Triggers.</strong> <span class="mono">/schedule</span> isn't proxied to the gateway. The whole time-conditional-contract feature waits on that.</li>
+  </ol>
+  <p class="note">None of these block the read-and-log core. They block the parts we'd otherwise oversell.</p>
+</section>
+
+<!-- AGENT FLOW -->
+<section>
+  <h2>The flow an agent follows</h2>
+  <ol>
+    <li><strong>Mint</strong> - get a DID, recorded as a log entry</li>
+    <li><strong>Log</strong> - every meaningful action, hashed and timestamped against that DID</li>
+    <li><strong>Prove</strong> - assemble the consensus + ledger record for an entry</li>
+    <li><strong>Verify</strong> - check a DID is present and not revoked (same client, for now)</li>
+    <li><strong>Revoke</strong> - retire the identity</li>
+  </ol>
+  <p class="note">The MCP <span class="mono">onboard_agent</span> prompt walks a new agent through steps 1-3 on first connect.</p>
+</section>
+
+<!-- CLI -->
+<section>
+  <h2>CLI</h2>
+  <pre><code>$ clockchain identity mint --name investor-update-agent \
+    --capabilities "draft,send-email,read-metrics"
+  DID: did:clockchain:agent:a8f3c2e1...   block: 2734500
+
+$ clockchain log file ./update.pdf --did did:clockchain:agent:a8f3c2e1... \
+    --asset-ref update-2026-06-02 --wait
+  ledger: b9c4d3f2...   block: 2734510   status: confirmed
+
+$ clockchain prove b9c4d3f2...
+  consensus + ledger layers populated; layers 1-3 marked unverifiable
+  (testnet: single node, votes show 0 - expected)</code></pre>
+  <p class="note">P0 set: <span class="mono">auth</span>, <span class="mono">identity mint/verify</span>, <span class="mono">log/search</span>, <span class="mono">prove</span>, <span class="mono">time</span>. That is the five-minute path, start to first logged action.</p>
+</section>
+
+<!-- MCP TOOLS -->
+<section>
+  <h2>MCP server - tools</h2>
+  <div class="two-col">
+    <div>
+      <h3>Identity &amp; logging</h3>
+      <ul class="note" style="font-size:0.82em;">
+        <li class="mono">mint_agent_identity</li>
+        <li class="mono">verify_agent_identity</li>
+        <li class="mono">revoke_agent_identity</li>
+        <li class="mono">log_action</li>
+        <li class="mono">search_actions / get_log_entry</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Proof &amp; time</h3>
+      <ul class="note" style="font-size:0.82em;">
+        <li class="mono">generate_proof</li>
+        <li class="mono">get_time / get_timestamp</li>
+        <li class="mono">get_block / get_validation</li>
+        <li class="mono warn">schedule_trigger (blocked)</li>
+      </ul>
+    </div>
+  </div>
+  <hr class="rule">
+  <p class="note">Resources: <span class="mono">clockchain://status</span>, <span class="mono">clockchain://agent/{did}</span>. Prompts: <span class="mono">onboard_agent</span>, <span class="mono">timestamp_document</span>, <span class="mono">audit_agent</span>. Full schemas and handler code are in Appendix A of the spec.</p>
+</section>
+
+<!-- MCP SETUP -->
+<section>
+  <h2>MCP server - setup</h2>
+  <pre><code>{
+  "mcpServers": {
+    "clockchain": {
+      "command": "npx",
+      "args": ["-y", "@clockchain/mcp-server"],
+      "env": {
+        "CLOCKCHAIN_API_KEY": "...",
+        "CLOCKCHAIN_CLIENT_ID": "...",
+        "CLOCKCHAIN_WALLET_ID": "..."
+      }
+    }
+  }
+}</code></pre>
+  <p class="note">Works in Claude Code, Cursor, Windsurf. Same package, two transports: stdio for local clients now, Streamable HTTP on ECS Fargate (~$20/mo) when a hosted endpoint is needed for ChatGPT and web agents.</p>
+</section>
+
+<!-- PROOF HONESTY -->
+<section>
+  <h2>On "court-admissible"</h2>
+  <p>The audit document lays out a five-layer evidence chain. Worth being precise about what we can build today:</p>
+  <table>
+    <tr><th>Layer</th><th>Buildable now</th></tr>
+    <tr><td>1 - VRF validator election</td><td class="warn">no - no endpoint returns the election proof</td></tr>
+    <tr><td>2 - per-validator time readings</td><td class="warn">no - not exposed</td></tr>
+    <tr><td>3 - independent computation</td><td class="muted">described only</td></tr>
+    <tr><td>4 - validator consensus (votes, trust)</td><td class="ok">yes - getValidationBlock</td></tr>
+    <tr><td>5 - ledger record</td><td class="ok">yes - ledger + block</td></tr>
+  </table>
+  <p class="note" style="margin-top:14px;">So the honest deliverable is a two-layer proof. The legal standards (eIDAS, RFC 3161) are the destination once a real validator set and the missing endpoints exist - not what a single-node testnet entry demonstrates. Say that plainly to customers.</p>
+</section>
+
+<!-- SUBNETS -->
+<section>
+  <h2>Why subnets matter later</h2>
+  <p>Mainnet does ~50K txns/day. One enterprise customer generates millions of log events a day. You can't put raw logs on a shared chain.</p>
+  <pre><code>customer logs  →  dedicated subnet (3-30 nodes)  →  one hash per cycle  →  mainnet</code></pre>
+  <ul>
+    <li>Logs stay private in the subnet; only a state-root fingerprint is anchored.</li>
+    <li>Mainnet load scales with customer count, not log volume.</li>
+  </ul>
+  <p class="note">Backend status: spawn/assign/dissolve handlers done; customer-assignment API in progress; subnet-internal time consensus planned Q3 2026. The tools gain <span class="mono">--subnet</span> routing when that lands.</p>
+</section>
+
+<!-- PLAN -->
+<section>
+  <h2>Build order</h2>
+  <table>
+    <tr><th>Weeks</th><th>Work</th></tr>
+    <tr><td>1-2</td><td><span class="mono">core</span> - client, DID helpers, evidence assembly, types</td></tr>
+    <tr><td>2-3</td><td><span class="mono">cli</span> - identity, logging, proofs, time</td></tr>
+    <tr><td>3-4</td><td><span class="mono">mcp-server</span> - stdio package on npm</td></tr>
+    <tr><td>4-5</td><td>remote MCP (Fargate), docs, registry listings</td></tr>
+    <tr><td>Q3+</td><td>subnets, triggers - gated on backend</td></tr>
+  </table>
+  <p class="note" style="margin-top:14px;">CLI and MCP run in parallel once core ships. First useful milestone - read time, mint a DID, log an action from the terminal - lands end of week 3.</p>
+</section>
+
+<!-- TESTING -->
+<section>
+  <h2>How it's tested</h2>
+  <ul>
+    <li><strong>Unit</strong> - mocked client, runs on every commit, no network (~2s)</li>
+    <li><strong>Protocol</strong> - spawn the MCP server, drive it with a real client over stdio</li>
+    <li><strong>Smoke / integration</strong> - against the live testnet, run before a release</li>
+    <li><strong>Contract</strong> - snapshot the API shapes, diff weekly, catch D4 changes early</li>
+  </ul>
+  <p class="note">A release cycle costs ~50 testnet requests. The free plan's 1,000 covers roughly twenty cycles, so quota isn't a constraint at this stage.</p>
+</section>
+
+<!-- WHAT GOOD LOOKS LIKE -->
+<section>
+  <h2>What "done" looks like</h2>
+  <ul>
+    <li>A developer goes from <span class="mono">npx</span> to a logged action in under five minutes.</li>
+    <li>An agent in Claude Code mints a DID and logs its first action from one config block.</li>
+    <li>The package is listed where agent developers look (mcp.run, glama.ai).</li>
+    <li>Five outside testers have run it - the activation number the assessment asked for.</li>
+  </ul>
+  <hr class="rule">
+  <p class="note">Honest framing throughout: we ship the read-and-log core that works today, and we name the identity-resolution and trigger pieces as backend dependencies rather than implying they're finished.</p>
+</section>
+
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({
+  hash: true,
+  slideNumber: 'c/t',
+  width: 1180,
+  height: 720,
+  margin: 0.07,
+  transition: 'none',
+  controlsLayout: 'edges',
+  center: false
+});
+</script>
+</body>
+</html>

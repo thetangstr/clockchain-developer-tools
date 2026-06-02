@@ -1,0 +1,17 @@
+# Node (for when the packages land here)
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# Secrets / local config - never commit
+.env
+.env.*
+*.pem
+config.toml
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
