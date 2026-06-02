@@ -56,6 +56,31 @@ AI Agent (LangChain, AutoGPT, CrewAI)     Developer
 
 ---
 
+## Live Evaluation (2026-06-02, full write-path test)
+
+A second pass actually exercised the write paths, not just read probes. Results:
+
+| Capability | Verdict | Evidence |
+|---|---|---|
+| Time oracle (`time`, `timestamp`, `block`) | **Working** | Returns live data; genesis block 1 = `2026-04-30T15:29:16Z`. Single node: `consentedOffset -999.0`, `totalNodes 1.0`, votes 0%. |
+| Validation (`getValidationBlock`) | **Working, empty** | 200 for any height; all vote/trust/participation fields are 0 on the single-node testnet. |
+| Search (`searchAsset`) | **Working** | 200, returns `[]` (no assets logged under this client). |
+| **Logging (`POST /log`)** | **Live, blocked on credits** | Passes structural + hash-type validation, then returns `400 {"message":"No enough tokens to facilitate this logging"}`. The endpoint works; the account has no log credits. |
+| Ledger (`GET /ledger/{id}`) | Present, untested | 500 on a bad id; needs a real `ledgerId` from a successful log. |
+| **Smart contract (`/schedule`)** | **Not available** | 404 on GET, POST, and `/api/schedule`. Not proxied to the gateway. |
+| Twitter logging (`/buyTweets`) | Present, not registered | `400 {"error":"This client ID is not registered with us"}`. |
+
+**Two confirmed corrections to earlier drafts:**
+
+1. **`hashType` must be hyphenated.** Valid set is `MD5 | SHA-1 | SHA-2 | SHA-256`. `"SHA256"` is rejected with `400 Invalid hash type`. The spec has been corrected throughout.
+2. **Logging is metered by purchased "tokens" (log credits)**, separate from the API request quota. With zero credits, every `/log` write fails at the token gate even though the request is otherwise valid. This matches the D4 Payment Gateway (Stripe, 10/100/1000 log packs) in the internal docs.
+
+**Operational note - rate limiting is far tighter than documented.** The docs say 50 req/min; in practice 1-2 calls trip `Rate limit exceeded` (HTTP 400) with a ~100s cooldown. Whether this is per-key burst limiting or leftover budget from same-day probing is unclear, but any polling/`watch`/streaming feature must assume a very low effective rate on the current tier and back off aggressively.
+
+**Net:** the entire read surface and the logging endpoint are real and reachable today. To finish the write-path test we need (a) log credits provisioned on a known `clientId`/`walletId`, and (b) the backend to expose `/schedule` for the trigger feature.
+
+---
+
 ## Verified API Surface (probed 2026-06-02)
 
 Before building, here is what the public gateway at `node.clockchain.network` actually exposes. This was probed directly with a live API key. Treat the rest of this document as a design against these facts, not a description of finished APIs.
@@ -475,7 +500,7 @@ interface LogActionParams {
   did: string                    // agent's DID
   assetHash: string
   assetReferenceId: string
-  hashType?: string              // default: SHA256
+  hashType?: string              // default: "SHA-256". Valid: MD5 | SHA-1 | SHA-2 | SHA-256 (hyphenated - confirmed by live API)
   versionNumber?: number
   additionalInfo?: string
 }
@@ -1101,7 +1126,7 @@ server.tool(
       walletId: config.walletId,
       assetReferenceId: `did:mint:${did}`,
       assetHash: computeHash(JSON.stringify({ did, name, capabilities, owner })),
-      hashType: "SHA256",
+      hashType: "SHA-256",
       versionNumber: 1,
       additionalInfo: JSON.stringify({ type: "did:mint", did, name, capabilities, owner })
     })
@@ -1205,7 +1230,7 @@ server.tool(
       walletId: config.walletId,
       assetReferenceId: `did:revoke:${did}`,
       assetHash: computeHash(JSON.stringify({ did, reason, revokedAt: new Date().toISOString() })),
-      hashType: "SHA256",
+      hashType: "SHA-256",
       versionNumber: 1,
       additionalInfo: JSON.stringify({ type: "did:revoke", did, reason })
     })
@@ -1253,7 +1278,7 @@ server.tool(
     },
     hash_type: {
       type: "string" as const,
-      description: "Hash algorithm. Default: SHA256."
+      description: "Hash algorithm. Valid: MD5, SHA-1, SHA-2, SHA-256 (hyphenated). Default: SHA-256."
     },
     version_number: {
       type: "number" as const,
@@ -1270,7 +1295,7 @@ server.tool(
       walletId: config.walletId,
       assetReferenceId: asset_reference_id,
       assetHash: asset_hash,
-      hashType: hash_type || "SHA256",
+      hashType: hash_type || "SHA-256",
       versionNumber: version_number || 1,
       additionalInfo: JSON.stringify({
         did,
