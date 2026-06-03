@@ -868,6 +868,47 @@ metadata field, `/schedule` exposure, and a multi-validator network for real
 proofs. The POC's value here is turning these from "we noticed" into "here is an
 agent failing on them," which is a stronger case to the backend team.
 
+### Blockchain-provider MCP requirements (2026 landscape)
+
+A blockchain MCP is held to requirements that generic MCP servers are not. These
+emerged as de-facto standards in 2026 (Coinbase's Base MCP as the reference,
+ERC-8004 + SIWA for identity, x402 for payments). Each is mapped to whether it
+applies to Clockchain and what it changes in this spec.
+
+| Requirement (industry) | Applies to Clockchain? | What it changes here |
+|---|---|---|
+| **Non-custodial: the MCP server never holds a private key** | **Yes, critically** | Our `/schedule` design passes `privateKey` in a query string. That violates this on two counts (key in the agent/server, and a secret in a URL). It must be redesigned or stay out of the MCP entirely - see conflict 1 below |
+| **Propose-then-approve: agent prepares a state-changing action, a human signs it against a simulation** | Partly | Logging is low-stakes (spends a credit, writes a hash) and does not need per-write human approval. But any token spend or contract deploy (`/schedule`, paying for logs) does. Adopt it for value-moving tools, not for `log_action` |
+| **Delegated signing via a keyring proxy; keys never reach the agent** | Only if/when we sign on-chain | `log_action` needs no signature today. If Clockchain adds agent-signed on-chain actions, signing must go through a client-side keyring, never the MCP server |
+| **On-chain identity to a standard (ERC-8004 + SIWA)** | **Yes - reconsider Product A** | Our proprietary `did:clockchain:agent:{uuid}` predates a standard that 30k+ agents now use. See conflict 2 below |
+| **Separate read/infra tools from write/custody tools** | **Yes** | Classify every tool. Read/infra (time, block, validation, search, ledger) is safe and broad; write/custody (log_action, schedule, any token op) is gated. Do not blur them in one undifferentiated tool list |
+| **Agents pay via API credit / gasless stablecoin (x402), not wallet+gas** | **Yes** | Reinforces the existing funding gap as a hard requirement, not a nice-to-have. An agent cannot fund logs through a wallet; the credit path must be API-payable |
+
+**Conflict 1 - `/schedule` and `privateKey`.** The current smart-contract path
+takes a raw `privateKey` as a query parameter. Under the non-custodial rule this
+cannot ship in an MCP tool as designed. Options, in order of preference:
+(a) redesign so the MCP only *prepares* the contract/schedule and a client-side
+signer approves it (propose-then-approve); (b) keep `schedule_trigger` out of the
+MCP server entirely and leave contract deployment to a human/CLI flow; (c) if a
+key must be used, it lives in the operator's environment and is never accepted as
+a tool input or placed in a URL. The tool stays **blocked** until one of these is
+chosen - it is now blocked on *design*, not just on the gateway 404.
+
+**Conflict 2 - proprietary DID vs ERC-8004.** Product A mints
+`did:clockchain:agent:{uuid}` as a `/log` convention. The market has converged on
+ERC-8004 (Identity / Reputation / Validation registries, agent as an ERC-721) plus
+SIWA for auth. Before building more of the proprietary path, decide: align with
+ERC-8004 so Clockchain agents interoperate with the 30k+ already registered, or
+justify a Clockchain-specific identity. This is a Product-A direction question
+(see `foundational-questions.md`), not a tooling detail - flag it, do not quietly
+build the proprietary version deeper.
+
+**What does NOT change.** Clockchain's writes are notarization (hash + credit),
+not value transfer, so `log_action` does not need per-action signing or
+approval - the non-custodial and propose-then-approve rules bite on
+contracts/payments, not on logging. The read tools are unaffected. This keeps the
+verified core shippable as a POC while the two conflicts above are resolved.
+
 ### POC scope and exit
 
 - **In scope:** local stdio server only; the verified tools (`get_time`,
@@ -876,8 +917,10 @@ agent failing on them," which is a stronger case to the backend team.
 - **Out of scope:** the remote/hosted server (Option 2 below), any public
   listing, and any "autonomous agent" claim.
 - **Exit criteria:** a written MCP-experience findings doc covering requirements
-  A-K with grades and the prioritized fix list, plus the reinforced backend asks.
-  That document - not a shipped package - is what Phase 3 produces.
+  A-K with grades and the prioritized fix list, the reinforced backend asks, AND
+  a decision on the two blockchain-MCP conflicts (the `/schedule` non-custodial
+  redesign and ERC-8004 vs proprietary DID). That document - not a shipped
+  package - is what Phase 3 produces.
 
 ### Reference build (the POC implements a subset of this)
 
@@ -930,13 +973,17 @@ POC is informing, not a commitment to build now.
 | `verify_proof` | `{evidence_package}` -> `{valid, layers_checked}` | P1 |
 | `generate_agent_proof` | `{did, since?, until?}` -> proof of entire action trail | P1 |
 
-**Triggers:**
+**Triggers:** (blocked - see Conflict 1 in "Blockchain-provider MCP
+requirements." The original design passed `privateKey` as input, which violates
+the non-custodial rule. These do not ship until redesigned propose-then-approve
+or kept out of the MCP. The `privateKey` schema below is the OLD design, retained
+only to show what must change.)
 
 | Tool | Schema | Priority |
 |---|---|---|
-| `schedule_trigger` | `{contract_class, schedule_on, min_trust, min_participation}` -> `{status}` | P1 |
-| `get_trigger_status` | `{contract_address}` -> `{status, fired_at?, trust_at_fire?}` | P1 |
-| `verify_trigger` | `{contract_address}` -> trigger execution proof | P2 |
+| `schedule_trigger` | ~~`{..., privateKey}`~~ must become prepare-only (no key input) | Blocked |
+| `get_trigger_status` | `{contract_address}` -> `{status, fired_at?, trust_at_fire?}` | Blocked |
+| `verify_trigger` | `{contract_address}` -> trigger execution proof | Blocked |
 
 **Time Oracle:**
 
