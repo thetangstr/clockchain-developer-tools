@@ -123,6 +123,75 @@ is Clockchain's tailwind - but OpenTimestamps is already the name attached to it
 
 ---
 
+## 4. How the industry handles paying for usage (the token question)
+
+This is the specific question: is buying logging credits with a crypto token,
+through a wallet, paying a network fee, the industry standard? The evidence says
+clearly **no** - and where crypto is used well, it looks nothing like
+Clockchain's current flow.
+
+**The default is prepaid fiat credits via Stripe.** OpenAI's API uses a prepaid
+credit system - buy credits in advance ($5 minimum), usage deducts from the
+balance, with auto-recharge ([TokenMix](https://tokenmix.ai/blog/openai-api-billing-explained)).
+This is the dominant pattern. A 2026 survey of the field concludes "prepaid fiat
+credits via Stripe-like payment methods appear to be the industry standard, while
+crypto token-based billing remains less common as a primary payment mechanism"
+([Cryptopolitan](https://www.cryptopolitan.com/the-12-best-crypto-api-providers-for-developers-in-2026/)).
+Even crypto-forward platforms split the difference: Nevermined uses "Stripe
+integration for fiat ... and Coinbase for stablecoin settlement," outsourcing the
+payment rails entirely ([Nevermined](https://nevermined.ai/blog/ai-agent-payment-systems)).
+
+**Where crypto IS the rail, the standard is x402 - and it is gasless USDC, not a
+project token.** Coinbase's [x402](https://docs.cdp.coinbase.com/x402/welcome)
+revives HTTP 402 to let clients (humans or AI agents) pay for an API call inline,
+"without accounts, sessions, or complex authentication." The mechanics are the
+exact opposite of Clockchain's flow:
+
+- **Gasless.** "The payment is a gasless USDC transfer on Base ... The user signs
+  the transfer locally but doesn't submit it to the blockchain. Instead, they send
+  the signature to the server, and the facilitator handles the on-chain settlement"
+  ([Sherlock](https://sherlock.xyz/post/x402-explained-the-http-402-payment-protocol)).
+  The user never holds or spends a gas token.
+- **Stablecoin, not a volatile native token.** Settlement is in USDC via EIP-3009,
+  "for the smoothest experience" ([Coinbase](https://www.coinbase.com/developer-platform/discover/launches/x402)).
+- **Built for agents.** "Let AI agents pay and access services autonomously with
+  no keys or human input needed."
+- **Real scale and serious backers.** 119M+ transactions on Base, ~$600M
+  annualized volume, zero protocol fees; the x402 Foundation includes Coinbase,
+  Cloudflare, Google, Visa, AWS, Circle, **Anthropic**, and Vercel
+  ([Coinbase](https://www.coinbase.com/developer-platform/discover/launches/x402)).
+
+This matters directly: x402 is the standard being built for exactly Clockchain's
+Product B use case - an AI agent paying per API call. And it is gasless USDC.
+
+**Why Clockchain's flow is so complicated.** It uses the pre-2023 model that the
+rest of the industry has already engineered around:
+
+1. **You pay in a volatile project token (`d4dt`), not a stablecoin.** Pricing in
+   your own token means the buyer takes on token-price risk just to buy logs.
+2. **You pay gas in a separate native token you don't hold.** Every ERC-20 transfer
+   requires the sender to own the chain's gas token. This is the classic trap:
+   "I want to send my USDC, but I first need to buy ETH to pay the fees?"
+   ([Fibo](https://fibo-crypto.fr/en/blog/account-abstraction-gasless-guide-en/)).
+   On Clockchain you hold `d4dt` but no SepoliaETH, so you can't move the `d4dt`.
+3. **It runs on a testnet (Sepolia)**, so the "payment" isn't even real value
+   movement - it's testnet plumbing exposed to the user.
+4. **No gas abstraction.** Since 2023, ERC-4337 account abstraction and
+   **paymasters** solve exactly this. "An ERC-20 paymaster allows users to pay gas
+   fees using a supported ERC-20 token ... users only ever think in dollars, and
+   never need to acquire ETH"
+   ([thirdweb](https://blog.thirdweb.com/account-abstraction-gas-fees-paymasters-bundlers-cost-optimization/)).
+   Clockchain implements none of this, so the raw gas requirement leaks straight
+   to the user.
+
+In short: the wallet-plus-gas purchase is not an industry standard - it is the
+specific thing the industry spent the last three years removing. The fix is one
+of two well-trodden paths: (a) **fiat prepaid credits via Stripe** as the default,
+or (b) if crypto is wanted, **gasless stablecoin** (x402 / USDC with a paymaster),
+never a volatile token the user has to fund with gas.
+
+---
+
 ## What the leaders do that we should copy
 
 1. **Single REST call, no wallet, fiat-simple.** Every successful timestamping
