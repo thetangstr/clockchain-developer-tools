@@ -23,6 +23,7 @@ gateway. Logging is funded by a separate "logs" credit balance (see
 | [`product-findings.md`](product-findings.md) | Hands-on findings from the live network + dashboard (2026-06-02). | Product / engineering |
 | [`industry-landscape.md`](industry-landscape.md) | Evidence on what leading timestamping/provenance platforms do, and where Clockchain can differentiate. | Product / strategy |
 | [`mcp-readiness.md`](mcp-readiness.md) | Per-tool assessment of which APIs are ready to become MCP tools for Products A & B, grounded in live tests. | Engineering / product |
+| [`journeys.md`](journeys.md) | Developer and agent end-to-end journeys, marking where the current API flow supports or breaks autonomous agent usage. | Engineering / product |
 
 Open either `.html` file in a browser to present (arrow keys to navigate,
 `Esc` for the slide overview).
