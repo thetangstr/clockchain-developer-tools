@@ -909,6 +909,56 @@ approval - the non-custodial and propose-then-approve rules bite on
 contracts/payments, not on logging. The read tools are unaffected. This keeps the
 verified core shippable as a POC while the two conflicts above are resolved.
 
+### How the ERC-8004 hybrid changes the MCP server (conditional)
+
+If Product A adopts the ERC-8004 + SIWA hybrid (see
+`product-a-identity-decision.md`), the MCP identity tools change shape: Clockchain
+stops *minting* a proprietary DID and starts *consuming* ERC-8004 identity, while
+its differentiated value moves to a time/validation attestation tool. This is
+conditional on that decision (which is itself conditional on the customer), so
+treat this as the target shape if the hybrid is chosen, not a committed rewrite.
+
+| Current tool (proprietary) | Becomes under the hybrid |
+|---|---|
+| `mint_agent_identity` (writes `did:mint:` to `/log`) | **Dropped from the MCP.** Agents already hold an ERC-8004 identity (minted via Base/Turnkey/etc.). The MCP accepts an existing `agentId`, it does not issue identity |
+| `verify_agent_identity` (client-scoped `searchAsset`) | **Resolve an ERC-8004 `agentId` from the public registry.** Cross-agent, no client scoping |
+| `get_agent_identity` (returns a bare hash) | **Read the ERC-8004 `agentURI` registration JSON** (name, operator, capabilities) - structured, off Clockchain |
+| `revoke_agent_identity` | Handled by the ERC-8004 identity lifecycle, not Clockchain |
+| `log_action` (keyed to `did:clockchain:agent`) | **Re-keyed to the ERC-8004 `agentId`** as the reference; otherwise unchanged (still hash + credit) |
+| (new) `attest_time` | **The differentiator.** Write a Clockchain consensus-time attestation toward the agent's ERC-8004 **Validation Registry** entry - "this action occurred at this verifiable time" |
+
+**The big upside: the hybrid resolves three gaps the readiness assessment marked
+BLOCKED.** Because ERC-8004 is a public, enumerable, structured registry rather
+than Clockchain's exact-match, client-scoped `searchAsset`:
+
+- **Cross-agent verification** (was blocked by client scoping) becomes native -
+  any agent can resolve any other agent's ERC-8004 identity.
+- **`get_agent_identity` with a real record** (was blocked by `additionalInfo`
+  sanitization) works - the metadata lives in the `agentURI` JSON, not in a
+  sanitized Clockchain field.
+- **Listing/enumeration** (was blocked) is a property of the ERC-8004 registry.
+
+In other words, adopting the standard fixes the Product A blockers we could not
+fix in tooling. That is a strong argument for the hybrid on MCP grounds alone.
+
+**New dependencies and caveats this introduces:**
+- ERC-8004 reads are **EVM reads** - the MCP needs an RPC to Ethereum / Base /
+  wherever the registry lives. A new external dependency.
+- Writing a Validation Registry attestation is an **EVM write**, so the
+  non-custodial and propose-then-approve rules apply to `attest_time` exactly as
+  they do to `schedule_trigger` - the MCP prepares it, a client-side signer
+  approves. It does not get to hold a key.
+- SIWA becomes the agent auth path (keys via keyring proxy, never in the agent),
+  layered on or replacing the API-key/clientId model for identity operations.
+- All of this is gated on the customer being in the agent/EVM economy. If the
+  buyer is enterprise compliance, none of it applies and the proprietary anchor
+  (or a simple internal identity) is fine.
+
+**What still does not change:** the read tools (time, block, validation) and the
+core notarization loop (`log_action` as hash + credit). The hybrid changes
+*identity* and *adds* a validation-attestation tool; it does not touch the
+verified time/logging core that the POC ships.
+
 ### POC scope and exit
 
 - **In scope:** local stdio server only; the verified tools (`get_time`,

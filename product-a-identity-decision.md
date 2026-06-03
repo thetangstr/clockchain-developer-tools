@@ -109,6 +109,10 @@ position than a proprietary identity competing head-on with a standard.
 - **Non-custodial alignment.** SIWA's keyring-proxy model (keys never in the
   agent) matches the non-custodial requirement already in the MCP spec. Adopting
   ERC-8004 + SIWA resolves the identity side of that requirement for free.
+- **MCP impact.** This decision reshapes the MCP identity tools (mint is dropped,
+  verify/get become ERC-8004 reads, a new time-attestation tool is added) and it
+  resolves three gaps the readiness assessment marked blocked. See "How the
+  ERC-8004 hybrid changes the MCP server" in `implementation-plan.md`.
 
 ## Risks
 
