@@ -55,13 +55,21 @@ The Purchase Logs page offers two rails:
 ```
 
 Choosing the token rail triggers a MetaMask transaction on **Sepolia testnet**.
-But spending `d4dt` needs **SepoliaETH** for gas, which a normal user does not
-have - so MetaMask offers to swap `10 d4dt -> 0.00009 SepoliaETH` just to cover
-the fee, and that fails with "Insufficient funds ... not enough SepoliaETH."
+Spending `d4dt` needs **SepoliaETH** for gas. On testnet that gas is free and
+valueless - you grab it from a faucet (e.g. Google Cloud Web3 hands out ~0.05 a
+day) - so this is not a cost wall. It is a **steps** wall: install MetaMask, find
+and use a faucet, get testnet ETH, approve the token, sign the transaction. A
+first-time user who just wanted to buy logs hits all of that before anything
+happens. (Observed first attempt failed with "Insufficient funds ... not enough
+SepoliaETH" simply because the faucet step hadn't been done yet.)
 
-The net experience: you hold the token, but you cannot spend it without a second
-gas token you also do not have. Buying logging credits becomes "install
-MetaMask, get testnet ETH, swap tokens, sign a transaction."
+Two things make this matter beyond "it's a few extra steps":
+
+- **On mainnet the gas is no longer free.** The same flow then charges real ETH
+  per transaction, a recurring cost on top of the log price. The testnet hides
+  that cost today.
+- **An AI agent cannot do any of these steps at all** - faucets, swaps, MetaMask
+  signing. See #3.
 
 **Recommendation**
 - Make the **fiat ($) rail the default** and visually primary. The card path

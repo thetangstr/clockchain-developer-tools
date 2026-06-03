@@ -169,13 +169,16 @@ rest of the industry has already engineered around:
 
 1. **You pay in a volatile project token (`d4dt`), not a stablecoin.** Pricing in
    your own token means the buyer takes on token-price risk just to buy logs.
-2. **You pay gas in a separate native token you don't hold.** Every ERC-20 transfer
-   requires the sender to own the chain's gas token. This is the classic trap:
-   "I want to send my USDC, but I first need to buy ETH to pay the fees?"
+2. **You pay gas in a separate native token.** Every ERC-20 transfer requires the
+   sender to own the chain's gas token. On the current Sepolia testnet that gas is
+   free (faucet-obtainable), so the cost is zero - but the *steps* remain (faucet,
+   approve, sign), and on **mainnet** this becomes the classic trap: "I want to
+   send my USDC, but I first need to buy ETH to pay the fees?"
    ([Fibo](https://fibo-crypto.fr/en/blog/account-abstraction-gasless-guide-en/)).
-   On Clockchain you hold `d4dt` but no SepoliaETH, so you can't move the `d4dt`.
-3. **It runs on a testnet (Sepolia)**, so the "payment" isn't even real value
-   movement - it's testnet plumbing exposed to the user.
+   The testnet hides a real recurring mainnet cost.
+3. **It runs on a testnet (Sepolia)**, which makes the gas free today but also
+   means the "payment" is testnet plumbing exposed to the user, not real value
+   movement - and it masks what the mainnet flow will actually cost.
 4. **No gas abstraction.** Since 2023, ERC-4337 account abstraction and
    **paymasters** solve exactly this. "An ERC-20 paymaster allows users to pay gas
    fees using a supported ERC-20 token ... users only ever think in dollars, and
