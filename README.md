@@ -24,6 +24,7 @@ gateway. Logging is funded by a separate "logs" credit balance (see
 | [`industry-landscape.md`](industry-landscape.md) | Evidence on what leading timestamping/provenance platforms do, and where Clockchain can differentiate. | Product / strategy |
 | [`mcp-readiness.md`](mcp-readiness.md) | Per-tool assessment of which APIs are ready to become MCP tools for Products A & B, grounded in live tests. | Engineering / product |
 | [`journeys.md`](journeys.md) | Developer and agent end-to-end journeys, marking where the current API flow supports or breaks autonomous agent usage. | Engineering / product |
+| [`product-a-identity-decision.md`](product-a-identity-decision.md) | Decision memo: proprietary DID vs ERC-8004 + SIWA for agent identity. Recommends a hybrid - adopt the standard, differentiate on time/validation. | Product / leadership |
 
 Open either `.html` file in a browser to present (arrow keys to navigate,
 `Esc` for the slide overview).

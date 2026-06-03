@@ -900,7 +900,7 @@ ERC-8004 (Identity / Reputation / Validation registries, agent as an ERC-721) pl
 SIWA for auth. Before building more of the proprietary path, decide: align with
 ERC-8004 so Clockchain agents interoperate with the 30k+ already registered, or
 justify a Clockchain-specific identity. This is a Product-A direction question
-(see `foundational-questions.md`), not a tooling detail - flag it, do not quietly
+(it depends on who the customer is), not a tooling detail - flag it, do not quietly
 build the proprietary version deeper.
 
 **What does NOT change.** Clockchain's writes are notarization (hash + credit),
