@@ -146,17 +146,20 @@ ones. Being clear about which is which matters for scoping.
 
 ## Recommendation
 
-**Ship the MCP server now for the verified slice, and build it so the client-side
-mitigations are in from day one** - local ref index for history, off-chain doc
-store for metadata, request throttling, and early low-credit warnings. That makes
-the developer journey and the *read-plus-occasional-log* agent journey genuinely
-good today.
+**Build the MCP server as a POC, not a launch.** Stand up the verified-slice
+server with the client-side mitigations (local ref index for history, off-chain
+doc store for metadata, request throttling, early low-credit warnings) and run it
+against real agents to learn what the MCP experience actually needs. The output is
+a findings doc on MCP-experience requirements, not a shipped product. See the
+Phase 3 POC section in `implementation-plan.md` for the requirements to evaluate
+(agent comprehension, error UX, idempotency/credit safety, rate-limit resilience,
+recall, metadata fidelity, observability).
 
-**But do not market autonomous agent usage until the backend closes the two
-existential gaps:** agent-payable funding and a public resolver. Until those land,
+**Do not market autonomous agent usage at all yet.** The two existential gaps -
+agent-payable funding and a public resolver - are backend, and until they close,
 an agent on Clockchain is a human-funded, low-frequency notary that cannot verify
-its peers - which is a useful tool, but not the autonomous-agent story Product A
-and B are sold on.
+its peers. The POC's job is partly to make those gaps concrete (an agent visibly
+failing on them) so the backend case is undeniable.
 
 The honest one-liner: **the API flow supports agent *integration* today, but not
 agent *autonomy* yet.** The gap between those two is funding and resolution, and

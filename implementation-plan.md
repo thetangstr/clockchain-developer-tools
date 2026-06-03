@@ -771,7 +771,119 @@ CLOCKCHAIN_INTEGRATION=true npm run test:smoke    # ~30s, ~10 requests
 
 ---
 
-## Phase 3: @clockchain/mcp-server (Week 3-4)
+## Phase 3: @clockchain/mcp-server - POC, not launch (Week 3-4)
+
+**This phase is a proof of concept, not a release.** We are not shipping or
+marketing the MCP server. We build the minimal verified-slice server, run it
+against real agents in a controlled setting, and use it to *learn what the MCP
+experience actually needs*. The deliverable of this phase is not a product - it
+is a findings document of MCP-experience requirements that feeds both our own
+backlog and the backend asks to the D4 team.
+
+Why POC and not ship: the journey analysis (`journeys.md`) shows the API supports
+agent *integration* but not agent *autonomy* yet. Shipping now would imply a
+maturity we have not validated. A POC lets us test the experience honestly and
+surface requirements before committing to a launch.
+
+### What the POC is trying to learn
+
+1. Can a real AI agent complete the read -> log -> verify loop autonomously
+   through these tools, without hand-holding?
+2. Where does it get confused or stuck - tool selection, error handling, the
+   async (blockHeight-null-then-confirmed) write model?
+3. Do the client-side mitigations (local index, off-chain docs, throttling,
+   credit warnings) actually hold up under realistic agent use?
+4. What latency, credit-burn, and rate-limit behavior do we see in practice?
+5. Which MCP-experience gaps matter most to fix before any real launch, and which
+   are backend blockers we cannot fix in tooling?
+
+### MCP-experience requirements to evaluate and improve during the POC
+
+These are the things to build, test, and grade. Each is a requirement for a good
+MCP experience that the POC exists to validate or expose.
+
+**A. Agent comprehension (does an agent use it correctly?)**
+- Tool names and descriptions clear enough for autonomous selection.
+- Input schemas with descriptions; required vs optional obvious.
+- The `onboard_agent` prompt actually guides a cold agent through mint -> log ->
+  prove.
+- Test: hand a real agent a task and watch whether it picks the right tools
+  unaided.
+
+**B. Error and edge-case UX for agents**
+- Structured, actionable errors, never raw 500s or cryptic strings. The live API
+  returns things like `"No enough tokens"`; the MCP layer must translate these
+  into guidance an agent (or its operator) can act on.
+- Distinct, recoverable signals for: out of credits, rate-limited (with a
+  retry-after), not-yet-confirmed (`blockHeight` null), not-found, hash mismatch.
+- Test: induce each failure and observe whether the agent recovers or stalls.
+
+**C. Async and latency handling**
+- The write returns `blockHeight: null` and confirms in ~0.6s. The tool must make
+  "pending vs confirmed" legible and offer a clean wait/poll.
+
+**D. Idempotency and credit safety (high priority)**
+- If an agent retries `log_action` after a timeout, does it double-write and
+  double-spend a log credit? The POC must test retry behavior and add an
+  idempotency key / client-side dedupe so uncertain retries do not burn credits
+  or create duplicate records. This is a real money-adjacent risk.
+
+**E. Rate-limit resilience (client-side mitigation to validate)**
+- Throttle, queue, backoff, and cache reads (`get_time`) to stay under the ~100s
+  cooldown. Test with an agent that logs frequently; measure how well the server
+  smooths bursts and where it still breaks.
+
+**F. History / recall (client-side mitigation to validate)**
+- A local index of every `ledgerId` / `assetReferenceId` the server writes, so
+  `search_actions` can list an agent's own history despite the API being
+  exact-match only. Test whether an agent can reliably recall its trail.
+
+**G. Metadata fidelity (client-side mitigation to validate)**
+- Off-chain document store: keep the real identity/action doc, anchor only its
+  hash, rehydrate on read. Test that the agent sees rich records even though the
+  chain holds only a hash (the API sanitizes structured metadata).
+
+**H. Credit / balance awareness**
+- Pre-flight low-balance warning and a surfaced remaining-credit count, so the
+  operator is warned before a hard stop rather than after a cryptic failure.
+
+**I. Observability (how the POC generates its learnings)**
+- Log every tool call: inputs, outputs, latency, errors. This trace is the raw
+  material for the findings document; without it the POC teaches us nothing.
+
+**J. Security**
+- Never echo the API key in responses or logs. The `/schedule` path takes a
+  `privateKey`; if it is ever exercised, that handling needs explicit review
+  before any non-POC use.
+
+**K. Setup ergonomics**
+- One-copy-paste config; clear failure if `clientId` / `walletId` are missing.
+
+### Backend gaps the POC will confirm but cannot fix (feed back to D4)
+
+The POC is expected to re-demonstrate, with an agent in the loop, the blockers
+already identified: agent-payable funding (an agent cannot buy credits), a public
+resolver (no cross-agent verification), a real rate tier, a structure-preserving
+metadata field, `/schedule` exposure, and a multi-validator network for real
+proofs. The POC's value here is turning these from "we noticed" into "here is an
+agent failing on them," which is a stronger case to the backend team.
+
+### POC scope and exit
+
+- **In scope:** local stdio server only; the verified tools (`get_time`,
+  `get_timestamp`, `get_block`, `get_validation`, `log_action`, `get_log_entry`,
+  `verify_asset`) plus the Product-A-as-anchor tools clearly labeled experimental.
+- **Out of scope:** the remote/hosted server (Option 2 below), any public
+  listing, and any "autonomous agent" claim.
+- **Exit criteria:** a written MCP-experience findings doc covering requirements
+  A-K with grades and the prioritized fix list, plus the reinforced backend asks.
+  That document - not a shipped package - is what Phase 3 produces.
+
+### Reference build (the POC implements a subset of this)
+
+The tool/transport detail below is the full design. The POC implements only the
+local stdio path and the verified-slice tools; treat the rest as the target the
+POC is informing, not a commitment to build now.
 
 ### Option 1: npm Package (stdio transport)
 
@@ -1084,24 +1196,30 @@ FREE plan: 1,000 requests. ~50 requests per release cycle. Supports ~20 releases
 |---|---|---|---|
 | 1 | `@clockchain/core` (API client + DID ops + evidence package) | Week 1-2 | None |
 | 2 | `@clockchain/cli` (identity, logging, proofs, time) | Week 2-3 | Phase 1 |
-| 3a | `@clockchain/mcp-server` (stdio, npm) | Week 3-4 | Phase 1 |
-| 3b | `@clockchain/mcp-server` (remote, ECS) | Week 4-5 | Phase 3a |
-| 4 | Docs, MCP registry, LangChain guide | Week 4-5 | Phase 2, 3a |
+| 3 | `@clockchain/mcp-server` **POC** (stdio, local) - learn MCP-experience requirements | Week 3-4 | Phase 1 |
+| 3b | Remote/hosted MCP (ECS) - **deferred, post-POC** | After a launch decision | Phase 3 |
+| 4 | Docs + LangChain guide (public listing deferred to launch) | Week 4-5 | Phase 2 |
 | 5 | Subnet integration | Q3 2026 | Backend APIs |
 
-Phases 2 and 3a run in parallel once Phase 1 ships.
+Phases 2 and 3 (POC) run in parallel once Phase 1 ships. There is no "ship the
+MCP server" milestone here - Phase 3 ends in a findings document and a
+go / no-go decision, not a release.
 
 ## Success Metrics
 
+Two kinds: shipping metrics for the CLI, and learning metrics for the MCP POC.
+
 | Metric | Target | Source |
 |---|---|---|
-| TTFL (time to first log) | < 5 minutes | CLI smoke test |
-| Agent TTFL (MCP) | < 2 minutes | Copy config -> agent mints DID -> logs action |
-| DID mints on testnet | 50+ by Week 8 | On-chain count |
-| npm weekly downloads | 100+ by Week 8 | npm stats |
-| MCP registry listing | Live by Week 5 | mcp.run, glama.ai |
-| LangChain integration | Working callback | Integration test |
-| External developer testers | 5 by Week 4 | Assessment target |
+| TTFL (time to first log), CLI | < 5 minutes | CLI smoke test |
+| External developer testers (CLI) | 5 by Week 4 | Assessment target |
+| **POC:** agent completes read -> log -> verify loop unaided | yes / no | POC trace |
+| **POC:** MCP-experience findings doc (requirements A-K graded) | produced | Phase 3 exit criterion |
+| **POC:** idempotent retries (no double log-credit spend) | verified | POC test D |
+| **POC:** client-side mitigations hold (index, off-chain docs, throttle) | graded | POC tests E-G |
+
+Deliberately **not** metrics yet: npm downloads, registry listings, autonomous
+agent adoption. Those belong to a launch we have not decided to do.
 
 ---
 
