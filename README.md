@@ -7,6 +7,12 @@ Agent-SDK (Product B) work built on top.
 Nothing here changes the blockchain protocol. Everything wraps the existing
 gateway at `node.clockchain.network`.
 
+**Verified status (2026-06-03):** Timestamp API, Logging, and Search/Ledger are
+confirmed working against the live network - a real log wrote, anchored on-chain
+in ~0.6s, and read back. Smart-contract triggers (`/schedule`) are not yet on the
+gateway. Logging is funded by a separate "logs" credit balance (see
+`product-findings.md`).
+
 ## Contents
 
 | File | What it is | Audience |

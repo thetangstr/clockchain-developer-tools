@@ -503,11 +503,36 @@ interface LogActionParams {
   did: string                    // agent's DID
   assetHash: string
   assetReferenceId: string
-  hashType?: string              // default: "SHA-256". Valid: MD5 | SHA-1 | SHA-2 | SHA-256 (hyphenated - confirmed by live API)
+  hashType?: string              // default: "SHA-256". Must be hyphenated.
   versionNumber?: number
   additionalInfo?: string
 }
+
+// Verified against a live /log write (2026-06-03). blockHeight is null on
+// create and populates ~0.6s later once the leader writes. Timestamps use
+// the format "DD-MM-YYYY HH:MM:SS:mmm UTC".
+interface LogResponse {
+  ledgerId: string
+  clientId: string
+  walletId: string
+  assetReferenceId: string
+  assetHash: string
+  hashType: string
+  versionNumber: number
+  additionalInfo: string | null
+  blockHeight: string | null     // null until on-chain; string height once confirmed
+  createdTimestamp: string
+  updatedTimestamp: string | null
+  assetName: string | null       // null via API; the dashboard sets it
+  type: string | null
+}
 ```
+
+> **Hash-type caveat (verified):** the `/log` API error lists valid types as
+> `MD5 | SHA-1 | SHA-2 | SHA-256`, but the live dashboard dropdown offers a wider
+> set (`SHA-256, MD5, SHA-1, SHA-384, SHA-512, SHA3, RIPEMD-160`). The two do not
+> agree. `SHA-256` (hyphenated) is confirmed accepted; treat anything beyond the
+> API's stated four as unverified until checked. Reconcile with the D4 team.
 
 ### Evidence Package (Product A+B)
 
@@ -546,7 +571,7 @@ interface EvidencePackage {
 - `hashFile(path: string): Promise<string>` - SHA-256 of file contents
 - `generateDID(): string` - create a `did:clockchain:agent:{uuid}`
 - `buildEvidencePackage(ledgerId: string): Promise<EvidencePackage>` - composites log entry + block + validation; layers 4-5 real, 1-3 descriptive
-- `waitForConfirmation(ledgerId: string, timeoutMs?: number): Promise<LogResponse>` - poll until blockHeight is non-null
+- `waitForConfirmation(ledgerId: string, timeoutMs?: number): Promise<LogResponse>` - poll until blockHeight is non-null (typically ~0.6s; poll every ~500ms, default timeout 15s)
 
 ### Configuration
 

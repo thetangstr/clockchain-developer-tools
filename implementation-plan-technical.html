@@ -111,13 +111,13 @@ curl -H "x-api-key: ..." https://node.clockchain.network/api/time/time</code></p
 <!-- VERIFIED API SURFACE - the honest core -->
 <section>
   <h2>What the gateway actually exposes</h2>
-  <p class="note">Probed against <span class="mono">node.clockchain.network</span> with a live key, 2026-06-02. This is the ground the plan stands on.</p>
+  <p class="note">Probed with a live key 2026-06-02; write path verified on a funded account 2026-06-03. This is the ground the plan stands on.</p>
   <table>
     <tr><th>Endpoint</th><th>Result</th></tr>
     <tr><td class="mono">/api/time/time, /timestamp, /block</td><td><span class="tag tag-ok">confirmed</span> wrapped in {success,data,meta}</td></tr>
-    <tr><td class="mono">/searchAsset</td><td><span class="tag tag-ok">confirmed</span> bare array, scoped to caller's clientId</td></tr>
+    <tr><td class="mono">/searchAsset</td><td><span class="tag tag-ok">verified</span> returns the logged entry; scoped to caller's clientId</td></tr>
     <tr><td class="mono">/getValidationBlock/{h}</td><td><span class="tag tag-ok">confirmed</span> no envelope; testnet votes are all zero</td></tr>
-    <tr><td class="mono">/ledger/{id}, /log</td><td><span class="tag">present</span> not verified end-to-end (writes need a walletId)</td></tr>
+    <tr><td class="mono">/log, /ledger/{id}</td><td><span class="tag tag-ok">verified end-to-end</span> wrote, anchored at block 2822102 in ~0.6s, read back. walletId = account email.</td></tr>
     <tr><td class="mono">/schedule</td><td><span class="tag tag-warn">404</span> not on the gateway - smart-contract triggers are blocked</td></tr>
   </table>
   <p class="note" style="margin-top:16px;">Response envelopes are inconsistent across endpoints. The client normalizes per-endpoint rather than assuming one wrapper.</p>
@@ -125,13 +125,12 @@ curl -H "x-api-key: ..." https://node.clockchain.network/api/time/time</code></p
 
 <!-- OPEN QUESTIONS -->
 <section>
-  <h2>Three things to settle with the D4 team</h2>
+  <h2>Two things to settle with the D4 team</h2>
   <ol>
-    <li><strong>Where does a <span class="mono">walletId</span> come from?</strong> The dashboard shows a client ID and an API key but no wallet. Every write path (<span class="mono">/log</span>) needs one.</li>
     <li><strong>Cross-client lookup.</strong> <span class="mono">searchAsset</span> only sees your own records. Two agents on different clients can't verify each other's identity, which is the point of a handshake. Needs a public <span class="mono">/did/{id}</span> resolver.</li>
     <li><strong>Triggers.</strong> <span class="mono">/schedule</span> isn't proxied to the gateway. The whole time-conditional-contract feature waits on that.</li>
   </ol>
-  <p class="note">None of these block the read-and-log core. They block the parts we'd otherwise oversell.</p>
+  <p class="note">Resolved already: <span class="mono">walletId</span> = the account email works for writes, and logging is verified end-to-end. Neither remaining item blocks the read-and-log core - they block the parts we'd otherwise oversell.</p>
 </section>
 
 <!-- AGENT FLOW -->
