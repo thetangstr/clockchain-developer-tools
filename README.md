@@ -15,6 +15,7 @@ gateway at `node.clockchain.network`.
 | [`implementation-plan-technical.html`](implementation-plan-technical.html) | Slide version of the spec, with the design detail. | Engineering review |
 | [`implementation-plan.html`](implementation-plan.html) | Short, high-level overview deck. | Business / stakeholders |
 | [`product-findings.md`](product-findings.md) | Hands-on findings from the live network + dashboard (2026-06-02). | Product / engineering |
+| [`industry-landscape.md`](industry-landscape.md) | Evidence on what leading timestamping/provenance platforms do, and where Clockchain can differentiate. | Product / strategy |
 
 Open either `.html` file in a browser to present (arrow keys to navigate,
 `Esc` for the slide overview).
