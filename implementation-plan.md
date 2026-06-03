@@ -97,13 +97,13 @@ Before building, here is what the public gateway at `node.clockchain.network` ac
 | `GET /getValidationBlock/{h}` | Confirmed 200 | `{validationBlockData:{...}}`. No `executionResult`/`faultHandling` wrapper (the internal doc showed those; the gateway does not return them). No `{success,data}` envelope. |
 | `GET /ledger/{id}` | Present (500 on bad id) | not verified with a real ledger ID |
 | `POST /log` | Present (500 on GET probe) | not verified end-to-end (would write to chain; needs a real walletId) |
-| `GET /schedule?...` | **404 — NOT exposed on the gateway** | The smart-contract scheduling endpoint exists only on a raw node (`:8000`) per the internal docs, not through the public gateway |
+| `GET /schedule?...` | **404 - NOT exposed on the gateway** | The smart-contract scheduling endpoint exists only on a raw node (`:8000`) per the internal docs, not through the public gateway |
 
 **Three things this changes:**
 
 1. **The response envelope is inconsistent.** `/api/time/*` wraps results in `{success, data, meta}`; `/searchAsset` and `/getValidationBlock` return raw bodies. The core client must unwrap per-endpoint, not assume a uniform envelope.
 
-2. **Triggers / smart contracts are blocked.** `/schedule` returns 404 on the public gateway. Everything in the "Time-Conditional Triggers" section below (CLI `trigger *`, MCP `schedule_trigger`) cannot be built against the public API today. It stays in the plan as a design target but is **gated on the backend exposing `/schedule` through the gateway** — treat it as Phase 5-adjacent, not P1.
+2. **Triggers / smart contracts are blocked.** `/schedule` returns 404 on the public gateway. Everything in the "Time-Conditional Triggers" section below (CLI `trigger *`, MCP `schedule_trigger`) cannot be built against the public API today. It stays in the plan as a design target but is **gated on the backend exposing `/schedule` through the gateway** - treat it as Phase 5-adjacent, not P1.
 
 3. **The validation block is sparse on testnet.** Block 100 returns `positiveVotes: 0, negativeVotes: 0, Trust value percentage: 0.0, Node participation percentage: 0.0`. With a single testnet node and `consentedOffset: -999.0`, every proof generated today carries zero votes and 0% trust. See "Evidence Package: testnet reality" below.
 
