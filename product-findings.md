@@ -198,9 +198,11 @@ from the UI to the API.
 
 - The **Timestamp API is solid**: time, timestamp, and block-by-height all
   return clean, fast, correctly-shaped data.
-- **The logging endpoint itself is fully wired** - it validated our payload and
-  failed only at the (correct) credit check. Once logs are funded, the write
-  path should work.
+- **Logging is verified working end-to-end** (2026-06-03). After funding log
+  credits, a real write succeeded: `POST /log` returned a `ledgerId`, the entry
+  anchored on-chain at block 2822102 in ~632ms, and it was retrievable by ledger
+  ID and searchable by reference. The notarization loop works: hash in, consensus
+  timestamp, on-chain anchor, verifiable out.
 - **Search** returns sensible empty results and is ready to use.
 - The dashboard covers the full surface (logging, search, twitter logging,
   purchase, token management, smart contracts, timestamp API) - the product

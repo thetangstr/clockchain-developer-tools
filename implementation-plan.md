@@ -65,8 +65,9 @@ A second pass actually exercised the write paths, not just read probes. Results:
 | Time oracle (`time`, `timestamp`, `block`) | **Working** | Returns live data; genesis block 1 = `2026-04-30T15:29:16Z`. Single node: `consentedOffset -999.0`, `totalNodes 1.0`, votes 0%. |
 | Validation (`getValidationBlock`) | **Working, empty** | 200 for any height; all vote/trust/participation fields are 0 on the single-node testnet. |
 | Search (`searchAsset`) | **Working** | 200, returns `[]` (no assets logged under this client). |
-| **Logging (`POST /log`)** | **Live, blocked on credits** | Passes structural + hash-type validation, then returns `400 {"message":"No enough tokens to facilitate this logging"}`. The endpoint works; the account has no log credits. |
-| Ledger (`GET /ledger/{id}`) | Present, untested | 500 on a bad id; needs a real `ledgerId` from a successful log. |
+| **Logging (`POST /log`)** | **Verified working end-to-end** | After funding log credits, a real write succeeded: returned a `ledgerId`, anchored on-chain at block 2822102 in ~632ms, retrievable by ID and by reference. `walletId` = the account email is accepted. (Before funding it returned `400 "No enough tokens to facilitate this logging"` - that was purely the zero-credit balance.) |
+| Ledger (`GET /ledger/{id}`) | **Verified working** | Returns the full record by `ledgerId`, including `blockHeight` once the leader writes (null for ~0.6s, then populated). |
+| Search (`GET /searchAsset`) | **Verified working** | Returns the logged entry (with populated `blockHeight`) when queried by `clientId` + `assetReferenceId`. |
 | **Smart contract (`/schedule`)** | **Not available** | 404 on GET, POST, and `/api/schedule`. Not proxied to the gateway. |
 | Twitter logging (`/buyTweets`) | Present, not registered | `400 {"error":"This client ID is not registered with us"}`. |
 
@@ -77,7 +78,9 @@ A second pass actually exercised the write paths, not just read probes. Results:
 
 **Operational note - rate limiting is far tighter than documented.** The docs say 50 req/min; in practice 1-2 calls trip `Rate limit exceeded` (HTTP 400) with a ~100s cooldown. Whether this is per-key burst limiting or leftover budget from same-day probing is unclear, but any polling/`watch`/streaming feature must assume a very low effective rate on the current tier and back off aggressively.
 
-**Net:** the entire read surface and the logging endpoint are real and reachable today. To finish the write-path test we need (a) log credits provisioned on a known `clientId`/`walletId`, and (b) the backend to expose `/schedule` for the trigger feature.
+**Net (updated 2026-06-03):** the read surface AND the full logging write path are now verified working against a live, funded account - log, confirm on-chain, search, retrieve all succeed. The only remaining gap is smart-contract triggers: `/schedule` is still 404 on the gateway.
+
+**Confirmed `/log` response schema (from the live write):** `ledgerId`, `clientId`, `walletId`, `assetReferenceId`, `assetHash`, `hashType`, `versionNumber`, `additionalInfo`, `blockHeight` (string once confirmed, null until then), `createdTimestamp` and `updatedTimestamp` (format `DD-MM-YYYY HH:MM:SS:mmm UTC`), plus `assetName` and `type` (both null in the API path; the dashboard sets `assetName`). Confirmation latency observed: ~632ms from create to on-chain `blockHeight`.
 
 ---
 
