@@ -9,20 +9,25 @@ This is a direction decision, and it sits downstream of customer discovery: the 
 Product A is for.
 The recommendation below states that dependency explicitly.
 
+## Decision (2026-06): COMMITTED to the hybrid
+
+Product has committed to the hybrid: **adopt ERC-8004 + SIWA for identity, and
+position Clockchain as the time/validation layer within it.** The proprietary
+`did:clockchain:agent` path will not be built deeper. The rest of this memo is
+the rationale.
+
+Standing assumption behind the commit: Product A targets the agent / EVM economy.
+If customer discovery later shows the buyer is non-crypto enterprise compliance,
+revisit - but the default is now ERC-8004.
+
 ## TL;DR
 
-**Do not build the proprietary DID deeper. Lean toward a hybrid: adopt ERC-8004
-for the identity primitive, and position Clockchain where it is actually
-differentiated - as a time-based validation and action-trail layer within the
-ERC-8004 model, not as a competing identity system.** Clockchain's edge is
+**Adopt ERC-8004 for the identity primitive, and position Clockchain where it is
+actually differentiated - as a time-based validation and action-trail layer within
+the ERC-8004 model, not as a competing identity system.** Clockchain's edge is
 *time*, not identity. ERC-8004 already owns identity. Competing on identity is
 fighting where we are weakest; plugging into it on validation is playing where we
 are strongest.
-
-Caveat: if customer discovery shows Product A's buyer is non-crypto enterprise
-compliance (not the agent economy), ERC-8004 may be irrelevant and a simple
-internal identity is fine. Decide the customer first; this memo assumes the
-agent-economy positioning the products are currently sold on.
 
 ## What ERC-8004 actually is
 

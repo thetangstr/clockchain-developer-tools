@@ -882,7 +882,7 @@ applies to Clockchain and what it changes in this spec.
 | **Delegated signing via a keyring proxy; keys never reach the agent** | Only if/when we sign on-chain | `log_action` needs no signature today. If Clockchain adds agent-signed on-chain actions, signing must go through a client-side keyring, never the MCP server |
 | **On-chain identity to a standard (ERC-8004 + SIWA)** | **Yes - reconsider Product A** | Our proprietary `did:clockchain:agent:{uuid}` predates a standard that 30k+ agents now use. See conflict 2 below |
 | **Separate read/infra tools from write/custody tools** | **Yes** | Classify every tool. Read/infra (time, block, validation, search, ledger) is safe and broad; write/custody (log_action, schedule, any token op) is gated. Do not blur them in one undifferentiated tool list |
-| **Agents pay via API credit / gasless stablecoin (x402), not wallet+gas** | **Yes** | Reinforces the existing funding gap as a hard requirement, not a nice-to-have. An agent cannot fund logs through a wallet; the credit path must be API-payable |
+| **Agents pay via API credit / gasless stablecoin (x402), not wallet+gas** | **Yes - decided** | Decision (2026-06): **design for x402 as the target funding path, but abstract funding behind a seam so the POC also runs on the current credit path (or a stub) without x402 live.** That lets us test agent sessions today and swap in x402 later. The MCP must never require a wallet/gas action from the agent |
 
 **Conflict 1 - `/schedule` and `privateKey`.** The current smart-contract path
 takes a raw `privateKey` as a query parameter. Under the non-custodial rule this
@@ -909,14 +909,14 @@ approval - the non-custodial and propose-then-approve rules bite on
 contracts/payments, not on logging. The read tools are unaffected. This keeps the
 verified core shippable as a POC while the two conflicts above are resolved.
 
-### How the ERC-8004 hybrid changes the MCP server (conditional)
+### How the ERC-8004 hybrid changes the MCP server (committed 2026-06)
 
-If Product A adopts the ERC-8004 + SIWA hybrid (see
-`product-a-identity-decision.md`), the MCP identity tools change shape: Clockchain
+Product has committed to the ERC-8004 + SIWA hybrid (see
+`product-a-identity-decision.md`). The MCP identity tools change shape: Clockchain
 stops *minting* a proprietary DID and starts *consuming* ERC-8004 identity, while
-its differentiated value moves to a time/validation attestation tool. This is
-conditional on that decision (which is itself conditional on the customer), so
-treat this as the target shape if the hybrid is chosen, not a committed rewrite.
+its differentiated value moves to a time/validation attestation tool. The standing
+assumption is an agent/EVM-economy customer; revisit only if discovery says
+otherwise.
 
 | Current tool (proprietary) | Becomes under the hybrid |
 |---|---|
@@ -968,9 +968,61 @@ verified time/logging core that the POC ships.
   listing, and any "autonomous agent" claim.
 - **Exit criteria:** a written MCP-experience findings doc covering requirements
   A-K with grades and the prioritized fix list, the reinforced backend asks, AND
-  a decision on the two blockchain-MCP conflicts (the `/schedule` non-custodial
-  redesign and ERC-8004 vs proprietary DID). That document - not a shipped
-  package - is what Phase 3 produces.
+  a decision on the `/schedule` non-custodial redesign. That document - not a
+  shipped package - is what Phase 3 produces.
+
+### Business decisions on record (2026-06)
+
+Settled, so the POC is not blocked on them:
+
+- **ERC-8004 identity:** committed to the hybrid. (Q6)
+- **Funding:** design for x402, but keep a funding seam so the POC runs on the
+  current credit path / a stub without x402 live. (Q7)
+- **Pricing / unit:** deferred. Not a POC concern. (Q8)
+- **Public distribution / MCP-directory listing:** not until mainnet. Flagged as
+  a "we should talk about it" before any launch, not now. (Q9)
+
+Still open, gating a *product* (not the POC): who the customer is, the wedge, and
+willingness to pay. The POC gathers first signal on these (see success criteria).
+
+### POC success - definition of done
+
+The POC succeeds if, at the end, we can make a confident go / no-go on building
+the MCP as a product. Three bars:
+
+**A. Functional - the core works through MCP**
+- An AI agent, in a real client (Claude Code or Cursor), completes the loop
+  unaided: get consensus time -> notarize an action -> verify it -> retrieve it.
+  (pass / fail)
+- A logged action references an ERC-8004 identity. (pass / fail)
+- Median agent loop completes in under ~2 minutes from a cold start. (target)
+
+**B. Learning - we know what to build**
+- MCP-experience requirements A-K graded with evidence from real agent runs.
+- Idempotency proven: across ~50 retried / duplicate `log_action` calls, zero
+  double-spent credits.
+- Client-side mitigations demonstrated: the history index returns the agent's own
+  actions, off-chain docs rehydrate, and throttling keeps an agent under the rate
+  limit for a realistic session.
+- The funding seam works: an agent runs a full session with no wallet / gas
+  action, on the credit path, with the x402 path spiked (even if stubbed).
+
+**C. Decision - we can greenlight or not**
+- The demo put in front of at least 3-5 candidate users / design partners, with
+  their reactions captured. This is the first real customer signal (Q1).
+- A written go / no-go that includes the requirement grades, the funding result,
+  and the two existential backend gaps (agent-payable funding, public resolver)
+  either owned by D4 with a date or demonstrated as hard blockers with
+  agent-failing evidence.
+
+**Explicitly NOT success criteria:** adoption, revenue, a public listing, mainnet,
+or "autonomous agents at scale." Those depend on the backend gaps and a launch we
+have not decided to do.
+
+**One sentence:** the POC succeeds when an agent completes the notarize-and-verify
+loop through the MCP in a real client, we have graded the experience requirements
+from real runs, and we have enough customer signal plus a funding / resolver
+answer to make a defensible go / no-go.
 
 ### Reference build (the POC implements a subset of this)
 
