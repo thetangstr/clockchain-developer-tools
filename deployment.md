@@ -179,6 +179,50 @@ Cloudflare Tunnel.
 Net: an agent run by AgentDash can use our MCP, configured at the runtime layer on
 localhost. Nothing changes in AgentDash itself.
 
+### Exact place to register our MCP (for a Claude Code / `claude_local` agent)
+
+AgentDash's `process` adapter spawns the runtime with a `command` + `args` +
+`cwd` and injects no MCP config. Claude Code (installed on the box - `~/.claude.json`
+exists, with a `mcpServers` key already holding `chrome-devtools`) reads its MCP
+servers from, in order:
+
+1. **Per-project `.mcp.json`** at the run's `cwd` (the worktree AgentDash realizes).
+2. **`~/.claude.json` -> `projects["<cwd>"].mcpServers`** (per-project, in the user
+   config; the box already has project entries here).
+3. **`~/.claude.json` -> top-level `mcpServers`** (global, all runs on the box -
+   simplest for a test).
+
+Drop our server into one of those. Simplest for a local agent on this box is
+**stdio in the global `~/.claude.json` `mcpServers`**, next to `chrome-devtools`:
+
+```json
+"clockchain": {
+  "command": "npx",
+  "args": ["-y", "@clockchain/mcp-server"],
+  "env": {
+    "CLOCKCHAIN_API_KEY": "...", "CLOCKCHAIN_CLIENT_ID": "...",
+    "CLOCKCHAIN_WALLET_ID": "...", "EVM_RPC_URL": "...",
+    "ERC8004_CHAIN": "base-sepolia"
+  }
+}
+```
+
+Or, to point a Claude Code agent at the HTTP host we run for business testers
+(same box, so localhost):
+
+```json
+"clockchain": {
+  "type": "http",
+  "url": "http://localhost:3000/mcp",
+  "headers": { "x-api-key": "<tester token>" }
+}
+```
+
+Recommendation: **stdio via `~/.claude.json` for AgentDash's local agents**
+(simplest, no host needed), and reserve the HTTP endpoint on the Mac mini for
+remote business testers. Both run off the same package; the POC ships both
+transports.
+
 ---
 
 ## 3. AWS production deployment plan
