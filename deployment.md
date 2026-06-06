@@ -13,6 +13,85 @@ conflict with the "no public distribution until mainnet" decision.
 
 ---
 
+## 0. Network exposure model (FOR NETWORK-TEAM APPROVAL)
+
+> **Status: PROPOSED - awaiting network-team sign-off.** The network team raised
+> that we should not stand up a networked, credentialed endpoint that fronts the
+> Clockchain server. This section is the proposal to address that, in a form they
+> can approve. Sign-off block at the bottom.
+
+### The concern, restated
+Our MCP server holds a Clockchain API key and calls the gateway
+(`node.clockchain.network`). If we host that MCP as a network-reachable endpoint,
+it becomes a credentialed inbound path into Clockchain. The ask is to avoid that.
+
+### Proposal (one line)
+**Default to stdio (no network listener); when a networked endpoint is genuinely
+needed, bind to the tailnet only; never a public bind for a key-holding endpoint.**
+
+### Reachability scopes on the Mac mini (probed 2026-06)
+| Scope | Address | Who can reach it |
+|---|---|---|
+| loopback | `127.0.0.1` | the Mac mini only |
+| LAN | `192.168.86.0/24` (`192.168.86.48`) | anything on the office/home subnet |
+| tailnet | `100.71.225.125` (Tailscale) | only devices in the Clockchain tailnet |
+| public | only via a tunnel / port-forward | the entire internet |
+
+(The box is behind NAT, so it is **not** publicly reachable unless we add a tunnel.
+AgentDash's own deployment uses the same `loopback / lan / tailnet` bind modes.)
+
+### Transport -> what it exposes
+| Transport / bind | Reachable from | Credentialed exposure |
+|---|---|---|
+| **stdio** | nothing (no listener) | none |
+| HTTP loopback | the Mac mini only | none beyond the host |
+| HTTP LAN | the subnet | anyone on the LAN |
+| HTTP tailnet | tailnet members | controlled membership |
+| HTTP + public tunnel | the internet | maximal - avoid |
+
+### Proposed posture by audience
+- **AgentDash / Claude (run ON the Mac mini): stdio, or HTTP on loopback.** They
+  are co-located, so they need nothing beyond the host. **No network exposure.**
+- **Remote business testers: tailnet bind only** (Tailscale membership), never a
+  LAN-wide or public bind.
+- **Public bind / tunnel for a key-holding endpoint: not done.**
+- **v3 on AWS:** an ALB is public by definition, so it only proceeds if the network
+  team approves a public (mainnet-gated) endpoint; otherwise v3 is tailnet/VPN-only
+  or we distribute the stdio server instead of hosting.
+
+Note: the Clockchain gateway is on the public internet, so the MCP always makes an
+**outbound** call to it. This proposal removes the **inbound** credentialed path,
+not the outbound call (that only changes if the gateway itself is locked to a
+private network).
+
+### Decisions requested from the network team
+1. Approve **stdio / loopback as the default** for co-located agents (no exposure). [ ]
+2. Approve **tailnet-only** for any remote tester access (no LAN-wide, no public). [ ]
+3. Clarify what "expose the Clockchain server" means:
+   - (a) "Do not add a new hosted, credentialed MCP endpoint" -> covered by 1 + 2. [ ]
+   - (b) "Lock `node.clockchain.network` itself to a private network / allowlist"
+     -> larger change; consumers must then be on that network (tailnet fits). [ ]
+4. v3 hosted-on-AWS: approve a public, mainnet-gated endpoint [ ], or require
+   tailnet/VPN-only [ ], or do not host (distribute stdio) [ ].
+
+### Question back to the network team (paste this)
+> Our MCP server holds a Clockchain API key and calls `node.clockchain.network`
+> outbound. Our default plan is to run it as a local stdio subprocess (no network
+> listener) for the agents on the Mac mini, and to bind to the Tailscale tailnet
+> only if a remote tester ever needs HTTP access - never a public or LAN-wide bind
+> for the key-holding endpoint. Does that satisfy "do not expose the Clockchain
+> server"? Or do you also want `node.clockchain.network` itself restricted to a
+> private network / allowlist (in which case consumer machines would need to be on
+> that network/tailnet)? And for an eventual AWS deployment, is a public
+> mainnet-gated endpoint acceptable, or must it stay tailnet/VPN-only?
+
+### Sign-off
+- Network team reviewer: ____________________  Date: __________
+- Decision: approved as proposed / approved with changes / needs discussion
+- Notes: ________________________________________________
+
+---
+
 ## 1. Mac mini test host (business-user testing)
 
 Goal: one running MCP endpoint that business users and AgentDash can hit, with no
