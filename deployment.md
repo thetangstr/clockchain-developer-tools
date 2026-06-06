@@ -111,6 +111,19 @@ docker run -d --name clockchain-mcp --restart unless-stopped \
   clockchain/mcp-server
 ```
 
+> **This Mac mini specifically (probed 2026-06): no Docker installed.** It has
+> node v26 at `/opt/homebrew/bin/node` and uses pnpm (that is how AgentDash runs).
+> So either install Colima/Docker first, or - simpler, matches the box - run via
+> node + pm2:
+>
+> ```bash
+> pnpm --filter @clockchain/mcp-server build
+> npm i -g pm2
+> env $(grep -v "^#" ~/clockchain-mcp/.env | xargs) \
+>   pm2 start packages/mcp-server/dist/server.js --name clockchain-mcp
+> pm2 save && pm2 startup   # survive reboots
+> ```
+
 **Step 4 - verify locally**
 
 ```bash
@@ -137,21 +150,34 @@ LAN testers and AgentDash skip step 5 and use `http://<LAN-IP>:3000/mcp` directl
 
 ---
 
-## 2. AgentDash integration
+## 2. AgentDash integration (resolved 2026-06, by inspecting the box)
 
-AgentDash hits the MCP as a **Streamable HTTP MCP client**:
+**AgentDash runs ON the Mac mini.** It *is* `mac-mini.lan` / `192.168.86.48`
+(subnet `192.168.86.0/24`), a node process serving `:3100`. Internally the
+product is "Paperclip" (`@paperclipai`). Two findings settle the wiring:
 
-- **Endpoint:** `http://<mac-mini-LAN-IP>:3000/mcp` (LAN) or the Cloudflare HTTPS
-  URL (remote).
-- **Auth header:** `x-api-key: <tester token>`.
-- AgentDash must support **remote / HTTP MCP servers**. If it only supports local
-  stdio servers, it would instead run `npx @clockchain/mcp-server` locally - in
-  which case the Mac mini host is not the path for AgentDash and we use stdio
-  there.
+**AgentDash itself is not an MCP client.** Its codebase has no MCP client SDK
+import, no `mcpServers` config, and no HTTP/SSE client transport (verified by
+grep). It only *exposes itself* as an MCP server (`@paperclipai/mcp-server`,
+stdio). So AgentDash-the-app will not dial our MCP directly - there is no
+remote-MCP-client feature to rely on in the app.
 
-**Open question to confirm:** does AgentDash support remote (HTTP) MCP servers,
-and is it on the same LAN/subnet as the Mac mini? Those two answers decide whether
-AgentDash connects LAN-direct, via the tunnel, or stdio-local.
+**But AgentDash orchestrates agents through runtime adapters** - its constants
+list `claude_local`, `codex_local`, `cursor`, `opencode_local`, `gemini_local`,
+`hermes_local`, `openclaw_gateway`, plus generic `process` / `http`. Those
+runtimes (Claude Code, Cursor, Codex, OpenCode, ...) are what support MCP servers,
+including remote/HTTP. So the integration path is: **wire our MCP into the agent
+runtime AgentDash launches** (in that runtime's MCP config), not into AgentDash.
+
+**Co-located, so no tunnel for local agents.** Because those runtimes run on the
+same Mac mini, they reach our MCP at `http://localhost:3000/mcp` (HTTP) or via
+stdio (`npx`). `192.168.86.48:3000` works for anything else on the subnet. The
+box is also on **Tailscale** (`100.71.225.125`), and AgentDash even has a
+`tailnet` bind mode - so off-network testers can use the tailnet instead of a
+Cloudflare Tunnel.
+
+Net: an agent run by AgentDash can use our MCP, configured at the runtime layer on
+localhost. Nothing changes in AgentDash itself.
 
 ---
 

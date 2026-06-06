@@ -54,10 +54,15 @@ MCP HTTP port (LAN-direct or via the tunnel).
 - Test Clockchain account: API key + `clientId` + `walletId`, with log credits
   and a budget cap (we already have a working key; confirm credits + cap).
 - Tester tokens (MCP-layer auth, separate from the Clockchain key).
-- Mac mini prepped: Docker installed, sleep disabled, LAN IP noted.
-- Confirm AgentDash supports a remote (HTTP) MCP server; if not, it runs stdio
-  locally instead.
-- **Done:** all values in hand; Mac mini reachable on the LAN.
+- Mac mini prep (probed 2026-06): it is `192.168.86.48` / `mac-mini.lan`, on
+  Tailscale (`100.71.225.125`), **no Docker** but node v26 + pnpm present - so run
+  via node + pm2 (or install Colima). Disable sleep.
+- AgentDash question: **resolved.** AgentDash runs ON this Mac mini and is not an
+  MCP client itself; it orchestrates agent runtimes (`claude_local`,
+  `codex_local`, `cursor`, etc.). We integrate by configuring our MCP into the
+  runtime AgentDash launches, on `localhost:3000`. No tunnel needed for local
+  agents.
+- **Done:** all values in hand; Mac mini reachable.
 
 ### Step 1 - Build `@clockchain/core`
 The shared client. Typed wrappers for the verified endpoints, per-endpoint
@@ -85,11 +90,14 @@ Dockerfile (node:22-alpine), build the image, run it with the env file, verify
   works from `localhost:3000`.
 
 ### Step 4 - Expose + connect AgentDash
-LAN URL for AgentDash (`http://<mac-mini-IP>:3000/mcp`); Cloudflare Tunnel for
-off-network business testers. Configure AgentDash's MCP client (endpoint +
-`x-api-key` token) and smoke-test the loop from AgentDash.
-- **Done:** AgentDash completes time -> log -> verify -> retrieve through the Mac
-  mini endpoint.
+AgentDash has no MCP client of its own, so we do not point "AgentDash" at the MCP.
+Instead, configure our MCP into the **agent runtime AgentDash launches**
+(`claude_local` / `codex_local` / `cursor` / ...) - it runs on the same Mac mini,
+so it reaches our server at `http://localhost:3000/mcp` (HTTP) or via stdio. For
+off-network business testers, use Tailscale (the box is already on the tailnet) or
+a Cloudflare Tunnel.
+- **Done:** an agent run by AgentDash completes time -> log -> verify -> retrieve
+  through our MCP on localhost.
 
 ### Step 5 - Test with business users + capture findings
 Run sessions with AgentDash and 3-5 testers. Grade against the MCP-experience
