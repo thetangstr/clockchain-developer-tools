@@ -163,6 +163,20 @@ export function registerTools(
           .string()
           .optional()
           .describe("Optional DID; if provided it is included in the reference id."),
+        wait: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, poll until the entry is confirmed on-chain (blockHeight " +
+              "populated) or wait_ms elapses, and return the confirmed record. " +
+              "Default false (returns immediately with blockHeight null/pending).",
+          ),
+        wait_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max time to wait for confirmation, in ms. Default 15000. Only used when wait=true."),
       },
     },
     async ({
@@ -172,6 +186,8 @@ export function registerTools(
       version_number,
       additional_info,
       did,
+      wait,
+      wait_ms,
     }) => {
       try {
         // If a DID is provided, fold it into the reference id so the anchor is
@@ -180,15 +196,24 @@ export function registerTools(
         const assetReferenceId = did
           ? `${did}:${asset_reference_id}`
           : asset_reference_id;
-        return ok(
-          await client.log({
-            assetHash: asset_hash,
-            assetReferenceId,
-            hashType: hash_type,
-            versionNumber: version_number,
-            additionalInfo: additional_info,
-          }),
-        );
+        const result = await client.log({
+          assetHash: asset_hash,
+          assetReferenceId,
+          hashType: hash_type,
+          versionNumber: version_number,
+          additionalInfo: additional_info,
+        });
+        if (wait) {
+          // Poll the ledger until blockHeight populates (confirmed) or timeout.
+          // On timeout this returns the last (still-pending) record rather than
+          // throwing, so the caller always gets the ledgerId back.
+          const confirmed = await client.waitForConfirmation(
+            result.ledgerId,
+            wait_ms ?? 15000,
+          );
+          return ok(confirmed);
+        }
+        return ok(result);
       } catch (err) {
         return fail(err);
       }
