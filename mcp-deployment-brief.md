@@ -15,9 +15,8 @@ meant to stand alone for a sign-off meeting.
 - **What:** an MCP server that lets AI agents and developers use Clockchain's
   time oracle and notarization (and, next, ERC-8004 agent identity) through
   standard agent tooling.
-- **Where it is:** the core is **built and verified live** - the time, logging,
-  and verify loop has been run end to end through the MCP layer against the real
-  Clockchain gateway.
+- **Where it is:** **in progress.** Core development and integration testing are
+  underway against the Clockchain gateway.
 - **What we are asking to approve:**
   1. the requirements (Section 3),
   2. the network exposure model (Section 5) - this is the network team's main item,
@@ -31,9 +30,9 @@ meant to stand alone for a sign-off meeting.
 
 | Capability | Shorthand | Status |
 |---|---|---|
-| Time oracle (read consensus time, blocks, validation) | "time stamp" | **Verified live** |
-| Notarization (hash in, timestamped proof, verify) | "tsa" | **Verified live** |
-| Agent identity read (ERC-8004) | identity | **Built, needs EVM RPC** |
+| Time oracle (read consensus time, blocks, validation) | "time stamp" | **In progress** |
+| Notarization (hash in, timestamped proof, verify) | "tsa" | **In progress** |
+| Agent identity read (ERC-8004) | identity | **In progress** (needs EVM RPC) |
 | Smart-contract triggers | "contract" | **Blocked** (gateway 404) |
 
 ---
@@ -159,6 +158,6 @@ the guardrails in Section 1, and the ERC-8004 hybrid direction (decided 2026-06)
 - `poc-build-plan.md` - sequenced build plan + how the Mac mini connects to Clockchain
 - `product-a-identity-decision.md` - ERC-8004 vs proprietary DID (decision)
 
-"Verified live" throughout this brief means it was run against the real Clockchain
-gateway during evaluation (time + logging + verify loop), including through the
-built MCP server.
+Status throughout this brief is **in progress**: the verified-slice tools (time,
+logging, verify) are being built and tested against the Clockchain gateway. We
+will update the status once integration testing is complete.
