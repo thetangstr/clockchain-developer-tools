@@ -66,6 +66,75 @@ Either way, disable Mac mini sleep so it stays reachable
 The endpoint URL and their tester token. Nothing installed. They (or AgentDash)
 point an MCP client at the URL with the token header.
 
+### Runbook (ready to run once the POC server exists)
+
+> **Prerequisite:** the Phase 3 POC server must be built and published as an image
+> (`clockchain/mcp-server`) or an npm package first. We are at spec stage - there
+> is no server to run today. This is the script for the moment it exists; to make
+> it runnable, the minimal server (Phase 1 core + Phase 3 stdio/http) has to be
+> built. Everything below is copy-paste-ready except the `__FILL__` values.
+
+**Step 0 - values to fill in** (from the checklist in section 3; most are shared
+with AWS):
+`CLOCKCHAIN_API_KEY`, `CLOCKCHAIN_CLIENT_ID`, `CLOCKCHAIN_WALLET_ID`,
+`EVM_RPC_URL`, `ERC8004_CHAIN` (base / base-sepolia / ethereum), and a list of
+`MCP_AUTH_TOKENS` for testers.
+
+**Step 1 - prep the Mac mini**
+
+```bash
+# Docker Desktop (or Colima) installed and set to start on login.
+# Keep the machine reachable:
+sudo pmset -a sleep 0 disablesleep 1
+# Note the LAN IP (AgentDash will use this):
+ipconfig getifaddr en0
+```
+
+**Step 2 - env file** `~/clockchain-mcp/.env`
+
+```
+MCP_TRANSPORT=http
+MCP_PORT=3000
+CLOCKCHAIN_API_KEY=__FILL__
+CLOCKCHAIN_CLIENT_ID=__FILL__
+CLOCKCHAIN_WALLET_ID=__FILL__
+EVM_RPC_URL=__FILL__
+ERC8004_CHAIN=base-sepolia
+MCP_AUTH_TOKENS=tester-a,tester-b
+```
+
+**Step 3 - run it**
+
+```bash
+docker run -d --name clockchain-mcp --restart unless-stopped \
+  -p 3000:3000 --env-file ~/clockchain-mcp/.env \
+  clockchain/mcp-server
+```
+
+**Step 4 - verify locally**
+
+```bash
+curl -s localhost:3000/health
+curl -s -X POST localhost:3000/mcp \
+  -H "x-api-key: tester-a" -H "content-type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+**Step 5 - expose to off-network testers (Cloudflare Tunnel)**
+
+```bash
+brew install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create clockchain-mcp
+cloudflared tunnel route dns clockchain-mcp mcp-test.<domain>
+# ingress -> service: http://localhost:3000, then:
+cloudflared tunnel run clockchain-mcp
+# Quick ad-hoc alternative (ephemeral URL, no domain needed):
+# cloudflared tunnel --url http://localhost:3000
+```
+
+LAN testers and AgentDash skip step 5 and use `http://<LAN-IP>:3000/mcp` directly.
+
 ---
 
 ## 2. AgentDash integration
