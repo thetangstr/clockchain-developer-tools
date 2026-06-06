@@ -17,6 +17,7 @@ gateway. Logging is funded by a separate "logs" credit balance (see
 
 | File | What it is | Audience |
 |---|---|---|
+| [`mcp-deployment-brief.md`](mcp-deployment-brief.md) | **Start here for approval.** One-page brief: requirements + deployment dependencies + network-exposure model, with sign-off blocks for stakeholders, network team, and backend. | Stakeholders / Network / Backend |
 | [`implementation-plan.md`](implementation-plan.md) | Full technical spec and build plan. Source of truth. | Engineering |
 | [`implementation-plan-technical.html`](implementation-plan-technical.html) | Slide version of the spec, with the design detail. | Engineering review |
 | [`implementation-plan.html`](implementation-plan.html) | Short, high-level overview deck. | Business / stakeholders |
