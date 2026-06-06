@@ -17,6 +17,9 @@ meant to stand alone for a sign-off meeting.
   standard agent tooling.
 - **Where it is:** **in progress.** Core development and integration testing are
   underway against the Clockchain gateway.
+- **Milestones:** **v1 - Fri Jun 19, 2026** (basic features, local) · **v2 - Fri
+  Jun 26, 2026** (Claude + AgentDash on the Mac mini) · **v3 - TBD** (AWS, gated on
+  network-team readiness + the smart-contract API). See Section 4.
 - **What we are asking to approve:**
   1. the requirements (Section 3),
   2. the network exposure model (Section 5) - this is the network team's main item,
@@ -60,13 +63,17 @@ meant to stand alone for a sign-off meeting.
 
 ---
 
-## 4. Deployment phases (where it runs)
+## 4. Milestones (v1 / v2 / v3) with target dates
 
-| Version | Where | Network posture |
-|---|---|---|
-| **v1** basic features | local (npx / stdio) | none (local only) |
-| **v2** Claude + AgentDash | Mac mini | stdio for co-located agents; tailnet bind for remote testers |
-| **v3** production | AWS (Fargate + ALB) | public endpoint gated to mainnet; otherwise tailnet/VPN-only |
+| Milestone | Target date | Where | What "done" means |
+|---|---|---|---|
+| **v1** - basic features | **Fri Jun 19, 2026** | local (npx / stdio) | time oracle + notarization tools working locally; identity read once the EVM RPC is provided |
+| **v2** - Claude + AgentDash | **Fri Jun 26, 2026** | Mac mini | an agent uses it via `~/.claude.json` (stdio); remote testers via tailnet; first business-tester feedback |
+| **v3** - production (AWS) | **TBD - gated** | AWS (Fargate + ALB) | deployed on AWS, tested. Gated on (a) network-team deploy readiness and (b) the smart-contract (`/schedule`) API being ready |
+
+Dependencies that move these dates: **v1** assumes the EVM RPC + chain are
+provided (Section 6); **v3** has no fixed date because it depends on the network
+team's deploy window and the backend exposing the smart-contract API.
 
 Detail: `roadmap.md` (v1/v2/v3) and `poc-build-plan.md`.
 

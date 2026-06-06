@@ -1,8 +1,9 @@
 # MCP Server Roadmap - v1 / v2 / v3
 
-Three milestones: **v1** = the basic features work (local), **v2** = it runs on
-the Mac mini and is used by Claude ("Clark") and AgentDash, **v3** = deployed and
-testable on AWS.
+Three milestones with target dates: **v1 (Fri Jun 19, 2026)** = the basic
+features work (local), **v2 (Fri Jun 26, 2026)** = it runs on the Mac mini and is
+used by Claude ("Clark") and AgentDash, **v3 (TBD)** = deployed and testable on
+AWS, gated on network-team deploy readiness + the smart-contract API.
 
 > Naming note: "Clark" is read here as **Claude / Claude Code** (the runtime
 > AgentDash launches as `claude_local`). Correct me if it means something else.
@@ -48,7 +49,7 @@ Hash in, tamper-proof timestamped record out. This is the logging product.
 
 ---
 
-## v1 - Basic features work (local)
+## v1 - Basic features work (local)  -  target: Fri Jun 19, 2026
 
 **Goal:** prove the feature set runs end to end on a dev machine.
 
@@ -69,7 +70,7 @@ Hash in, tamper-proof timestamped record out. This is the logging product.
 - **Status:** ~90% done. The package is built and the loop is verified live; what
   remains is the `wait` option and wiring `resolve_agent` to a real RPC.
 
-## v2 - Working on Claude ("Clark") + AgentDash (Mac mini)
+## v2 - Working on Claude ("Clark") + AgentDash (Mac mini)  -  target: Fri Jun 26, 2026
 
 **Goal:** real agents and business users actually use it, hosted on the Mac mini.
 
@@ -88,7 +89,7 @@ Hash in, tamper-proof timestamped record out. This is the logging product.
   time -> log -> verify unaided via `~/.claude.json`; 3-5 business testers hit the
   HTTP endpoint and react; findings graded + a go / no-go.
 
-## v3 - Deployed and testable on AWS (final state)
+## v3 - Deployed and testable on AWS (final state)  -  target: TBD (gated)
 
 **Goal:** production-grade hosting, the form we would actually launch from.
 
@@ -112,6 +113,7 @@ Hash in, tamper-proof timestamped record out. This is the logging product.
 
 | Dimension | v1 | v2 | v3 |
 |---|---|---|---|
+| Target date | Fri Jun 19, 2026 | Fri Jun 26, 2026 | TBD (gated) |
 | Runs where | local (npx/stdio) | Mac mini | AWS (Fargate) |
 | Who tests | us | Claude + AgentDash agents, 3-5 business testers | us, on AWS |
 | Transport | stdio | stdio (agents) + HTTP (testers) | HTTP (remote) |
