@@ -1,0 +1,16 @@
+{
+  "groups": [
+    {
+      "title": "Clockchain MCP Server - Approval Brief",
+      "files": ["mcp-deployment-brief.md", "roadmap.md"]
+    },
+    {
+      "title": "Clockchain MCP Server - Engineering Spec",
+      "files": ["implementation-plan.md", "mcp-readiness.md", "deployment.md", "poc-build-plan.md", "journeys.md"]
+    },
+    {
+      "title": "Clockchain MCP Server - Research & Decisions",
+      "files": ["product-findings.md", "industry-landscape.md", "product-a-identity-decision.md"]
+    }
+  ]
+}

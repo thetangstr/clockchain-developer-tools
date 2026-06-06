@@ -47,6 +47,33 @@ AI Agent (LangChain, AutoGPT, CrewAI)     Developer
                 NTP
 ```
 
+### Client/server boundary - who runs what
+
+We ship the MCP **server** (`@clockchain/mcp-server`) and `@clockchain/core`. We do
+**not** build an MCP client. The MCP *client* lives on the **agent-runtime / harness
+side** - the host application that connects to the server, discovers its tools, and
+calls them on the model's behalf:
+
+- **Our test / dev harness:** Claude Code (or Claude Desktop, Cursor, etc.) is the
+  MCP client. We register our server in its config; it does the connecting.
+- **AgentDash:** the client is **AgentDash's own runtime** (`claude_local`). The MCP
+  client lives on the AgentDash side - AgentDash launches our server and talks to it.
+- **General:** any MCP-capable host is a valid client. We neither write nor ship one.
+
+How the two connect:
+
+- **stdio (default, co-located):** the client/harness **spawns `clockchain-mcp` as a
+  subprocess** and exchanges JSON-RPC over stdin/stdout. On the Mac mini, AgentDash is
+  the client and starts our server locally - no port, no network listener, no exposure.
+- **HTTP (remote):** a remote client connects to the server's Streamable HTTP endpoint
+  over a private network (bearer token). The client is still host-side; only the
+  transport changes.
+
+**Where our responsibility ends:** the server binary plus a documented registration
+snippet (e.g. `~/.claude.json` `mcpServers` for Claude Code; the equivalent on
+AgentDash). Configuring and running the *client* is the harness's job, not ours - so
+"the MCP client" is never something we deploy or expose.
+
 ### Why TypeScript
 
 - MCP SDK is TypeScript-native (`@modelcontextprotocol/sdk`)
@@ -909,6 +936,25 @@ not value transfer, so `log_action` does not need per-action signing or
 approval - the non-custodial and propose-then-approve rules bite on
 contracts/payments, not on logging. The read tools are unaffected. This keeps the
 verified core shippable as a POC while the two conflicts above are resolved.
+
+**Also blockchain-specific (operational, beyond the security table above):**
+- **Async finality.** On-chain writes are not instant - `log_action` returns with
+  `blockHeight: null` and confirms ~0.6s later (variable). Tools must expose
+  **pending vs confirmed** and offer a `wait` option; a client must not treat a
+  write as final the moment it returns.
+- **Idempotency / replay safety.** On-chain writes are irreversible and spend a
+  credit, so a retry (e.g. after a `RateLimitError`) must not double-write. Use a
+  stable `assetReferenceId` and check-before-write rather than blind retry.
+- **Verifiable artifacts, not statuses.** Every write returns a `ledgerId` + block
+  height + hash so the result is independently re-checkable later (the court-style
+  `verify_asset`). Returning proof, not just "ok," is the whole point of a
+  blockchain MCP.
+- **Testnet vs mainnet.** Today's network is a 1-node testnet: proofs render votes
+  and trust as 0 and the data is **not authoritative**. A public endpoint and any
+  "proof" claims are gated to mainnet (Q9).
+- **Rate limits are real and unbatched.** The gateway throttles hard; `core` maps
+  429 to `RateLimitError` but deliberately does not retry, so the client/agent owns
+  backoff.
 
 ### How the ERC-8004 hybrid changes the MCP server (committed 2026-06)
 
