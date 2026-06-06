@@ -26,6 +26,7 @@ gateway. Logging is funded by a separate "logs" credit balance (see
 | [`journeys.md`](journeys.md) | Developer and agent end-to-end journeys, marking where the current API flow supports or breaks autonomous agent usage. | Engineering / product |
 | [`product-a-identity-decision.md`](product-a-identity-decision.md) | Decision memo: proprietary DID vs ERC-8004 + SIWA for agent identity. Recommends a hybrid - adopt the standard, differentiate on time/validation. | Product / leadership |
 | [`deployment.md`](deployment.md) | Hosting plan: local stdio (devs), Mac mini test host (business users + AgentDash), and the AWS production plan + info checklist. | Engineering / ops |
+| [`poc-build-plan.md`](poc-build-plan.md) | Goal + sequenced plan to get the MCP server running on the Mac mini (and how it connects to Clockchain). | Engineering / leadership |
 
 Open either `.html` file in a browser to present (arrow keys to navigate,
 `Esc` for the slide overview).
