@@ -13,7 +13,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "test": "tsc -b && node --test"
   },
   "dependencies": {
     "@clockchain/core": "0.1.0",

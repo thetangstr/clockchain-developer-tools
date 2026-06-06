@@ -4,12 +4,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   computeHash,
+  hashFile,
   ClockchainClient,
   ApiError,
   RateLimitError,
   InsufficientCreditsError,
   AuthError,
 } from "../dist/index.js";
+import { writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const cfg = { apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://test.local" };
 
@@ -102,4 +106,15 @@ test("log() applies SHA-256 default and config ids", async () => {
   assert.equal(sent.versionNumber, 1);
   assert.equal(sent.clientId, "c");
   assert.equal(sent.walletId, "w");
+});
+
+test("hashFile matches computeHash of the same bytes", async () => {
+  const path = join(tmpdir(), `clockchain-hashfile-${process.pid}-${Date.now()}.txt`);
+  const contents = "clockchain hashFile test contents";
+  await writeFile(path, contents);
+  try {
+    assert.equal(await hashFile(path), computeHash(contents));
+  } finally {
+    await rm(path, { force: true });
+  }
 });
