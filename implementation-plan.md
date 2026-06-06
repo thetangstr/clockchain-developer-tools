@@ -972,6 +972,12 @@ verified time/logging core that the POC ships.
   it is **design-validated / spiked, not a demonstrated write.**
 - **Out of scope:** the remote/hosted server (Option 2 below), any public
   listing, and any "autonomous agent" claim.
+- **Hosting for the POC: none.** The POC runs locally - `npx` in the developer's
+  client (Claude Code / Cursor), stdio transport. There is no server to deploy.
+  The only infrastructure it needs is an **EVM RPC endpoint** for the ERC-8004
+  read (a free/managed RPC - Alchemy, Infura, QuickNode, or a public endpoint -
+  is fine for the POC) and the developer's existing Clockchain API key. So
+  "hosting" is not a Phase-3 decision; the one thing to provision is the RPC.
 - **Exit criteria:** a written MCP-experience findings doc covering requirements
   A-K with grades and the prioritized fix list, the reinforced backend asks, AND
   a decision on the `/schedule` non-custodial redesign. That document - not a
@@ -1200,7 +1206,23 @@ CLOCKCHAIN_INTEGRATION=true npm run test:integration    # ~15s, ~10 requests
 
 ### Option 2: Remote MCP Server (Streamable HTTP)
 
-Ship after Option 1 proves demand.
+Ship after Option 1 proves demand. **Public/remote hosting is gated to mainnet
+(Q9 decision, 2026-06)** - we do not stand up a public `mcp.clockchain.network`
+during testnet. This section is the target design, not a near-term build.
+
+Three things the remote option must add beyond the diagram below, because of
+later decisions:
+
+- **EVM RPC at the edge.** The hosted server needs its own EVM RPC for ERC-8004
+  reads (and, later, the `attest_time` flow). Budget a managed RPC, not a public
+  one, at hosted scale.
+- **Multi-tenant key handling stays non-custodial.** A hosted, multi-user server
+  raises the stakes on the non-custodial rule: it must never hold user private
+  keys. Identity auth goes through SIWA; the Clockchain API key arrives per
+  request (`x-api-key`), is never stored server-side, and is never logged.
+- **Funding seam.** The hosted path is where x402 / API-credit funding actually
+  matters (a hosted agent can't use a local credit file). The seam designed in
+  the POC plugs in here.
 
 #### Hosting: ECS Fargate on AWS
 
