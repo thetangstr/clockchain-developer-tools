@@ -97,3 +97,33 @@ test("resolve_agent returns status unknown when ERC-8004 is unconfigured", async
   const res = await collectTools().resolve_agent({ agent_id: "a1" });
   assert.equal(JSON.parse(textOf(res)).status, "unknown");
 });
+
+test("get_block returns the block data", async () => {
+  routeFetch([["/api/time/block", { body: { success: true, data: { height: "5", proposer: "p" } } }]]);
+  const res = await collectTools().get_block({ height: 5 });
+  assert.deepEqual(JSON.parse(textOf(res)), { height: "5", proposer: "p" });
+});
+
+test("get_validation returns validation data", async () => {
+  routeFetch([["/getValidationBlock", { body: { validationBlockData: { height: 5, trust: 0 } } }]]);
+  const res = await collectTools().get_validation({ height: 5 });
+  assert.deepEqual(JSON.parse(textOf(res)), { height: 5, trust: 0 });
+});
+
+test("get_timestamp returns consensus detail", async () => {
+  routeFetch([["/api/time/timestamp", { body: { success: true, data: { votes: 0 } } }]]);
+  const res = await collectTools().get_timestamp({});
+  assert.deepEqual(JSON.parse(textOf(res)), { votes: 0 });
+});
+
+test("search_actions returns the array", async () => {
+  routeFetch([["/searchAsset", { body: [{ ledgerId: "L" }] }]]);
+  const res = await collectTools().search_actions({ asset_reference_id: "r" });
+  assert.deepEqual(JSON.parse(textOf(res)), [{ ledgerId: "L" }]);
+});
+
+test("get_log_entry returns the record", async () => {
+  routeFetch([["/ledger/", { body: { ledgerId: "L9", blockHeight: "5" } }]]);
+  const res = await collectTools().get_log_entry({ ledger_id: "L9" });
+  assert.equal(JSON.parse(textOf(res)).ledgerId, "L9");
+});

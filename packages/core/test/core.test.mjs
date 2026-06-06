@@ -118,3 +118,64 @@ test("hashFile matches computeHash of the same bytes", async () => {
     await rm(path, { force: true });
   }
 });
+
+// Route the stubbed fetch by URL substring -> { status?, body }.
+function routeFetch(routes) {
+  globalThis.fetch = async (url, opts) => {
+    lastRequest = { url, opts };
+    for (const [match, resp] of routes) {
+      if (String(url).includes(match)) {
+        const raw = typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
+        const status = resp.status ?? 200;
+        return { status, ok: status >= 200 && status < 300, statusText: "stub", text: async () => raw };
+      }
+    }
+    throw new Error("no route for " + url);
+  };
+}
+
+test("getBlock(number) hits the block endpoint with the height", async () => {
+  routeFetch([["/api/time/block", { body: { success: true, data: { height: "5", proposer: "p" } } }]]);
+  assert.deepEqual(await new ClockchainClient(cfg).getBlock(5), { height: "5", proposer: "p" });
+  assert.match(String(lastRequest.url), /height=5/);
+});
+
+test("getBlock('latest') resolves height via getTime first", async () => {
+  routeFetch([
+    ["/api/time/time", { body: { success: true, data: { latestBlockTime: "t", latestBlockHeight: "42" } } }],
+    ["/api/time/block", { body: { success: true, data: { height: "42" } } }],
+  ]);
+  assert.deepEqual(await new ClockchainClient(cfg).getBlock("latest"), { height: "42" });
+  assert.match(String(lastRequest.url), /height=42/);
+});
+
+test("getTimestamp unwraps {success,data}", async () => {
+  stubFetch(200, { success: true, data: { time: "x", votes: 0 } });
+  assert.deepEqual(await new ClockchainClient(cfg).getTimestamp(), { time: "x", votes: 0 });
+});
+
+test("searchAsset scopes by clientId and returns the array", async () => {
+  stubFetch(200, [{ ledgerId: "L" }]);
+  const out = await new ClockchainClient(cfg).searchAsset("ref1");
+  assert.deepEqual(out, [{ ledgerId: "L" }]);
+  assert.match(String(lastRequest.url), /clientId=c/);
+  assert.match(String(lastRequest.url), /assetReferenceId=ref1/);
+});
+
+test("getLedgerEntry maps an error envelope to ApiError", async () => {
+  stubFetch(200, { success: false, error: { message: "not found" } });
+  await assert.rejects(() => new ClockchainClient(cfg).getLedgerEntry("missing"), ApiError);
+});
+
+test("waitForConfirmation returns the record once blockHeight populates", async () => {
+  stubFetch(200, { ledgerId: "L", blockHeight: "100" });
+  const rec = await new ClockchainClient(cfg).waitForConfirmation("L", 2000);
+  assert.equal(rec.blockHeight, "100");
+});
+
+test("waitForConfirmation returns the pending record on timeout (no throw)", async () => {
+  stubFetch(200, { ledgerId: "L", blockHeight: null });
+  const rec = await new ClockchainClient(cfg).waitForConfirmation("L", 10);
+  assert.equal(rec.ledgerId, "L");
+  assert.equal(rec.blockHeight, null);
+});
