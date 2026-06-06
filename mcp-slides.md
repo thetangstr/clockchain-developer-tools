@@ -43,9 +43,9 @@ later and conditional.
 |---|---|---|
 | 1 | Core client over the verified APIs (time, log, verify) | Wk 1-2 |
 | 2 | CLI - terminal access | Wk 2-3 |
-| 3 | **MCP server POC** - local, verified tools; learn the requirements (not a launch) | Wk 3-4 |
+| 3 | **MCP server POC** - verified tools + ERC-8004 identity read; learn the requirements (not a launch) | Wk 3-4 |
 | 4 | Remote MCP + docs | After POC go / no-go |
-| 5 | ERC-8004 hybrid + time-attestation | Conditional on customer |
+| 5 | ERC-8004 time-attestation (write) + hybrid build-out | Committed; sequenced later |
 
 **Ships first (verified, works today):** time, log, verify, search.
 

@@ -472,6 +472,7 @@ The shared foundation. Every CLI command and MCP tool calls into this.
 | `searchAsset(clientId, assetRef)` | `GET /searchAsset?...` | Read-only |
 | `getLedgerEntry(ledgerId)` | `GET /ledger/{ledgerId}` | Read-only |
 | `schedule(params)` | `GET /schedule?...` | **Not on gateway (404).** Blocked - see Verified API Surface |
+| `resolveAgent(agentId)` | ERC-8004 registry read via **EVM RPC** (Ethereum / Base) | Read-only. New for the ERC-8004 commit - resolves an agent's identity / `agentURI`. Adds an EVM-RPC dependency to core |
 
 **Envelope handling (confirmed by probe):** `/api/time/*` returns `{success, data, meta}` - unwrap `.data`. `/searchAsset` and `/getValidationBlock` return raw bodies (a bare array and a bare object respectively) with no envelope. The client must normalize per-endpoint; do not assume a uniform `{success,data}` wrapper. Types below describe the unwrapped result.
 
@@ -961,9 +962,14 @@ verified time/logging core that the POC ships.
 
 ### POC scope and exit
 
-- **In scope:** local stdio server only; the verified tools (`get_time`,
-  `get_timestamp`, `get_block`, `get_validation`, `log_action`, `get_log_entry`,
-  `verify_asset`) plus the Product-A-as-anchor tools clearly labeled experimental.
+- **In scope:** local stdio server only; the verified Clockchain tools
+  (`get_time`, `get_timestamp`, `get_block`, `get_validation`, `log_action`,
+  `get_log_entry`, `verify_asset`) **plus ERC-8004 identity resolve/reference
+  (read-only)** - the agent resolves an `agentId` and a logged action carries it.
+  This adds an **EVM-RPC read dependency** (to Ethereum / Base, wherever the
+  registry lives) to the POC. The ERC-8004 write path (`attest_time` to the
+  Validation Registry) is an EVM write under propose-then-approve, so for the POC
+  it is **design-validated / spiked, not a demonstrated write.**
 - **Out of scope:** the remote/hosted server (Option 2 below), any public
   listing, and any "autonomous agent" claim.
 - **Exit criteria:** a written MCP-experience findings doc covering requirements
@@ -1345,7 +1351,7 @@ FREE plan: 1,000 requests. ~50 requests per release cycle. Supports ~20 releases
 |---|---|---|---|
 | 1 | `@clockchain/core` (API client + DID ops + evidence package) | Week 1-2 | None |
 | 2 | `@clockchain/cli` (identity, logging, proofs, time) | Week 2-3 | Phase 1 |
-| 3 | `@clockchain/mcp-server` **POC** (stdio, local) - learn MCP-experience requirements | Week 3-4 | Phase 1 |
+| 3 | `@clockchain/mcp-server` **POC** (stdio, local) - learn MCP-experience requirements; includes ERC-8004 identity read | Week 3-4 | Phase 1 + EVM RPC |
 | 3b | Remote/hosted MCP (ECS) - **deferred, post-POC** | After a launch decision | Phase 3 |
 | 4 | Docs + LangChain guide (public listing deferred to launch) | Week 4-5 | Phase 2 |
 | 5 | Subnet integration | Q3 2026 | Backend APIs |
