@@ -1,7 +1,7 @@
 # Clockchain MCP Server - Requirements & Deployment Brief
 
 **For approval by: Stakeholders (Product / Leadership) + Network Team + Backend (D4).**
-**Status: PROPOSED - awaiting sign-off.**  Date: 2026-06.
+**Status: PROPOSED - awaiting sign-off.**  Date: 2026-06-06.
 
 This is the single approval document. It consolidates what the MCP server is, the
 requirements it must meet, and the technical/deployment dependencies that need
@@ -68,7 +68,7 @@ meant to stand alone for a sign-off meeting.
 | Milestone | Target date | Where | What "done" means |
 |---|---|---|---|
 | **v1** - basic features | **Fri Jun 19, 2026** | local (npx / stdio) | time oracle + notarization tools working locally; identity read once the EVM RPC is provided |
-| **v2** - Claude + AgentDash | **Fri Jun 26, 2026** | Mac mini | an agent uses it via `~/.claude.json` (stdio); remote testers via tailnet; first business-tester feedback |
+| **v2** - Claude + AgentDash | **Fri Jun 26, 2026** | Mac mini | agents use it locally; remote testers over a private network; first business-tester feedback |
 | **v3** - production (AWS) | **TBD - gated** | AWS (Fargate + ALB) | deployed on AWS, tested. Gated on (a) network-team deploy readiness and (b) the smart-contract (`/schedule`) API being ready |
 
 Dependencies that move these dates: **v1** assumes the EVM RPC + chain are
@@ -81,34 +81,26 @@ Detail: `roadmap.md` (v1/v2/v3) and `poc-build-plan.md`.
 
 ## 5. Network exposure model (NETWORK-TEAM APPROVAL)
 
-**Proposal:** default to **stdio (no listener)**; when a networked endpoint is
-genuinely needed, bind to the **tailnet only**; **never a public bind for a
-key-holding endpoint.**
+**Proposal:** default to **stdio (no network listener)**; if a networked endpoint
+is ever needed, bind to a **private network (VPN / tailnet) only**; **never a
+public bind for a key-holding endpoint.**
 
-Reachability scopes on the Mac mini (probed 2026-06; the box is behind NAT, so not
-public unless we add a tunnel):
-
-| Scope | Address | Reachable by |
-|---|---|---|
-| loopback | `127.0.0.1` | the host only |
-| LAN | `192.168.86.0/24` | the office/home subnet |
-| tailnet | `100.71.225.125` (Tailscale) | Clockchain tailnet members |
-| public | only via a tunnel | the internet (avoid) |
-
-Posture: AgentDash and Claude run **on** the Mac mini, so they reach the MCP over
-stdio / loopback - **no network exposure.** Remote testers use the **tailnet**
-only. The Clockchain gateway is reached **outbound**; this model adds no inbound
-credentialed path. Full tables in `deployment.md` Section 0.
+For **v1 and v2 there is no new inbound credentialed path** to Clockchain: the
+agents that use the MCP run locally alongside it, and any remote testing is kept on
+a private network. The MCP only ever calls the Clockchain gateway **outbound**.
+(The host and transport setup itself is an internal engineering detail, not part of
+this approval.)
 
 **Network-team decisions:**
-1. Approve **stdio / loopback default** for co-located agents (no exposure). [ ]
-2. Approve **tailnet-only** for remote testers; no LAN-wide, no public bind. [ ]
+1. Approve **local / no-listener default** for co-located agents (no exposure). [ ]
+2. Approve **private-network (VPN / tailnet) only** for any remote access; no
+   public bind. [ ]
 3. Clarify "expose the Clockchain server":
    - (a) "no new hosted credentialed MCP endpoint" -> covered by 1 + 2. [ ]
-   - (b) "lock `node.clockchain.network` to a private network/allowlist" -> larger
-     change; consumers must be on that network (tailnet fits). [ ]
-4. v3 on AWS: public, mainnet-gated [ ] / tailnet-VPN-only [ ] / do not host,
-   distribute stdio [ ].
+   - (b) "lock `node.clockchain.network` itself to a private network / allowlist"
+     -> larger change, flagged for discussion. [ ]
+4. v3 on AWS: public, mainnet-gated [ ] / private (VPN) only [ ] / do not host,
+   distribute the local server [ ].
 
 ---
 
@@ -118,7 +110,7 @@ credentialed path. Full tables in `deployment.md` Section 0.
 |---|---|---|
 | EVM RPC URL + target chain (recommend Base Sepolia) + ERC-8004 registry address | identity read (`resolve_agent`), v1+ | Network / Backend |
 | Clockchain test account: API key + client/wallet + **log credits** + budget cap | logging, all versions | Product / Backend |
-| Mac mini host prep: node + pm2 (no Docker installed), disable sleep, tailnet on, tester tokens | v2 | Engineering |
+| Mac mini test host prep + tester access tokens (internal engineering setup) | v2 | Engineering |
 | AWS: account + region + VPC (new or reuse D4's) | v3 | Network / Eng |
 | Domain + DNS in Route53 (for TLS cert) | v3 | Network |
 | Secrets store (Secrets Manager / SSM) for API key + RPC + tokens | v2/v3 | Eng |
@@ -148,7 +140,7 @@ RFC-3161 TSA wire format (separate build).
 | Network team |  |  |  |
 | Backend (D4) owner |  |  |  |
 
-**Stakeholder sign-off covers:** build + run v1-v2 on the verified feature set,
+**Stakeholder sign-off covers:** build + run v1-v2 on the core feature set,
 the guardrails in Section 1, and the ERC-8004 hybrid direction (decided 2026-06).
 **Network-team sign-off covers:** the decisions in Section 5.
 **Backend sign-off covers:** the dependencies in Section 6 it owns.
@@ -165,6 +157,6 @@ the guardrails in Section 1, and the ERC-8004 hybrid direction (decided 2026-06)
 - `poc-build-plan.md` - sequenced build plan + how the Mac mini connects to Clockchain
 - `product-a-identity-decision.md` - ERC-8004 vs proprietary DID (decision)
 
-Status throughout this brief is **in progress**: the verified-slice tools (time,
+Status throughout this brief is **in progress**: the core-slice tools (time,
 logging, verify) are being built and tested against the Clockchain gateway. We
 will update the status once integration testing is complete.

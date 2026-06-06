@@ -13,16 +13,16 @@ AWS, gated on network-team deploy readiness + the smart-contract API.
 ## Feature inventory (what this MCP actually has)
 
 Grouped by Clockchain product area, mapped to the "timestamp / tsa / contract"
-shorthand, with honest status from live testing.
+shorthand, with honest, conservative status.
 
-### A. Time oracle  ("time stamp")  - VERIFIED
+### A. Time oracle  ("time stamp")  - IN PROGRESS
 Read the decentralized clock.
 - `get_time` - current consensus time + latest block height
 - `get_timestamp` - full node status (Marzullo offset, drift, votes, node count)
 - `get_block` - block details by height (proposer, time)
 - `get_validation` - validator vote / trust data for a block
 
-### B. Notarization  ("tsa" - proof of existence)  - VERIFIED
+### B. Notarization  ("tsa" - proof of existence)  - IN PROGRESS
 Hash in, tamper-proof timestamped record out. This is the logging product.
 - `log_action` - record a SHA-256 hash on-chain with a consensus timestamp
 - `get_log_entry` - fetch a record by ledger id (shows on-chain confirmation)
@@ -55,20 +55,20 @@ Hash in, tamper-proof timestamped record out. This is the logging product.
 
 - **Where:** local - `npx`/stdio, driven by a script or the CLI. No hosting.
 - **In scope:** Group A (time oracle, 4 tools) + Group B (notarization, 4 tools) -
-  the 8 verified tools. `resolve_agent` (Group C) read **once an EVM RPC + chain
+  the 8 core tools. `resolve_agent` (Group C) read **once an EVM RPC + chain
   are provided** (recommend Base Sepolia).
 - **Polish to add for v1:** a `wait` option on `log_action` (poll
   `waitForConfirmation` until `blockHeight` populates), structured agent-facing
   errors, low-credit warning, and per-call logging (observability).
 - **Out of scope:** smart contracts (blocked), `attest_time` (write), HTTP host,
   multi-tenant, remote access.
-- **How we test it:** the stdio smoke loop (already passing: `log_action ->
-  get_log_entry -> verify_asset`, positive and negative) plus the time-oracle
-  reads.
-- **Exit:** all 8 verified tools pass a scripted loop locally; `resolve_agent`
+- **How we test it:** the stdio smoke loop (`log_action -> get_log_entry ->
+  verify_asset`, positive and negative) plus the time-oracle reads.
+- **Exit:** all 8 core tools pass a scripted loop locally; `resolve_agent`
   returns a real ERC-8004 record once the RPC is set.
-- **Status:** ~90% done. The package is built and the loop is verified live; what
-  remains is the `wait` option and wiring `resolve_agent` to a real RPC.
+- **Status:** in progress. The package is built and the smoke loop runs in dev;
+  integration testing against the gateway is underway. Remaining: the `wait`
+  option and wiring `resolve_agent` to a real RPC.
 
 ## v2 - Working on Claude ("Clark") + AgentDash (Mac mini)  -  target: Fri Jun 26, 2026
 

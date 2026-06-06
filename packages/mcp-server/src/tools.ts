@@ -44,6 +44,35 @@ function fail(err: unknown) {
 }
 
 /**
+ * Per-call observability: one stderr line per tool call with status + duration.
+ * stdout stays clean for the MCP protocol. Disable with MCP_LOG=off.
+ */
+function trace(name: string, status: "ok" | "error", startMs: number): void {
+  if (process.env.MCP_LOG === "off") return;
+  console.error(
+    `[clockchain-mcp] tool=${name} status=${status} ms=${Date.now() - startMs}`,
+  );
+}
+
+/**
+ * Run a tool's work function with uniform timing, tracing, and error mapping.
+ * Centralizing this keeps every handler a one-liner and guarantees consistent
+ * ok()/fail() behavior. Handler arg types are unaffected (still inferred from
+ * each tool's inputSchema), so schema<->handler type-checking is preserved.
+ */
+async function run(name: string, work: () => Promise<unknown>) {
+  const start = Date.now();
+  try {
+    const result = ok(await work());
+    trace(name, "ok", start);
+    return result;
+  } catch (err) {
+    trace(name, "error", start);
+    return fail(err);
+  }
+}
+
+/**
  * Register all Clockchain tools on the given MCP server.
  *
  * NOTE: `schedule_trigger` is intentionally omitted. The gateway returns 404 for
@@ -63,13 +92,7 @@ export function registerTools(
         "Get the latest consented block time and height from the Clockchain network.",
       inputSchema: {},
     },
-    async () => {
-      try {
-        return ok(await client.getTime());
-      } catch (err) {
-        return fail(err);
-      }
-    },
+    async () => run("get_time", () => client.getTime()),
   );
 
   server.registerTool(
@@ -80,13 +103,7 @@ export function registerTools(
         "Get detailed consensus timestamp info (Marzullo time, votes, node participation).",
       inputSchema: {},
     },
-    async () => {
-      try {
-        return ok(await client.getTimestamp());
-      } catch (err) {
-        return fail(err);
-      }
-    },
+    async () => run("get_timestamp", () => client.getTimestamp()),
   );
 
   server.registerTool(
@@ -101,13 +118,7 @@ export function registerTools(
           .describe('Block height, or "latest".'),
       },
     },
-    async ({ height }) => {
-      try {
-        return ok(await client.getBlock(height));
-      } catch (err) {
-        return fail(err);
-      }
-    },
+    async ({ height }) => run("get_block", () => client.getBlock(height)),
   );
 
   server.registerTool(
@@ -123,13 +134,8 @@ export function registerTools(
           .describe("Block height to fetch validation data for."),
       },
     },
-    async ({ height }) => {
-      try {
-        return ok(await client.getValidationBlock(height));
-      } catch (err) {
-        return fail(err);
-      }
-    },
+    async ({ height }) =>
+      run("get_validation", () => client.getValidationBlock(height)),
   );
 
   server.registerTool(
@@ -163,6 +169,20 @@ export function registerTools(
           .string()
           .optional()
           .describe("Optional DID; if provided it is included in the reference id."),
+        wait: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, poll until the entry is confirmed on-chain (blockHeight " +
+              "populated) or wait_ms elapses, and return the confirmed record. " +
+              "Default false (returns immediately with blockHeight null/pending).",
+          ),
+        wait_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max time to wait for confirmation, in ms. Default 15000. Only used when wait=true."),
       },
     },
     async ({
@@ -172,27 +192,31 @@ export function registerTools(
       version_number,
       additional_info,
       did,
-    }) => {
-      try {
+      wait,
+      wait_ms,
+    }) =>
+      run("log_action", async () => {
         // If a DID is provided, fold it into the reference id so the anchor is
         // attributable to the agent identity. (additionalInfo is plain-text-only
         // and sanitized server-side, so identity must not be stored there.)
         const assetReferenceId = did
           ? `${did}:${asset_reference_id}`
           : asset_reference_id;
-        return ok(
-          await client.log({
-            assetHash: asset_hash,
-            assetReferenceId,
-            hashType: hash_type,
-            versionNumber: version_number,
-            additionalInfo: additional_info,
-          }),
-        );
-      } catch (err) {
-        return fail(err);
-      }
-    },
+        const result = await client.log({
+          assetHash: asset_hash,
+          assetReferenceId,
+          hashType: hash_type,
+          versionNumber: version_number,
+          additionalInfo: additional_info,
+        });
+        if (wait) {
+          // Poll the ledger until blockHeight populates (confirmed) or timeout.
+          // On timeout this returns the last (still-pending) record rather than
+          // throwing, so the caller always gets the ledgerId back.
+          return client.waitForConfirmation(result.ledgerId, wait_ms ?? 15000);
+        }
+        return result;
+      }),
   );
 
   server.registerTool(
@@ -207,13 +231,8 @@ export function registerTools(
           .describe("Exact assetReferenceId to search for."),
       },
     },
-    async ({ asset_reference_id }) => {
-      try {
-        return ok(await client.searchAsset(asset_reference_id));
-      } catch (err) {
-        return fail(err);
-      }
-    },
+    async ({ asset_reference_id }) =>
+      run("search_actions", () => client.searchAsset(asset_reference_id)),
   );
 
   server.registerTool(
@@ -225,13 +244,8 @@ export function registerTools(
         ledger_id: z.string().describe("The ledgerId to fetch."),
       },
     },
-    async ({ ledger_id }) => {
-      try {
-        return ok(await client.getLedgerEntry(ledger_id));
-      } catch (err) {
-        return fail(err);
-      }
-    },
+    async ({ ledger_id }) =>
+      run("get_log_entry", () => client.getLedgerEntry(ledger_id)),
   );
 
   server.registerTool(
@@ -247,22 +261,18 @@ export function registerTools(
           .describe("The current hash of the asset to compare."),
       },
     },
-    async ({ ledger_id, current_hash }) => {
-      try {
+    async ({ ledger_id, current_hash }) =>
+      run("verify_asset", async () => {
         const record = await client.getLedgerEntry(ledger_id);
-        const match = record.assetHash === current_hash;
-        return ok({
-          match,
+        return {
+          match: record.assetHash === current_hash,
           ledgerId: record.ledgerId,
           blockHeight: record.blockHeight,
           anchoredHash: record.assetHash,
           currentHash: current_hash,
           assetReferenceId: record.assetReferenceId,
-        });
-      } catch (err) {
-        return fail(err);
-      }
-    },
+        };
+      }),
   );
 
   server.registerTool(
@@ -276,12 +286,7 @@ export function registerTools(
         agent_id: z.string().describe("The agent id to resolve."),
       },
     },
-    async ({ agent_id }) => {
-      try {
-        return ok(await resolveAgent(config, agent_id));
-      } catch (err) {
-        return fail(err);
-      }
-    },
+    async ({ agent_id }) =>
+      run("resolve_agent", () => resolveAgent(config, agent_id)),
   );
 }

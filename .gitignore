@@ -15,3 +15,10 @@ config.toml
 *.swp
 .idea/
 .vscode/
+scripts/credentials.json
+scripts/token.json
+scripts/node_modules
+scripts/package.json
+scripts/package-lock.json
+scripts/created.json
+scripts/.omc/
