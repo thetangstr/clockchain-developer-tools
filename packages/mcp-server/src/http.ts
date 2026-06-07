@@ -42,6 +42,14 @@ export function isAuthorized(
   return apiKey.length > 0 && tokens.includes(apiKey);
 }
 
+/** True for the unauthenticated health-probe routes (GET /health|/healthz). */
+export function isHealthCheck(
+  method: string | undefined,
+  url: string | undefined,
+): boolean {
+  return method === "GET" && (url === "/health" || url === "/healthz");
+}
+
 export async function runHttp(): Promise<void> {
   const port = Number(process.env.MCP_PORT ?? "3000");
   const tokens = parseTokens(process.env.MCP_AUTH_TOKENS);
@@ -50,6 +58,15 @@ export async function runHttp(): Promise<void> {
     isAuthorized(req.headers, tokens);
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // Unauthenticated, lightweight health check for the Mac mini runbook and the
+    // AWS ALB / GCP Cloud Run health probes. Must be before auth (probes send no
+    // token) and must not touch the gateway.
+    if (isHealthCheck(req.method, req.url)) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
     if (!checkAuth(req)) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));

@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck } from "../dist/http.js";
 
 const tokens = ["tester-a", "tester-b"];
 
@@ -32,4 +32,13 @@ test("rejects missing / wrong / malformed tokens", () => {
 
 test("handles array-valued headers", () => {
   assert.equal(isAuthorized({ authorization: ["Bearer tester-a"] }, tokens), true);
+});
+
+test("isHealthCheck matches GET /health and /healthz only", () => {
+  assert.equal(isHealthCheck("GET", "/health"), true);
+  assert.equal(isHealthCheck("GET", "/healthz"), true);
+  assert.equal(isHealthCheck("POST", "/health"), false);
+  assert.equal(isHealthCheck("GET", "/mcp"), false);
+  assert.equal(isHealthCheck("GET", "/"), false);
+  assert.equal(isHealthCheck(undefined, undefined), false);
 });
