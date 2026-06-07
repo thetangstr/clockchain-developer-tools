@@ -7,10 +7,18 @@ import {
   ClockchainClient,
   InsufficientCreditsError,
   RateLimitError,
+  buildReceipt,
   computeHash,
+  eventHashOf,
   readConfigFromEnv,
+  type BlockResponse,
+  type ValidationBlock,
 } from "@clockchain/core";
 import { PAGE } from "./page.js";
+
+/** A visible "behind the scenes" step with the real time it took. */
+type Step = { label: string; ms: number; detail?: string };
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 import { buildFeedbackRecord } from "./feedback.js";
 
 /**
@@ -63,7 +71,13 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       return send(res, 200, { status: "ok" });
     }
     if (req.method === "POST" && req.url === "/api/time") {
-      return send(res, 200, await client.getTime());
+      const t = Date.now();
+      const time = await client.getTime();
+      const steps: Step[] = [
+        { label: "Query the Clockchain gateway for the latest consented block", ms: Date.now() - t, detail: `GET node.clockchain.network/api/time` },
+        { label: "Network returns the Marzullo consensus time (agreed by the validator set, not one server's clock)", ms: 0, detail: `block ${time.latestBlockHeight}` },
+      ];
+      return send(res, 200, { ...time, steps });
     }
     if (req.method === "POST" && req.url === "/api/notarize") {
       const { text } = await readJson(req);
@@ -112,16 +126,63 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       if (cap > 0 && used >= cap) {
         return send(res, 429, { error: "Demo budget reached. Restart to reset." });
       }
-      const receipt = await client.attestAction({ agentId, action, inputs, outputs, wait: true, waitMs: 12000 });
+
+      // Orchestrate the attestation step-by-step so the page can show the real
+      // (fast) on-chain work happening behind the scenes. No LLM is involved on
+      // this path - it is a direct SDK integration.
+      const steps: Step[] = [];
+      const input = { agentId, action, inputs, outputs };
+
+      let t = Date.now();
+      const eventHash = eventHashOf(input);
+      steps.push({ label: "Canonicalize the agent's inputs + outputs (sorted JSON) and compute the SHA-256 event fingerprint", ms: Date.now() - t, detail: eventHash });
+
+      t = Date.now();
+      const assetReferenceId = `${agentId}:${action}:${Date.now()}`;
+      const log = await client.log({ assetHash: eventHash, assetReferenceId, additionalInfo: "agent attested receipt" });
       if (cap > 0) used++;
-      return send(res, 200, receipt);
+      steps.push({ label: "Anchor the fingerprint on-chain (POST /log -> node.clockchain.network)", ms: Date.now() - t, detail: `ledgerId ${log.ledgerId}` });
+
+      t = Date.now();
+      const confirmed = await client.waitForConfirmation(log.ledgerId, 12000);
+      steps.push({ label: "Wait for the validator network to write it into a consensus block", ms: Date.now() - t, detail: confirmed.blockHeight ? `block ${confirmed.blockHeight}` : "still pending" });
+
+      let block: BlockResponse | null = null;
+      let validation: ValidationBlock | null = null;
+      if (confirmed.blockHeight != null) {
+        // Retry briefly: the block-detail endpoint can lag a beat behind the height.
+        t = Date.now();
+        for (let i = 0; i < 4 && !block?.blockTime; i++) {
+          block = await client.getBlock(confirmed.blockHeight).catch(() => null);
+          if (!block?.blockTime) await delay(400);
+        }
+        steps.push({ label: "Read the block's consensus timestamp (Marzullo time, multi-source at mainnet)", ms: Date.now() - t, detail: block?.blockTime ?? "n/a" });
+
+        t = Date.now();
+        validation = await client.getValidationBlock(confirmed.blockHeight).catch(() => null);
+        const votes = validation ? (validation.positiveVotes ?? 0) : 0;
+        steps.push({ label: "Read the validator attestation for that block", ms: Date.now() - t, detail: `${votes} validator vote(s) - single-validator on testnet` });
+      }
+
+      const receipt = buildReceipt({ input, eventHash, network: "testnet", log: confirmed, block, validation, identity: null });
+      steps.push({ label: "Assemble the Agent Attested Receipt", ms: 0, detail: "self-verifying artifact" });
+      return send(res, 200, { ...receipt, steps });
     }
     if (req.method === "POST" && req.url === "/api/verify-receipt") {
       const { receipt } = await readJson(req);
       if (!receipt || typeof receipt !== "object") {
         return send(res, 400, { error: "receipt is required" });
       }
-      return send(res, 200, await client.verifyReceipt(receipt as never));
+      const r = receipt as { agentId: string; action: string; payload?: { inputs?: unknown; outputs?: unknown }; anchor?: { ledgerId?: string } };
+      const steps: Step[] = [];
+      let t = Date.now();
+      const recomputed = eventHashOf({ agentId: r.agentId, action: r.action, inputs: r.payload?.inputs, outputs: r.payload?.outputs });
+      steps.push({ label: "Recompute the SHA-256 fingerprint from the receipt's own payload (no trust in us required)", ms: Date.now() - t, detail: recomputed });
+      t = Date.now();
+      const result = await client.verifyReceipt(receipt as never);
+      steps.push({ label: "Fetch the hash anchored on-chain at this ledgerId and compare", ms: Date.now() - t, detail: `anchored ${result.anchoredHash}` });
+      steps.push({ label: result.match ? "Fingerprints match - the receipt is genuine and unaltered" : "Fingerprints differ - the record was altered", ms: 0 });
+      return send(res, 200, { ...result, steps });
     }
     if (req.method === "POST" && req.url === "/api/feedback") {
       const body = await readJson(req);
