@@ -4,7 +4,7 @@ export const PAGE = /* html */ `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Clockchain · Agent</title>
+<title>Clockchain · MCP Playground</title>
 <style>
   :root {
     --bg:#0a0c12; --panel:#141925; --panel-2:#0e121b; --line:#232b3c; --line-soft:#1b2230;
@@ -20,6 +20,20 @@ export const PAGE = /* html */ `<!doctype html>
   .dot { width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 10px var(--ok); }
   h1 { font-size:20px; font-weight:650; margin:9px 0 3px; letter-spacing:-.01em; }
   .sub { color:var(--muted); margin:0; font-size:13px; }
+  .sub b { color:#cdd6e3; }
+  .meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
+  .tag { font-size:11.5px; color:var(--muted); background:var(--panel-2); border:1px solid var(--line);
+    border-radius:999px; padding:4px 11px; }
+  .tag.link { color:var(--accent); text-decoration:none; cursor:pointer; }
+  .tag.link:hover { border-color:var(--accent); background:rgba(91,140,255,.08); }
+  .about { margin:4px 2px 0; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:0 14px; }
+  .about summary { cursor:pointer; padding:12px 0; font-size:13.5px; font-weight:600; color:#cdd6e3; list-style:none; }
+  .about summary::-webkit-details-marker { display:none; }
+  .about summary::before { content:"›"; display:inline-block; margin-right:8px; color:var(--accent); transition:transform .15s; }
+  .about[open] summary::before { transform:rotate(90deg); }
+  .about ul { margin:0 0 8px; padding-left:18px; color:var(--muted); font-size:13px; }
+  .about li { margin:6px 0; } .about li b { color:#cdd6e3; }
+  .about .tip { color:var(--faint); font-size:12.5px; margin:6px 0 14px; }
 
   #log { flex:1; overflow-y:auto; padding:8px 2px 12px; display:flex; flex-direction:column; gap:12px; }
   .msg { display:flex; gap:10px; max-width:100%; }
@@ -58,9 +72,23 @@ export const PAGE = /* html */ `<!doctype html>
 <div class="app">
   <header>
     <div class="brand"><span class="dot"></span> Clockchain</div>
-    <h1>Talk to the agent</h1>
-    <p class="sub">An autonomous agent (MiniMax) that proves its high-stakes actions on-chain. Ask it to do something - it drives the Clockchain tools over MCP and shows its work.</p>
+    <h1>MCP Playground</h1>
+    <p class="sub">Chat with an autonomous AI agent that uses Clockchain to <b>prove its high-stakes actions</b>. It drives the Clockchain tools over MCP and shows its work - reasoning, on-chain anchoring, and a verifiable receipt.</p>
+    <div class="meta">
+      <span class="tag">Direct-to-LLM: MiniMax-M2.7-highspeed → MCP (no Hermes harness in this demo)</span>
+      <a class="tag link" href="__RESEARCH_URL__" target="_blank" rel="noopener">Plan &amp; architecture ↗</a>
+    </div>
   </header>
+
+  <details class="about">
+    <summary>What can I do here? (3 business use cases)</summary>
+    <ul>
+      <li><b>Verifiable time</b> - regulatory / SLA timestamping against a clock the validator network agrees on, not one server you control.</li>
+      <li><b>Agent attested receipt</b> - when an AI agent takes a high-stakes action (a trade, a payment, a signature), get a tamper-evident, on-chain proof of <b>who</b> acted, <b>what</b> they did, and <b>when</b> - an artifact an auditor can hold.</li>
+      <li><b>Independent verification</b> - anyone can re-check the receipt later without trusting you; post-hoc tampering is caught.</li>
+    </ul>
+    <p class="tip">New here? Tap a suggestion below - the agent will walk you through it.</p>
+  </details>
 
   <div id="log"></div>
 
@@ -147,7 +175,7 @@ export const PAGE = /* html */ `<!doctype html>
   // Greeting
   (function greet() {
     const b = botRow();
-    b.appendChild(el(null, "Hi - I'm an autonomous agent. I can read Clockchain's decentralized consensus time and attest high-stakes actions on-chain so they're independently verifiable. Try a suggestion below, or ask me to do something."));
+    b.appendChild(el(null, "Welcome to the Clockchain MCP Playground. I'm an autonomous AI agent - I can read the network's consensus time and attest high-stakes actions on-chain so they're independently verifiable. The quickest way to see it: tap a suggestion below and I'll walk you through it, showing my reasoning and the on-chain proof. (Heads-up: this demo talks to the LLM directly, not through our Hermes agent.)"));
   })();
 </script>
 </body>
