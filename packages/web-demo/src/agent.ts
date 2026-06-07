@@ -19,7 +19,7 @@ const MCP_SERVER_PATH =
   new URL("../../mcp-server/dist/stdio.js", import.meta.url).pathname;
 
 // Only expose the read + attest tools to the agent (keep it on-rails).
-const ALLOWED_TOOLS = new Set(["get_time", "attest_action", "verify_receipt", "get_timestamp"]);
+const ALLOWED_TOOLS = new Set(["get_time", "attest_action", "verify_receipt", "get_timestamp", "resolve_agent"]);
 
 const SYSTEM_PROMPT =
   "You are an autonomous treasury agent operating on behalf of a company. You can " +
