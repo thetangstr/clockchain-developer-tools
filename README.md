@@ -21,6 +21,8 @@ gateway. Logging is funded by a separate "logs" credit balance (see
 | File | What it is | Audience |
 |---|---|---|
 | [`mcp-deployment-brief.md`](mcp-deployment-brief.md) | **Start here for approval.** One-page brief: requirements + deployment dependencies + network-exposure model, with sign-off blocks for stakeholders, network team, and backend. | Stakeholders / Network / Backend |
+| [`TRY-IT.md`](TRY-IT.md) | Hands-on test for non-engineers (~10 min). | Business testers |
+| [`DELEGATED-ACCESS.md`](DELEGATED-ACCESS.md) | Give testers access without the API key or a VPN: Cloudflare Access in front of the web demo + MCP endpoint, with token/rate/budget caps. | Engineering / ops |
 | [`implementation-plan.md`](implementation-plan.md) | Full technical spec and build plan. Source of truth. | Engineering |
 | [`implementation-plan-technical.html`](implementation-plan-technical.html) | Slide version of the spec, with the design detail. | Engineering review |
 | [`implementation-plan.html`](implementation-plan.html) | Short, high-level overview deck. | Business / stakeholders |
