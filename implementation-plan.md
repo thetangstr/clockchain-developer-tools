@@ -74,6 +74,37 @@ snippet (e.g. `~/.claude.json` `mcpServers` for Claude Code; the equivalent on
 AgentDash). Configuring and running the *client* is the harness's job, not ours - so
 "the MCP client" is never something we deploy or expose.
 
+### Delegated tester access (business testing, no key + no VPN)
+
+To let business testers try it without handing out the Clockchain API key or
+putting them on a VPN, a hosted endpoint sits behind **two independent gates**:
+
+```
+Tester ─▶ [ Cloudflare Access: edge identity gate ] ─▶ [ our server: token + caps ] ─▶ Clockchain gateway
+            allowlist (email / SSO); blocks            key custodied here; never
+            everyone else at the edge                  sent to the client
+```
+
+- **Edge identity gate (Cloudflare Access):** only allowlisted identities reach the
+  host; scanners/bots are stopped before a request lands. No client install, no VPN.
+- **Application gate (our server):** per-tester revocable token
+  (`Authorization: Bearer` or `x-api-key`), per-token rate limit
+  (`MCP_RATE_PER_MIN`), a logging-credit spend cap (`MCP_LOG_BUDGET`), read +
+  `log_action` tools only, non-custodial. Refuses to start without tokens when
+  `MCP_REQUIRE_AUTH=1`.
+
+Two consumer surfaces ride the same protected endpoint:
+
+- **`@clockchain/web-demo`** - a zero-install browser page (read time → notarize →
+  verify → tamper test) for non-engineers. The key stays server-side; the page has
+  no auth of its own and is meant to run behind the identity gate.
+- **The MCP endpoint** - the agent experience via Claude/AgentDash, using the
+  per-tester token (plus a Cloudflare service token for the programmatic client).
+
+Runbook and policies: `DELEGATED-ACCESS.md`. This is allowlist-gated and capped -
+explicitly **not** a public open endpoint, and a *public* endpoint still waits for
+mainnet (Q9).
+
 ### Why TypeScript
 
 - MCP SDK is TypeScript-native (`@modelcontextprotocol/sdk`)

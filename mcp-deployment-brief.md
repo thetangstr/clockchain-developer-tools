@@ -105,21 +105,37 @@ is ever needed, bind to a **private network (VPN / tailnet) only**; **never a
 public bind for a key-holding endpoint.**
 
 For **v1 and v2 there is no new inbound credentialed path** to Clockchain: the
-agents that use the MCP run locally alongside it, and any remote testing is kept on
-a private network. The MCP only ever calls the Clockchain gateway **outbound**.
-(The host and transport setup itself is an internal engineering detail, not part of
-this approval.)
+agents that use the MCP run locally alongside it, and any remote testing is fronted
+by an **identity gate** (below). The MCP only ever calls the Clockchain gateway
+**outbound**. (The host and transport setup itself is an internal engineering
+detail, not part of this approval.)
+
+**Delegated tester access (how business users test without the key or a VPN).**
+To let business testers try it, we put the endpoint behind **two independent
+gates** instead of handing out the Clockchain key or asking testers onto a VPN:
+
+1. **Edge identity gate (Cloudflare Access):** only allowlisted people (by email /
+   SSO) can reach the endpoint at all; everyone else is blocked at the edge before
+   any request touches our host. No VPN, nothing for testers to install.
+2. **Application gate (our server):** per-tester revocable token, per-token rate
+   limit, a logging-credit spend cap, read + notarize tools only, and
+   **non-custodial** (no private key on the host). The Clockchain API key stays on
+   the server and is never sent to the tester.
+
+This is **not a public, open endpoint** - it is allowlist-gated and capped, which
+satisfies the "do not expose the Clockchain server" ask while still enabling a
+controlled business test. Detail: `DELEGATED-ACCESS.md`.
 
 **Network-team decisions:**
 1. Approve **local / no-listener default** for co-located agents (no exposure). [ ]
-2. Approve **private-network (VPN / tailnet) only** for any remote access; no
-   public bind. [ ]
+2. Approve **delegated tester access** = identity-gated (Cloudflare Access) +
+   token + caps; no public bind, no key shared, no VPN required. [ ]
 3. Clarify "expose the Clockchain server":
    - (a) "no new hosted credentialed MCP endpoint" -> covered by 1 + 2. [ ]
    - (b) "lock `node.clockchain.network` itself to a private network / allowlist"
      -> larger change, flagged for discussion. [ ]
-4. v3 on AWS: public, mainnet-gated [ ] / private (VPN) only [ ] / do not host,
-   distribute the local server [ ].
+4. v3 on AWS/GCP: public, mainnet-gated [ ] / identity-gated (Access/IAP) only [ ] /
+   do not host, distribute the local server [ ].
 
 ---
 
@@ -130,6 +146,7 @@ this approval.)
 | EVM RPC URL + target chain (recommend Base Sepolia) + ERC-8004 registry address | identity read (`resolve_agent`), v1+ | Network / Backend |
 | Clockchain test account: API key + client/wallet + **log credits** + budget cap | logging, all versions | Product / Backend |
 | Mac mini test host prep + tester access tokens (internal engineering setup) | v2 | Engineering |
+| Delegated tester access: a Cloudflare domain + Zero Trust **Access** app/policy + per-tester tokens (fronts the web demo and the MCP endpoint) | v2 (business testing) | Network / Eng |
 | Cloud account + region: **AWS** (account/VPC) or **GCP** (project, e.g. reuse `yarda-740f4`) | v3 | Network / Eng |
 | Domain + DNS for TLS (Route53 on AWS; managed cert / `*.run.app` on GCP Cloud Run) | v3 | Network |
 | Secrets store (AWS Secrets Manager / SSM, or GCP Secret Manager) for API key + RPC + tokens | v2/v3 | Eng |
@@ -172,7 +189,8 @@ the guardrails in Section 1, and the ERC-8004 hybrid direction (decided 2026-06)
 - `implementation-plan.md` - the spec, blockchain-MCP requirements, and the MCP
   tool detail (Appendix A)
 - `mcp-readiness.md` - per-tool readiness, grounded in live tests
-- `deployment.md` - Section 0 (network model), Mac mini runbook, AWS plan + checklist
+- `deployment.md` - Section 0 (network model), Mac mini runbook, AWS/GCP plans + checklist
+- `DELEGATED-ACCESS.md` - how testers get access without the key or a VPN (Cloudflare Access + token/rate/budget caps)
 - `poc-build-plan.md` - sequenced build plan + how the Mac mini connects to Clockchain
 - `product-a-identity-decision.md` - ERC-8004 vs proprietary DID (decision)
 
