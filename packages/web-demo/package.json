@@ -10,6 +10,7 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "test": "tsc -b && node --test",
     "start": "node dist/server.js"
   },
   "dependencies": {
