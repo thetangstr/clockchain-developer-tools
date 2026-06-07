@@ -14,7 +14,8 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@clockchain/core": "0.1.0"
+    "@clockchain/core": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "engines": {
     "node": ">=18"

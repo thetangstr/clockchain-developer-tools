@@ -14,11 +14,16 @@ import {
   type BlockResponse,
   type ValidationBlock,
 } from "@clockchain/core";
+import { randomUUID } from "node:crypto";
 import { PAGE } from "./page.js";
+import { runTurn, llmConfigured } from "./agent.js";
 
 /** A visible "behind the scenes" step with the real time it took. */
 type Step = { label: string; ms: number; detail?: string };
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** In-memory chat sessions: sessionId -> running LLM message history. */
+const sessions = new Map<string, unknown[]>();
 import { buildFeedbackRecord } from "./feedback.js";
 
 /**
@@ -69,6 +74,27 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (req.method === "GET" && (req.url === "/health" || req.url === "/healthz")) {
       return send(res, 200, { status: "ok" });
+    }
+    if (req.method === "GET" && req.url === "/api/config") {
+      return send(res, 200, { agent: llmConfigured() });
+    }
+    if (req.method === "POST" && req.url === "/api/agent") {
+      if (!llmConfigured()) {
+        return send(res, 503, { error: "The agent (LLM) is not configured on this host." });
+      }
+      const { sessionId, message } = await readJson(req);
+      if (typeof message !== "string" || message.trim().length === 0) {
+        return send(res, 400, { error: "message is required" });
+      }
+      if (cap > 0 && used >= cap) {
+        return send(res, 429, { error: "Demo budget reached. Restart to reset." });
+      }
+      const sid = typeof sessionId === "string" && sessions.has(sessionId) ? sessionId : randomUUID();
+      const history = sessions.get(sid) ?? [];
+      const { events, receipt } = await runTurn(history as unknown[], message.trim());
+      sessions.set(sid, history);
+      if (cap > 0 && events.some((e) => e.type === "tool_result" && /ledgerId/.test(e.content))) used++;
+      return send(res, 200, { sessionId: sid, events, receipt });
     }
     if (req.method === "POST" && req.url === "/api/time") {
       const t = Date.now();
