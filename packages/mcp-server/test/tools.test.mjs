@@ -127,3 +127,20 @@ test("get_log_entry returns the record", async () => {
   const res = await collectTools().get_log_entry({ ledger_id: "L9" });
   assert.equal(JSON.parse(textOf(res)).ledgerId, "L9");
 });
+
+test("log_action honors MCP_LOG_BUDGET cap across calls", async () => {
+  routeFetch([["/log", { body: { ledgerId: "LB", blockHeight: null } }]]);
+  const prev = process.env.MCP_LOG_BUDGET;
+  process.env.MCP_LOG_BUDGET = "1";
+  try {
+    const tools = collectTools(); // budget bound at registration time
+    const first = await tools.log_action({ asset_hash: "h", asset_reference_id: "r1" });
+    assert.ok(!first.isError, "first write within budget");
+    const second = await tools.log_action({ asset_hash: "h", asset_reference_id: "r2" });
+    assert.equal(second.isError, true, "second write exceeds budget");
+    assert.match(textOf(second), /budget/i);
+  } finally {
+    if (prev === undefined) delete process.env.MCP_LOG_BUDGET;
+    else process.env.MCP_LOG_BUDGET = prev;
+  }
+});

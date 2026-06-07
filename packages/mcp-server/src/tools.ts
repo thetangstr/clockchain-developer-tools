@@ -9,6 +9,7 @@ import {
 } from "@clockchain/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { BudgetExceededError, createLogBudget } from "./budget.js";
 
 /** Standard MCP success payload from a JSON-serializable result. */
 function ok(result: unknown) {
@@ -32,6 +33,8 @@ function fail(err: unknown) {
   } else if (err instanceof AuthError) {
     message =
       "Authentication failed. Check CLOCKCHAIN_API_KEY (x-api-key) is set and valid.";
+  } else if (err instanceof BudgetExceededError) {
+    message = err.message;
   } else if (err instanceof ApiError) {
     message = `Clockchain API error (${err.status}): ${err.message}`;
   } else {
@@ -83,6 +86,9 @@ export function registerTools(
   config: ClockchainConfig,
 ): void {
   const client = new ClockchainClient(config);
+  // Optional per-process cap on successful log writes (MCP_LOG_BUDGET).
+  // Disabled when unset -> identical to v1.
+  const budget = createLogBudget();
 
   server.registerTool(
     "get_time",
@@ -196,6 +202,8 @@ export function registerTools(
       wait_ms,
     }) =>
       run("log_action", async () => {
+        // Enforce the optional per-process write cap before spending a credit.
+        budget.check();
         // If a DID is provided, fold it into the reference id so the anchor is
         // attributable to the agent identity. (additionalInfo is plain-text-only
         // and sanitized server-side, so identity must not be stored there.)
@@ -209,6 +217,8 @@ export function registerTools(
           versionNumber: version_number,
           additionalInfo: additional_info,
         });
+        // Only count successful writes (a failed write spends no credit).
+        budget.record();
         if (wait) {
           // Poll the ledger until blockHeight populates (confirmed) or timeout.
           // On timeout this returns the last (still-pending) record rather than

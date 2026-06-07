@@ -22,3 +22,6 @@ scripts/package.json
 scripts/package-lock.json
 scripts/created.json
 scripts/.omc/
+
+# allow the committed env template
+!packages/mcp-server/.env.example

@@ -12,21 +12,61 @@ import { buildServer } from "./server.js";
  *
  * This uses stateless transports (one per request) for simplicity.
  */
-export async function runHttp(): Promise<void> {
-  const port = Number(process.env.MCP_PORT ?? "3000");
-  const tokens = (process.env.MCP_AUTH_TOKENS ?? "")
+/** Parse a comma-separated MCP_AUTH_TOKENS value into a token list. */
+export function parseTokens(raw: string | undefined): string[] {
+  return (raw ?? "")
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
+}
 
-  const checkAuth = (req: IncomingMessage): boolean => {
-    if (tokens.length === 0) return true;
-    const header = req.headers["authorization"] ?? "";
-    const match = /^Bearer\s+(.+)$/i.exec(Array.isArray(header) ? header[0] : header);
-    return match != null && tokens.includes(match[1].trim());
-  };
+const firstHeader = (h: string | string[] | undefined): string =>
+  (Array.isArray(h) ? h[0] : h) ?? "";
+
+/**
+ * Authorize a request against the token list. When no tokens are configured,
+ * auth is open (local/trusted use). A token is accepted via either
+ * `Authorization: Bearer <token>` or `x-api-key: <token>` - both are documented
+ * for testers, so supporting both avoids a 401 from picking the "wrong" header.
+ *
+ * Pure and exported so it can be unit-tested without binding a port.
+ */
+export function isAuthorized(
+  headers: { authorization?: string | string[]; "x-api-key"?: string | string[] },
+  tokens: string[],
+): boolean {
+  if (tokens.length === 0) return true;
+  const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
+  if (bearer && tokens.includes(bearer[1].trim())) return true;
+  const apiKey = firstHeader(headers["x-api-key"]).trim();
+  return apiKey.length > 0 && tokens.includes(apiKey);
+}
+
+/** True for the unauthenticated health-probe routes (GET /health|/healthz). */
+export function isHealthCheck(
+  method: string | undefined,
+  url: string | undefined,
+): boolean {
+  return method === "GET" && (url === "/health" || url === "/healthz");
+}
+
+export async function runHttp(): Promise<void> {
+  const port = Number(process.env.MCP_PORT ?? "3000");
+  const tokens = parseTokens(process.env.MCP_AUTH_TOKENS);
+
+  const checkAuth = (req: IncomingMessage): boolean =>
+    isAuthorized(req.headers, tokens);
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    // Unauthenticated, lightweight health check for the Mac mini runbook and the
+    // AWS ALB / GCP Cloud Run health probes. Must be before auth (probes send no
+    // token) and must not touch the gateway.
+    if (isHealthCheck(req.method, req.url)) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
     if (!checkAuth(req)) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
