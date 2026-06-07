@@ -42,6 +42,8 @@ const cap = Number(process.env.MCP_LOG_BUDGET ?? "0");
 let used = 0;
 
 const FEEDBACK_FILE = resolve(process.env.FEEDBACK_FILE ?? "feedback.jsonl");
+const RESEARCH_URL = process.env.RESEARCH_URL ?? "https://clockchain-research.vercel.app";
+const PAGE_HTML = PAGE.replace(/__RESEARCH_URL__/g, RESEARCH_URL);
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -69,7 +71,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
   try {
     if (req.method === "GET" && (req.url === "/" || req.url === "")) {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(PAGE);
+      res.end(PAGE_HTML);
       return;
     }
     if (req.method === "GET" && (req.url === "/health" || req.url === "/healthz")) {
