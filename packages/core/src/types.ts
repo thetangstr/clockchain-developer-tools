@@ -93,3 +93,67 @@ export interface AgentIdentity {
 
 /** A bare ledger record as returned by /searchAsset and /ledger/{id}. */
 export type LedgerRecord = LogResponse;
+
+/** Input to {@link ClockchainClient.attestAction}. */
+export interface AttestActionInput {
+  /** Who acted (e.g. an ERC-8004 agentId or an internal agent label). */
+  agentId: string;
+  /** What they did (e.g. "execute_trade", "sign_contract"). */
+  action: string;
+  /** The exact inputs to the decision (hashed into the event fingerprint). */
+  inputs?: unknown;
+  /** The exact outputs of the decision (hashed into the event fingerprint). */
+  outputs?: unknown;
+  /** Wait for on-chain confirmation before returning. Default true. */
+  wait?: boolean;
+  /** Max wait for confirmation, ms. Default 15000. */
+  waitMs?: number;
+}
+
+/**
+ * An Agent Attested Receipt: independently verifiable proof of who acted, what
+ * they did, and when. Fields are populated where the live network supports them;
+ * multi-validator attestation is marked as mainnet-gated (the testnet runs a
+ * single validator, so its vote/trust data is not yet a supermajority).
+ */
+export interface AgentReceipt {
+  schema: "clockchain.receipt/v1";
+  network: string;
+  agentId: string;
+  action: string;
+  /** SHA-256 of the canonical {agentId, action, inputs, outputs}. */
+  eventHash: string;
+  hashType: "SHA-256";
+  /** The exact payload that was hashed, so the receipt is self-verifying. */
+  payload: { inputs: unknown; outputs: unknown };
+  anchor: {
+    ledgerId: string;
+    assetReferenceId: string;
+    blockHeight: string | null;
+    recordedAt: string;
+    consensusTime: string | null;
+    confirmed: boolean;
+  };
+  attestation: {
+    validators: number;
+    trustPct: number | null;
+    status: "single-validator-testnet" | "multi-validator";
+    note: string;
+  };
+  identity: {
+    resolved: boolean;
+    status: string;
+    note: string;
+  };
+  verify: { how: string };
+  disclaimer: string;
+}
+
+/** Result of {@link ClockchainClient.verifyReceipt}. */
+export interface ReceiptVerification {
+  match: boolean;
+  eventHash: string;
+  anchoredHash: string;
+  blockHeight: string | null;
+  ledgerId: string;
+}

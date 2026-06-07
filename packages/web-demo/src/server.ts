@@ -104,6 +104,25 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         blockHeight: record.blockHeight,
       });
     }
+    if (req.method === "POST" && req.url === "/api/attest") {
+      const { agentId, action, inputs, outputs } = await readJson(req);
+      if (typeof agentId !== "string" || typeof action !== "string") {
+        return send(res, 400, { error: "agentId and action are required" });
+      }
+      if (cap > 0 && used >= cap) {
+        return send(res, 429, { error: "Demo budget reached. Restart to reset." });
+      }
+      const receipt = await client.attestAction({ agentId, action, inputs, outputs, wait: true, waitMs: 12000 });
+      if (cap > 0) used++;
+      return send(res, 200, receipt);
+    }
+    if (req.method === "POST" && req.url === "/api/verify-receipt") {
+      const { receipt } = await readJson(req);
+      if (!receipt || typeof receipt !== "object") {
+        return send(res, 400, { error: "receipt is required" });
+      }
+      return send(res, 200, await client.verifyReceipt(receipt as never));
+    }
     if (req.method === "POST" && req.url === "/api/feedback") {
       const body = await readJson(req);
       const { record, error } = buildFeedbackRecord(body, req.headers, Date.now());

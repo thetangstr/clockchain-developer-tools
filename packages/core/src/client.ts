@@ -7,14 +7,19 @@ import {
   RateLimitError,
 } from "./errors.js";
 import type {
+  AgentReceipt,
+  AttestActionInput,
   BlockResponse,
   LedgerRecord,
   LogEntry,
   LogResponse,
+  ReceiptVerification,
   TimeResponse,
   TimestampResponse,
   ValidationBlock,
 } from "./types.js";
+import { buildReceipt, eventHashOf } from "./receipt.js";
+import { resolveAgent } from "./erc8004.js";
 
 /** Standard {success, data, meta} envelope used by some endpoints. */
 interface SuccessEnvelope<T> {
@@ -166,6 +171,67 @@ export class ClockchainClient {
     }
     if (last) return last;
     return this.getLedgerEntry(ledgerId);
+  }
+
+  /**
+   * Attest an autonomous agent action and return an {@link AgentReceipt}.
+   *
+   * One call abstracts the whole flow: fingerprint the action (SHA-256 of the
+   * canonical inputs/outputs), anchor it on-chain via {@link log}, wait for
+   * confirmation, and gather the consensus time + validation + (optional)
+   * ERC-8004 identity into a self-verifying receipt. Crypto/RPC/Web3 stay hidden.
+   */
+  async attestAction(input: AttestActionInput): Promise<AgentReceipt> {
+    const eventHash = eventHashOf(input);
+    const assetReferenceId = `${input.agentId}:${input.action}:${Date.now()}`;
+    const wait = input.wait ?? true;
+
+    let log = await this.log({
+      assetHash: eventHash,
+      assetReferenceId,
+      additionalInfo: "agent attested receipt",
+    });
+    if (wait) {
+      log = await this.waitForConfirmation(log.ledgerId, input.waitMs ?? 15000);
+    }
+
+    // Best-effort enrichment - none of these should fail the attestation.
+    let block: BlockResponse | null = null;
+    let validation: ValidationBlock | null = null;
+    if (log.blockHeight != null) {
+      block = await this.getBlock(log.blockHeight).catch(() => null);
+      validation = await this.getValidationBlock(log.blockHeight).catch(() => null);
+    }
+    let identity: { resolved: boolean; status: string } | null = null;
+    if (this.config.evmRpcUrl && this.config.erc8004RegistryAddress) {
+      const id = await resolveAgent(this.config, input.agentId).catch(() => null);
+      if (id) identity = { resolved: id.status !== "unknown", status: id.status };
+    }
+
+    // Single-validator today; this stays "testnet" until the network is mainnet.
+    const network = "testnet";
+    return buildReceipt({ input, eventHash, network, log, block, validation, identity });
+  }
+
+  /**
+   * Independently re-verify a receipt: recompute the event hash from the receipt's
+   * own payload and confirm it matches what is anchored on-chain at its ledgerId.
+   */
+  async verifyReceipt(receipt: AgentReceipt): Promise<ReceiptVerification> {
+    const record = await this.getLedgerEntry(receipt.anchor.ledgerId);
+    const recomputed = eventHashOf({
+      agentId: receipt.agentId,
+      action: receipt.action,
+      inputs: receipt.payload.inputs,
+      outputs: receipt.payload.outputs,
+    });
+    return {
+      match: recomputed === record.assetHash && recomputed === receipt.eventHash,
+      eventHash: recomputed,
+      anchoredHash: record.assetHash,
+      blockHeight: record.blockHeight,
+      ledgerId: record.ledgerId,
+    };
   }
 
   // --- internals ---
