@@ -1,0 +1,21 @@
+{
+  "name": "@clockchain/web-demo",
+  "version": "0.1.0",
+  "description": "Zero-install browser demo for the Clockchain notarization workflow (deploy behind Cloudflare Access)",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/server.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@clockchain/core": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
