@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import {
   ApiError,
   AuthError,
@@ -9,6 +11,7 @@ import {
   readConfigFromEnv,
 } from "@clockchain/core";
 import { PAGE } from "./page.js";
+import { buildFeedbackRecord } from "./feedback.js";
 
 /**
  * Zero-install browser demo for the Clockchain notarization workflow.
@@ -24,6 +27,8 @@ const client = new ClockchainClient(config);
 
 const cap = Number(process.env.MCP_LOG_BUDGET ?? "0");
 let used = 0;
+
+const FEEDBACK_FILE = resolve(process.env.FEEDBACK_FILE ?? "feedback.jsonl");
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -99,6 +104,17 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         blockHeight: record.blockHeight,
       });
     }
+    if (req.method === "POST" && req.url === "/api/feedback") {
+      const body = await readJson(req);
+      const { record, error } = buildFeedbackRecord(body, req.headers, Date.now());
+      if (error) return send(res, 400, { error });
+      await mkdir(dirname(FEEDBACK_FILE), { recursive: true });
+      await appendFile(FEEDBACK_FILE, JSON.stringify(record) + "\n", "utf8");
+      console.error(
+        `[clockchain-web-demo] feedback: rating=${record!.rating} from=${record!.email || record!.role || "anon"}`,
+      );
+      return send(res, 200, { ok: true });
+    }
     return send(res, 404, { error: "not found" });
   } catch (err) {
     const { status, message } = errorFor(err);
@@ -110,5 +126,6 @@ const port = Number(process.env.WEB_PORT ?? process.env.PORT ?? "8080");
 server.listen(port, () => {
   console.error(`[clockchain-web-demo] listening on :${port}`);
   if (cap > 0) console.error(`[clockchain-web-demo] notarization budget: ${cap}`);
+  console.error(`[clockchain-web-demo] feedback -> ${FEEDBACK_FILE}`);
   console.error("[clockchain-web-demo] deploy BEHIND an identity gate (Cloudflare Access); no token auth of its own.");
 });

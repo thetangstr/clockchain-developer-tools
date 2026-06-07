@@ -25,3 +25,7 @@ scripts/.omc/
 
 # allow the committed env template
 !packages/mcp-server/.env.example
+
+# web-demo runtime feedback log
+feedback.jsonl
+packages/web-demo/feedback.jsonl
