@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter } from "../dist/http.js";
 
 const tokens = ["tester-a", "tester-b"];
 
@@ -41,4 +41,26 @@ test("isHealthCheck matches GET /health and /healthz only", () => {
   assert.equal(isHealthCheck("GET", "/mcp"), false);
   assert.equal(isHealthCheck("GET", "/"), false);
   assert.equal(isHealthCheck(undefined, undefined), false);
+});
+
+test("callerKey keys on token when present, else IP", () => {
+  assert.equal(callerKey({ authorization: "Bearer tester-a" }, "1.2.3.4"), "tok:tester-a");
+  assert.equal(callerKey({ "x-api-key": "tester-b" }, "1.2.3.4"), "tok:tester-b");
+  assert.equal(callerKey({}, "1.2.3.4"), "ip:1.2.3.4");
+  assert.equal(callerKey({}, undefined), "ip:unknown");
+});
+
+test("rate limiter disabled when perMin <= 0 (always allows)", () => {
+  const rl = createRateLimiter(0);
+  assert.equal(rl.enabled, false);
+  for (let i = 0; i < 1000; i++) assert.equal(rl.allow("k", 1000), true);
+});
+
+test("rate limiter enforces per-key fixed window", () => {
+  const rl = createRateLimiter(2);
+  assert.equal(rl.allow("a", 0), true);   // 1
+  assert.equal(rl.allow("a", 10), true);  // 2
+  assert.equal(rl.allow("a", 20), false); // over limit in window
+  assert.equal(rl.allow("b", 20), true);  // different key unaffected
+  assert.equal(rl.allow("a", 60_001), true); // window rolled over
 });

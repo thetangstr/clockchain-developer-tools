@@ -50,9 +50,69 @@ export function isHealthCheck(
   return method === "GET" && (url === "/health" || url === "/healthz");
 }
 
+/**
+ * Identify the caller for rate-limiting: the presented token if any, else the
+ * remote IP. Tokens are already validated by the time this is used, so keying on
+ * the token gives a per-tester limit; the IP fallback covers health/edge cases.
+ */
+export function callerKey(
+  headers: { authorization?: string | string[]; "x-api-key"?: string | string[] },
+  remoteAddr: string | undefined,
+): string {
+  const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
+  if (bearer) return `tok:${bearer[1].trim()}`;
+  const apiKey = firstHeader(headers["x-api-key"]).trim();
+  if (apiKey) return `tok:${apiKey}`;
+  return `ip:${remoteAddr ?? "unknown"}`;
+}
+
+/**
+ * Fixed-window per-key rate limiter. Disabled (always allows) when perMin <= 0.
+ * Pure and injectable (`now`) so it can be unit-tested without timers.
+ */
+export function createRateLimiter(perMin: number) {
+  const windowMs = 60_000;
+  const hits = new Map<string, { count: number; resetAt: number }>();
+  return {
+    enabled: perMin > 0,
+    /** True if the request is allowed; false if the key is over its limit. */
+    allow(key: string, now: number = Date.now()): boolean {
+      if (perMin <= 0) return true;
+      const e = hits.get(key);
+      if (!e || now >= e.resetAt) {
+        hits.set(key, { count: 1, resetAt: now + windowMs });
+        return true;
+      }
+      if (e.count >= perMin) return false;
+      e.count++;
+      return true;
+    },
+  };
+}
+
 export async function runHttp(): Promise<void> {
   const port = Number(process.env.MCP_PORT ?? "3000");
   const tokens = parseTokens(process.env.MCP_AUTH_TOKENS);
+
+  // Footgun guard: for a delegated/hosted deploy, set MCP_REQUIRE_AUTH=1 so the
+  // server refuses to start without tokens (otherwise auth is open by design).
+  if (tokens.length === 0) {
+    if (/^(1|true|yes)$/i.test(process.env.MCP_REQUIRE_AUTH ?? "")) {
+      console.error(
+        "[clockchain-mcp] FATAL: MCP_REQUIRE_AUTH is set but MCP_AUTH_TOKENS is " +
+          "empty. Refusing to start an open, credential-holding HTTP endpoint.",
+      );
+      process.exit(1);
+    }
+    console.error(
+      "[clockchain-mcp] WARNING: no MCP_AUTH_TOKENS set - the HTTP endpoint is " +
+        "OPEN (no auth). Only do this for local/trusted use. Set MCP_AUTH_TOKENS " +
+        "(and MCP_REQUIRE_AUTH=1) for any networked/delegated deploy.",
+    );
+  }
+
+  const perMin = Number(process.env.MCP_RATE_PER_MIN ?? "0");
+  const limiter = createRateLimiter(Number.isFinite(perMin) ? perMin : 0);
 
   const checkAuth = (req: IncomingMessage): boolean =>
     isAuthorized(req.headers, tokens);
@@ -70,6 +130,13 @@ export async function runHttp(): Promise<void> {
     if (!checkAuth(req)) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
+
+    // Per-tester rate limit (after auth so the key is the validated token).
+    if (limiter.enabled && !limiter.allow(callerKey(req.headers, req.socket.remoteAddress))) {
+      res.writeHead(429, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "rate_limited" }));
       return;
     }
 
