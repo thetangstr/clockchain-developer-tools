@@ -56,8 +56,12 @@ calls them on the model's behalf:
 
 - **Our test / dev harness:** Claude Code (or Claude Desktop, Cursor, etc.) is the
   MCP client. We register our server in its config; it does the connecting.
-- **AgentDash:** the client is **AgentDash's own runtime** (`claude_local`). The MCP
-  client lives on the AgentDash side - AgentDash launches our server and talks to it.
+- **Clark (primary v2 consumer):** our Slackbot backed by a Clockchain-profiled
+  **Hermes agent** on the Mac mini. Hermes is the MCP client; we register our server
+  per-profile via `hermes --profile clockchain mcp add`, and Clark reaches it over
+  local stdio (no network). Slack is just the chat surface.
+- **AgentDash:** orchestrates agent runtimes (`claude_local`, `hermes_local`, ...);
+  the MCP client is that runtime, which launches our server and talks to it.
 - **General:** any MCP-capable host is a valid client. We neither write nor ship one.
 
 How the two connect:
