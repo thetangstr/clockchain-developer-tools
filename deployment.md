@@ -132,7 +132,10 @@ docker run -d --name clockchain-mcp --restart unless-stopped \
   clockchain/mcp-server
 ```
 
-Lighter alternative without Docker: `pm2 start dist/server.js` with the same env.
+Lighter alternative without Docker: `pm2 start ecosystem.config.cjs` from
+`packages/mcp-server` (after `set -a; source .env; set +a`). The runnable entry is
+`dist/index.js` (it dispatches on `MCP_TRANSPORT`); `dist/server.js` only exports
+`buildServer()` and does nothing when run directly.
 Either way, disable Mac mini sleep so it stays reachable
 (`sudo pmset -a sleep 0 disablesleep 1`).
 
@@ -218,9 +221,11 @@ docker run -d --name clockchain-mcp --restart unless-stopped \
 > ```bash
 > pnpm --filter @clockchain/mcp-server build
 > npm i -g pm2
-> env $(grep -v "^#" ~/clockchain-mcp/.env | xargs) \
->   pm2 start packages/mcp-server/dist/server.js --name clockchain-mcp
-> pm2 save && pm2 startup   # survive reboots
+> cd packages/mcp-server
+> cp .env.example .env        # then fill in secrets
+> set -a; source .env; set +a # export .env into the shell
+> pm2 start ecosystem.config.cjs   # runs dist/index.js (MCP_TRANSPORT=http)
+> pm2 save && pm2 startup     # survive reboots
 > ```
 
 **Step 4 - verify locally**
