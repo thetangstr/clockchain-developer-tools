@@ -174,6 +174,14 @@ Before building, here is what the public gateway at `node.clockchain.network` ac
 - **`walletId` provenance.** `/log` requires `clientId` and `walletId`. The dashboard exposes a Client ID (email) and an API key, but no `walletId`. Where a developer obtains one is unknown. Phase 1 is blocked on this for any write path.
 - **`searchAsset` is scoped to the caller's `clientId`.** It cannot list by prefix and cannot see another client's records. This breaks two features as specified (cross-client DID verification and `identity list`) - see the DID section.
 - **No per-validator reading endpoint.** The audit doc says individual time-source readings are stored, but no API returns them. Evidence-package layers 1-3 cannot be populated from the live API today (see Evidence Package section).
+- **ERC-8004 registry choice (ASSUMPTION - confirm with infoObject).** `resolve_agent`
+  currently reads the **ERC-8004 reference deployment** Identity Registry at
+  `0x7177a6867296406881E20d6647232314736Dd09A` on **Ethereum Sepolia** (the 8004
+  team's canonical contracts; same address across testnets). Verified live: agent
+  `#1` resolves to `tokenURI`/`ownerOf`. This is a POC default so identity reads
+  work now; **the production registry (Clockchain's own ERC-8004 deployment vs. the
+  ecosystem's canonical one) must be confirmed with infoObject.** Override via
+  `EVM_RPC_URL` / `ERC8004_CHAIN` / `ERC8004_REGISTRY_ADDRESS` - no code change.
 
 ---
 

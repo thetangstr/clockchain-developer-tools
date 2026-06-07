@@ -97,6 +97,7 @@ export const PAGE = /* html */ `<!doctype html>
     <div class="chip" data-msg="Execute a 250,000 USDC/ETH treasury trade triggered because price is below 3000, and attest it on Clockchain so we have proof.">💸 Attest a treasury trade</div>
     <div class="chip" data-msg="Verify the receipt you just created is genuine and unaltered.">✓ Verify the receipt</div>
     <div class="chip" data-msg="Now imagine someone changed the trade size to 999,999 after the fact - check whether that altered record still verifies.">⚠ Tamper test</div>
+    <div class="chip" data-msg="Resolve the ERC-8004 on-chain identity of agent #1 - who owns it and what's its agent URI?">🪪 Resolve an agent identity</div>
   </div>
 
   <div class="composer">

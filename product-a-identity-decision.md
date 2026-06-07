@@ -144,6 +144,17 @@ position than a proprietary identity competing head-on with a standard.
 4. **Sequence it behind the customer-discovery question.** If the buyer is not
    in the agent economy, revisit.
 
+## POC wiring (ASSUMPTION - confirm with infoObject)
+
+`resolve_agent` is now live (read-only) against the **ERC-8004 reference
+deployment** Identity Registry `0x7177a6867296406881E20d6647232314736Dd09A` on
+**Ethereum Sepolia** - the 8004 team's canonical contracts (same address across
+testnets). Verified: agent `#1` resolves to its `tokenURI` + `ownerOf`. This is a
+**POC default chosen so identity reads work today; it is an assumption to confirm
+with infoObject** - specifically whether we point at the ecosystem's canonical
+registry or Clockchain's own ERC-8004 deployment (the open question just below).
+Swappable via `EVM_RPC_URL` / `ERC8004_CHAIN` / `ERC8004_REGISTRY_ADDRESS`.
+
 ## Open questions to validate
 
 - Is Product A's buyer in the ERC-8004 / agent economy at all? (Customer discovery.)
