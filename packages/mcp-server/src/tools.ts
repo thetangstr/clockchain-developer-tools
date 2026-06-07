@@ -5,6 +5,7 @@ import {
   InsufficientCreditsError,
   RateLimitError,
   resolveAgent,
+  type AgentReceipt,
   type ClockchainConfig,
 } from "@clockchain/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -298,5 +299,55 @@ export function registerTools(
     },
     async ({ agent_id }) =>
       run("resolve_agent", () => resolveAgent(config, agent_id)),
+  );
+
+  server.registerTool(
+    "attest_action",
+    {
+      title: "Attest an autonomous agent action (Agent Attested Receipt)",
+      description:
+        "Fingerprint an agent action (SHA-256 of agent_id + action + inputs + " +
+        "outputs), anchor it on-chain, and return a verifiable Agent Attested " +
+        "Receipt (event hash, on-chain anchor, consensus timestamp). This is a " +
+        "write; it spends a log credit.",
+      inputSchema: {
+        agent_id: z.string().describe("Who acted (ERC-8004 agentId or an agent label)."),
+        action: z.string().describe('What they did, e.g. "execute_trade".'),
+        inputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision inputs."),
+        outputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision outputs."),
+        wait: z.boolean().optional().describe("Wait for on-chain confirmation. Default true."),
+        wait_ms: z.number().int().positive().optional().describe("Max wait, ms. Default 15000."),
+      },
+    },
+    async ({ agent_id, action, inputs, outputs, wait, wait_ms }) =>
+      run("attest_action", async () => {
+        budget.check();
+        const receipt = await client.attestAction({
+          agentId: agent_id,
+          action,
+          inputs,
+          outputs,
+          wait,
+          waitMs: wait_ms,
+        });
+        budget.record();
+        return receipt;
+      }),
+  );
+
+  server.registerTool(
+    "verify_receipt",
+    {
+      title: "Verify an Agent Attested Receipt",
+      description:
+        "Independently re-verify a receipt: recompute the event hash from the " +
+        "receipt's own payload and confirm it matches what is anchored on-chain. " +
+        "Pass the full receipt object returned by attest_action.",
+      inputSchema: {
+        receipt: z.record(z.string(), z.unknown()).describe("The receipt object from attest_action."),
+      },
+    },
+    async ({ receipt }) =>
+      run("verify_receipt", () => client.verifyReceipt(receipt as unknown as AgentReceipt)),
   );
 }

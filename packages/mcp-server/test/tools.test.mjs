@@ -128,6 +128,35 @@ test("get_log_entry returns the record", async () => {
   assert.equal(JSON.parse(textOf(res)).ledgerId, "L9");
 });
 
+test("attest_action returns a receipt; verify_receipt confirms it", async () => {
+  // event hash for the payload below (recomputed by verify) is whatever the
+  // server anchors; stub /log to echo a fixed assetHash and make /ledger match it.
+  let anchored = null;
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    const json = (body, status = 200) => ({ status, ok: status < 400, statusText: "stub", text: async () => JSON.stringify(body) });
+    if (u.includes("/log")) {
+      anchored = JSON.parse(opts.body).assetHash;
+      return json({ ledgerId: "LR", assetReferenceId: JSON.parse(opts.body).assetReferenceId, assetHash: anchored, blockHeight: "500", createdTimestamp: "t" });
+    }
+    if (u.includes("/ledger/")) return json({ ledgerId: "LR", assetHash: anchored, blockHeight: "500", assetReferenceId: "r", createdTimestamp: "t" });
+    if (u.includes("/api/time/block")) return json({ success: true, data: { blockHeight: 500, proposerAddress: "0x", blockTime: "2026-06-07T00:00:00Z" } });
+    if (u.includes("/getValidationBlock")) return json({ validationBlockData: { blockHeight: 500, positiveVotes: 1, negativeVotes: 0, "Trust value percentage": 0, "Node participation percentage": 0 } });
+    throw new Error("no route " + u);
+  };
+  const tools = collectTools();
+  const res = await tools.attest_action({ agent_id: "agent:bot", action: "execute_trade", inputs: { size: 1 }, outputs: { ok: true } });
+  assert.ok(!res.isError, "attest ok");
+  const receipt = JSON.parse(textOf(res));
+  assert.equal(receipt.schema, "clockchain.receipt/v1");
+  assert.equal(receipt.anchor.blockHeight, "500");
+  assert.equal(receipt.attestation.status, "single-validator-testnet");
+
+  const vres = await tools.verify_receipt({ receipt });
+  assert.ok(!vres.isError, "verify ok");
+  assert.equal(JSON.parse(textOf(vres)).match, true);
+});
+
 test("log_action honors MCP_LOG_BUDGET cap across calls", async () => {
   routeFetch([["/log", { body: { ledgerId: "LB", blockHeight: null } }]]);
   const prev = process.env.MCP_LOG_BUDGET;
