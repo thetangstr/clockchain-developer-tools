@@ -283,6 +283,32 @@ Cloudflare Tunnel.
 Net: an agent run by AgentDash can use our MCP, configured at the runtime layer on
 localhost. Nothing changes in AgentDash itself.
 
+### Clark = our Hermes agent (Slack) - the primary v2 consumer
+
+**Clark** is our Slackbot, backed by a **Clockchain-profiled Hermes agent running
+on the Mac mini** (`hermes ... --profile clockchain gateway run`, live on the box).
+Hermes *is* the harness / MCP client, co-located with our server - so Clark reaches
+our tools over **local stdio, no network, no Cloudflare**. Slack workspace/channel
+membership is the access gate.
+
+Hermes has a first-class MCP CLI (`hermes mcp add/list/test`), and MCP servers are
+registered **per profile**. The `clockchain` profile currently has none, so adding
+ours is clean. Registration (run on the Mac mini, once the built server is present
+there):
+
+```bash
+hermes --profile clockchain mcp add clockchain \
+  --command node \
+  --args /Users/maxiaoer/clockchain-developer-tools/packages/mcp-server/dist/stdio.js \
+  --env CLOCKCHAIN_API_KEY=... CLOCKCHAIN_CLIENT_ID=... CLOCKCHAIN_WALLET_ID=...
+hermes --profile clockchain mcp test clockchain     # verify the connection
+# then reload the clockchain gateway so Clark picks up the new toolset
+```
+
+Prerequisite: the server must exist on the box (e.g. `git clone` + `npm install` +
+`npm run build`, or copy `dist/`). After this, Clark can use `get_time`,
+`log_action`, `verify_asset`, etc. directly in Slack.
+
 ### Exact place to register our MCP (for a Claude Code / `claude_local` agent)
 
 AgentDash's `process` adapter spawns the runtime with a `command` + `args` +

@@ -2,11 +2,13 @@
 
 Three milestones with target dates: **v1 (Fri Jun 19, 2026)** = the basic
 features work (local), **v2 (Fri Jun 26, 2026)** = it runs on the Mac mini and is
-used by Claude ("Clark") and AgentDash, **v3 (TBD)** = deployed and testable on
-AWS, gated on network-team deploy readiness + the smart-contract API.
+used by Clark and AgentDash, **v3 (TBD)** = deployed and testable on
+AWS/GCP, gated on network-team deploy readiness + the smart-contract API.
 
-> Naming note: "Clark" is read here as **Claude / Claude Code** (the runtime
-> AgentDash launches as `claude_local`). Correct me if it means something else.
+> **Clark** is our Slackbot, backed by a **Clockchain-profiled Hermes agent on the
+> Mac mini** (`hermes --profile clockchain`). Hermes is the harness / MCP client, so
+> Clark reaches our tools over local stdio - registered via `hermes mcp add`
+> (per-profile), no network, no Cloudflare. See `deployment.md`.
 
 ---
 
@@ -70,24 +72,26 @@ Hash in, tamper-proof timestamped record out. This is the logging product.
   integration testing against the gateway is underway. Remaining: the `wait`
   option and wiring `resolve_agent` to a real RPC.
 
-## v2 - Working on Claude ("Clark") + AgentDash (Mac mini)  -  target: Fri Jun 26, 2026
+## v2 - Working on Clark (Slack/Hermes) + AgentDash (Mac mini)  -  target: Fri Jun 26, 2026
 
 **Goal:** real agents and business users actually use it, hosted on the Mac mini.
 
 - **Where:** the Mac mini (`192.168.86.48`, which is also the AgentDash host).
 - **Transports:**
-  - **stdio** wired into `~/.claude.json` `mcpServers` - this is how Claude /
-    AgentDash's `claude_local` agents reach it (same box, no network).
-  - **HTTP** endpoint for remote business testers (Tailscale, the box is already
-    on the tailnet, or a Cloudflare Tunnel).
+  - **stdio** registered into Hermes via `hermes --profile clockchain mcp add` -
+    this is how **Clark** (and other local Hermes/`claude_local` agents) reach it
+    (same box, no network).
+  - **HTTP** endpoint for remote business testers, behind Cloudflare Access (web
+    demo + MCP), per `DELEGATED-ACCESS.md`.
 - **Auth & safety:** tester tokens (`MCP_AUTH_TOKENS`); the Clockchain API key
   stays on the box only; a credit-budget cap so a runaway test can't drain logs;
   observability on.
 - **Features:** the v1 set (A + B + `resolve_agent`). Still no contracts, no
   `attest_time` write.
-- **Exit (this is the POC success bar):** a Claude/AgentDash agent completes
-  time -> log -> verify unaided via `~/.claude.json`; 3-5 business testers hit the
-  HTTP endpoint and react; findings graded + a go / no-go.
+- **Exit (this is the POC success bar):** Clark (Hermes) or an AgentDash agent
+  completes time -> log -> verify unaided via its registered MCP toolset; 3-5
+  business testers use the web demo / hit the endpoint and react; findings graded
+  + a go / no-go.
 
 ## v3 - Deployed and testable on AWS (final state)  -  target: TBD (gated)
 
