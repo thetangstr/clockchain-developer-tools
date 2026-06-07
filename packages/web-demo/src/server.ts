@@ -142,8 +142,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 });
 
 const port = Number(process.env.WEB_PORT ?? process.env.PORT ?? "8080");
-server.listen(port, () => {
-  console.error(`[clockchain-web-demo] listening on :${port}`);
+// Optional bind host. Set WEB_HOST to a specific interface (e.g. the tailnet IP)
+// to restrict reach to that network; unset binds all interfaces.
+const host = process.env.WEB_HOST || undefined;
+server.listen(port, host, () => {
+  console.error(`[clockchain-web-demo] listening on ${host ?? "*"}:${port}`);
   if (cap > 0) console.error(`[clockchain-web-demo] notarization budget: ${cap}`);
   console.error(`[clockchain-web-demo] feedback -> ${FEEDBACK_FILE}`);
   console.error("[clockchain-web-demo] deploy BEHIND an identity gate (Cloudflare Access); no token auth of its own.");
