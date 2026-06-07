@@ -42,11 +42,48 @@ const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 // Fallback set when there is no docs.config.json and no filenames are passed.
 const DEFAULT_FILES = ['mcp-deployment-brief.md', 'roadmap.md'];
 
+/**
+ * Refresh the access token ourselves when it is expired/near-expiry.
+ *
+ * The googleapis library's built-in auto-refresh hangs under Node 23 (gaxios),
+ * so we do the refresh with a plain fetch to the token endpoint (fast, reliable)
+ * and persist the new access token + expiry. The OAuth2 client is then handed a
+ * non-expired token and never triggers its own (hanging) refresh path.
+ */
+async function ensureFreshToken(key, token) {
+  const skewMs = 120_000;
+  const valid = token.access_token && token.expiry_date && token.expiry_date - skewMs > Date.now();
+  if (valid || !token.refresh_token) return token;
+  const body = new URLSearchParams({
+    client_id: key.client_id,
+    client_secret: key.client_secret,
+    refresh_token: token.refresh_token,
+    grant_type: 'refresh_token',
+  });
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error(`token refresh failed: ${data.error_description || data.error || res.status}`);
+  }
+  const updated = {
+    ...token,
+    access_token: data.access_token,
+    expiry_date: Date.now() + (data.expires_in ?? 3600) * 1000,
+  };
+  await writeFile(TOKEN_PATH, JSON.stringify(updated, null, 2));
+  return updated;
+}
+
 async function getClient() {
   if (existsSync(TOKEN_PATH)) {
     const creds = JSON.parse(await readFile(CREDENTIALS_PATH, 'utf8'));
     const key = creds.installed || creds.web;
-    const token = JSON.parse(await readFile(TOKEN_PATH, 'utf8'));
+    let token = JSON.parse(await readFile(TOKEN_PATH, 'utf8'));
+    token = await ensureFreshToken(key, token);
     const oauth = new google.auth.OAuth2(key.client_id, key.client_secret, key.redirect_uris?.[0]);
     oauth.setCredentials(token);
     return oauth;
