@@ -5,11 +5,31 @@ Three hosting tiers, in order of when we use them:
 1. **Local stdio** - for developers. `npx`, no host. (Already in the plan.)
 2. **Mac mini test host** - for business users + AgentDash. **This is the new
    one.** A running HTTP endpoint testers can hit without installing anything.
-3. **AWS** - production. Plan is ready below; build is gated on a go decision, and
-   a *public* endpoint is gated to mainnet (Q9).
+3. **AWS or GCP** - production. Plans for both are below; build is gated on a go
+   decision, and a *public* endpoint is gated to mainnet (Q9).
 
 The Mac mini is a **private test endpoint**, not a public listing - it does not
 conflict with the "no public distribution until mainnet" decision.
+
+### Hosting as business scenarios (the Goldilocks pick)
+
+Each tier is a different business situation, not just a different server. Framed
+by who it serves, what it costs, and what it exposes:
+
+| Tier | Business scenario | Cost / effort | Exposure | Fit |
+|---|---|---|---|---|
+| **Local stdio** | A single developer trying the tools on their laptop. No one else can reach it. | ~$0, minutes | none | **Too small** - can't put it in front of a business tester |
+| **Mac mini test host** | "Let a handful of business users and our AgentDash agents try it this month" on hardware we already own. | ~$0 new, hours | private (LAN / tailnet) | **Goldilocks for testing now** |
+| **GCP Cloud Run** | "Give me a real managed URL I can share, that scales to zero when idle and costs cents." Managed prod without an ops team. | ~$/mo, ~1 day | private or public (gated) | **Goldilocks for first real hosting** |
+| **AWS ECS Fargate + ALB** | "Production launch posture" - always-on, autoscaled, full VPC/secrets/CI footprint. | $$/mo, days | public (mainnet-gated) | **Too big until we're launching** |
+
+**Goldilocks reading:** use the **Mac mini now** (zero new spend, private, already
+the AgentDash box) to get business feedback; when we need a real shareable
+endpoint, **GCP Cloud Run** is the just-right next step (managed, scale-to-zero,
+cheap, TLS included) before committing to the heavier always-on AWS stack. AWS
+remains the documented path if we standardize there or need its specific
+footprint. Pick the cloud by where the rest of the infra lives; the server image
+is identical on both.
 
 ---
 
@@ -352,3 +372,56 @@ Target architecture (from the spec): ECR image -> ECS Fargate service -> ALB
 Give me those and I can turn this into concrete Terraform / a deploy script. Most
 of them also apply to the Mac mini host (API key, EVM RPC, target chain, tester
 tokens), so answering them unblocks both.
+
+---
+
+## 4. GCP production deployment plan (alternative to AWS)
+
+Same container, different cloud. **Cloud Run** is the recommended GCP target: it
+is serverless, scales to zero (you pay only per request - cheap for a POC/early
+prod), includes managed TLS, and deploys in one command. It is the "Goldilocks"
+first real host above. (Use **GKE** instead only if we need long-lived connections
+or already run a cluster.)
+
+Target architecture: Artifact Registry image -> Cloud Run service -> managed
+HTTPS URL; secrets in Secret Manager; egress to `node.clockchain.network` and the
+EVM RPC. We already have a GCP project on hand (`yarda-740f4`).
+
+### Steps
+
+1. Build and push the image to **Artifact Registry**
+   (`gcloud builds submit` or `docker push`).
+2. Put secrets in **Secret Manager**: `CLOCKCHAIN_API_KEY`, `EVM_RPC_URL`, MCP
+   tester/auth tokens; grant the Cloud Run service account access.
+3. **Deploy to Cloud Run** (256-512 MB, scale-to-zero), injecting secrets as env:
+   ```bash
+   gcloud run deploy clockchain-mcp \
+     --image <region>-docker.pkg.dev/<project>/mcp/clockchain-mcp \
+     --region <region> --port 3000 \
+     --set-env-vars MCP_TRANSPORT=http,MCP_PORT=3000,ERC8004_CHAIN=base-sepolia \
+     --set-secrets CLOCKCHAIN_API_KEY=clockchain-api-key:latest,EVM_RPC_URL=evm-rpc-url:latest \
+     --no-allow-unauthenticated      # keep it private until mainnet (Q9)
+   ```
+4. **Access control:** `--no-allow-unauthenticated` + IAM (or an internal load
+   balancer / IAP) keeps it private - the non-public posture the network team
+   asked for. Flip to public only at mainnet. Cloud Run gives a managed
+   `*.run.app` HTTPS URL; map a custom domain when wanted.
+5. **Health/observability:** `/health` check; logs/metrics flow to **Cloud
+   Logging / Monitoring** automatically.
+6. **CI/CD:** GitHub Actions -> **Workload Identity Federation** (keyless) -> build,
+   push to Artifact Registry, `gcloud run deploy`.
+
+### What I need from you / D4 to finalize the GCP plan
+
+Mostly the same as AWS, GCP-flavored:
+- [ ] GCP **project ID** + **region** (reuse `yarda-740f4`, or a dedicated project?)
+- [ ] Deploy access: a CI service account, or GitHub **Workload Identity Federation**
+- [ ] Confirm **Secret Manager** for the API key / RPC / tester tokens
+- [ ] Which Clockchain account (API key + client/wallet) the hosted server uses
+- [ ] **Public vs private**: keep `--no-allow-unauthenticated` (recommended pre-mainnet) or expose via IAP/allowlist
+- [ ] Custom domain (e.g. `mcp-test.clockchain.network`) or use the `*.run.app` URL
+- [ ] EVM RPC provider + target chain (Base mainnet / Base Sepolia / Ethereum)
+- [ ] Expected call volume + monthly cost ceiling, and the credit budget cap
+
+The chain/RPC, Clockchain account, and tester-token answers are shared with the
+AWS and Mac mini setups - answering once unblocks all three.

@@ -38,6 +38,25 @@ meant to stand alone for a sign-off meeting.
 | Agent identity read (ERC-8004) | identity | **In progress** (needs EVM RPC) |
 | Smart-contract triggers | "contract" | **Blocked** (gateway 404) |
 
+### Business use cases (and the Goldilocks one to lead with)
+
+What the capabilities above are *for*, in business terms:
+
+| Use case | What it does for a customer | Built on |
+|---|---|---|
+| **Tamper-evident proof of an AI agent's action** | Prove an agent did X at a verifiable time, and that the record hasn't changed - accountability for autonomous agents. | notarization + time oracle |
+| Document / contract notarization | Hash a file, get a timestamped on-chain record, later prove it is unaltered (court-style check). | notarization |
+| Audit trail for records | A verifiable, append-only log of events with consensus timestamps. | notarization |
+| Verifiable time as a primitive | Read a decentralized, multi-source consensus clock instead of trusting one server. | time oracle |
+
+**Goldilocks (lead) use case:** *tamper-evident proof of an AI agent's action.*
+It is the **just-right wedge** - narrow enough to demo today on the verified
+tools, it combines our two differentiators (verifiable **time** + agent
+**action**), and it rides the agent/ERC-8004 direction we have already committed
+to. Broader claims (a full compliance audit platform) are too big for the current
+1-node testnet; bare "timestamp an API call" is too small to be differentiated.
+We lead the demo and the pitch with the agent-action proof.
+
 ---
 
 ## 3. Requirements
@@ -69,7 +88,7 @@ meant to stand alone for a sign-off meeting.
 |---|---|---|---|
 | **v1** - basic features | **Fri Jun 19, 2026** | local (npx / stdio) | time oracle + notarization tools working locally; identity read once the EVM RPC is provided |
 | **v2** - Claude + AgentDash | **Fri Jun 26, 2026** | Mac mini | agents use it locally; remote testers over a private network; first business-tester feedback |
-| **v3** - production (AWS) | **TBD - gated** | AWS (Fargate + ALB) | deployed on AWS, tested. Gated on (a) network-team deploy readiness and (b) the smart-contract (`/schedule`) API being ready |
+| **v3** - production (AWS or GCP) | **TBD - gated** | AWS (Fargate + ALB) **or GCP (Cloud Run)** | deployed to a managed cloud, tested. Gated on (a) network-team deploy readiness and (b) the smart-contract (`/schedule`) API being ready |
 
 Dependencies that move these dates: **v1** assumes the EVM RPC + chain are
 provided (Section 6); **v3** has no fixed date because it depends on the network
@@ -111,9 +130,9 @@ this approval.)
 | EVM RPC URL + target chain (recommend Base Sepolia) + ERC-8004 registry address | identity read (`resolve_agent`), v1+ | Network / Backend |
 | Clockchain test account: API key + client/wallet + **log credits** + budget cap | logging, all versions | Product / Backend |
 | Mac mini test host prep + tester access tokens (internal engineering setup) | v2 | Engineering |
-| AWS: account + region + VPC (new or reuse D4's) | v3 | Network / Eng |
-| Domain + DNS in Route53 (for TLS cert) | v3 | Network |
-| Secrets store (Secrets Manager / SSM) for API key + RPC + tokens | v2/v3 | Eng |
+| Cloud account + region: **AWS** (account/VPC) or **GCP** (project, e.g. reuse `yarda-740f4`) | v3 | Network / Eng |
+| Domain + DNS for TLS (Route53 on AWS; managed cert / `*.run.app` on GCP Cloud Run) | v3 | Network |
+| Secrets store (AWS Secrets Manager / SSM, or GCP Secret Manager) for API key + RPC + tokens | v2/v3 | Eng |
 | Managed EVM RPC at the edge | v3 | Network / Eng |
 | Funding decision: x402 / API-credit seam | v3 (agent-payable) | Product |
 | Expected scale + monthly budget ceiling | v3 sizing | Product |
