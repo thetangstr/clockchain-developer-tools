@@ -86,28 +86,40 @@ const header = (reqs, sid) => rule(reqs, sid, 0, 0, PAGE_W, C.v1, 5); // thin to
 /* ---------- slides ---------- */
 function slideOverview(reqs, sid) {
   header(reqs, sid);
-  eyebrow(reqs, sid, MX, 40, 'Clockchain MCP', C.v1);
-  heading(reqs, sid, MX, 56, 'Status & roadmap');
-  text(reqs, sid, MX, 100, CW, 40,
+  eyebrow(reqs, sid, MX, 38, 'Executive summary · Clockchain MCP', C.v1);
+  heading(reqs, sid, MX, 54, 'Status & roadmap');
+  text(reqs, sid, MX, 96, CW, 34,
     "An MCP server that turns Clockchain's network APIs into tools any AI agent can call. v1 is live this week on the testnet — demo-ready today. v2 and v3 are in design.",
-    { size: 12, color: C.mut, line: 120 });
-  rule(reqs, sid, MX, 150, CW);
+    { size: 11.5, color: C.mut, line: 122 });
+  rule(reqs, sid, MX, 148, CW);
 
-  const rows = [
-    { code: 'v1', color: C.v1, tint: C.tV1, timing: 'THIS WEEK', one: 'In progress, ready for testing. Core MCP live on the testnet — quick demo today (detail next slide).', stat: 'READY FOR TESTING', statColor: C.green, statTint: C.tGreen },
-    { code: 'v2', color: C.v2, tint: C.tV2, timing: 'NEXT WEEK', one: 'Connect to AgentDash for an agent-orchestration test — the same MCP, driven by a real agent host.', stat: 'IN DESIGN', statColor: C.gray, statTint: C.tGray },
-    { code: 'v3', color: C.v3, tint: C.tV3, timing: 'LATER', one: 'Tested and hosted on AWS or GCP — production-grade and managed.', stat: 'IN DESIGN', statColor: C.gray, statTint: C.tGray },
+  const cols = [
+    { code: 'v1', color: C.v1, status: 'LIVE · TESTNET', sColor: C.green, sTint: C.tGreen, sW: 106, timing: 'This week', inc: [
+      'MCP server — up & in testing',
+      'Playground — demo-ready today',
+      'Internal-user launch later this week (after Clockchain / D4D domain access)',
+    ] },
+    { code: 'v2', color: C.v2, status: 'IN DESIGN', sColor: C.gray, sTint: C.tGray, sW: 78, timing: 'By end of month', inc: [
+      'AgentDash integration — agent orchestration',
+      'Hosted, access-controlled playground',
+    ] },
+    { code: 'v3', color: C.v3, status: 'IN DESIGN', sColor: C.gray, sTint: C.tGray, sW: 78, timing: 'By end of month', inc: [
+      'Cloud launch — AWS & GCP',
+      'Production-grade, managed hosting',
+    ] },
   ];
-  let y = 168;
-  for (const r of rows) {
-    rule(reqs, sid, MX, y + 4, 3, r.color, 52); // color tick
-    text(reqs, sid, MX + 14, y, 56, 36, r.code, { size: 22, bold: true, color: r.color });
-    chip(reqs, sid, MX + 72, y + 6, 92, 20, r.timing, r.tint, r.color, 8.5);
-    text(reqs, sid, MX + 178, y + 2, 296, 52, r.one, { size: 11, color: C.ink, line: 115 });
-    chip(reqs, sid, PAGE_W - MX - 138, y + 6, 138, 22, r.stat, r.statTint, r.statColor, 9);
-    y += 64;
-  }
-  text(reqs, sid, MX, 372, CW, 20, 'Everything runs on the testnet (single validator). v2 and v3 are in design — not started.', { size: 9, color: C.amber });
+  const gap = 16, cw = (CW - 2 * gap) / 3;
+  cols.forEach((c, i) => {
+    const x = MX + i * (cw + gap);
+    text(reqs, sid, x, 164, 46, 28, c.code, { size: 20, bold: true, color: c.color });
+    chip(reqs, sid, x + 44, 168, c.sW, 18, c.status, c.sTint, c.sColor, 8.5);
+    text(reqs, sid, x, 194, cw, 14, c.timing, { size: 9.5, color: C.mut });
+    text(reqs, sid, x, 214, cw, 12, 'INCLUDES', { size: 8, bold: true, color: C.faint });
+    text(reqs, sid, x, 228, cw, 124, c.inc.join('\n'), { size: 9.5, color: C.ink, line: 120, space: 4, bullets: 'BULLET_DISC_CIRCLE_SQUARE' });
+  });
+
+  rule(reqs, sid, MX, 360, CW);
+  text(reqs, sid, MX, 368, CW, 26, 'v2 and v3 proceed concurrently, now → end of month.   Not yet in scope: multi-validator / mainnet, public launch.', { size: 9, color: C.amber, line: 120 });
 }
 
 function twoColumn(reqs, sid, eb, ebColor, title, sub, left, right) {
