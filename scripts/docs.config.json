@@ -1,8 +1,12 @@
 {
   "groups": [
     {
-      "title": "Clockchain MCP Server - Approval Brief",
-      "files": ["mcp-deployment-brief.md", "roadmap.md"]
+      "title": "Clockchain MCP - Approval (Business Execs)",
+      "files": ["approval-exec.md"]
+    },
+    {
+      "title": "Clockchain MCP - Approval (Network & Tech)",
+      "files": ["approval-network.md"]
     },
     {
       "title": "Clockchain MCP Server - Engineering Spec",

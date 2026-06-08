@@ -3,6 +3,10 @@
 **For approval by: Stakeholders (Product / Leadership) + Network Team + Backend (D4).**
 **Status: PROPOSED - awaiting sign-off. V1 POC validated on testnet.**  Date: 2026-06-08.
 
+> **For sign-off, use the split docs, not this one:** business execs →
+> `approval-exec.md` (one page, live walkthrough); network/tech → `approval-network.md`.
+> This brief is now the **detailed reference** behind them.
+
 This is the single approval document. It consolidates what the MCP server is, the
 requirements it must meet, and the technical/deployment dependencies that need
 provisioning or a decision. Detailed specs are linked at the end; this brief is
