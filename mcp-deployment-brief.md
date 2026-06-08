@@ -1,7 +1,7 @@
 # Clockchain MCP Server - Requirements & Deployment Brief
 
 **For approval by: Stakeholders (Product / Leadership) + Network Team + Backend (D4).**
-**Status: PROPOSED - awaiting sign-off.**  Date: 2026-06-06.
+**Status: PROPOSED - awaiting sign-off. V1 POC validated on testnet.**  Date: 2026-06-08.
 
 This is the single approval document. It consolidates what the MCP server is, the
 requirements it must meet, and the technical/deployment dependencies that need
@@ -15,17 +15,30 @@ meant to stand alone for a sign-off meeting.
 - **What:** an MCP server that lets AI agents and developers use Clockchain's
   time oracle and notarization (and, next, ERC-8004 agent identity) through
   standard agent tooling.
-- **Where it is:** **in progress.** Core development and integration testing are
-  underway against the Clockchain gateway.
-- **Milestones:** **v1 - Fri Jun 19, 2026** (basic features, local) · **v2 - Fri
-  Jun 26, 2026** (Claude + AgentDash on the Mac mini) · **v3 - TBD** (AWS, gated on
-  network-team readiness + the smart-contract API). See Section 4.
+- **Where it is:** **V1 POC validated on the testnet.** A live **MCP Playground**
+  demonstrates the core end to end against the real network: an AI agent reads
+  consensus time, produces tamper-evident **attested receipts**, **timestamps
+  documents (TSA-style)**, **verifies + detects tampering**, and **resolves an
+  ERC-8004 agent identity (read)**. Remaining for V1 hardening: access-controlled
+  hosting for external testers, and the identity *write* path.
+- **What we can validate/test today:** the five capabilities above, through a chat
+  agent driving the MCP tools, with every result an independently verifiable,
+  downloadable on-chain receipt.
+- **Milestones:** **v1 - Fri Jun 19, 2026** (basic features - core already
+  validated) · **v2 - Fri Jun 26, 2026** (hosted for testers + agent use) ·
+  **v3 - TBD** (managed cloud, gated on network-team readiness + the smart-contract
+  API). See Section 4.
 - **What we are asking to approve:**
   1. the requirements (Section 3),
   2. the network exposure model (Section 5) - this is the network team's main item,
   3. provisioning the deployment dependencies (Section 6) so we can run v1 and v2.
-- **Guardrails (what this is NOT):** smart contracts are blocked (gateway 404); no
-  public endpoint until mainnet; we are not marketing autonomous agent usage yet.
+- **Caveats / guardrails (what this is NOT yet):** **single-validator testnet** -
+  the workflow + proofs are real, but multi-validator supermajority and "court-grade"
+  claims come with mainnet; the **demo talks to the LLM directly** (not yet via our
+  production agent); **reads are live, writes are designed** (identity write +
+  smart-contract triggers use non-custodial propose-then-approve, not yet wired;
+  `/schedule` is gateway-404); **install is from source** (npm publish prepped, not
+  yet live); no public endpoint until mainnet.
 
 ---
 
@@ -33,10 +46,12 @@ meant to stand alone for a sign-off meeting.
 
 | Capability | Shorthand | Status |
 |---|---|---|
-| Time oracle (read consensus time, blocks, validation) | "time stamp" | **In progress** |
-| Notarization (hash in, timestamped proof, verify) | "tsa" | **In progress** |
-| Agent identity read (ERC-8004) | identity | **In progress** (needs EVM RPC) |
-| Smart-contract triggers | "contract" | **Blocked** (gateway 404) |
+| Time oracle (read consensus time, blocks, validation) | "time stamp" | **Validated on testnet** |
+| Notarization / proof-of-existence (hash in, timestamped proof, verify) | "tsa" | **Validated on testnet** |
+| Agent attested receipt (who/what/when, tamper-evident) | receipt | **Validated on testnet** |
+| Agent identity **read** (ERC-8004) | identity | **Validated on testnet** (reference registry - assumption to confirm) |
+| Agent identity **write** (validation attestation) | identity | **Designed** (non-custodial propose-then-approve; needs a signer) |
+| Smart-contract triggers | "contract" | **Blocked** (gateway 404 + non-custodial redesign) |
 
 ### Business use cases (and the Goldilocks one to lead with)
 
