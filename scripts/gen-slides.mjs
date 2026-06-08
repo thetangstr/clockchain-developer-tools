@@ -264,7 +264,40 @@ function slideJourney(reqs, sid) {
   text(reqs, sid, MX, 384, CW, 14, 'Maps to EU AI Act: Art. 12 logging · Art. 14 human oversight · Annex IV documentation · Art. 74 audit access', { size: 8.5, color: C.faint });
 }
 
-// Slide 6 — TL;DR from leadership discovery interviews (the first customer).
+// a filled circle with a centered glyph/emoji (simple icon graphic).
+function icon(reqs, sid, x, y, d, glyph, fill, color) {
+  const id = oid('ic');
+  reqs.push({ createShape: { objectId: id, shapeType: 'ELLIPSE', elementProperties: elProps(sid, x, y, d, d) } });
+  reqs.push({ updateShapeProperties: { objectId: id, fields: 'shapeBackgroundFill.solidFill.color,outline.propertyState,contentAlignment', shapeProperties: { shapeBackgroundFill: { solidFill: { color: { rgbColor: rgb(fill) } } }, outline: { propertyState: 'NOT_RENDERED' }, contentAlignment: 'MIDDLE' } } });
+  reqs.push({ insertText: { objectId: id, text: glyph } });
+  reqs.push({ updateTextStyle: { objectId: id, textRange: { type: 'ALL' }, style: { fontSize: { magnitude: 22, unit: 'PT' }, foregroundColor: { opaqueColor: { rgbColor: rgb(color) } } }, fields: 'fontSize,foregroundColor' } });
+  reqs.push({ updateParagraphStyle: { objectId: id, textRange: { type: 'ALL' }, style: { alignment: 'CENTER' }, fields: 'alignment' } });
+}
+
+// Slide 3 — how real users reach the MCP (three channels).
+function slideChannels(reqs, sid) {
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 40, 'how real users reach the mcp', C.v1);
+  heading(reqs, sid, MX, 56, 'Three ways in');
+  text(reqs, sid, MX, 100, CW, 22, 'The playground is the human front door; developers and agents connect to the same MCP directly.', { size: 12, color: C.mut, line: 120 });
+  rule(reqs, sid, MX, 138, CW);
+
+  const cols = [
+    { glyph: '▶', color: C.v1, tint: C.tV1, title: 'Sales & Marketing', sub: 'Try it on our site', body: 'A prospect opens the playground on our marketing page and chats with an AI agent that uses our MCP — seeing our services produce verifiable proof, live and zero-install.' },
+    { glyph: '</>', color: C.v3, tint: C.tV3, title: 'Developers', sub: 'API key + open-source client', body: 'Get an API key from our site, clone the MCP client from our GitHub repo, and wire Clockchain’s tools into their own agent in minutes.' },
+    { glyph: '◆', color: C.v2, tint: C.tV2, title: 'AI Agents', sub: 'Discover via marketplace', body: 'An agent finds our MCP in a marketplace / registry listing, connects, and acts — with one-time human approval (non-custodial).' },
+  ];
+  const gap = 16, cw = (CW - 2 * gap) / 3;
+  cols.forEach((c, i) => {
+    const x = MX + i * (cw + gap);
+    icon(reqs, sid, x + (cw - 54) / 2, 162, 54, c.glyph, c.color, C.white);
+    text(reqs, sid, x, 228, cw, 18, c.title, { size: 13.5, bold: true, color: c.color, align: 'CENTER' });
+    text(reqs, sid, x, 248, cw, 14, c.sub, { size: 9.5, color: C.mut, align: 'CENTER' });
+    text(reqs, sid, x, 272, cw, 96, c.body, { size: 9.5, color: C.ink, line: 130, align: 'CENTER' });
+  });
+}
+
+// Slide 7 — TL;DR from leadership discovery interviews (the first customer).
 function cell(reqs, sid, x, y, w, label, labelColor, body) {
   text(reqs, sid, x, y, w, 12, label, { size: 9, bold: true, color: labelColor });
   text(reqs, sid, x, y + 15, w, 100, body, { size: 9.5, color: C.mut, line: 122 });
@@ -330,17 +363,18 @@ async function upsertDeck(token, prior) {
   const presentationId = pres.presentationId;
   const old = (pres.slides || []).map((s) => s.objectId);
 
-  const ids = ['sldOverview', 'sldJourney', 'sldScope', 'sldNetwork', 'sldOpen', 'sldTLDR'];
+  const ids = ['sldOverview', 'sldJourney', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen', 'sldTLDR'];
   const reqs = [];
   // delete old slides FIRST so the deterministic new IDs don't collide with them
   old.forEach((objectId) => reqs.push({ deleteObject: { objectId } }));
   ids.forEach((s) => reqs.push({ createSlide: { objectId: s, slideLayoutReference: { predefinedLayout: 'BLANK' } } }));
   slideOverview(reqs, ids[0]);
   slideJourney(reqs, ids[1]);
-  slideScope(reqs, ids[2]);
-  slideNetwork(reqs, ids[3]);
-  slideOpen(reqs, ids[4]);
-  slideTLDR(reqs, ids[5]);
+  slideChannels(reqs, ids[2]);
+  slideScope(reqs, ids[3]);
+  slideNetwork(reqs, ids[4]);
+  slideOpen(reqs, ids[5]);
+  slideTLDR(reqs, ids[6]);
 
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests: reqs });
   await setCommentable(token, presentationId);
