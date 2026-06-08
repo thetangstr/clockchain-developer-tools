@@ -12,10 +12,20 @@
   "files": [
     "dist"
   ],
+  "keywords": ["clockchain", "mcp", "model-context-protocol", "agent", "blockchain", "timestamp"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thetangstr/clockchain-developer-tools.git",
+    "directory": "packages/mcp-server"
+  },
   "scripts": {
     "build": "tsc -b",
     "test": "tsc -b && node --test",
-    "demo": "node demo.mjs"
+    "demo": "node demo.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@clockchain/core": "0.1.0",

@@ -15,9 +15,19 @@
   "files": [
     "dist"
   ],
+  "keywords": ["clockchain", "blockchain", "timestamp", "notarization", "agent"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thetangstr/clockchain-developer-tools.git",
+    "directory": "packages/core"
+  },
   "scripts": {
     "build": "tsc -b",
-    "test": "tsc -b && node --test"
+    "test": "tsc -b && node --test",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=18"

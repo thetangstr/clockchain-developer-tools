@@ -2,6 +2,7 @@
 
 > **Want to test it yourself?** Non-engineers start with [`TRY-IT.md`](TRY-IT.md)
 > (~10 min, plain steps). Engineers see [`QUICKSTART.md`](QUICKSTART.md).
+> **Add it to your AI agent (Claude Code / Desktop / Cursor):** [`INSTALL.md`](INSTALL.md).
 
 Specs and plans for the Clockchain developer surface: a CLI and an MCP server
 over the existing D4 node API, plus the agent-identity (Product A) and
