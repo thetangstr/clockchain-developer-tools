@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 // gen-slides.mjs
-// Build the "Clockchain MCP - Roadmap (v1 -> v3)" deck as a native Google Slides
-// presentation (commentable, shareable). The detailed MCP roadmap lives here as
-// slides; the website /plan/milestones page stays high-level (per product).
+// Build the "Clockchain MCP - Roadmap (v1 to v3)" deck as a native Google Slides
+// presentation (commentable, shareable) from pre-rendered slide images.
 //
-//   node gen-slides.mjs            # create or update-in-place the deck
+// The slide images in scripts/slides-assets/ are high-res screenshots of the
+// v1→v3 MCP milestones HTML (the page.tsx at research commit 0bdf012), so the
+// deck looks EXACTLY like that page. To refresh them: render that page locally
+// (HTTP Basic auth clockchain/chainclock) and re-capture each section.
+//
+//   node gen-slides.mjs            # create or update-in-place the deck from slides-assets/*.png
 //   node gen-slides.mjs trash ID   # move a deck to Trash (reversible)
 //
 // AUTH: same OAuth Desktop client + token as md-to-gdocs.mjs (scope drive.file,
-// which the Slides API accepts for files this app created). Token auto-refreshed
-// via plain fetch (the googleapis gaxios path hangs under Node 23).
+// which the Slides API + Drive uploads accept for files this app created).
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,52 +23,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CREDENTIALS_PATH = join(__dirname, 'credentials.json');
 const TOKEN_PATH = join(__dirname, 'token.json');
 const LEDGER_PATH = join(__dirname, 'slides-created.json');
+const ASSETS_DIR = join(__dirname, 'slides-assets');
 
 const DECK_TITLE = 'Clockchain MCP - Roadmap (v1 to v3)';
-
-// The existing MCP milestone page, broken into slides.
-const SLIDES = [
-  { layout: 'TITLE', title: 'Clockchain MCP - Roadmap',
-    subtitle: 'v1 to v3  ·  build led by Yang (~95% of it)  ·  testnet today\nJune 2026' },
-  { layout: 'TITLE_AND_BODY', title: 'The three releases at a glance', bullets: [
-    'v1 - Core MCP  ·  SHIPPED on testnet',
-    'v2 - Hosted + access-controlled  ·  IN PROGRESS (gated on domain access)',
-    'v3 - Production-grade  ·  PLANNED (network sign-off + contract API)',
-    'One platform, three steps: prove it -> let people use it -> make it production-grade',
-  ] },
-  { layout: 'TITLE_AND_BODY', title: 'v1 - Core MCP (shipped on testnet)', bullets: [
-    'What it is: the MCP server that turns Clockchain\'s existing network APIs into tools any AI agent can call',
-    'Capabilities: verifiable time · document timestamping (TSA) · agent attested receipt · independent verify + tamper · agent identity (read)',
-    'Proven end-to-end on the testnet, with a chatbot playground that walks a business user through each use case',
-    'Dependencies (all in hand): build owned by Yang · testnet APIs + creds · pinned MCP SDK',
-    'Done when: every capability validated on the testnet  ✓',
-  ] },
-  { layout: 'TITLE_AND_BODY', title: 'v2 - Hosted + access-controlled (in progress)', bullets: [
-    'Goal: make v1 usable by people who should not have to install anything',
-    'Cloudflare Access playground - zero-install, no VPN, free for up to 50 users',
-    'Leadership (Ken & Tetsuji) and design partners try every capability from a link',
-    'Confirm an outside agent host (e.g. AgentDash) calls the same hosted MCP',
-    'The only blocker: a domain we control (clockchain.network) - about 2 days out',
-  ] },
-  { layout: 'TITLE_AND_BODY', title: 'v3 - Production-grade (planned)', bullets: [
-    'Goal: from a testnet demo to something a company can depend on',
-    'Managed cloud hosting (AWS or GCP) with auth + secret handling',
-    'On-chain writes - agent-identity write + smart-contract triggers - non-custodial propose-then-approve (the server never holds a key)',
-    'Multi-validator / mainnet path for the strongest court-grade proofs',
-    'Gated on the network team + the contract API - not on the MCP build',
-  ] },
-  { layout: 'TITLE_AND_BODY', title: 'Scope & honesty', bullets: [
-    'In scope today (testnet): time · TSA · attested receipt · verify/tamper · identity read',
-    'Not yet: identity write · smart-contract triggers · multi-validator / mainnet · public launch',
-    'Everything runs on the testnet (single validator) until v3',
-    'The workflow + proofs are real and verifiable; mainnet brings the supermajority + the strongest claims',
-  ] },
-];
-
-const PLACEHOLDERS = {
-  TITLE: { title: 'CENTERED_TITLE', body: 'SUBTITLE' },
-  TITLE_AND_BODY: { title: 'TITLE', body: 'BODY' },
-};
 
 async function ensureFreshToken(key, token) {
   const skewMs = 120_000;
@@ -105,59 +65,85 @@ async function api(token, url, method = 'GET', body) {
   return data;
 }
 
-// Build createSlide + insertText + bullets requests for one slide.
-function slideRequests(slide, i) {
-  const ids = { slide: `slide_${i}`, title: `title_${i}`, body: `body_${i}` };
-  const ph = PLACEHOLDERS[slide.layout];
-  const reqs = [{
-    createSlide: {
-      objectId: ids.slide,
-      slideLayoutReference: { predefinedLayout: slide.layout },
-      placeholderIdMappings: [
-        { layoutPlaceholder: { type: ph.title, index: 0 }, objectId: ids.title },
-        { layoutPlaceholder: { type: ph.body, index: 0 }, objectId: ids.body },
-      ],
-    },
-  }];
-  reqs.push({ insertText: { objectId: ids.title, text: slide.title } });
-  const bodyText = slide.bullets ? slide.bullets.join('\n') : (slide.subtitle || '');
-  if (bodyText) {
-    reqs.push({ insertText: { objectId: ids.body, text: bodyText } });
-    if (slide.bullets) {
-      reqs.push({ createParagraphBullets: { objectId: ids.body, textRange: { type: 'ALL' }, bulletPreset: 'BULLET_DISC_CIRCLE_SQUARE' } });
-    }
-  }
-  return reqs;
+// PNG dimensions from the IHDR chunk (width/height at bytes 16..24).
+function pngSize(buf) {
+  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+}
+
+async function uploadImage(token, name, buf) {
+  const boundary = 'cc_img_boundary_8e21';
+  const meta = { name, mimeType: 'image/png' };
+  const pre = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: image/png\r\n\r\n`;
+  const post = `\r\n--${boundary}--`;
+  const body = Buffer.concat([Buffer.from(pre), buf, Buffer.from(post)]);
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`upload ${name} -> ${res.status}: ${JSON.stringify(data).slice(0, 300)}`);
+  // make it fetchable by the Slides API (server-side fetch needs public read)
+  await api(token, `https://www.googleapis.com/drive/v3/files/${data.id}/permissions?fields=id`, 'POST', { role: 'reader', type: 'anyone' });
+  return data.id;
 }
 
 async function setCommentable(token, id) {
   try {
-    await api(token, `https://www.googleapis.com/drive/v3/files/${id}/permissions?fields=id`, 'POST',
-      { role: 'commenter', type: 'anyone' });
+    await api(token, `https://www.googleapis.com/drive/v3/files/${id}/permissions?fields=id`, 'POST', { role: 'commenter', type: 'anyone' });
   } catch (e) {
     if (!String(e).includes('409')) console.warn(`  (permission warn): ${String(e).slice(0, 120)}`);
   }
 }
 
-async function upsertDeck(token, prior) {
-  let presentationId, oldSlideIds;
+// contain image within the page, centered (EMU math).
+function containTransform(page, img) {
+  const pageW = page.width.magnitude, pageH = page.height.magnitude;
+  const ar = img.w / img.h;
+  let w = pageW, h = pageW / ar;
+  if (h > pageH) { h = pageH; w = pageH * ar; }
+  return { w, h, tx: (pageW - w) / 2, ty: (pageH - h) / 2 };
+}
+
+async function upsertDeck(token, prior, assets) {
+  let pres;
   if (prior?.id) {
-    const pres = await api(token, `https://slides.googleapis.com/v1/presentations/${prior.id}`);
-    presentationId = pres.presentationId;
-    oldSlideIds = (pres.slides || []).map((s) => s.objectId);
-    console.log(`  updating in place: ${presentationId}`);
+    pres = await api(token, `https://slides.googleapis.com/v1/presentations/${prior.id}`);
+    console.log(`  updating in place: ${pres.presentationId}`);
   } else {
-    const pres = await api(token, 'https://slides.googleapis.com/v1/presentations', 'POST', { title: DECK_TITLE });
-    presentationId = pres.presentationId;
-    oldSlideIds = (pres.slides || []).map((s) => s.objectId);
-    console.log(`  created: ${presentationId}`);
+    pres = await api(token, 'https://slides.googleapis.com/v1/presentations', 'POST', { title: DECK_TITLE });
+    console.log(`  created: ${pres.presentationId}`);
   }
-  // New slides are appended after the old ones; deleting the old ones last leaves
-  // only the freshly built deck (preserves the file URL + file-level comments).
-  const requests = [
-    ...SLIDES.flatMap((s, i) => slideRequests(s, i)),
-    ...oldSlideIds.map((objectId) => ({ deleteObject: { objectId } })),
-  ];
+  const presentationId = pres.presentationId;
+  const page = pres.pageSize; // EMU; can't be changed post-create, so we lay out to it
+  const oldSlideIds = (pres.slides || []).map((s) => s.objectId);
+
+  // upload images first
+  const uploaded = [];
+  for (const a of assets) {
+    const buf = await readFile(a.path);
+    const id = await uploadImage(token, `${DECK_TITLE} — ${a.name}`, buf);
+    uploaded.push({ id, size: pngSize(buf) });
+    console.log(`  uploaded ${a.name}`);
+  }
+
+  // build new image slides, then delete the old ones (keeps the file URL + comments)
+  const requests = [];
+  uploaded.forEach((u, i) => {
+    const slideId = `img_slide_${i}`;
+    const t = containTransform(page, u.size);
+    requests.push({ createSlide: { objectId: slideId, slideLayoutReference: { predefinedLayout: 'BLANK' } } });
+    requests.push({ createImage: {
+      url: `https://drive.google.com/uc?export=view&id=${u.id}`,
+      elementProperties: {
+        pageObjectId: slideId,
+        size: { width: { magnitude: t.w, unit: 'EMU' }, height: { magnitude: t.h, unit: 'EMU' } },
+        transform: { scaleX: 1, scaleY: 1, translateX: t.tx, translateY: t.ty, unit: 'EMU' },
+      },
+    } });
+  });
+  oldSlideIds.forEach((objectId) => requests.push({ deleteObject: { objectId } }));
+
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests });
   await setCommentable(token, presentationId);
   return { id: presentationId, url: `https://docs.google.com/presentation/d/${presentationId}/edit` };
@@ -175,9 +161,13 @@ async function main() {
   const token = await getAccessToken();
   if (args[0] === 'trash') return trash(token, args.slice(1));
 
+  const files = (await readdir(ASSETS_DIR)).filter((f) => f.toLowerCase().endsWith('.png')).sort();
+  if (!files.length) throw new Error(`no PNGs in ${ASSETS_DIR}`);
+  const assets = files.map((f) => ({ name: f.replace(/\.png$/i, ''), path: join(ASSETS_DIR, f) }));
+
   const prior = existsSync(LEDGER_PATH) ? JSON.parse(await readFile(LEDGER_PATH, 'utf8')) : {};
-  console.log(`Building deck "${DECK_TITLE}" (${SLIDES.length} slides):`);
-  const data = await upsertDeck(token, prior[DECK_TITLE]);
+  console.log(`Building deck "${DECK_TITLE}" from ${assets.length} image(s):`);
+  const data = await upsertDeck(token, prior[DECK_TITLE], assets);
   await writeFile(LEDGER_PATH, JSON.stringify({ ...prior, [DECK_TITLE]: data }, null, 2));
   console.log(`\nDone.\n  ${DECK_TITLE}\n  -> ${data.url}\nLedger: ${LEDGER_PATH}`);
 }
