@@ -26,6 +26,14 @@ export const PAGE = /* html */ `<!doctype html>
     border-radius:999px; padding:4px 11px; }
   .tag.link { color:var(--accent); text-decoration:none; cursor:pointer; }
   .tag.link:hover { border-color:var(--accent); background:rgba(91,140,255,.08); }
+  .netbar { display:flex; align-items:center; gap:9px; margin-top:10px; padding:7px 11px; background:var(--panel-2);
+    border:1px solid var(--line); border-radius:10px; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+  .ndot { width:8px; height:8px; border-radius:50%; background:var(--faint); }
+  .ndot.up { background:var(--ok); box-shadow:0 0 8px var(--ok); } .ndot.down { background:var(--bad); box-shadow:0 0 8px var(--bad); }
+  .nlabel { font-weight:700; letter-spacing:.06em; text-transform:uppercase; font-size:11px; padding:2px 8px; border-radius:999px; }
+  .nlabel.mainnet { color:#0a0c12; background:var(--ok); }
+  .nlabel.testnet { color:#0a0c12; background:var(--warn); }
+  .nfields { color:#9aa6ba; }
   .about { margin:4px 2px 0; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:0 14px; }
   .about summary { cursor:pointer; padding:12px 0; font-size:13.5px; font-weight:600; color:#cdd6e3; list-style:none; }
   .about summary::-webkit-details-marker { display:none; }
@@ -78,6 +86,11 @@ export const PAGE = /* html */ `<!doctype html>
       <span class="tag">Direct-to-LLM: MiniMax-M2.7-highspeed → MCP (no Hermes harness in this demo)</span>
       <a class="tag link" href="__RESEARCH_URL__" target="_blank" rel="noopener">Plan &amp; architecture ↗</a>
     </div>
+    <div class="netbar" id="netbar" title="Live network status">
+      <span class="ndot" id="ndot"></span>
+      <span class="nlabel" id="nlabel">…</span>
+      <span class="nfields" id="nfields">checking network…</span>
+    </div>
   </header>
 
   <details class="about">
@@ -108,6 +121,14 @@ export const PAGE = /* html */ `<!doctype html>
 </div>
 <script>
   let sessionId = null, busy = false, lastReceipt = null;
+  const API_OF = {
+    get_time: "GET /api/time/time", get_timestamp: "GET /api/time/timestamp",
+    get_block: "GET /api/time/block", get_validation: "GET /getValidationBlock/{h}",
+    log_action: "POST /log", search_actions: "GET /searchAsset", get_log_entry: "GET /ledger/{id}",
+    verify_asset: "GET /ledger/{id}", resolve_agent: "eth_call → ERC-8004 registry",
+    attest_action: "POST /log → poll /ledger → /api/time/block → /getValidationBlock",
+    verify_receipt: "GET /ledger/{id}",
+  };
   const log = document.getElementById("log"), input = document.getElementById("input");
 
   function el(cls, html) { const d = document.createElement("div"); if (cls) d.className = cls; if (html != null) d.innerHTML = html; return d; }
@@ -138,8 +159,11 @@ export const PAGE = /* html */ `<!doctype html>
     for (const ev of events) {
       if (ev.type === "thinking") b.appendChild(el("think", "💭 " + esc(ev.text)));
       else if (ev.type === "text") b.appendChild(el(null, esc(ev.text)));
-      else if (ev.type === "tool_use") b.appendChild(el("tool", "⚙ <span class='name'>" + esc(ev.name) + "</span>(" + esc(JSON.stringify(ev.input)).slice(0, 160) + ")"));
-      else if (ev.type === "tool_result") b.appendChild(el("tool", "↳ <span class='res'>" + esc(ev.content.split("\\n")[0]).slice(0, 140) + "</span>"));
+      else if (ev.type === "tool_use") b.appendChild(el("tool",
+        "⚙ <span class='name'>" + esc(ev.name) + "</span>(" + esc(JSON.stringify(ev.input || {}, null, 0)) + ")" +
+        (API_OF[ev.name] ? "\\n   <span class='res'>↗ Clockchain API: " + API_OF[ev.name] + "</span>" : "")));
+      else if (ev.type === "tool_result") b.appendChild(el("tool",
+        "↳ <span class='res'>response:</span>\\n<span class='res'>" + esc(ev.content).slice(0, 1200) + "</span>"));
       scroll(); await new Promise((r) => setTimeout(r, 250)); // reveal step-by-step
     }
     if (receipt) renderReceipt(b, receipt);
@@ -174,6 +198,29 @@ export const PAGE = /* html */ `<!doctype html>
   }
 
   // Greeting
+  // Live network status strip (cached server-side; poll every 12s).
+  async function refreshStatus() {
+    try {
+      const s = await (await fetch("/api/status")).json();
+      const net = String(s.network || "").toLowerCase();
+      const nlabel = document.getElementById("nlabel");
+      nlabel.textContent = s.network || "network";
+      nlabel.className = "nlabel " + (net.includes("main") ? "mainnet" : "testnet");
+      document.getElementById("ndot").className = "ndot " + (s.ok ? "up" : "down");
+      if (s.ok) {
+        const parts = ["block <b>" + Number(s.blockHeight).toLocaleString() + "</b>"];
+        if (s.validators != null) parts.push(s.validators + " validator" + (s.validators == 1 ? "" : "s"));
+        if (s.participationPct != null) parts.push(s.participationPct + "% participation");
+        if (s.consensusTime) { const p = Date.parse(s.consensusTime); parts.push("consensus " + (isNaN(p) ? String(s.consensusTime).replace(/^.*_/, "") : new Date(p).toLocaleTimeString())); }
+        parts.push(s.latencyMs + "ms · " + s.gateway);
+        document.getElementById("nfields").innerHTML = parts.join("  ·  ");
+      } else {
+        document.getElementById("nfields").innerHTML = "<span class='bad'>unreachable</span> · " + esc(s.error || "") + " · " + s.gateway;
+      }
+    } catch { document.getElementById("ndot").className = "ndot down"; document.getElementById("nfields").textContent = "status unavailable"; }
+  }
+  refreshStatus(); setInterval(refreshStatus, 12000);
+
   (function greet() {
     const b = botRow();
     b.appendChild(el(null, "Welcome to the Clockchain MCP Playground. I'm an autonomous AI agent - I can read the network's consensus time and attest high-stakes actions on-chain so they're independently verifiable. The quickest way to see it: tap a suggestion below and I'll walk you through it, showing my reasoning and the on-chain proof. (Heads-up: this demo talks to the LLM directly, not through our Hermes agent.)"));
