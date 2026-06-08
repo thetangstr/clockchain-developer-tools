@@ -149,6 +149,53 @@ async function createDoc(token, name, markdown, folderId) {
   return data;
 }
 
+// Update an existing doc IN PLACE (same fileId/URL, comments preserved). Replaces
+// the content (Drive re-converts the markdown) and refreshes the name.
+async function updateDoc(token, id, name, markdown) {
+  const boundary = 'ccu' + Math.random().toString(16).slice(2);
+  const meta = { name };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+    `--${boundary}\r\nContent-Type: text/markdown\r\n\r\n${markdown}\r\n` +
+    `--${boundary}--`;
+  const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=multipart&fields=id,webViewLink`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`update failed: ${data.error?.message || res.status}`);
+  console.log(`  ↻ ${name}  ->  ${data.webViewLink}`);
+  return data;
+}
+
+// Make a doc commentable by anyone with the link (idempotent; ignores "already exists").
+async function setCommentable(token, id) {
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${id}/permissions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'commenter', type: 'anyone' }),
+    });
+    if (!res.ok && res.status !== 409) {
+      const d = await res.json().catch(() => ({}));
+      console.warn(`    (comment-share warn: ${d.error?.message || res.status})`);
+    }
+  } catch (e) {
+    console.warn(`    (comment-share warn: ${e?.message || e})`);
+  }
+}
+
+// Create a new doc OR update the existing one in place if the ledger has its id.
+async function upsertDoc(token, key, name, markdown, folderId, prior) {
+  const existing = prior[key]?.id;
+  const data = existing
+    ? await updateDoc(token, existing, name, markdown)
+    : await createDoc(token, name, markdown, folderId);
+  await setCommentable(token, data.id);
+  return data;
+}
+
 async function trash(token, ids) {
   console.log(`Trashing ${ids.length} doc(s) (reversible - Drive Trash):`);
   let ok = 0;
@@ -181,6 +228,8 @@ async function main() {
 
   const folderId = process.env.FOLDER_ID || null;
   const ledger = {};
+  // Prior ledger: lets us UPDATE existing docs in place (preserve URL + comments).
+  const prior = existsSync(LEDGER_PATH) ? JSON.parse(await readFile(LEDGER_PATH, 'utf8')) : {};
 
   // --group "<substr>" regenerates only matching group(s) (case-insensitive).
   let groupFilter = null;
@@ -207,7 +256,7 @@ async function main() {
         if (md != null) parts.push(demoteHeadings(md.trim()));
       }
       const combined = `# ${g.title}\n\n` + parts.join('\n\n---\n\n') + '\n';
-      const data = await createDoc(token, g.title, combined, folderId);
+      const data = await upsertDoc(token, g.title, g.title, combined, folderId, prior);
       ledger[g.title] = data;
     }
   } else {
@@ -217,13 +266,12 @@ async function main() {
     for (const f of files) {
       const md = await readSpec(f);
       if (md == null) continue;
-      const data = await createDoc(token, basename(f, '.md'), md, folderId);
+      const data = await upsertDoc(token, f, basename(f, '.md'), md, folderId, prior);
       ledger[f] = data;
     }
   }
 
-  // When regenerating a subset (--group), merge into the existing ledger.
-  const prior = (groupFilter && existsSync(LEDGER_PATH)) ? JSON.parse(await readFile(LEDGER_PATH, 'utf8')) : {};
+  // Merge into the existing ledger (keeps ids for docs not touched this run).
   await writeFile(LEDGER_PATH, JSON.stringify({ ...prior, ...ledger }, null, 2));
   console.log(`\nDone. ${Object.keys(ledger).length} Google Doc(s) created. Ledger: ${LEDGER_PATH}`);
 }
