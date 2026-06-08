@@ -99,6 +99,7 @@ export const PAGE = /* html */ `<!doctype html>
       <li><b>Verifiable time</b> - regulatory / SLA timestamping against a clock the validator network agrees on, not one server you control.</li>
       <li><b>Agent attested receipt</b> - when an AI agent takes a high-stakes action (a trade, a payment, a signature), get a tamper-evident, on-chain proof of <b>who</b> acted, <b>what</b> they did, and <b>when</b> - an artifact an auditor can hold.</li>
       <li><b>Independent verification</b> - anyone can re-check the receipt later without trusting you; post-hoc tampering is caught.</li>
+      <li><b>Proof of existence (TSA-style)</b> - timestamp any document so you can later prove it existed at a verifiable time and is unaltered (hash + consensus timestamp + on-chain anchor).</li>
     </ul>
     <p class="tip">New here? Tap a suggestion below - the agent will walk you through it.</p>
   </details>
@@ -111,6 +112,7 @@ export const PAGE = /* html */ `<!doctype html>
     <div class="chip" data-msg="Verify the receipt you just created is genuine and unaltered.">✓ Verify the receipt</div>
     <div class="chip" data-msg="Now imagine someone changed the trade size to 999,999 after the fact - check whether that altered record still verifies.">⚠ Tamper test</div>
     <div class="chip" data-msg="Resolve the ERC-8004 on-chain identity of agent #1 - who owns it and what's its agent URI?">🪪 Resolve an agent identity</div>
+    <div class="chip" data-msg="Timestamp this document on Clockchain so we can later prove it existed and is unaltered: 'Master Services Agreement v3 - approved by the board, 2026'. Give me the proof (the hash, block, and consensus time), then show what happens if someone alters one word.">📄 Timestamp a document (TSA)</div>
   </div>
 
   <div class="composer">
