@@ -52,19 +52,49 @@ export type AgentEvent =
   | { type: "tool_result"; name: string; content: string }
   | { type: "error"; text: string };
 
-async function callMiniMax(body: unknown): Promise<any> {
-  const res = await fetch(`${MM_BASE}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "x-api-key": MM_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`LLM error ${res.status}: ${JSON.stringify(data).slice(0, 200)}`);
-  return data;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// The MiniMax endpoint can be flaky from a remote host (transient "fetch failed",
+// resets, 429/5xx). Retry with backoff + a per-attempt timeout so one blip doesn't
+// surface to the user as a failed turn.
+async function callMiniMax(body: unknown, attempt = 0): Promise<any> {
+  const MAX_RETRIES = 3;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60_000);
+    let res: Response;
+    try {
+      res = await fetch(`${MM_BASE}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "x-api-key": MM_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if ((res.status === 429 || res.status >= 500) && attempt < MAX_RETRIES) {
+        await sleep(500 * 2 ** attempt);
+        return callMiniMax(body, attempt + 1);
+      }
+      throw new Error(`LLM error ${res.status}: ${JSON.stringify(data).slice(0, 200)}`);
+    }
+    return data;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const transient = /abort|fetch failed|terminated|ECONNRESET|ETIMEDOUT|EAI_AGAIN|network|socket|timeout/i.test(msg);
+    if (transient && attempt < MAX_RETRIES) {
+      await sleep(500 * 2 ** attempt);
+      return callMiniMax(body, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 /**
