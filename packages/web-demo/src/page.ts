@@ -81,9 +81,9 @@ export const PAGE = /* html */ `<!doctype html>
   <header>
     <div class="brand"><span class="dot"></span> Clockchain</div>
     <h1>MCP Playground</h1>
-    <p class="sub">Chat with an autonomous AI agent that uses Clockchain to <b>prove its high-stakes actions</b>. It drives the Clockchain tools over MCP and shows its work - reasoning, on-chain anchoring, and a verifiable receipt.</p>
+    <p class="sub">Chat with an AI agent that uses Clockchain's <b>existing network APIs</b> - verifiable time, notarization, agent identity - exposed as tools through <b>MCP</b>. Every result is independently verifiable, on-chain proof.</p>
     <div class="meta">
-      <span class="tag">Direct-to-LLM: MiniMax-M2.7-highspeed → MCP (no Hermes harness in this demo)</span>
+      <span class="tag">MCP turns Clockchain's live network APIs into tools any AI agent can use</span>
       <a class="tag link" href="__RESEARCH_URL__" target="_blank" rel="noopener">Plan &amp; architecture ↗</a>
     </div>
     <div class="netbar" id="netbar" title="Live network status">
@@ -225,7 +225,7 @@ export const PAGE = /* html */ `<!doctype html>
 
   (function greet() {
     const b = botRow();
-    b.appendChild(el(null, "Welcome to the Clockchain MCP Playground. I'm an autonomous AI agent - I can read the network's consensus time and attest high-stakes actions on-chain so they're independently verifiable. The quickest way to see it: tap a suggestion below and I'll walk you through it, showing my reasoning and the on-chain proof. (Heads-up: this demo talks to the LLM directly, not through our Hermes agent.)"));
+    b.appendChild(el(null, "Welcome to the Clockchain MCP Playground. I'm an AI agent - through MCP, I can use Clockchain's existing network APIs (consensus time, notarization, agent identity) and turn them into independently verifiable, on-chain proof. Tap a suggestion below and I'll walk you through it."));
   })();
 </script>
 </body>
