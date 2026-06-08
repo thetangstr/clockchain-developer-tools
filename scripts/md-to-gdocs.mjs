@@ -120,30 +120,50 @@ async function readSpec(filename) {
   return readFile(path, 'utf8');
 }
 
-async function createDoc(drive, name, markdown, folderId) {
-  const res = await drive.files.create({
-    requestBody: {
-      name,
-      mimeType: 'application/vnd.google-apps.document',
-      ...(folderId ? { parents: [folderId] } : {}),
-    },
-    media: { mimeType: 'text/markdown', body: Readable.from(markdown) },
-    fields: 'id,webViewLink',
-  });
-  console.log(`  ✓ ${name}  ->  ${res.data.webViewLink}`);
-  return res.data;
+// Raw-fetch Drive access token (the googleapis library's gaxios hangs on Drive
+// calls under Node 23; plain fetch works, as the token refresh proved).
+async function getAccessToken() {
+  const creds = JSON.parse(await readFile(CREDENTIALS_PATH, 'utf8'));
+  const key = creds.installed || creds.web;
+  let token = JSON.parse(await readFile(TOKEN_PATH, 'utf8'));
+  token = await ensureFreshToken(key, token);
+  if (!token.access_token) throw new Error('no access token (run the auth flow first)');
+  return token.access_token;
 }
 
-async function trash(drive, ids) {
+async function createDoc(token, name, markdown, folderId) {
+  const boundary = 'ccb' + Math.random().toString(16).slice(2);
+  const meta = { name, mimeType: 'application/vnd.google-apps.document', ...(folderId ? { parents: [folderId] } : {}) };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+    `--${boundary}\r\nContent-Type: text/markdown\r\n\r\n${markdown}\r\n` +
+    `--${boundary}--`;
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`create failed: ${data.error?.message || res.status}`);
+  console.log(`  ✓ ${name}  ->  ${data.webViewLink}`);
+  return data;
+}
+
+async function trash(token, ids) {
   console.log(`Trashing ${ids.length} doc(s) (reversible - Drive Trash):`);
   let ok = 0;
   for (const id of ids) {
     try {
-      await drive.files.update({ fileId: id, requestBody: { trashed: true } });
+      const res = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=id`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trashed: true }),
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error?.message || res.status); }
       console.log(`  🗑  ${id}`);
       ok++;
     } catch (e) {
-      console.warn(`  !  ${id}: ${e?.errors?.[0]?.message || e?.message || e}`);
+      console.warn(`  !  ${id}: ${e?.message || e}`);
     }
   }
   console.log(`\nDone. ${ok}/${ids.length} moved to Trash.`);
@@ -151,13 +171,12 @@ async function trash(drive, ids) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const auth = await getClient();
-  const drive = google.drive({ version: 'v3', auth });
+  const token = await getAccessToken();
 
   if (args[0] === 'trash') {
     const ids = args.slice(1).filter(Boolean);
     if (!ids.length) { console.error('Usage: node md-to-gdocs.mjs trash <id> [id ...]'); process.exit(1); }
-    return trash(drive, ids);
+    return trash(token, ids);
   }
 
   const folderId = process.env.FOLDER_ID || null;
@@ -188,7 +207,7 @@ async function main() {
         if (md != null) parts.push(demoteHeadings(md.trim()));
       }
       const combined = `# ${g.title}\n\n` + parts.join('\n\n---\n\n') + '\n';
-      const data = await createDoc(drive, g.title, combined, folderId);
+      const data = await createDoc(token, g.title, combined, folderId);
       ledger[g.title] = data;
     }
   } else {
@@ -198,7 +217,7 @@ async function main() {
     for (const f of files) {
       const md = await readSpec(f);
       if (md == null) continue;
-      const data = await createDoc(drive, basename(f, '.md'), md, folderId);
+      const data = await createDoc(token, basename(f, '.md'), md, folderId);
       ledger[f] = data;
     }
   }
