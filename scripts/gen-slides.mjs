@@ -176,20 +176,44 @@ function slideNetwork(reqs, sid) {
   rule(reqs, sid, x0, y - 6, CW, C.line);
 }
 
+// a column of titled blocks: version tag chip + bold title + context line.
+function column(reqs, sid, x, y0, w, items) {
+  let y = y0;
+  for (const it of items) {
+    const tColor = it.tag === 'v2' ? C.v2 : C.v3, tTint = it.tag === 'v2' ? C.tV2 : C.tV3;
+    chip(reqs, sid, x, y, 28, 16, it.tag, tTint, tColor, 8);
+    text(reqs, sid, x + 36, y - 2, w - 36, 18, it.title, { size: 11.5, bold: true, color: C.ink });
+    text(reqs, sid, x, y + 18, w, 32, it.ctx, { size: 9.5, color: C.mut, line: 115 });
+    y += 52;
+  }
+}
+
 function slideOpen(reqs, sid) {
-  twoColumn(reqs, sid, 'discussion', C.v1, 'Open questions & dependencies', '',
-    { label: 'OPEN QUESTIONS', tint: C.tV1, color: C.v1, chipW: 134, items: [
-      'Production identity registry (ERC-8004) — confirm which one?',
-      'Hosting target — AWS or GCP?',
-      'Smart-contract API (/schedule) — when is it exposed?',
-      'Mainnet timeline / TGE?',
-    ] },
-    { label: 'DEPENDENCIES', tint: C.tAmber, color: C.amber, chipW: 118, items: [
-      'AgentDash dev access — for the v2 orchestration test',
-      'A domain we control — to host the playground behind access',
-      'Network-team sign-off — production hosting (v3)',
-      'Contract API + signer / gas — on-chain writes (v3)',
-    ] });
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 40, 'discussion', C.v1);
+  heading(reqs, sid, MX, 56, 'Open questions & dependencies');
+  text(reqs, sid, MX, 100, CW, 24, 'None of these block v1 (this week). They unblock v2 (next week) and v3.', { size: 12, color: C.mut, line: 120 });
+  rule(reqs, sid, MX, 132, CW);
+
+  const colW = 300, lx = MX, rx = MX + 328;
+  rule(reqs, sid, MX + 312, 150, 1, C.line, PAGE_H - 150 - 28);
+  // column headers
+  chip(reqs, sid, lx, 150, 122, 20, 'OPEN QUESTIONS', C.tV1, C.v1, 9);
+  text(reqs, sid, lx + 130, 153, 170, 16, 'decisions we need', { size: 9, color: C.faint });
+  chip(reqs, sid, rx, 150, 110, 20, 'DEPENDENCIES', C.tAmber, C.amber, 9);
+  text(reqs, sid, rx + 118, 153, 180, 16, 'what we need from others', { size: 9, color: C.faint });
+
+  column(reqs, sid, lx, 184, colW, [
+    { tag: 'v3', title: 'Cloud: AWS or GCP?', ctx: 'v3 runs the MCP as a managed service — the choice drives hosting, secrets, and cost.' },
+    { tag: 'v3', title: 'Contract triggers: is /schedule exposed?', ctx: "v3 lets an agent schedule an on-chain action; that needs the protocol backend's /schedule API." },
+    { tag: 'v3', title: 'Mainnet & TGE timeline?', ctx: 'Court-grade proofs + real value-at-stake need mainnet; the date sets when v3 leaves testnet.' },
+  ]);
+  column(reqs, sid, rx, 184, colW, [
+    { tag: 'v2', title: 'AgentDash dev access', ctx: "Next week's orchestration test needs a real AgentDash environment that can call our MCP." },
+    { tag: 'v2', title: 'A domain we control', ctx: 'For a zero-install playground link behind Cloudflare Access (e.g. clockchain.network, ~2 days).' },
+    { tag: 'v3', title: 'Network-team sign-off', ctx: 'Production hosting exposes the MCP to the live network — the infra team approves the model first.' },
+    { tag: 'v3', title: 'Signer + gas + contract API', ctx: 'On-chain writes (identity write, triggers) need a signing flow + gas — non-custodial propose-then-approve.' },
+  ]);
 }
 
 /* ---------- auth + api ---------- */
