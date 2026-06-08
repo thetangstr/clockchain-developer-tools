@@ -10,12 +10,55 @@ recommended) or **remote** (you connect to a hosted endpoint).
 
 ---
 
-## Local install (npm / stdio) - recommended
+Your key stays on your machine; the server has **no network listener** (it only
+calls Clockchain outbound).
 
-Once published to npm, it's one command per host. Your key stays on your machine;
-the server has **no network listener** (it only calls Clockchain outbound).
+## Install from source (current method)
 
-### Claude Code
+The package isn't on npm yet, so install from the repo. You need **GitHub access
+to `thetangstr/clockchain-developer-tools`** (it's private - ask the team).
+
+```bash
+git clone https://github.com/thetangstr/clockchain-developer-tools.git
+cd clockchain-developer-tools
+npm install
+npm run build
+```
+
+### Register with Claude Code (run from the repo root)
+```bash
+claude mcp add clockchain \
+  --env CLOCKCHAIN_API_KEY=<your key> \
+  --env CLOCKCHAIN_CLIENT_ID=<you@example.com> \
+  --env CLOCKCHAIN_WALLET_ID=<you@example.com> \
+  -- node "$(pwd)/packages/mcp-server/dist/stdio.js"
+```
+Then open a **new** session, run `/mcp` (you should see `clockchain`), and ask:
+*"use clockchain to get the current consensus time."*
+
+### Claude Desktop / Cursor / any MCP host (manual config)
+Add to the host's MCP config (`claude_desktop_config.json`, `~/.claude.json`
+`mcpServers`, etc.) - use the **absolute path** to the built file:
+```json
+{
+  "mcpServers": {
+    "clockchain": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/clockchain-developer-tools/packages/mcp-server/dist/stdio.js"],
+      "env": {
+        "CLOCKCHAIN_API_KEY": "<your key>",
+        "CLOCKCHAIN_CLIENT_ID": "<you@example.com>",
+        "CLOCKCHAIN_WALLET_ID": "<you@example.com>"
+      }
+    }
+  }
+}
+```
+After pulling updates: `git pull && npm run build`, then restart your MCP host.
+
+## Install via npm (coming soon)
+
+Once `@clockchain/mcp-server` is published, install becomes one command (no clone):
 ```bash
 claude mcp add clockchain \
   --env CLOCKCHAIN_API_KEY=<your key> \
@@ -23,12 +66,7 @@ claude mcp add clockchain \
   --env CLOCKCHAIN_WALLET_ID=<you@example.com> \
   -- npx -y @clockchain/mcp-server
 ```
-Then open a **new** session, run `/mcp` (you should see `clockchain`), and ask:
-*"use clockchain to get the current consensus time."*
-
-### Claude Desktop / Cursor / any MCP host (manual config)
-Add to the host's MCP config (`claude_desktop_config.json`, `~/.claude.json`
-`mcpServers`, etc.):
+Manual config (npm):
 ```json
 {
   "mcpServers": {
