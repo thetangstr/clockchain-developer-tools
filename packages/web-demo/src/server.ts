@@ -45,6 +45,61 @@ const FEEDBACK_FILE = resolve(process.env.FEEDBACK_FILE ?? "feedback.jsonl");
 const RESEARCH_URL = process.env.RESEARCH_URL ?? "https://clockchain-research.vercel.app";
 const PAGE_HTML = PAGE.replace(/__RESEARCH_URL__/g, RESEARCH_URL);
 
+// Network label shown in the live status strip (testnet vs mainnet). Configurable
+// so it tracks reality; the strip also shows the real validator count so the label
+// is never an overclaim.
+const NETWORK_LABEL = process.env.NETWORK_LABEL ?? "Testnet";
+const GATEWAY_HOST = (() => {
+  try { return new URL(config.endpoint).host; } catch { return config.endpoint; }
+})();
+
+// Server-side cached network status so many open pages make at most one gateway
+// call per TTL (avoids hammering / rate limits).
+let statusCache: Record<string, unknown> | null = null;
+let statusAt = 0;
+let statusInflight: Promise<Record<string, unknown>> | null = null;
+const STATUS_TTL = 8000;
+
+async function getNetworkStatus(): Promise<Record<string, unknown>> {
+  const now = Date.now();
+  if (statusCache && now - statusAt < STATUS_TTL) return statusCache;
+  if (statusInflight) return statusInflight;
+  statusInflight = (async () => {
+    const t0 = Date.now();
+    try {
+      const ts = await client.getTimestamp();
+      statusCache = {
+        ok: true, network: NETWORK_LABEL, gateway: GATEWAY_HOST,
+        blockHeight: ts.blockHeight,
+        consensusTime: ts.madMarzulloTime ?? null,
+        validators: ts.totalNodes ?? null,
+        participationPct: ts["nodeParticipation%"] ?? null,
+        positiveVotesPct: ts.positiveVotesPercentage ?? null,
+        latencyMs: Date.now() - t0,
+      };
+    } catch {
+      try {
+        const tm = await client.getTime(); // lighter fallback before declaring down
+        statusCache = {
+          ok: true, network: NETWORK_LABEL, gateway: GATEWAY_HOST,
+          blockHeight: tm.latestBlockHeight, consensusTime: tm.latestBlockTime,
+          validators: null, latencyMs: Date.now() - t0,
+        };
+      } catch (e2) {
+        statusCache = {
+          ok: false, network: NETWORK_LABEL, gateway: GATEWAY_HOST,
+          error: errorFor(e2).message, latencyMs: Date.now() - t0,
+        };
+      }
+    }
+    statusAt = Date.now();
+    const out = statusCache as Record<string, unknown>;
+    statusInflight = null;
+    return out;
+  })();
+  return statusInflight;
+}
+
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
@@ -79,6 +134,9 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     if (req.method === "GET" && req.url === "/api/config") {
       return send(res, 200, { agent: llmConfigured() });
+    }
+    if (req.method === "GET" && req.url === "/api/status") {
+      return send(res, 200, await getNetworkStatus());
     }
     if (req.method === "POST" && req.url === "/api/agent") {
       if (!llmConfigured()) {
