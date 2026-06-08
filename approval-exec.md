@@ -19,9 +19,13 @@ and produces verifiable proof. We'll demo:
 - **Agent identity (read)** - resolve an agent's ERC-8004 on-chain identity.
 
 ## How to access it
-- **Playground (business folks):** a zero-install, access-controlled web link
-  (Cloudflare Access - log in with your email, no VPN, no install). Standing up
-  this week; until then we screen-share on request. *(This is approval ask #2.)*
+- **Today (this meeting):** we **screen-share** the live playground - nothing to set up.
+- **Remote, self-serve access for business folks - what it needs:** a **zero-install,
+  access-controlled web link** via **Cloudflare Access** (log in with your email, no
+  VPN, no install). It is **free** (Cloudflare Tunnel + Access, free up to 50 users;
+  TLS included). The **one prerequisite is a domain on Cloudflare** - we'll use
+  **`clockchain.network`** (access expected in ~2 days) or any domain we control;
+  once the domain is in hand the gated link is roughly same-day. *(Approval ask #2.)*
 - **The MCP, for developers:** clone the client repo and add it to your own AI
   agent - [github.com/thetangstr/clockchain-developer-tools](https://github.com/thetangstr/clockchain-developer-tools)
   → [`INSTALL.md`](https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md).
