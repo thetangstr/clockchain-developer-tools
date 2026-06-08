@@ -363,18 +363,20 @@ async function upsertDeck(token, prior) {
   const presentationId = pres.presentationId;
   const old = (pres.slides || []).map((s) => s.objectId);
 
-  const ids = ['sldOverview', 'sldJourney', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen', 'sldTLDR'];
+  // Customer thesis leads (slide 2) to anchor the business/customer discussion;
+  // the old mechanic "journey" slide is dropped (it overlapped this + is shown live
+  // in the playground). slideJourney() remains defined but unused.
+  const ids = ['sldOverview', 'sldCustomer', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen'];
   const reqs = [];
   // delete old slides FIRST so the deterministic new IDs don't collide with them
   old.forEach((objectId) => reqs.push({ deleteObject: { objectId } }));
   ids.forEach((s) => reqs.push({ createSlide: { objectId: s, slideLayoutReference: { predefinedLayout: 'BLANK' } } }));
   slideOverview(reqs, ids[0]);
-  slideJourney(reqs, ids[1]);
+  slideTLDR(reqs, ids[1]);
   slideChannels(reqs, ids[2]);
   slideScope(reqs, ids[3]);
   slideNetwork(reqs, ids[4]);
   slideOpen(reqs, ids[5]);
-  slideTLDR(reqs, ids[6]);
 
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests: reqs });
   await setCommentable(token, presentationId);
