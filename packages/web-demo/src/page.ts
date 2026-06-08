@@ -74,6 +74,35 @@ export const PAGE = /* html */ `<!doctype html>
   .typing { color:var(--faint); font-size:13px; font-style:italic; }
   .foot { text-align:center; color:var(--faint); font-size:11.5px; padding:0 0 8px; }
   .foot a { color:var(--muted); cursor:pointer; }
+
+  /* guided journey rail */
+  .journey { margin:6px 2px 2px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:11px 13px; }
+  .jhead { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); font-weight:700; margin-bottom:9px; }
+  .jhead span { color:var(--faint); font-weight:500; letter-spacing:.02em; text-transform:none; }
+  .jsteps { display:flex; gap:7px; flex-wrap:wrap; }
+  .jstep { flex:1 1 0; min-width:96px; display:flex; align-items:center; gap:8px; background:var(--panel-2); border:1px solid var(--line);
+    color:var(--text); border-radius:10px; padding:8px 10px; font:inherit; font-size:12.5px; cursor:pointer; transition:border-color .12s,background .12s; text-align:left; }
+  .jstep:hover { border-color:var(--accent); background:rgba(91,140,255,.08); }
+  .jstep b { display:inline-flex; align-items:center; justify-content:center; width:19px; height:19px; flex-shrink:0; border-radius:50%;
+    background:var(--accent); color:#fff; font-size:11px; font-weight:700; }
+  .jstep.done b { background:var(--ok); } .jstep.done { opacity:.85; }
+
+  /* connect modal */
+  .ov { position:fixed; inset:0; background:rgba(4,6,11,.72); display:none; align-items:center; justify-content:center; z-index:50; padding:18px; }
+  .ov.open { display:flex; }
+  .modal { background:var(--panel); border:1px solid var(--line); border-radius:16px; max-width:560px; width:100%; max-height:88vh; overflow:auto; padding:20px 22px; }
+  .modal h2 { margin:0 0 4px; font-size:18px; } .modal .lead { color:var(--muted); font-size:13px; margin:0 0 14px; }
+  .ostep { display:flex; gap:11px; padding:11px 0; border-top:1px solid var(--line-soft); }
+  .ostep:first-of-type { border-top:0; }
+  .onum { flex-shrink:0; width:22px; height:22px; border-radius:50%; background:var(--panel-2); border:1px solid var(--line); color:var(--accent); font-weight:700; font-size:12px; display:flex; align-items:center; justify-content:center; }
+  .otext { font-size:13px; color:var(--text); } .otext b { color:#fff; } .otext .m { color:var(--muted); }
+  .code { position:relative; margin:8px 0 2px; background:var(--panel-2); border:1px solid var(--line-soft); border-radius:9px;
+    padding:9px 11px; font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; color:#bcc7d8; white-space:pre-wrap; word-break:break-all; }
+  .copy { position:absolute; top:6px; right:6px; background:var(--panel); border:1px solid var(--line); color:var(--muted); border-radius:6px; font-size:10.5px; padding:2px 7px; cursor:pointer; }
+  .copy:hover { border-color:var(--accent); color:var(--accent); }
+  .modal .close { float:right; background:none; border:0; color:var(--muted); font-size:20px; cursor:pointer; line-height:1; }
+  .modal .mnote { margin:14px 0 0; font-size:12px; color:var(--faint); }
+  .modal a { color:var(--accent); }
 </style>
 </head>
 <body>
@@ -105,6 +134,17 @@ export const PAGE = /* html */ `<!doctype html>
     <p class="tip">New here? Tap a suggestion below - the agent will walk you through it.</p>
   </details>
 
+  <div class="journey" id="journey">
+    <div class="jhead">Guided journey <span>· follow the steps, or just chat below</span></div>
+    <div class="jsteps">
+      <button class="jstep" data-step="understand"><b>1</b> Understand</button>
+      <button class="jstep" data-step="see"><b>2</b> See it work</button>
+      <button class="jstep" data-step="prove"><b>3</b> Prove &amp; tamper</button>
+      <button class="jstep" data-step="connect"><b>4</b> Connect</button>
+      <button class="jstep" data-step="golive"><b>5</b> Go live</button>
+    </div>
+  </div>
+
   <div id="log"></div>
 
   <div class="chips" id="chips">
@@ -123,6 +163,30 @@ export const PAGE = /* html */ `<!doctype html>
   </div>
   <div class="foot"><a onclick="rateDemo()">Rate this demo</a> · test network - workflow real, multi-validator attestation at mainnet</div>
 </div>
+
+<div class="ov" id="connectOv">
+  <div class="modal">
+    <button class="close" onclick="closeConnect()" aria-label="Close">×</button>
+    <h2>Connect your agent to the network</h2>
+    <p class="lead">Three steps to make your own AI agent emit Clockchain proof. You're on <b>testnet</b> today.</p>
+    <div class="ostep"><div class="onum">1</div><div class="otext"><b>Get testnet access.</b> <span class="m">Request an API key + client/wallet id - provisioned for you today (self-serve coming with v3).</span></div></div>
+    <div class="ostep"><div class="onum">2</div><div class="otext"><b>Add the Clockchain MCP server to your agent.</b> <span class="m">Claude Code / Cursor / LangChain / AgentDash - anything that speaks MCP.</span>
+      <div class="code"><button class="copy" data-copy="cli">copy</button><span id="cfg-cli">claude mcp add clockchain \\
+  --command node \\
+  --args /path/to/clockchain-developer-tools/packages/mcp-server/dist/stdio.js \\
+  --env CLOCKCHAIN_API_KEY=YOUR_KEY \\
+  --env CLOCKCHAIN_CLIENT_ID=YOUR_ID \\
+  --env CLOCKCHAIN_WALLET_ID=YOUR_WALLET \\
+  --env CLOCKCHAIN_ENDPOINT=https://node.clockchain.network</span></div>
+    </div></div>
+    <div class="ostep"><div class="onum">3</div><div class="otext"><b>Make your first attested call - then verify it.</b> <span class="m">Ask your agent:</span>
+      <div class="code"><button class="copy" data-copy="call">copy</button><span id="cfg-call">"Timestamp this document on Clockchain and give me a verifiable receipt, then re-verify it independently."</span></div>
+    </div></div>
+    <p class="mnote">Testnet now (single validator). Mainnet adds the multi-validator supermajority + permanence - the strongest court-grade claim.
+      Full setup: <a href="https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md" target="_blank" rel="noopener">INSTALL.md ↗</a></p>
+  </div>
+</div>
+
 <script>
   let sessionId = null, busy = false, lastReceipt = null;
   const API_OF = {
@@ -190,6 +254,32 @@ export const PAGE = /* html */ `<!doctype html>
   function sendMsg() { const t = input.value; input.value = ""; input.style.height = "auto"; send(t); }
 
   document.getElementById("chips").addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (c) send(c.dataset.msg); });
+
+  // ---- guided journey ----
+  function botInfo(html) { const b = botRow(); b.appendChild(el(null, html)); scroll(); }
+  function markDone(step) { const el2 = document.querySelector('.jstep[data-step="' + step + '"]'); if (el2) el2.classList.add("done"); }
+  const J_SEE = "I'm a CISO at an EU bank preparing for the EU AI Act. Our high-risk credit-scoring AI just DENIED applicant-8831 (reasons: DTI over 45%, thin file), and a human reviewer confirmed it under Article 14. Attest this decision on Clockchain so we have a tamper-evident, independently verifiable record of what the AI decided, when, and that a human confirmed it. Then explain which EU AI Act obligations (Art. 12 logging, Art. 14 oversight) this satisfies.";
+  const J_PROVE = "Verify the receipt you just created is genuine and unaltered. Then re-verify a copy of it where the decision was changed from DENY to APPROVE after the fact, and show whether that altered record still verifies.";
+  function journey(step) {
+    if (step === "understand") { markDone("understand"); botInfo(
+      "<b>The problem.</b> When your AI agent takes a high-stakes action - a trade, a payment, an automated decision - your own logs are self-attested. In a dispute or an audit (e.g. the <b>EU AI Act</b>), they're not proof: you could have edited them.<br><br>" +
+      "<b>What Clockchain gives you.</b> Every action gets a neutral, tamper-evident, <b>independently verifiable</b> receipt - <b>who</b> acted, <b>what</b> they did, <b>when</b> - that an outsider can check without trusting you.<br><br>Tap <b>2 See it work</b> and I'll attest a real high-risk AI decision on-chain."); }
+    else if (step === "see") { markDone("see"); send(J_SEE); }
+    else if (step === "prove") { markDone("prove"); send(J_PROVE); }
+    else if (step === "connect") { markDone("connect"); openConnect(); }
+    else if (step === "golive") { markDone("golive"); botInfo(
+      "You're on the <b>testnet</b> (single validator) - the workflow and proofs are real; <b>mainnet</b> adds the multi-validator supermajority + permanence (the strongest court-grade claim).<br><br>To wire this into your own agent, tap <b>4 Connect</b>. Plan &amp; architecture: <a href='__RESEARCH_URL__' target='_blank' rel='noopener'>research site ↗</a>."); }
+  }
+  document.getElementById("journey").addEventListener("click", (e) => { const s = e.target.closest(".jstep"); if (s) journey(s.dataset.step); });
+
+  // ---- connect modal ----
+  function openConnect() { document.getElementById("connectOv").classList.add("open"); }
+  function closeConnect() { document.getElementById("connectOv").classList.remove("open"); }
+  document.getElementById("connectOv").addEventListener("click", (e) => { if (e.target.id === "connectOv") closeConnect(); });
+  document.querySelectorAll(".copy").forEach((btn) => { btn.onclick = () => {
+    const span = document.getElementById("cfg-" + btn.dataset.copy); if (!span) return;
+    navigator.clipboard.writeText(span.innerText); const t = btn.textContent; btn.textContent = "copied"; setTimeout(() => (btn.textContent = t), 1200);
+  }; });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
   input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 140) + "px"; });
 
