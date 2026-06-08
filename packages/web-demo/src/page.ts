@@ -94,12 +94,13 @@ export const PAGE = /* html */ `<!doctype html>
   </header>
 
   <details class="about">
-    <summary>What can I do here? (3 business use cases)</summary>
+    <summary>What can I do here? (business use cases)</summary>
     <ul>
-      <li><b>Verifiable time</b> - regulatory / SLA timestamping against a clock the validator network agrees on, not one server you control.</li>
-      <li><b>Agent attested receipt</b> - when an AI agent takes a high-stakes action (a trade, a payment, a signature), get a tamper-evident, on-chain proof of <b>who</b> acted, <b>what</b> they did, and <b>when</b> - an artifact an auditor can hold.</li>
-      <li><b>Independent verification</b> - anyone can re-check the receipt later without trusting you; post-hoc tampering is caught.</li>
-      <li><b>Proof of existence (TSA-style)</b> - timestamp any document so you can later prove it existed at a verifiable time and is unaltered (hash + consensus timestamp + on-chain anchor).</li>
+      <li><b>EU AI Act compliance (for a CISO)</b> - high-risk AI systems must keep tamper-evident, traceable logs (Art. 12), retain them (Art. 26), document the system (Annex IV), and show human oversight (Art. 14). We give you an <b>independently verifiable</b> evidence trail a regulator can check <b>without trusting you</b>. Tap the 🏛 path below.</li>
+      <li><b>Verifiable time</b> - regulatory / SLA / incident-reporting timestamps against a clock the validator network agrees on, not one server you control.</li>
+      <li><b>Agent attested receipt</b> - when an AI agent takes a high-stakes action (a trade, a payment, a decision), get a tamper-evident, on-chain proof of <b>who</b> acted, <b>what</b> they did, and <b>when</b> - an artifact an auditor can hold.</li>
+      <li><b>Independent verification</b> - anyone can re-check the record later without trusting you; post-hoc tampering is caught.</li>
+      <li><b>Proof of existence (TSA-style)</b> - timestamp any document (e.g. your Annex IV technical documentation) so you can later prove it existed at a verifiable time and is unaltered.</li>
     </ul>
     <p class="tip">New here? Tap a suggestion below - the agent will walk you through it.</p>
   </details>
@@ -107,6 +108,7 @@ export const PAGE = /* html */ `<!doctype html>
   <div id="log"></div>
 
   <div class="chips" id="chips">
+    <div class="chip" data-msg="I'm a CISO at an EU bank preparing for the EU AI Act. Our high-risk credit-scoring AI just DENIED applicant-8831 (reasons: DTI over 45%, thin file), and a human reviewer confirmed it under Article 14. Attest this decision on Clockchain so we have a tamper-evident, independently verifiable record of what the AI decided, when, and that a human confirmed it - the kind of Article 12 log a market-surveillance auditor can check without trusting us. Then explain which EU AI Act obligations this satisfies.">🏛 EU AI Act: prove a high-risk AI decision</div>
     <div class="chip" data-msg="What time does the Clockchain network agree it is right now?">⏱ Read consensus time</div>
     <div class="chip" data-msg="Execute a 250,000 USDC/ETH treasury trade triggered because price is below 3000, and attest it on Clockchain so we have proof.">💸 Attest a treasury trade</div>
     <div class="chip" data-msg="Verify the receipt you just created is genuine and unaltered.">✓ Verify the receipt</div>
