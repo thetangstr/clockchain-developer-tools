@@ -188,44 +188,49 @@ function slideNetwork(reqs, sid) {
   rule(reqs, sid, x0, y - 6, CW, C.line);
 }
 
-// a column of titled blocks: version tag chip + bold title + context line.
-function column(reqs, sid, x, y0, w, items) {
+// a column of titled blocks: tag chip + bold title + context line.
+// opt: { spacing, titleSize, ctxSize } to tune density.
+function column(reqs, sid, x, y0, w, items, opt = {}) {
+  const sp = opt.spacing || 52, ts = opt.titleSize || 11.5, cs = opt.ctxSize || 9.5;
   let y = y0;
   for (const it of items) {
-    const tColor = it.tag === 'v2' ? C.v2 : C.v3, tTint = it.tag === 'v2' ? C.tV2 : C.tV3;
-    chip(reqs, sid, x, y, 28, 16, it.tag, tTint, tColor, 8);
-    text(reqs, sid, x + 36, y - 2, w - 36, 18, it.title, { size: 11.5, bold: true, color: C.ink });
-    text(reqs, sid, x, y + 18, w, 32, it.ctx, { size: 9.5, color: C.mut, line: 115 });
-    y += 52;
+    const tColor = it.tColor || (it.tag === 'v2' ? C.v2 : C.v3);
+    const tTint = it.tTint || (it.tag === 'v2' ? C.tV2 : C.tV3);
+    chip(reqs, sid, x, y, 26, 15, it.tag, tTint, tColor, 8);
+    text(reqs, sid, x + 32, y - 2, w - 32, 18, it.title, { size: ts, bold: true, color: C.ink });
+    text(reqs, sid, x, y + 15, w, sp - 14, it.ctx, { size: cs, color: C.mut, line: 113 });
+    y += sp;
   }
 }
 
 function slideOpen(reqs, sid) {
   header(reqs, sid);
-  eyebrow(reqs, sid, MX, 40, 'discussion', C.v1);
-  heading(reqs, sid, MX, 56, 'Open questions & dependencies');
-  text(reqs, sid, MX, 100, CW, 24, 'None of these block v1 (this week). They unblock v2 (next week) and v3.', { size: 12, color: C.mut, line: 120 });
-  rule(reqs, sid, MX, 132, CW);
+  eyebrow(reqs, sid, MX, 36, 'discussion · before we launch to real users', C.v1);
+  heading(reqs, sid, MX, 52, 'Open questions & dependencies');
+  rule(reqs, sid, MX, 96, CW);
 
   const colW = 300, lx = MX, rx = MX + 328;
-  rule(reqs, sid, MX + 312, 150, 1, C.line, PAGE_H - 150 - 28);
+  rule(reqs, sid, MX + 312, 110, 1, C.line, PAGE_H - 110 - 22);
   // column headers
-  chip(reqs, sid, lx, 150, 122, 20, 'OPEN QUESTIONS', C.tV1, C.v1, 9);
-  text(reqs, sid, lx + 130, 153, 170, 16, 'decisions we need', { size: 9, color: C.faint });
-  chip(reqs, sid, rx, 150, 110, 20, 'DEPENDENCIES', C.tAmber, C.amber, 9);
-  text(reqs, sid, rx + 118, 153, 180, 16, 'what we need from others', { size: 9, color: C.faint });
+  chip(reqs, sid, lx, 110, 116, 17, 'OPEN QUESTIONS', C.tV1, C.v1, 8);
+  text(reqs, sid, lx + 124, 112, 180, 14, 'business scenarios to resolve', { size: 8.5, color: C.faint });
+  chip(reqs, sid, rx, 110, 100, 17, 'DEPENDENCIES', C.tAmber, C.amber, 8);
+  text(reqs, sid, rx + 108, 112, 180, 14, 'what we need from others', { size: 8.5, color: C.faint });
 
-  column(reqs, sid, lx, 184, colW, [
-    { tag: 'v3', title: 'Cloud: AWS or GCP?', ctx: 'v3 runs the MCP as a managed service — the choice drives hosting, secrets, and cost.' },
-    { tag: 'v3', title: 'Contract triggers: is /schedule exposed?', ctx: "v3 lets an agent schedule an on-chain action; that needs the protocol backend's /schedule API." },
-    { tag: 'v3', title: 'Mainnet & TGE timeline?', ctx: 'Court-grade proofs + real value-at-stake need mainnet; the date sets when v3 leaves testnet.' },
-  ]);
-  column(reqs, sid, rx, 184, colW, [
-    { tag: 'v2', title: 'AgentDash dev access', ctx: "Next week's orchestration test needs a real AgentDash environment that can call our MCP." },
-    { tag: 'v2', title: 'A domain we control', ctx: 'For a zero-install playground link behind Cloudflare Access (e.g. clockchain.network, ~2 days).' },
-    { tag: 'v3', title: 'Network-team sign-off', ctx: 'Production hosting exposes the MCP to the live network — the infra team approves the model first.' },
-    { tag: 'v3', title: 'Signer + gas + contract API', ctx: 'On-chain writes (identity write, triggers) need a signing flow + gas — non-custodial propose-then-approve.' },
-  ]);
+  const QT = C.v1, QTint = C.tV1;
+  column(reqs, sid, lx, 140, colW, [
+    { tag: '1', tColor: QT, tTint: QTint, title: 'Onboarding & access', ctx: 'A design partner wants their team on the playground next week. How do users get a key and connect their agent — self-serve, or do we provision and gate each one? Who is allowed in?' },
+    { tag: '2', tColor: QT, tTint: QTint, title: 'Data & confidentiality', ctx: "A bank's security team asks what we can see. Can we guarantee only the hash is anchored — never their underlying data — and prove it? The first question every regulated buyer asks." },
+    { tag: '3', tColor: QT, tTint: QTint, title: 'Reliability & what we promise', ctx: 'A customer wants to rely on receipts in a live workflow. What uptime / support do we commit, and what is the fallback if our node or the network is unreachable?' },
+  ], { spacing: 80, titleSize: 11, ctxSize: 9 });
+
+  column(reqs, sid, rx, 140, colW, [
+    { tag: 'v2', title: 'AgentDash dev access', ctx: 'A real agent host that can call our MCP for the orchestration test.' },
+    { tag: 'v2', title: 'A domain we control', ctx: 'To put the playground behind access for real users (Cloudflare).' },
+    { tag: 'v3', title: 'Cloud accounts — AWS & GCP', ctx: 'We are doing both — access + billing set up for each.' },
+    { tag: 'v3', title: 'Network-team sign-off', ctx: 'Production hosting + the network exposure model.' },
+    { tag: 'v3', title: 'Signer + gas + contract API', ctx: 'For on-chain writes — identity write, contract triggers.' },
+  ], { spacing: 46, titleSize: 10.5, ctxSize: 8.5 });
 }
 
 // Slide 2 — business-facing customer journey (the EU AI Act CISO).
@@ -257,6 +262,34 @@ function slideJourney(reqs, sid) {
     'Outcome — audit-ready evidence that holds up to a market-surveillance authority, against fines up to €35M / 7% of global turnover.',
     { size: 11.5, bold: true, color: C.ink, line: 118 });
   text(reqs, sid, MX, 384, CW, 14, 'Maps to EU AI Act: Art. 12 logging · Art. 14 human oversight · Annex IV documentation · Art. 74 audit access', { size: 8.5, color: C.faint });
+}
+
+// Slide 6 — TL;DR from leadership discovery interviews (the first customer).
+function cell(reqs, sid, x, y, w, label, labelColor, body) {
+  text(reqs, sid, x, y, w, 12, label, { size: 9, bold: true, color: labelColor });
+  text(reqs, sid, x, y + 15, w, 100, body, { size: 9.5, color: C.mut, line: 122 });
+}
+function slideTLDR(reqs, sid) {
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 36, 'discovery · leadership convergence', C.v1);
+  heading(reqs, sid, MX, 52, 'Our first customer');
+  rule(reqs, sid, MX, 92, CW, C.tV1, 44);
+  text(reqs, sid, MX + 16, 99, CW - 32, 32,
+    'The compliance officer — CISO / Chief Compliance Officer — at a regulated, EU-exposed enterprise deploying high-risk AI agents (financial-services-leaning), forced by EU AI Act Article 12.',
+    { size: 10.5, bold: true, color: C.ink, line: 120 });
+  const lx = MX, rx = MX + 328, cw = 300;
+  cell(reqs, sid, lx, 150, cw, 'THE PAIN', C.v1,
+    "Can't produce regulator-grade, independently-verifiable evidence of what their agents did and when. Their own logs are a claim, not evidence — and across counterparties, no single clock is authoritative.");
+  cell(reqs, sid, rx, 150, cw, 'POSITIONING', C.v3,
+    'Neutral, independently-verifiable identity + ordering of agent actions — the evidence Article 12 requires that your own logs cannot provide. Lead with neutral ordering + existence, not "prove exactly when".');
+  cell(reqs, sid, lx, 258, cw, 'THE HONEST GAP', C.amber,
+    'No demand evidence yet — no prospect has asked unprompted. The logic is coherent but untested; treat it as the gating fact. Validate with 5–10 CISO / CCO discovery calls.');
+  cell(reqs, sid, rx, 258, cw, 'THE MOVE', C.green,
+    'Build the smallest slice — an "Article 12 Evidence Pack": one agent action end-to-end (capture → identity-bind → timestamp → mint → regulator-format export → public verify). Lead every call with the artifact.');
+  rule(reqs, sid, MX, 366, CW);
+  text(reqs, sid, MX, 374, CW, 24,
+    'Open fork: intra-company Article 12 record-keeping vs inter-company multi-party ordering — the first product picks one. Article 12 is the testable, deadline-bound wedge.',
+    { size: 8.5, color: C.amber, line: 120 });
 }
 
 /* ---------- auth + api ---------- */
@@ -297,7 +330,7 @@ async function upsertDeck(token, prior) {
   const presentationId = pres.presentationId;
   const old = (pres.slides || []).map((s) => s.objectId);
 
-  const ids = ['sldOverview', 'sldJourney', 'sldScope', 'sldNetwork', 'sldOpen'];
+  const ids = ['sldOverview', 'sldJourney', 'sldScope', 'sldNetwork', 'sldOpen', 'sldTLDR'];
   const reqs = [];
   // delete old slides FIRST so the deterministic new IDs don't collide with them
   old.forEach((objectId) => reqs.push({ deleteObject: { objectId } }));
@@ -307,6 +340,7 @@ async function upsertDeck(token, prior) {
   slideScope(reqs, ids[2]);
   slideNetwork(reqs, ids[3]);
   slideOpen(reqs, ids[4]);
+  slideTLDR(reqs, ids[5]);
 
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests: reqs });
   await setCommentable(token, presentationId);
