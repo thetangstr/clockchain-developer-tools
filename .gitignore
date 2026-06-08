@@ -29,3 +29,4 @@ scripts/.omc/
 # web-demo runtime feedback log
 feedback.jsonl
 packages/web-demo/feedback.jsonl
+scripts/slides-created.json
