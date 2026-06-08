@@ -216,6 +216,37 @@ function slideOpen(reqs, sid) {
   ]);
 }
 
+// Slide 2 — business-facing customer journey (the EU AI Act CISO).
+function slideJourney(reqs, sid) {
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 40, 'customer journey · who buys this', C.v1);
+  heading(reqs, sid, MX, 56, 'The AI Act CISO');
+  text(reqs, sid, MX, 100, CW, 32,
+    'A security chief deploying high-risk AI (EU AI Act, applies Aug 2026). Their compliance evidence is self-attested — in an audit, their own logs are not proof.',
+    { size: 12, color: C.mut, line: 120 });
+  rule(reqs, sid, MX, 150, CW);
+
+  const steps = [
+    { n: '1', t: 'Capture the decision', d: 'Every high-risk AI decision — and the human sign-off — is anchored to a ledger no single party controls.' },
+    { n: '2', t: 'Timestamp it', d: 'Stamped against a clock the validator network agrees on, not your own server.' },
+    { n: '3', t: 'Catch tampering', d: 'Anyone can re-check it later; any edit after the fact fails verification.' },
+    { n: '4', t: 'Hand over proof', d: 'A regulator verifies the record without trusting you — evidence, not your word.' },
+  ];
+  const gap = 14, cw = (CW - 3 * gap) / 4;
+  steps.forEach((s, i) => {
+    const x = MX + i * (cw + gap);
+    chip(reqs, sid, x, 170, 26, 26, s.n, C.tV1, C.v1, 12);
+    text(reqs, sid, x, 206, cw, 20, s.t, { size: 12.5, bold: true, color: C.ink });
+    text(reqs, sid, x, 228, cw, 96, s.d, { size: 10, color: C.mut, line: 120 });
+  });
+
+  rule(reqs, sid, MX, 330, CW, C.tV1, 46);
+  text(reqs, sid, MX + 16, 339, CW - 32, 30,
+    'Outcome — audit-ready evidence that holds up to a market-surveillance authority, against fines up to €35M / 7% of global turnover.',
+    { size: 11.5, bold: true, color: C.ink, line: 118 });
+  text(reqs, sid, MX, 384, CW, 14, 'Maps to EU AI Act: Art. 12 logging · Art. 14 human oversight · Annex IV documentation · Art. 74 audit access', { size: 8.5, color: C.faint });
+}
+
 /* ---------- auth + api ---------- */
 async function ensureFreshToken(key, token) {
   const skew = 120_000;
@@ -254,15 +285,16 @@ async function upsertDeck(token, prior) {
   const presentationId = pres.presentationId;
   const old = (pres.slides || []).map((s) => s.objectId);
 
-  const ids = ['sldOverview', 'sldScope', 'sldNetwork', 'sldOpen'];
+  const ids = ['sldOverview', 'sldJourney', 'sldScope', 'sldNetwork', 'sldOpen'];
   const reqs = [];
   // delete old slides FIRST so the deterministic new IDs don't collide with them
   old.forEach((objectId) => reqs.push({ deleteObject: { objectId } }));
   ids.forEach((s) => reqs.push({ createSlide: { objectId: s, slideLayoutReference: { predefinedLayout: 'BLANK' } } }));
   slideOverview(reqs, ids[0]);
-  slideScope(reqs, ids[1]);
-  slideNetwork(reqs, ids[2]);
-  slideOpen(reqs, ids[3]);
+  slideJourney(reqs, ids[1]);
+  slideScope(reqs, ids[2]);
+  slideNetwork(reqs, ids[3]);
+  slideOpen(reqs, ids[4]);
 
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests: reqs });
   await setCommentable(token, presentationId);
