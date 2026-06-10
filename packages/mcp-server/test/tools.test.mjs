@@ -36,14 +36,14 @@ function routeFetch(routes) {
 }
 
 test("get_time returns unwrapped data, not an error", async () => {
-  routeFetch([["/api/time/time", { body: { success: true, data: { latestBlockTime: "t", latestBlockHeight: "9" } } }]]);
+  routeFetch([["/getTime", { body: { success: true, data: { madMarzulloTime: "t", blockHeight: "9" } } }]]);
   const res = await collectTools().get_time({});
   assert.ok(!res.isError);
   assert.deepEqual(JSON.parse(textOf(res)), { latestBlockTime: "t", latestBlockHeight: "9" });
 });
 
 test("get_time maps 429 to an actionable rate-limit error", async () => {
-  routeFetch([["/api/time/time", { status: 429, body: { message: "slow" } }]]);
+  routeFetch([["/getTime", { status: 429, body: { message: "slow" } }]]);
   const res = await collectTools().get_time({});
   assert.equal(res.isError, true);
   assert.match(textOf(res), /rate limit/i);
@@ -111,7 +111,7 @@ test("get_validation returns validation data", async () => {
 });
 
 test("get_timestamp returns consensus detail", async () => {
-  routeFetch([["/api/time/timestamp", { body: { success: true, data: { votes: 0 } } }]]);
+  routeFetch([["/getTime", { body: { success: true, data: { votes: 0 } } }]]);
   const res = await collectTools().get_timestamp({});
   assert.deepEqual(JSON.parse(textOf(res)), { votes: 0 });
 });
