@@ -91,10 +91,16 @@ export async function resolveAgent(
 /**
  * Smart-contract scheduling stub.
  *
- * The /schedule endpoint is NOT available on the gateway (returns 404), so this
- * intentionally throws rather than making a real call. When the backend exposes
- * it, the tool must use propose-then-approve (no private key in the server).
+ * CORRECTION (2026-06-10): the scheduling API IS live — at `POST /api/contract/schedule`
+ * (not `/schedule`, which 404s), and it takes a client-side `signature` + `nonce`
+ * (NOT a private key in a URL), so it is non-custodial-friendly. The `/api/contract/*`
+ * surface — `types`, `estimate`, `schedule`, list-by-client/wallet — is verified live.
+ *
+ * This still throws only because the core client does not wrap `/api/contract/*` yet.
+ * When it does, deploy is a value-moving write, so wrap it propose-then-approve:
+ * the server prepares + prices the deployment, a client-side signer approves.
+ * See ROADMAP.md "Smart contracts".
  */
 export function schedule(): never {
-  throw new Error("smart-contract scheduling is not available on the gateway yet");
+  throw new Error("smart-contract scheduling (POST /api/contract/schedule) is live but not yet wrapped in this client — see ROADMAP.md");
 }
