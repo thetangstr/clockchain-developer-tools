@@ -52,8 +52,8 @@ test("typed error hierarchy + default statuses", () => {
   assert.equal(new RateLimitError().name, "RateLimitError");
 });
 
-test("getTime unwraps the {success,data} envelope", async () => {
-  stubFetch(200, { success: true, data: { latestBlockTime: "t", latestBlockHeight: "5" } });
+test("getTime derives latest time/height from /getTime", async () => {
+  stubFetch(200, { success: true, data: { madMarzulloTime: "t", blockHeight: "5" } });
   const c = new ClockchainClient(cfg);
   assert.deepEqual(await c.getTime(), { latestBlockTime: "t", latestBlockHeight: "5" });
 });
@@ -142,7 +142,7 @@ test("getBlock(number) hits the block endpoint with the height", async () => {
 
 test("getBlock('latest') resolves height via getTime first", async () => {
   routeFetch([
-    ["/api/time/time", { body: { success: true, data: { latestBlockTime: "t", latestBlockHeight: "42" } } }],
+    ["/getTime", { body: { success: true, data: { madMarzulloTime: "t", blockHeight: "42" } } }],
     ["/api/time/block", { body: { success: true, data: { height: "42" } } }],
   ]);
   assert.deepEqual(await new ClockchainClient(cfg).getBlock("latest"), { height: "42" });

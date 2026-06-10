@@ -57,17 +57,29 @@ export class ClockchainClient {
     this.baseUrl = (config.endpoint || DEFAULT_ENDPOINT).replace(/\/+$/, "");
   }
 
-  /** GET /api/time/time -> {success, data, meta}; returns data. */
+  /**
+   * Latest consented block time + height, derived from {@link getTimestamp}
+   * (the public /getTime endpoint).
+   */
   async getTime(): Promise<TimeResponse> {
-    const env = await this.request<SuccessEnvelope<TimeResponse>>("/api/time/time");
-    return env.data;
+    const ts = await this.getTimestamp();
+    return {
+      latestBlockTime: ts.madMarzulloTime,
+      latestBlockHeight: ts.blockHeight,
+    };
   }
 
-  /** GET /api/time/timestamp -> {success, data, meta}; returns data. */
+  /**
+   * GET /getTime -> {success, data, meta}; returns data.
+   *
+   * Public consensus-time endpoint — no api-key scope required. Supersedes the
+   * scope-gated /api/time/time + /api/time/timestamp, which 401 ("Invalid or
+   * expired API key") for logging-scope keys. The data shape matches
+   * {@link TimestampResponse} exactly (blockHeight, madMarzulloTime, totalNodes,
+   * nodeParticipation%, votes, …).
+   */
   async getTimestamp(): Promise<TimestampResponse> {
-    const env = await this.request<SuccessEnvelope<TimestampResponse>>(
-      "/api/time/timestamp",
-    );
+    const env = await this.request<SuccessEnvelope<TimestampResponse>>("/getTime");
     return env.data;
   }
 
