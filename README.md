@@ -41,14 +41,19 @@ Open either `.html` file in a browser to present (arrow keys to navigate,
 
 ## Status
 
-This is a plan, not shipped code. Key points called out in the spec:
+Working against the live gateway. Verified surface (updated 2026-06-10):
 
-- Only the three time endpoints, `/searchAsset`, and `/getValidationBlock` are
-  confirmed on the public gateway (probed 2026-06-02).
-- Smart-contract triggers (`/schedule`) are **not** exposed on the gateway yet.
-- Cross-client identity resolution and `walletId` provisioning are open
-  questions for the D4 team. See "Verified API Surface" and "Open assumptions"
-  in the spec.
+- **Time:** read consensus time from the **public `/getTime`** (no key scope). The
+  `/api/time/*` family 401s on logging-scope keys.
+- **Notarization:** `/log`, `/ledger/{id}`, `/searchAsset`, `/getValidationBlock`
+  all confirmed working - log, confirm on-chain, retrieve, verify.
+- **Smart-contract scheduling:** **live** at `POST /api/contract/schedule`
+  (signature-based, non-custodial) - *not* blocked, and *not* `/schedule`.
+- **Agent identity:** the ERC-8004 registry is live and resolving; `resolve_agent`
+  just needs `EVM_RPC_URL` + registry + chain set.
+- Single-validator testnet; tight rate limits; no cross-client verification yet.
+
+**See [ROADMAP.md](./ROADMAP.md) for the full current limitations + v1/v2/v3 plan.**
 
 ## Build order (5 weeks)
 
