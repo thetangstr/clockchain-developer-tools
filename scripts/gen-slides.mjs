@@ -245,6 +245,59 @@ function slideModules(reqs, sid) {
     { size: 8.5, color: C.amber, line: 122 });
 }
 
+// Meridian Pay — the demo customer dogfooded in AgentDash: 7 agents, a weekly
+// vendor-disbursement cycle, every consequential action attested on Clockchain.
+function slideMeridian(reqs, sid) {
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 32, 'demo company · dogfooded in agentdash', C.v1);
+  heading(reqs, sid, MX, 48, 'Meridian Pay');
+  text(reqs, sid, MX, 86, CW, 26,
+    'An autonomous B2B-payments / digital-treasury fintech that runs its weekly vendor-disbursement cycle entirely through AI agents — proving every consequential action on-chain via the Clockchain MCP.',
+    { size: 10, color: C.mut, line: 120 });
+  rule(reqs, sid, MX, 122, CW, C.tV1, 30);
+  text(reqs, sid, MX + 12, 127, CW - 24, 22,
+    'Goal — "run the weekly vendor-disbursement cycle with court-grade proof": pay approved vendors, reconcile, and produce a regulator-ready audit trail where every agent action is independently attested on Clockchain.',
+    { size: 9, bold: true, color: C.ink, line: 116 });
+
+  const colW = (CW - 30) / 2, lx = MX, rx = MX + colW + 30, colY = 166;
+  rule(reqs, sid, MX + colW + 15, colY, 1, C.line, 150);
+  chip(reqs, sid, lx, colY, 124, 16, 'THE AGENT ORG · 7', C.tV1, C.v1, 8);
+  const agents = [
+    ['Atlas', 'Chief of Staff — orchestrates; delegates on-chain'],
+    ['Onboard', 'Vendor-Onboarding — KYB & activation'],
+    ['Vega', 'Payments Executor — runs the disbursements'],
+    ['Tally', 'Reconciliation — nightly ledger close'],
+    ['Sentinel', 'Fraud-Watch — flags + delegates forensics'],
+    ['Probe', 'Forensic Investigator — deep-dives flags'],
+    ['Ledger', 'Compliance-Reporter — Art.12 / SEC 17a-4'],
+  ];
+  let ay = colY + 23;
+  for (const [n, r] of agents) {
+    text(reqs, sid, lx, ay, 58, 12, n, { size: 9.5, bold: true, color: C.ink });
+    text(reqs, sid, lx + 60, ay, colW - 60, 12, r, { size: 8.5, color: C.mut });
+    ay += 17;
+  }
+  chip(reqs, sid, rx, colY, 188, 16, 'THE WEEKLY CYCLE · 5 ATTESTED TASKS', C.tV3, C.v3, 8);
+  const tasks = [
+    ['MER-1', 'KYB & activate Northwind Logistics — Onboard'],
+    ['MER-2', 'Nightly ledger reconciliation — Tally'],
+    ['MER-3', 'Fraud flag → forensic deep-dive — Sentinel→Probe'],
+    ['MER-4', 'Compliance report, Art.12 / 17a-4 — Ledger'],
+    ['MER-8', 'Vendor payment — Northwind $180,000 — Vega  ★ flagship'],
+  ];
+  let ty = colY + 23;
+  for (const [n, r] of tasks) {
+    text(reqs, sid, rx, ty, 46, 12, n, { size: 9, bold: true, color: C.v3 });
+    text(reqs, sid, rx + 48, ty, colW - 48, 12, r, { size: 8.5, color: C.ink });
+    ty += 19;
+  }
+
+  rule(reqs, sid, MX, 346, CW, C.tAmber, 48);
+  text(reqs, sid, MX + 12, 351, CW - 24, 40,
+    'The Clockchain hook — each action emits an Agent Attested Receipt:  mint_identity → delegate_authority (Atlas→Vega, Sentinel→Probe) → attest_action (MER-8 anchored at block 3,552,958) → build_evidence_package → generate_compliance_report → verify_receipt (match = true).  The same action that burns LLM tokens is the one attested on Clockchain — proof of who / what / when rides the work.',
+    { size: 8, bold: true, color: C.ink, line: 118 });
+}
+
 function slideOpen(reqs, sid) {
   header(reqs, sid);
   eyebrow(reqs, sid, MX, 36, 'discussion · before we launch to real users', C.v1);
@@ -482,20 +535,21 @@ async function upsertDeck(token, prior) {
   // Order: exec overview → the five modules (architecture) → the two-lane roadmap
   // (centerpiece) → the business case (first customer, who-buys journey, three
   // ways in) → v1 scope → network → open Qs.
-  const ids = ['sldOverview', 'sldModules', 'sldLanes', 'sldCustomer', 'sldJourney', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen'];
+  const ids = ['sldOverview', 'sldModules', 'sldMeridian', 'sldLanes', 'sldCustomer', 'sldJourney', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen'];
   const reqs = [];
   // delete old slides FIRST so the deterministic new IDs don't collide with them
   old.forEach((objectId) => reqs.push({ deleteObject: { objectId } }));
   ids.forEach((s) => reqs.push({ createSlide: { objectId: s, slideLayoutReference: { predefinedLayout: 'BLANK' } } }));
   slideOverview(reqs, ids[0]);
   slideModules(reqs, ids[1]);
-  slideLanes(reqs, ids[2]);
-  slideTLDR(reqs, ids[3]);
-  slideJourney(reqs, ids[4]);
-  slideChannels(reqs, ids[5]);
-  slideScope(reqs, ids[6]);
-  slideNetwork(reqs, ids[7]);
-  slideOpen(reqs, ids[8]);
+  slideMeridian(reqs, ids[2]);
+  slideLanes(reqs, ids[3]);
+  slideTLDR(reqs, ids[4]);
+  slideJourney(reqs, ids[5]);
+  slideChannels(reqs, ids[6]);
+  slideScope(reqs, ids[7]);
+  slideNetwork(reqs, ids[8]);
+  slideOpen(reqs, ids[9]);
 
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests: reqs });
   await setCommentable(token, presentationId);
@@ -511,7 +565,7 @@ async function main() {
   const token = await getAccessToken();
   if (args[0] === 'trash') return trash(token, args.slice(1));
   const prior = existsSync(LEDGER_PATH) ? JSON.parse(await readFile(LEDGER_PATH, 'utf8')) : {};
-  console.log(`Building elegant native deck "${DECK_TITLE}" (9 slides):`);
+  console.log(`Building elegant native deck "${DECK_TITLE}" (10 slides):`);
   const data = await upsertDeck(token, prior[DECK_TITLE]);
   await writeFile(LEDGER_PATH, JSON.stringify({ ...prior, [DECK_TITLE]: data }, null, 2));
   console.log(`\nDone.\n  ${DECK_TITLE}\n  -> ${data.url}\nLedger: ${LEDGER_PATH}`);

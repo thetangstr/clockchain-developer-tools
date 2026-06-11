@@ -135,6 +135,17 @@ contract {{NAME}} {
 }`;
 
 /**
+ * Coerce a contract name into a valid Solidity identifier (letters/digits/_/$,
+ * not starting with a digit). Used for both the in-source contract name and the
+ * upload filename, which must match for the gateway's bytecode lookup to succeed.
+ */
+export function solidityName(name: string): string {
+  let s = String(name ?? "").replace(/[^a-zA-Z0-9_$]/g, "_");
+  if (!/^[a-zA-Z_$]/.test(s)) s = "C" + s;
+  return s || "Contract";
+}
+
+/**
  * Parse a Clockchain timestamp to epoch milliseconds (UTC). NaN if unparseable.
  *
  * CRITICAL: the gateway emits DD-MM-YYYY ("11-06-2026_14:41:29:089" for
@@ -973,7 +984,12 @@ export class ClockchainClient {
     const { contractSource, ...fields } = params as Record<string, string | number> & {
       contractSource?: string;
     };
-    const name = String(fields.contractName ?? "Contract");
+    // A Solidity contract name must be a valid identifier — `contract treasury-payout {}`
+    // is a SYNTAX ERROR. The gateway names the compiled bytecode by the uploaded
+    // FILENAME and solc names it by the CONTRACT name, so both must be this exact
+    // sanitized identifier, or the compile yields no bytecode ("Bytecode missing" 500).
+    const name = solidityName(String(fields.contractName ?? "Contract"));
+    fields.contractName = name; // keep the form field consistent with source + filename
     const source =
       typeof contractSource === "string" && contractSource.length > 0
         ? contractSource
