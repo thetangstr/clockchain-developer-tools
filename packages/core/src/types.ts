@@ -157,3 +157,161 @@ export interface ReceiptVerification {
   blockHeight: string | null;
   ledgerId: string;
 }
+
+// ===== SCHEDULER (smart-contract /api/contract/*) =====
+
+/**
+ * Multipart form fields for {@link ClockchainClient.estimateContract} /
+ * scheduleContract. These map to Spring `@RequestParam` values forwarded as
+ * multipart/form-data alongside the Solidity source file. Required keys are
+ * blockchain, contractType, contractName, deadline; additional per-ERC keys
+ * (symbol, supply, …) are passed through as-is. The file part is named
+ * `contractFile` for estimate and `solidityFile` for schedule (VERIFIED, Swagger).
+ */
+export type ContractParams = Record<string, string | number>;
+
+/**
+ * The "approve" half of propose-then-approve: the gas numbers from the chosen
+ * estimate plus the caller's wallet signature + integer nonce. VERIFIED against
+ * the gateway's Swagger (2026-06-11): nonce is an INTEGER and the signature is
+ * an EVM wallet signature (personal_sign pattern; see {@link
+ * ClockchainClient.scheduleContract}). NON-CUSTODIAL — caller-supplied.
+ */
+export interface ScheduleApproval {
+  /** Gas fees from the chosen estimate (numbers, not strings). */
+  gasFees: number;
+  minGasFees?: number;
+  maxGasFees?: number;
+  totalPayablePrice: number;
+  totalPayablePriceUnit?: string;
+  /** INTEGER nonce per Swagger (NOT a string). */
+  nonce: number;
+  /** EVM wallet signature (personal_sign pattern) — caller-supplied. */
+  signature: string;
+  deadline?: number;
+  trustPercentage?: number;
+}
+
+/**
+ * Result of {@link ClockchainClient.estimateContract}. The gateway's estimate
+ * shape is not strictly typed here (it varies by ERC); the raw object is
+ * surfaced to the caller alongside the params that must be signed to schedule.
+ */
+export interface ContractEstimate {
+  estimate: unknown;
+  /** The exact params the caller must sign + forward to scheduleContract. */
+  params: ContractParams;
+}
+
+/** Result of {@link ClockchainClient.scheduleContract} (non-custodial deploy). */
+export interface ScheduledContract {
+  result: unknown;
+  params: ContractParams;
+  approval: ScheduleApproval;
+}
+
+// ===== AUDIT (derivative — composes Time + Logging + Identity) =====
+
+/** One assembled, attested event in an {@link AuditTrail}. Mints nothing new. */
+export interface AuditEvent {
+  ledgerId: string;
+  assetReferenceId: string;
+  assetHash: string;
+  /** Clockchain consensus time for this event's block (null if pending). */
+  time: string | null;
+  blockHeight: string | null;
+  additionalInfo: string;
+}
+
+/** Assembled view over events the free modules already attested. */
+export interface AuditTrail {
+  assetReferenceId: string;
+  events: AuditEvent[];
+  count: number;
+  builtAt: string;
+}
+
+/** Supported compliance presets. Formats are PARAMETERS, never bespoke tools. */
+export type ComplianceFormat = "eu_ai_act_art12" | "sec_17a4" | "iso_27001";
+
+/** A rendered compliance report (the same trail in a regulator preset). */
+export interface ComplianceReport {
+  format: ComplianceFormat;
+  assetReferenceId: string;
+  reportHash: string;
+  document: Record<string, unknown>;
+  honestyNote: string;
+}
+
+/** A self-contained, offline-verifiable evidence packet for one ledger record. */
+export interface EvidencePackage {
+  packageId: string;
+  pkgHash: string;
+  record: LedgerRecord;
+  block: BlockResponse | null;
+  validation: ValidationBlock | null;
+  plainEnglish: string;
+  honestyNote: string;
+}
+
+/** Result of {@link ClockchainClient.verifyPackage}. */
+export interface PackageVerification {
+  valid: boolean;
+  pkgHashMatch: boolean;
+  anchorMatch: boolean;
+  recomputedPkgHash: string;
+  anchoredHash: string;
+  note: string;
+}
+
+// ===== AGENT IDENTITY (writes via the /log hash-anchor convention) =====
+
+/** Result of a mint / revoke / delegate identity write. */
+export interface IdentityWrite {
+  did: string;
+  assetReferenceId: string;
+  docHash: string;
+  ledgerId: string;
+  blockHeight: string | null;
+  status: "active" | "revoked" | "delegated";
+}
+
+/** One entry in a DID's attested activity history. */
+export interface IdentityEvent {
+  type: "mint" | "revoke" | "delegate";
+  assetReferenceId: string;
+  ledgerId: string;
+  assetHash: string;
+  /** Clockchain consensus time for this event's block (null if pending). */
+  time: string | null;
+  blockHeight: string | null;
+  /**
+   * The gateway's record-creation timestamp (createdTimestamp). Used as the
+   * fallback instant for valid-at-T when consensus `time` is not yet populated.
+   * Gateway format is DD-MM-YYYY (e.g. "11-06-2026 16:10:48:544 UTC").
+   */
+  recordedAt: string;
+}
+
+/** Result of {@link ClockchainClient.getIdentityHistory}. */
+export interface IdentityHistory {
+  did: string;
+  events: IdentityEvent[];
+}
+
+/**
+ * Result of {@link ClockchainClient.verifyIdentityAt} — the valid-at-T query.
+ * Authorized iff an attested mint exists at or before T and no revoke does.
+ * This is identity VERIFICATION (was the binding valid at T?), not authentication.
+ */
+export interface IdentityVerification {
+  did: string;
+  /** The queried instant (RFC 3339, echoed back). */
+  at: string;
+  authorized: boolean;
+  reason: string;
+  mintedAt: string | null;
+  revokedAt: string | null;
+  evidence: { mintLedgerId?: string; revokeLedgerId?: string };
+  note: string;
+}

@@ -89,18 +89,20 @@ export async function resolveAgent(
 }
 
 /**
- * Smart-contract scheduling stub.
+ * Smart-contract scheduling is now wrapped on {@link ClockchainClient} as the
+ * propose-then-approve pair {@link ClockchainClient.estimateContract} (price the
+ * deploy + return the params to sign) and {@link ClockchainClient.scheduleContract}
+ * (forward the caller-supplied signature + nonce). Deploy is a value-moving write
+ * over the live `POST /api/contract/schedule` surface; the server never signs
+ * (non-custodial). This thin re-export keeps the historical entry point pointing
+ * at the real implementation instead of throwing.
  *
- * CORRECTION (2026-06-10): the scheduling API IS live — at `POST /api/contract/schedule`
- * (not `/schedule`, which 404s), and it takes a client-side `signature` + `nonce`
- * (NOT a private key in a URL), so it is non-custodial-friendly. The `/api/contract/*`
- * surface — `types`, `estimate`, `schedule`, list-by-client/wallet — is verified live.
- *
- * This still throws only because the core client does not wrap `/api/contract/*` yet.
- * When it does, deploy is a value-moving write, so wrap it propose-then-approve:
- * the server prepares + prices the deployment, a client-side signer approves.
- * See ROADMAP.md "Smart contracts".
+ * @deprecated Use {@link ClockchainClient.estimateContract} +
+ * {@link ClockchainClient.scheduleContract} directly.
  */
 export function schedule(): never {
-  throw new Error("smart-contract scheduling (POST /api/contract/schedule) is live but not yet wrapped in this client — see ROADMAP.md");
+  throw new Error(
+    "Use ClockchainClient.estimateContract() then ClockchainClient.scheduleContract() " +
+      "— smart-contract scheduling is wrapped on the client (non-custodial: the caller signs).",
+  );
 }

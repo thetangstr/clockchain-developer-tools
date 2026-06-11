@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 // gen-slides.mjs
-// "Clockchain MCP - Roadmap (v1 to v3)" — 4 elegant, NATIVE Google Slides
+// "Clockchain MCP - Roadmap (v1 to v3)" — 9 elegant, NATIVE Google Slides
 // (real editable text boxes + shapes, not images):
 //   1. Status & roadmap (v1/v2/v3 overview)
-//   2. What's in v1 — in scope / out of scope
-//   3. Testnet now, mainnet later
-//   4. Open questions & dependencies
+//   2. The five modules (Time/Logging/Scheduler/Audit/Identity — design + status)
+//   3. Two lanes, one launch (Lane A features / Lane B hosting+CI-CD, phased)
+//   4. Our first customer (discovery thesis)
+//   5. The AI Act CISO (who-buys customer journey)
+//   6. Three ways in (how real users reach the MCP)
+//   7. What's in v1 — in scope / out of scope
+//   8. Testnet now, mainnet later
+//   9. Open questions & dependencies
 //
 //   node gen-slides.mjs            # create or update-in-place
 //   node gen-slides.mjs trash ID   # move a deck to Trash (reversible)
@@ -95,17 +100,19 @@ function slideOverview(reqs, sid) {
 
   const cols = [
     { code: 'v1', color: C.v1, status: 'LIVE · TESTNET', sColor: C.green, sTint: C.tGreen, sW: 106, timing: 'This week', inc: [
-      'MCP server — up & in testing',
-      'Playground — demo-ready today',
-      'Internal-user launch later this week (after Clockchain / D4D domain access)',
+      'MCP server — five modules, 25 tools',
+      'Playground — redesigned, demo-ready',
+      'Cross-party verify (keyless) + valid-at-T identity',
     ] },
     { code: 'v2', color: C.v2, status: 'IN DESIGN', sColor: C.gray, sTint: C.tGray, sW: 78, timing: 'By end of month', inc: [
-      'AgentDash integration — agent orchestration',
-      'Hosted, access-controlled playground',
+      'Hosted MCP endpoint + Cloudflare gate',
+      'Schedule create (wallet sig) · free / paid tiers',
+      'AgentDash agent-orchestration integration',
     ] },
     { code: 'v3', color: C.v3, status: 'IN DESIGN', sColor: C.gray, sTint: C.tGray, sW: 78, timing: 'By end of month', inc: [
-      'Cloud launch — AWS & GCP',
-      'Production-grade, managed hosting',
+      'Cloud launch — AWS & GCP, managed hosting',
+      'Mainnet-grade, multi-validator proofs',
+      'Identity write + regulator-export presets',
     ] },
   ];
   const gap = 16, cw = (CW - 2 * gap) / 3;
@@ -119,7 +126,7 @@ function slideOverview(reqs, sid) {
   });
 
   rule(reqs, sid, MX, 360, CW);
-  text(reqs, sid, MX, 368, CW, 26, 'v2 and v3 proceed concurrently, now → end of month.   Not yet in scope: multi-validator / mainnet, public launch.', { size: 9, color: C.amber, line: 120 });
+  text(reqs, sid, MX, 368, CW, 26, 'Two lanes run in parallel — features (A) + hosting / CI-CD (B), meeting at the hosted endpoint.   Not yet in scope: multi-validator / mainnet, public launch.', { size: 9, color: C.amber, line: 120 });
 }
 
 function twoColumn(reqs, sid, eb, ebColor, title, sub, left, right) {
@@ -142,16 +149,16 @@ function twoColumn(reqs, sid, eb, ebColor, title, sub, left, right) {
 function slideScope(reqs, sid) {
   twoColumn(reqs, sid, 'v1 · this week', C.v1, "What's in v1", 'Ready for testing now — a quick demo is available today.',
     { label: 'IN SCOPE', tint: C.tGreen, color: C.green, chipW: 96, items: [
-      'Verifiable time — the consensus clock',
-      'Document timestamping — TSA / proof of existence',
-      'Agent attested receipt — who / what / when, tamper-evident',
-      'Independent verify + tamper detection',
-      'Agent identity — read (ERC-8004)',
-      'Chatbot playground that walks a user through each',
+      'Verifiable time + attested receipts, tamper-evident',
+      'Audit — trails, Art. 12 / 17a-4 / ISO presets, evidence packs',
+      'Identity — mint / revoke / history + valid-at-T',
+      'Cross-party verify — keyless, no account needed',
+      'Scheduler — types, live cost quotes, listing',
+      'Chatbot playground walking a user through all five',
     ] },
     { label: 'OUT OF SCOPE', tint: C.tGray, color: C.gray, chipW: 116, muted: true, items: [
-      'Agent identity — write (validation attestation)',
-      'Smart-contract triggers',
+      'Schedule create — needs wallet signature → v2',
+      'Identity directory / public resolver → v2',
       'AgentDash / agent-orchestration integration → v2',
       'Hosting / production on AWS or GCP → v3',
       'Multi-validator / mainnet-grade proofs → later',
@@ -203,6 +210,38 @@ function column(reqs, sid, x, y0, w, items, opt = {}) {
   }
 }
 
+// The five modules — design + status, mirroring the public /architecture page.
+function slideModules(reqs, sid) {
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 36, 'architecture · one server, five modules', C.v1);
+  heading(reqs, sid, MX, 52, 'The five modules');
+  text(reqs, sid, MX, 94, CW, 22,
+    'One MCP server, non-custodial (it never holds your keys). Only hash fingerprints go on-chain — and anyone can re-verify them, no account needed.',
+    { size: 10.5, color: C.mut, line: 118 });
+  rule(reqs, sid, MX, 126, CW);
+
+  const rows = [
+    { name: 'Time', live: 'LIVE', amber: false,
+      d: 'The clock no single party controls — validators agree on each instant; records bind to a network fact, not a server claim.' },
+    { name: 'Logging', live: 'LIVE', amber: false,
+      d: 'Hash-anchored attested receipts: your content stays with you; one altered character and verification fails.' },
+    { name: 'Scheduler', live: 'LIVE · CREATE=PREVIEW', amber: true,
+      d: 'Promised-T vs actual-T accountability. Live cost quotes + listing; committing is propose-then-approve with your wallet signature.' },
+    { name: 'Audit', live: 'LIVE', amber: false,
+      d: 'A derivative — composes attested records into EU AI Act Art. 12 / SEC 17a-4 / ISO 27001 presets and self-verifying evidence packs.' },
+    { name: 'Identity', live: 'LIVE · DIRECTORY=PREVIEW', amber: true,
+      d: 'did:clockchain + valid-at-T: was the agent authorized at the instant it acted? Verification, not authentication.' },
+  ];
+  let y = 138;
+  for (const r of rows) {
+    text(reqs, sid, MX, y, 92, 16, r.name, { size: 12, bold: true, color: C.ink });
+    chip(reqs, sid, MX + 92, y + 1, r.amber ? 142 : 44, 15, r.live, r.amber ? C.tAmber : C.tGreen, r.amber ? C.amber : C.green, 7.5);
+    text(reqs, sid, MX + 248, y - 1, CW - 248, 44, r.d, { size: 9, color: C.mut, line: 113 });
+    y += 49;
+    if (r !== rows[rows.length - 1]) rule(reqs, sid, MX, y - 8, CW);
+  }
+}
+
 function slideOpen(reqs, sid) {
   header(reqs, sid);
   eyebrow(reqs, sid, MX, 36, 'discussion · before we launch to real users', C.v1);
@@ -226,10 +265,10 @@ function slideOpen(reqs, sid) {
 
   column(reqs, sid, rx, 140, colW, [
     { tag: 'v2', title: 'AgentDash dev access', ctx: 'A real agent host that can call our MCP for the orchestration test.' },
-    { tag: 'v2', title: 'A domain we control', ctx: 'To put the playground behind access for real users (Cloudflare).' },
-    { tag: 'v3', title: 'Cloud accounts — AWS & GCP', ctx: 'We are doing both — access + billing set up for each.' },
-    { tag: 'v3', title: 'Network-team sign-off', ctx: 'Production hosting + the network exposure model.' },
-    { tag: 'v3', title: 'Signer + gas + contract API', ctx: 'For on-chain writes — identity write, contract triggers.' },
+    { tag: 'v2', title: 'DNS on clockchain.network', ctx: 'Domain is at GoDaddy — set up mcp.clockchain.network with Ken to host the endpoint behind Cloudflare.' },
+    { tag: 'v2', title: 'Schedule signature spec', ctx: 'One sentence from backend: what message does the wallet sign for /api/contract/schedule — and is it enforced on testnet?' },
+    { tag: 'v2', title: 'Public resolver — identity directory', ctx: 'Unscoped DID lookup + search, so agents can discover identities they were never handed.' },
+    { tag: 'v3', title: 'Cloud accounts + network sign-off', ctx: 'AWS & GCP access/billing; production hosting + exposure model.' },
   ], { spacing: 46, titleSize: 10.5, ctxSize: 8.5 });
 }
 
@@ -325,6 +364,80 @@ function slideTLDR(reqs, sid) {
     { size: 8.5, color: C.amber, line: 120 });
 }
 
+// a vertical stack of phase blocks for one lane: bold "mark · label" header
+// (color-coded by phase) over a bulleted item list. `slot` pt per phase block.
+// Items must be short enough to stay on ONE line (~44 chars) so they don't
+// wrap into the next block — that was the original overlap bug.
+function laneStack(reqs, sid, x, y0, w, phases, slot) {
+  let y = y0;
+  for (const p of phases) {
+    text(reqs, sid, x, y, w, 13, `${p.mark}  ${p.label}`, { size: 9.5, bold: true, color: p.color });
+    text(reqs, sid, x, y + 14, w, slot - 16, p.items.join('\n'), { size: 9.5, color: C.ink, line: 116, space: 1, bullets: 'BULLET_DISC_CIRCLE_SQUARE' });
+    y += slot;
+  }
+}
+
+// Two-lane roadmap — Lane A (what users touch & buy) vs Lane B (where it runs),
+// each phased ✓ shipped / ▶ next / ◷ later and mapped to v1 / v2 / v3. The amber
+// band is the cross-lane gate: cloud agents need Lane B's hosted endpoint.
+function slideLanes(reqs, sid) {
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 40, 'roadmap · two lanes to launch', C.v1);
+  heading(reqs, sid, MX, 56, 'Two lanes, one launch');
+  text(reqs, sid, MX, 96, CW, 26,
+    'Lane A is what users touch and buy; Lane B is where it runs. They meet at the hosted endpoint — Lane A can’t reach cloud agents until Lane B ships it.',
+    { size: 11, color: C.mut, line: 118 });
+  rule(reqs, sid, MX, 142, CW);
+
+  const colW = (CW - 36) / 2, lx = MX, rx = MX + colW + 36, colY = 152;
+  rule(reqs, sid, MX + colW + 18, colY, 1, C.line, 196); // vertical divider
+
+  chip(reqs, sid, lx, colY, 224, 19, 'LANE A · WHAT USERS TOUCH & BUY', C.tV1, C.v1, 8.5);
+  chip(reqs, sid, rx, colY, 178, 19, 'LANE B · WHERE IT RUNS', C.tV3, C.v3, 8.5);
+
+  const SLOT = 56, py = colY + 28;
+  laneStack(reqs, sid, lx, py, colW, [
+    { mark: '✓', label: 'SHIPPED · v1', color: C.green, items: [
+      'Five modules · receipts · tamper detect',
+      'Audit trails · Art. 12 / 17a-4 / ISO packs',
+      'Valid-at-T identity · keyless x-party verify',
+    ] },
+    { mark: '▶', label: 'NEXT · v2', color: C.v2, items: [
+      'Schedule create — wallet signature',
+      'Identity directory (public resolver)',
+      'Free / paid tiers · AgentDash',
+    ] },
+    { mark: '◷', label: 'LATER · v3', color: C.v3, items: [
+      'ERC-8004 identity write (on-chain)',
+      'Cron-logger accountability layer',
+      'Mainnet-grade, multi-validator proofs',
+    ] },
+  ], SLOT);
+
+  laneStack(reqs, sid, rx, py, colW, [
+    { mark: '✓', label: 'SHIPPED · v1', color: C.green, items: [
+      'CI gate — typecheck + build on PRs',
+      'Auto release-notes · Vercel deploy',
+      'Two-repo sync (playground ↔ core)',
+    ] },
+    { mark: '▶', label: 'NEXT · v2', color: C.v2, items: [
+      'Hosted endpoint — mcp.clockchain.network',
+      'DNS at GoDaddy → set up with Ken',
+      'Cloudflare gate · tokens / OAuth',
+    ] },
+    { mark: '◷', label: 'LATER · v3', color: C.v3, items: [
+      'AWS / GCP production hosting',
+      'Observability + idempotency',
+      'Mainnet infra · multi-validator',
+    ] },
+  ], SLOT);
+
+  rule(reqs, sid, MX, 354, CW, C.tAmber, 44);
+  text(reqs, sid, MX + 16, 360, CW - 32, 32,
+    'Cross-lane gate — Cowork / claude.ai / Desktop connect from Anthropic’s cloud, so they need Lane B’s hosted HTTPS endpoint. Today only Claude Code (local stdio) connects; mcp.clockchain.network unblocks Lane A’s biggest reach.',
+    { size: 9, bold: true, color: C.ink, line: 116 });
+}
+
 /* ---------- auth + api ---------- */
 async function ensureFreshToken(key, token) {
   const skew = 120_000;
@@ -363,20 +476,23 @@ async function upsertDeck(token, prior) {
   const presentationId = pres.presentationId;
   const old = (pres.slides || []).map((s) => s.objectId);
 
-  // Customer thesis leads (slide 2) to anchor the business/customer discussion;
-  // the old mechanic "journey" slide is dropped (it overlapped this + is shown live
-  // in the playground). slideJourney() remains defined but unused.
-  const ids = ['sldOverview', 'sldCustomer', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen'];
+  // Order: exec overview → the five modules (architecture) → the two-lane roadmap
+  // (centerpiece) → the business case (first customer, who-buys journey, three
+  // ways in) → v1 scope → network → open Qs.
+  const ids = ['sldOverview', 'sldModules', 'sldLanes', 'sldCustomer', 'sldJourney', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen'];
   const reqs = [];
   // delete old slides FIRST so the deterministic new IDs don't collide with them
   old.forEach((objectId) => reqs.push({ deleteObject: { objectId } }));
   ids.forEach((s) => reqs.push({ createSlide: { objectId: s, slideLayoutReference: { predefinedLayout: 'BLANK' } } }));
   slideOverview(reqs, ids[0]);
-  slideTLDR(reqs, ids[1]);
-  slideChannels(reqs, ids[2]);
-  slideScope(reqs, ids[3]);
-  slideNetwork(reqs, ids[4]);
-  slideOpen(reqs, ids[5]);
+  slideModules(reqs, ids[1]);
+  slideLanes(reqs, ids[2]);
+  slideTLDR(reqs, ids[3]);
+  slideJourney(reqs, ids[4]);
+  slideChannels(reqs, ids[5]);
+  slideScope(reqs, ids[6]);
+  slideNetwork(reqs, ids[7]);
+  slideOpen(reqs, ids[8]);
 
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests: reqs });
   await setCommentable(token, presentationId);
@@ -392,7 +508,7 @@ async function main() {
   const token = await getAccessToken();
   if (args[0] === 'trash') return trash(token, args.slice(1));
   const prior = existsSync(LEDGER_PATH) ? JSON.parse(await readFile(LEDGER_PATH, 'utf8')) : {};
-  console.log(`Building elegant native deck "${DECK_TITLE}" (4 slides):`);
+  console.log(`Building elegant native deck "${DECK_TITLE}" (9 slides):`);
   const data = await upsertDeck(token, prior[DECK_TITLE]);
   await writeFile(LEDGER_PATH, JSON.stringify({ ...prior, [DECK_TITLE]: data }, null, 2));
   console.log(`\nDone.\n  ${DECK_TITLE}\n  -> ${data.url}\nLedger: ${LEDGER_PATH}`);

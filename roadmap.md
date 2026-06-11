@@ -43,11 +43,63 @@ Hash in, tamper-proof timestamped record out. This is the logging product.
   attest is an EVM write, so it is subject to the non-custodial / propose-then-
   approve rule.
 
-### D. Smart contracts  ("contract")  - BLOCKED
-- `schedule_trigger` and friends - **not available.** `/schedule` returns 404 on
-  the public gateway (verified), and the documented design passed a private key in
-  a URL, which violates the non-custodial rule. Blocked on both a backend (expose
-  `/schedule`) and a redesign (propose-then-approve). **Cannot be in v1.**
+### D. Smart contracts  ("contract")  - WRAPPED AS MCP TOOLS (create gated on signature spec)
+**Updated 2026-06-11:** the full shape is now decoded from the gateway's own
+Swagger (`/v2/api-docs`) and wrapped as tools: `get_contract_types`,
+`estimate_schedule` (live gas/USD quotes with `estimateId`s), `list_schedules`
+(`GET /api/contract/client/{clientId}`), and `create_schedule`.
+- `estimate` is **multipart** with a `contractFile` source upload; `schedule` is
+  multipart with a **`solidityFile`** part (different name), the chosen estimate's
+  gas numbers, an **integer `nonce`**, and a client-side `signature`. The scheme is
+  the gateway's EVM wallet-sign pattern (`AuthRequest {message, signature,
+  walletAddress}` → personal_sign style). Flow: `estimate` → `buyService
+  (SMARTCONTRACT, estimateId)` → `schedule`.
+- **The one remaining gate on `create`:** the exact signed-message format (and
+  whether testnet enforces it) is undocumented - one sentence needed from the
+  backend team. It is a **value-moving write** (deploys a contract, spends
+  gas/tokens), so the tools never fabricate a signature; propose-then-approve.
+
+---
+
+## Current limitations (verified 2026-06-11)
+
+Honest "what doesn't work yet," so nothing is pitched as more than it is.
+
+1. **Single-validator testnet.** `totalNodes: 1`, trust `0.0%`; receipts are marked
+   `single-validator-testnet`. Proofs are real and independently verifiable, but the
+   **multi-validator supermajority** (the strongest, court-grade claim) is mainnet-gated.
+2. **Consensus time reads from `/getTime` (public), not `/api/time/*`.** The
+   `/api/time/time|timestamp|block` family **401s** ("Invalid or expired API key") for
+   logging-scope keys. Use `/getTime` for current consensus time. The **per-block** time
+   (`/api/time/block`) stays gated, so a receipt's `consensusTime` falls back to the
+   gateway record time until a time-scoped key is provisioned.
+3. **ERC-8004 identity not wired by default.** `resolve_agent` returns `unknown` until
+   `EVM_RPC_URL` + registry address + chain are set. The **registry contract itself is
+   live and resolving** (Sepolia `0x7177…Dd09A`, agent #1 → real owner + URI), so this is
+   a config task, not a missing capability.
+4. **Rate limits are tighter than documented.** ~1-2 calls can trip "Rate limit exceeded"
+   with a ~100s cooldown. Any polling / `watch` / streaming must back off aggressively.
+5. **Cross-client *verification* works; cross-client *discovery* does not.**
+   Corrected 2026-06-11: `GET /ledger/{id}` and `POST /verifyAsset` (body = array of
+   hashes) require **no API key** - verified live - so agent-A *can* independently
+   verify any record agent-B presents (present-and-verify; the `verify_cross_party`
+   tool). What remains gated is **discovery/enumeration**: `searchAsset` is
+   clientId-scoped (and `clientId` is a required param), so you cannot look up a
+   record you were never handed. That still needs a public resolver from the
+   network team.
+5b. **The gateway exposes mutable ledger endpoints.** Its Swagger (`/v2/api-docs`,
+   itself publicly exposed along with `/actuator/mappings`) documents `PUT` and
+   `DELETE /ledger/{id}`. The chain anchor still protects integrity, but a mutable
+   gateway DB under a tamper-evidence product is a surface to close - flagged to
+   the network team.
+6. **Evidence package is 2 layers (consensus + ledger).** Per-validator readings and the
+   full evidence stack need endpoints not yet exposed. "Court-admissible" is the
+   destination, not what a generated package proves today.
+7. **No hosted MCP endpoint yet.** `mcp.clockchain.network` is not live. The server runs
+   over **stdio** (HTTP transport exists in code, not deployed), so remote agents run a
+   local/embedded copy rather than connecting to one hosted server.
+8. **TSA lifecycle (commit -> prove -> settle) is spec + demo, not server tools.** It
+   works in the playground; it is not yet exposed as canonical MCP tools.
 
 ---
 

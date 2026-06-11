@@ -9,16 +9,32 @@ import {
 import type {
   AgentReceipt,
   AttestActionInput,
+  AuditEvent,
+  AuditTrail,
   BlockResponse,
+  ComplianceFormat,
+  ComplianceReport,
+  ContractEstimate,
+  ContractParams,
+  EvidencePackage,
+  IdentityEvent,
+  IdentityHistory,
+  IdentityVerification,
+  IdentityWrite,
   LedgerRecord,
   LogEntry,
   LogResponse,
+  PackageVerification,
   ReceiptVerification,
+  ScheduleApproval,
+  ScheduledContract,
   TimeResponse,
   TimestampResponse,
   ValidationBlock,
 } from "./types.js";
 import { buildReceipt, eventHashOf } from "./receipt.js";
+import { canonicalize } from "./receipt.js";
+import { computeHash } from "./hash.js";
 import { resolveAgent } from "./erc8004.js";
 
 /** Standard {success, data, meta} envelope used by some endpoints. */
@@ -39,6 +55,104 @@ type RequestMethod = "GET" | "POST";
 interface RequestOptions {
   method?: RequestMethod;
   body?: unknown;
+}
+
+/** Shared honesty note shipped with every audit trail / report / pack. */
+const AUDIT_HONESTY_NOTE =
+  "Testnet. Designed-for court-grade evidence, not court-tested or certified. " +
+  "Single-validator testnet: consensus/trust numbers are currently 0. Identity " +
+  "binding may be a stub (own-client hash-anchor) until the public resolver lands.";
+
+/**
+ * Compliance format presets. Each is a PARAMETER-driven renderer over the same
+ * assembled trail — adding a regulator is adding a preset here, never a new tool.
+ */
+const COMPLIANCE_PRESETS: Record<
+  ComplianceFormat,
+  (trail: AuditTrail) => Record<string, unknown>
+> = {
+  eu_ai_act_art12: (trail) => ({
+    standard: "EU AI Act Article 12 (record-keeping)",
+    assetReferenceId: trail.assetReferenceId,
+    recordCount: trail.count,
+    automaticallyGeneratedLogs: trail.events.map((e) => ({
+      ledgerId: e.ledgerId,
+      timestamp: e.time,
+      referenceSituation: e.assetReferenceId,
+      contentHash: e.assetHash,
+    })),
+    generatedAt: trail.builtAt,
+  }),
+  sec_17a4: (trail) => ({
+    standard: "SEC Rule 17a-4 (WORM record retention)",
+    assetReferenceId: trail.assetReferenceId,
+    recordCount: trail.count,
+    records: trail.events.map((e) => ({
+      ledgerId: e.ledgerId,
+      dateTime: e.time,
+      recordHash: e.assetHash,
+      reference: e.assetReferenceId,
+    })),
+    generatedAt: trail.builtAt,
+  }),
+  iso_27001: (trail) => ({
+    standard: "ISO/IEC 27001 (information security event log)",
+    assetReferenceId: trail.assetReferenceId,
+    recordCount: trail.count,
+    auditTrail: trail.events.map((e) => ({
+      eventId: e.ledgerId,
+      occurredAt: e.time,
+      integrityHash: e.assetHash,
+      asset: e.assetReferenceId,
+    })),
+    generatedAt: trail.builtAt,
+  }),
+};
+
+/**
+ * Bundled contract source so {@link ClockchainClient.estimateContract} works
+ * without the caller uploading a file. `/api/contract/*` is multipart and
+ * requires a `contractFile` part the network compiles/prices; pass
+ * `contractSource` in the params to override this default.
+ */
+const DEFAULT_CONTRACT_TEMPLATE = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract {{NAME}} {
+  string public name = "{{NAME}}";
+  string public symbol = "DEMO";
+  uint8 public decimals = 18;
+  uint256 public totalSupply = 1000000 ether;
+  mapping(address => uint256) public balanceOf;
+  event Transfer(address indexed from, address indexed to, uint256 value);
+  constructor() { balanceOf[msg.sender] = totalSupply; }
+  function transfer(address to, uint256 value) public returns (bool) {
+    require(balanceOf[msg.sender] >= value, "insufficient");
+    balanceOf[msg.sender] -= value; balanceOf[to] += value;
+    emit Transfer(msg.sender, to, value); return true;
+  }
+}`;
+
+/**
+ * Parse a Clockchain timestamp to epoch milliseconds (UTC). NaN if unparseable.
+ *
+ * CRITICAL: the gateway emits DD-MM-YYYY ("11-06-2026_14:41:29:089" for
+ * consensus, "11-06-2026 16:10:48:544 UTC" for createdTimestamp). These MUST be
+ * pattern-matched BEFORE Date.parse: V8 leniently mis-parses them month-first
+ * (Nov 6 instead of Jun 11). Order: gateway regex → Date.parse (ISO) → epoch.
+ */
+function parseClockTime(value: unknown): number {
+  const s = String(value ?? "");
+  const m = s.match(
+    /^(\d{2})-(\d{2})-(\d{4})[_ ](\d{2}):(\d{2}):(\d{2}):(\d{3})(?: UTC)?$/,
+  );
+  if (m) {
+    return Date.UTC(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +m[6], +m[7]);
+  }
+  const iso = Date.parse(s);
+  if (!isNaN(iso)) return iso;
+  const n = Number(s);
+  if (!isNaN(n) && n > 0) return n > 1e12 ? n : n * 1000; // epoch ms or s
+  return NaN;
 }
 
 /**
@@ -246,7 +360,552 @@ export class ClockchainClient {
     };
   }
 
+  // ===== SCHEDULER (smart-contract /api/contract/*) =====
+
+  /**
+   * GET /api/contract/types -> string[] of supported ERC contract types
+   * (e.g. ["ERC-20","ERC-721",…]). Works with the x-api-key header.
+   */
+  async getContractTypes(): Promise<string[]> {
+    return this.request<string[]>("/api/contract/types");
+  }
+
+  /**
+   * POST /api/contract/estimate — VERIFIED multipart/form-data: form fields
+   * (blockchain, contractType, contractName, scheduledTimestamp, + per-ERC keys)
+   * PLUS a `contractFile` source upload the network compiles/prices. Returns the
+   * gas/USD estimate (least/likely/veryLikely, each with an `estimateId`).
+   *
+   * The "propose" half of propose-then-approve: it prices the deploy and hands
+   * back the params + an estimateId the caller signs. It moves no value. Pass
+   * `contractSource` in params to override the bundled template.
+   */
+  async estimateContract(params: ContractParams): Promise<ContractEstimate> {
+    // VERIFIED (Swagger): the estimate file part is named `contractFile`.
+    const estimate = await this.requestContractMultipart<unknown>(
+      "/api/contract/estimate",
+      params,
+      "contractFile",
+    );
+    return { estimate, params };
+  }
+
+  /**
+   * POST /api/contract/schedule — VERIFIED multipart/form-data (2026-06-11,
+   * gateway Swagger /v2/api-docs, live-tested). The file part is named
+   * `solidityFile` (NOT `contractFile`, which is the estimate's part). Fields:
+   * blockchain, clientId, walletId, contractName, contractType, deadline (int),
+   * gasFees/minGasFees/maxGasFees (numbers from the chosen estimate),
+   * totalPayablePrice, totalPayablePriceUnit, trustPercentage (int), `nonce`
+   * (INTEGER), `signature` (string). Flow per Swagger: estimate →
+   * buyService(SMARTCONTRACT, estimateId) → schedule.
+   *
+   * SIGNATURE SCHEME (decoded): the gateway's EVM wallet-sign pattern — its
+   * AuthRequest is {message, signature, walletAddress} → personal_sign style.
+   * The EXACT signed-message format and any testnet enforcement are UNCONFIRMED;
+   * NEVER fabricate a signature for a demo. NON-CUSTODIAL: the server never
+   * signs; the caller signs client-side and we only forward signature + nonce.
+   * This deploys a time-triggered contract — a value-moving write.
+   */
+  async scheduleContract(
+    params: ContractParams,
+    approval: ScheduleApproval,
+  ): Promise<ScheduledContract> {
+    const result = await this.requestContractMultipart<unknown>(
+      "/api/contract/schedule",
+      {
+        ...params,
+        ...approval,
+        clientId: this.config.clientId,
+        walletId: this.config.walletId,
+      },
+      "solidityFile",
+    );
+    return { result, params, approval };
+  }
+
+  /**
+   * GET /api/contract/client/{clientId} — the REAL list endpoint (VERIFIED;
+   * returns {success, data:[...]}). Replaces the guessed /api/contract/list,
+   * which 404s. Unwraps the envelope; returns [] on error.
+   */
+  async listScheduled(): Promise<unknown[]> {
+    const res = await this.request<SuccessEnvelope<unknown[]> | unknown[]>(
+      `/api/contract/client/${encodeURIComponent(this.config.clientId)}`,
+    ).catch(() => [] as unknown[]);
+    if (Array.isArray(res)) return res;
+    if (
+      res &&
+      typeof res === "object" &&
+      Array.isArray((res as SuccessEnvelope<unknown[]>).data)
+    ) {
+      return (res as SuccessEnvelope<unknown[]>).data;
+    }
+    return [];
+  }
+
+  // ===== AUDIT (derivative — composes Time + Logging + Identity) =====
+
+  /**
+   * Assemble the attested history for an asset into an ordered trail. Pure
+   * composition: searchAsset to find the records, then enrich each with its
+   * block time. Mints nothing — every event was already attested by Logging/Time.
+   */
+  async generateAuditTrail(assetReferenceId: string): Promise<AuditTrail> {
+    const records = await this.searchAsset(assetReferenceId);
+    const events: AuditEvent[] = [];
+    for (const record of records) {
+      let time: string | null = null;
+      if (record.blockHeight != null) {
+        const block = await this.getBlock(record.blockHeight).catch(() => null);
+        time = block?.blockTime ?? null;
+      }
+      events.push({
+        ledgerId: record.ledgerId,
+        assetReferenceId: record.assetReferenceId,
+        assetHash: record.assetHash,
+        time,
+        blockHeight: record.blockHeight,
+        additionalInfo: record.additionalInfo,
+      });
+    }
+    // Order by block height (pending/null last), then by creation order.
+    events.sort((a, b) => {
+      const ah = a.blockHeight == null ? Infinity : Number(a.blockHeight);
+      const bh = b.blockHeight == null ? Infinity : Number(b.blockHeight);
+      return ah - bh;
+    });
+    return {
+      assetReferenceId,
+      events,
+      count: events.length,
+      builtAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Render an audit trail into a compliance PRESET. `format` is a PARAMETER —
+   * adding a regulator is adding a preset, never a new tool. The document is a
+   * structured object; the reportHash is deterministic (canonical hash) so two
+   * parties hash to the same digest.
+   */
+  async generateComplianceReport(
+    assetReferenceId: string,
+    format: ComplianceFormat,
+  ): Promise<ComplianceReport> {
+    const trail = await this.generateAuditTrail(assetReferenceId);
+    const document = COMPLIANCE_PRESETS[format](trail);
+    const reportHash = computeHash(canonicalize({ format, document }));
+    return {
+      format,
+      assetReferenceId,
+      reportHash,
+      document,
+      honestyNote: AUDIT_HONESTY_NOTE,
+    };
+  }
+
+  /**
+   * Build a self-contained evidence packet for one ledger record: the record +
+   * block + validation + a plain-English "how to verify without trusting
+   * Clockchain" note. The pkgHash is a canonical digest so re-export is
+   * deterministic.
+   */
+  async buildEvidencePackage(ledgerId: string): Promise<EvidencePackage> {
+    const record = await this.getLedgerEntry(ledgerId);
+    let block: BlockResponse | null = null;
+    let validation: ValidationBlock | null = null;
+    if (record.blockHeight != null) {
+      block = await this.getBlock(record.blockHeight).catch(() => null);
+      validation = await this.getValidationBlock(record.blockHeight).catch(
+        () => null,
+      );
+    }
+    const plainEnglish =
+      `Ledger record ${record.ledgerId} anchored asset hash ${record.assetHash} ` +
+      `(reference ${record.assetReferenceId}) at block height ` +
+      `${record.blockHeight ?? "pending"}. To verify without trusting Clockchain: ` +
+      "recompute the SHA-256 hash of your original asset and confirm it equals " +
+      "the anchored assetHash above, then fetch this ledgerId from the public " +
+      "Clockchain ledger and confirm the anchored hash and block match this packet.";
+    const pkgHash = computeHash(
+      canonicalize({ record, block, validation, plainEnglish }),
+    );
+    return {
+      packageId: `pkg_${record.ledgerId}`,
+      pkgHash,
+      record,
+      block,
+      validation,
+      plainEnglish,
+      honestyNote: AUDIT_HONESTY_NOTE,
+    };
+  }
+
+  /**
+   * Recompute an evidence package's pkgHash and compare its anchored hash to the
+   * ledger. Reuses the same canonicalization used to build the packet, so a
+   * faithful packet round-trips to the same digest. Resolves the anchored hash
+   * against Clockchain, never a local store.
+   */
+  async verifyPackage(pkg: EvidencePackage): Promise<PackageVerification> {
+    const recomputedPkgHash = computeHash(
+      canonicalize({
+        record: pkg.record,
+        block: pkg.block,
+        validation: pkg.validation,
+        plainEnglish: pkg.plainEnglish,
+      }),
+    );
+    const record = await this.getLedgerEntry(pkg.record.ledgerId);
+    const anchorMatch = record.assetHash === pkg.record.assetHash;
+    const pkgHashMatch = recomputedPkgHash === pkg.pkgHash;
+    return {
+      valid: pkgHashMatch && anchorMatch,
+      pkgHashMatch,
+      anchorMatch,
+      recomputedPkgHash,
+      anchoredHash: record.assetHash,
+      note:
+        "Verified against the Clockchain ledger. Testnet; designed-for " +
+        "court-grade, not certified.",
+    };
+  }
+
+  // ===== AGENT IDENTITY (writes via the /log hash-anchor convention) =====
+
+  /**
+   * Mint an agent identity by anchoring SHA-256 of the canonical document under
+   * the `did:mint:{did}` convention. The document stays client-side — only its
+   * hash is anchored (additionalInfo is plain-text and strips structure).
+   */
+  async mintIdentity(
+    did: string,
+    document: unknown,
+  ): Promise<IdentityWrite> {
+    const docHash = computeHash(canonicalize(document));
+    const assetReferenceId = `did:mint:${did}`;
+    const log = await this.log({
+      assetHash: docHash,
+      assetReferenceId,
+      additionalInfo: "agent identity mint",
+    });
+    return {
+      did,
+      assetReferenceId,
+      docHash,
+      ledgerId: log.ledgerId,
+      blockHeight: log.blockHeight,
+      status: "active",
+    };
+  }
+
+  /**
+   * Revoke an agent identity under the `did:revoke:{did}` convention. The
+   * revoke-T is attested by the anchor's block time (load-bearing for valid-at-T).
+   */
+  async revokeIdentity(did: string): Promise<IdentityWrite> {
+    const assetReferenceId = `did:revoke:${did}`;
+    const docHash = computeHash(canonicalize({ revoke: did }));
+    const log = await this.log({
+      assetHash: docHash,
+      assetReferenceId,
+      additionalInfo: "agent identity revoke",
+    });
+    return {
+      did,
+      assetReferenceId,
+      docHash,
+      ledgerId: log.ledgerId,
+      blockHeight: log.blockHeight,
+      status: "revoked",
+    };
+  }
+
+  /**
+   * Delegate a scoped, time-boxed subset of authority from parent to child under
+   * the `did:delegate:{parent}:{child}` convention. Anchors the hash of the
+   * delegation document; the document itself stays client-side.
+   */
+  async delegateAuthority(args: {
+    parentDid: string;
+    childDid: string;
+    scope: string[];
+    until: string;
+  }): Promise<IdentityWrite> {
+    const { parentDid, childDid, scope, until } = args;
+    const assetReferenceId = `did:delegate:${parentDid}:${childDid}`;
+    const docHash = computeHash(
+      canonicalize({ parent: parentDid, child: childDid, scope, until }),
+    );
+    const log = await this.log({
+      assetHash: docHash,
+      assetReferenceId,
+      additionalInfo: "agent authority delegation",
+    });
+    return {
+      did: childDid,
+      assetReferenceId,
+      docHash,
+      ledgerId: log.ledgerId,
+      blockHeight: log.blockHeight,
+      status: "delegated",
+    };
+  }
+
+  /**
+   * Assemble a DID's attested activity history by exact-match searching the
+   * mint / revoke / delegate references, then ordering by block height. Reuses
+   * the Logging recall path; mints nothing.
+   */
+  async getIdentityHistory(did: string): Promise<IdentityHistory> {
+    const refs: Array<{ type: "mint" | "revoke" | "delegate"; ref: string }> = [
+      { type: "mint", ref: `did:mint:${did}` },
+      { type: "revoke", ref: `did:revoke:${did}` },
+    ];
+    const events: IdentityHistory["events"] = [];
+    for (const { type, ref } of refs) {
+      const records = await this.searchAsset(ref).catch(() => []);
+      for (const record of records) {
+        const time = await this.consensusTimeFor(record.blockHeight);
+        events.push(this.toIdentityEvent(type, record, time));
+      }
+    }
+    // Delegations are keyed by `did:delegate:${did}:${child}`; searchAsset is
+    // exact-match, so a child-agnostic prefix search is not available. We try the
+    // self-delegation ref as a best-effort (full enumeration is backend-gated).
+    const delegateRecords = await this.searchAsset(
+      `did:delegate:${did}:${did}`,
+    ).catch(() => []);
+    for (const record of delegateRecords) {
+      const time = await this.consensusTimeFor(record.blockHeight);
+      events.push(this.toIdentityEvent("delegate", record, time));
+    }
+    events.sort((a, b) => {
+      const ah = a.blockHeight == null ? Infinity : Number(a.blockHeight);
+      const bh = b.blockHeight == null ? Infinity : Number(b.blockHeight);
+      return ah - bh;
+    });
+    return { did, events };
+  }
+
+  /**
+   * Valid-at-T — the dispute-winning query: was this agent's identity authorized
+   * at the instant T? Computed from attested mint-T and revoke-T: authorized iff
+   * a mint exists at or before T and no revoke exists at or before T.
+   * acted-at-T1 vs revoked-at-T2 with T1 > T2 ⟹ provably unauthorized.
+   *
+   * This is identity VERIFICATION (was the binding valid at T?), NOT
+   * authentication. Both timestamps are independently attested on-chain; any
+   * counterparty can re-verify them keylessly via {@link publicGetLedger}.
+   */
+  async verifyIdentityAt(
+    did: string,
+    atIso: string,
+  ): Promise<IdentityVerification> {
+    const at = Date.parse(atIso);
+    if (isNaN(at)) {
+      throw new ApiError(
+        "Invalid 'at' time — pass RFC 3339, e.g. 2026-06-11T14:00:00Z",
+        400,
+      );
+    }
+    const history = await this.getIdentityHistory(did);
+    const mintsBefore = history.events.filter(
+      (e) => e.type === "mint" && this.instantOf(e) <= at,
+    );
+    const revokesBefore = history.events.filter(
+      (e) => e.type === "revoke" && this.instantOf(e) <= at,
+    );
+    const lastMint = mintsBefore[mintsBefore.length - 1];
+    const lastRevoke = revokesBefore[revokesBefore.length - 1];
+    const authorized = !!lastMint && !lastRevoke;
+    return {
+      did,
+      at: atIso,
+      authorized,
+      reason: !lastMint
+        ? "No attested mint exists at or before T — identity did not exist yet."
+        : lastRevoke
+          ? "An attested revoke exists at or before T — authority had been withdrawn."
+          : "An attested mint exists at or before T and no revoke had occurred — authorized at T.",
+      mintedAt: lastMint ? String(lastMint.time ?? lastMint.recordedAt) : null,
+      revokedAt: lastRevoke
+        ? String(lastRevoke.time ?? lastRevoke.recordedAt)
+        : null,
+      evidence: {
+        mintLedgerId: lastMint?.ledgerId,
+        revokeLedgerId: lastRevoke?.ledgerId,
+      },
+      note:
+        "Both timestamps are independently attested on-chain; any counterparty " +
+        "can re-verify them keylessly via /ledger/{id}. Own-client history " +
+        "(cross-client discovery is backend-gated).",
+    };
+  }
+
+  // ===== CROSS-PARTY (keyless) VERIFICATION =====
+  // VERIFIED live (2026-06-11): GET /ledger/{id} and POST /verifyAsset require
+  // NO api key. Any counterparty holding a receipt (ledgerId) or just the hash
+  // can verify against the network WITHOUT a Clockchain account — present-and-
+  // verify works cross-party TODAY. (Only DISCOVERY/enumeration — searchAsset —
+  // is clientId-scoped.) This is the trust-minimizing payoff: an outside party
+  // needs no privileged access to confirm an anchor.
+
+  /**
+   * Keyless ledger read (GET /ledger/{id}, NO x-api-key) — what an outside
+   * counterparty does with a receipt's ledgerId, with no Clockchain account.
+   */
+  async publicGetLedger(ledgerId: string): Promise<LedgerRecord> {
+    return this.keylessRequest<LedgerRecord>(
+      `/ledger/${encodeURIComponent(ledgerId)}`,
+    );
+  }
+
+  /**
+   * Keyless verify-by-hash (POST /verifyAsset, body a JSON array of hashes, NO
+   * x-api-key) — anyone holding the hash can confirm it is anchored, without an
+   * account. Proves Clockchain stores no privileged gate on present-and-verify.
+   */
+  async publicVerifyHash(hash: string): Promise<Record<string, unknown>> {
+    return this.keylessRequest<Record<string, unknown>>("/verifyAsset", {
+      method: "POST",
+      body: [hash],
+    });
+  }
+
   // --- internals ---
+
+  /**
+   * Best-effort consensus (block) time for a height — null when pending or on
+   * any lookup error. Used to enrich identity history with attested time.
+   */
+  private async consensusTimeFor(
+    blockHeight: string | null,
+  ): Promise<string | null> {
+    if (blockHeight == null) return null;
+    const block = await this.getBlock(blockHeight).catch(() => null);
+    return block?.blockTime ?? null;
+  }
+
+  /**
+   * Resolve an identity event to an epoch-ms instant for valid-at-T comparison.
+   * Prefers the attested consensus `time`, falling back to `recordedAt`. Both
+   * are parsed with {@link parseClockTime} (gateway DD-MM-YYYY formats FIRST).
+   */
+  private instantOf(event: IdentityEvent): number {
+    const t = parseClockTime(event.time);
+    return isNaN(t) ? parseClockTime(event.recordedAt) : t;
+  }
+
+  /**
+   * Keyless HTTP entry point: deliberately sends NO x-api-key, proving cross-
+   * party present-and-verify needs no privileged access. Parses JSON; maps a
+   * non-2xx to an ApiError.
+   */
+  private async keylessRequest<T>(
+    path: string,
+    opts: RequestOptions = {},
+  ): Promise<T> {
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (opts.body !== undefined) {
+      headers["content-type"] = "application/json";
+    }
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: opts.method ?? "GET",
+      headers, // NO x-api-key — that is the point
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    });
+    if (!res.ok) {
+      throw new ApiError(
+        `Clockchain request failed: ${res.status} ${res.statusText}`,
+        res.status,
+      );
+    }
+    return (await res.json()) as T;
+  }
+
+  /**
+   * Multipart POST to /api/contract/* (the VERIFIED shape): form fields + a
+   * Solidity source upload. The file-part name DIFFERS per endpoint (VERIFIED,
+   * Swagger): `contractFile` for /estimate, `solidityFile` for /schedule — pass
+   * it via `fileField`. Uses the bundled template when no `contractSource` is
+   * given. Sets only x-api-key (fetch adds the multipart boundary itself).
+   * Non-custodial: any signature/nonce are caller-supplied.
+   */
+  private async requestContractMultipart<T>(
+    path: string,
+    params: Record<string, string | number>,
+    fileField: string = "contractFile",
+  ): Promise<T> {
+    const { contractSource, ...fields } = params as Record<string, string | number> & {
+      contractSource?: string;
+    };
+    const name = String(fields.contractName ?? "Contract");
+    const source =
+      typeof contractSource === "string" && contractSource.length > 0
+        ? contractSource
+        : DEFAULT_CONTRACT_TEMPLATE.replace(/\{\{NAME\}\}/g, name);
+
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(fields)) {
+      if (v === undefined || v === null) continue;
+      fd.append(k, String(v));
+    }
+    fd.append(fileField, new Blob([source], { type: "text/plain" }), `${name}.sol`);
+
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: { "x-api-key": this.config.apiKey, accept: "application/json" },
+      body: fd,
+    });
+    const raw = await res.text();
+    let parsed: unknown = undefined;
+    if (raw.length > 0) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = raw;
+      }
+    }
+    const textForMatch = typeof parsed === "string" ? parsed : JSON.stringify(parsed ?? "");
+    if (res.status === 429 || /rate limit exceeded/i.test(textForMatch)) {
+      throw new RateLimitError("Rate limit exceeded", res.status, parsed);
+    }
+    if (res.status === 401) {
+      throw new AuthError("Authentication failed (check x-api-key)", 401, parsed);
+    }
+    if (!res.ok) {
+      throw new ApiError(
+        `Clockchain request failed: ${res.status} ${res.statusText}`,
+        res.status,
+        parsed,
+      );
+    }
+    return parsed as T;
+  }
+
+  /**
+   * Map a ledger record into an ordered identity-history event. Carries the
+   * gateway's createdTimestamp as `recordedAt` so valid-at-T can fall back to it
+   * when consensus `time` is not (yet) resolved. `time` is enriched separately
+   * by {@link getIdentityHistory} (best-effort block-time lookup).
+   */
+  private toIdentityEvent(
+    type: "mint" | "revoke" | "delegate",
+    record: LedgerRecord,
+    time: string | null = null,
+  ): IdentityHistory["events"][number] {
+    return {
+      type,
+      assetReferenceId: record.assetReferenceId,
+      ledgerId: record.ledgerId,
+      assetHash: record.assetHash,
+      time,
+      blockHeight: record.blockHeight,
+      recordedAt: record.createdTimestamp,
+    };
+  }
 
   private isErrorEnvelope(value: unknown): value is ErrorEnvelope {
     return (

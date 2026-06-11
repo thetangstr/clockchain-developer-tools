@@ -7,6 +7,10 @@ import {
   resolveAgent,
   type AgentReceipt,
   type ClockchainConfig,
+  type ComplianceFormat,
+  type ContractParams,
+  type EvidencePackage,
+  type ScheduleApproval,
 } from "@clockchain/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -77,10 +81,12 @@ async function run(name: string, work: () => Promise<unknown>) {
 }
 
 /**
- * Register all Clockchain tools on the given MCP server.
+ * Register all Clockchain tools on the given MCP server, grouped into the five
+ * lane-A modules: Time, Logging, Agent Identity, Scheduler, Audit.
  *
- * NOTE: `schedule_trigger` is intentionally omitted. The gateway returns 404 for
- * /schedule, and on-chain scheduling conflicts with the non-custodial model.
+ * Scheduling wraps the live /api/contract/* surface (NOT the 404'd /schedule)
+ * and stays non-custodial: create_schedule forwards a caller-supplied signature
+ * + nonce; the server never holds a key.
  */
 export function registerTools(
   server: McpServer,
@@ -90,6 +96,8 @@ export function registerTools(
   // Optional per-process cap on successful log writes (MCP_LOG_BUDGET).
   // Disabled when unset -> identical to v1.
   const budget = createLogBudget();
+
+  // ===== TIME MCP =====
 
   server.registerTool(
     "get_time",
@@ -144,6 +152,8 @@ export function registerTools(
     async ({ height }) =>
       run("get_validation", () => client.getValidationBlock(height)),
   );
+
+  // ===== LOGGING MCP =====
 
   server.registerTool(
     "log_action",
@@ -286,6 +296,10 @@ export function registerTools(
       }),
   );
 
+  // ===== AGENT IDENTITY MCP =====
+  // Read/attestation surface: ERC-8004 resolve + agent-attested receipts. The
+  // hash-anchored identity writes (mint/revoke/delegate/history) are below.
+
   server.registerTool(
     "resolve_agent",
     {
@@ -349,5 +363,389 @@ export function registerTools(
     },
     async ({ receipt }) =>
       run("verify_receipt", () => client.verifyReceipt(receipt as unknown as AgentReceipt)),
+  );
+
+  // ===== SCHEDULER MCP =====
+  // Wraps the live /api/contract/* surface. Testnet; non-custodial (the caller
+  // signs — the server NEVER holds a key); create_schedule deploys a
+  // time-triggered contract, which is a value-moving write.
+
+  server.registerTool(
+    "get_contract_types",
+    {
+      title: "List schedulable contract types",
+      description:
+        "List the ERC contract types the scheduler can deploy (e.g. ERC-20, " +
+        "ERC-721). Testnet. Read-only; moves no value.",
+      inputSchema: {},
+    },
+    async () => run("get_contract_types", () => client.getContractTypes()),
+  );
+
+  server.registerTool(
+    "estimate_schedule",
+    {
+      title: "Estimate a scheduled contract deploy (propose)",
+      description:
+        "Propose step of propose-then-approve: price a time-triggered contract " +
+        "deploy and return the exact params to sign. Testnet; non-custodial (the " +
+        "caller signs, the server never holds a key). Required params include " +
+        "blockchain, contractType, contractName, and scheduledTimestamp (epoch " +
+        "seconds), plus per-ERC fields (symbol/supply/…). Moves no value.",
+      inputSchema: {
+        params: z
+          .record(z.string(), z.union([z.string(), z.number()]))
+          .describe(
+            "Contract params (forwarded as query params): blockchain, " +
+              "contractType, contractName, scheduledTimestamp, plus per-ERC fields.",
+          ),
+      },
+    },
+    async ({ params }) =>
+      run("estimate_schedule", () =>
+        client.estimateContract(params as ContractParams),
+      ),
+  );
+
+  server.registerTool(
+    "create_schedule",
+    {
+      title: "Create a scheduled contract deploy (approve)",
+      description:
+        "Approve step of propose-then-approve: deploy a time-triggered contract. " +
+        "Accepts the params from estimate_schedule PLUS the gas numbers from the " +
+        "chosen estimate, an INTEGER nonce, and a caller-supplied wallet " +
+        "signature. The signature is a NON-CUSTODIAL EVM wallet signature " +
+        "(personal_sign pattern) — the caller signs client-side and the server " +
+        "NEVER holds a private key. The exact signed-message format and any " +
+        "testnet enforcement are unconfirmed; NEVER fabricate a signature. " +
+        "Testnet. This is a value-moving write.",
+      inputSchema: {
+        params: z
+          .record(z.string(), z.union([z.string(), z.number()]))
+          .describe("The same params priced by estimate_schedule."),
+        gas_fees: z.number().describe("gasFees from the chosen estimate."),
+        min_gas_fees: z.number().optional().describe("minGasFees from the chosen estimate."),
+        max_gas_fees: z.number().optional().describe("maxGasFees from the chosen estimate."),
+        total_payable_price: z.number().describe("totalPayablePrice from the chosen estimate."),
+        total_payable_price_unit: z
+          .string()
+          .optional()
+          .describe('Price unit, e.g. "ETH".'),
+        nonce: z
+          .number()
+          .int()
+          .describe("INTEGER nonce (per Swagger; NOT a string)."),
+        signature: z
+          .string()
+          .describe(
+            "Caller-produced EVM wallet signature (personal_sign pattern). " +
+              "Non-custodial; never fabricated.",
+          ),
+        deadline: z.number().int().optional().describe("Deadline (epoch int)."),
+        trust_percentage: z.number().int().optional().describe("trustPercentage (int)."),
+      },
+    },
+    async ({
+      params,
+      gas_fees,
+      min_gas_fees,
+      max_gas_fees,
+      total_payable_price,
+      total_payable_price_unit,
+      nonce,
+      signature,
+      deadline,
+      trust_percentage,
+    }) =>
+      run("create_schedule", () => {
+        const approval: ScheduleApproval = {
+          gasFees: gas_fees,
+          minGasFees: min_gas_fees,
+          maxGasFees: max_gas_fees,
+          totalPayablePrice: total_payable_price,
+          totalPayablePriceUnit: total_payable_price_unit,
+          nonce,
+          signature,
+          deadline,
+          trustPercentage: trust_percentage,
+        };
+        return client.scheduleContract(params as ContractParams, approval);
+      }),
+  );
+
+  server.registerTool(
+    "list_schedules",
+    {
+      title: "List scheduled contracts",
+      description:
+        "List the scheduled contracts for the configured client via the real " +
+        "endpoint GET /api/contract/client/{clientId} (returns {success, data}). " +
+        "Testnet; read-only.",
+      inputSchema: {},
+    },
+    async () => run("list_schedules", () => client.listScheduled()),
+  );
+
+  // ===== AUDIT MCP =====
+  // Derivative: composes Time + Logging + Identity data and exports it in
+  // regulator PRESETS. Mints no new primitive; formats are parameters, never
+  // bespoke per-client tools. Testnet; designed-for court-grade, not certified.
+
+  server.registerTool(
+    "generate_audit_trail",
+    {
+      title: "Assemble an attested audit trail",
+      description:
+        "Assemble the attested history for an asset into an ordered trail " +
+        "(events with hashes + block times). Derivative — composes existing " +
+        "Logging + Time data, mints nothing. Testnet.",
+      inputSchema: {
+        asset_reference_id: z
+          .string()
+          .describe("Exact assetReferenceId to assemble a trail for."),
+      },
+    },
+    async ({ asset_reference_id }) =>
+      run("generate_audit_trail", () =>
+        client.generateAuditTrail(asset_reference_id),
+      ),
+  );
+
+  server.registerTool(
+    "generate_compliance_report",
+    {
+      title: "Export a trail in a compliance preset",
+      description:
+        "Render the assembled trail into a regulator PRESET. `format` is a " +
+        "parameter — adding a regulator is a preset, never a new tool. " +
+        "Deterministic: same asset + format yields the same reportHash. Testnet; " +
+        "designed-for court-grade, not certified.",
+      inputSchema: {
+        asset_reference_id: z
+          .string()
+          .describe("Exact assetReferenceId to report on."),
+        format: z
+          .enum(["eu_ai_act_art12", "sec_17a4", "iso_27001"])
+          .describe("Compliance preset to render."),
+      },
+    },
+    async ({ asset_reference_id, format }) =>
+      run("generate_compliance_report", () =>
+        client.generateComplianceReport(
+          asset_reference_id,
+          format as ComplianceFormat,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "build_evidence_package",
+    {
+      title: "Build a self-contained evidence package",
+      description:
+        "Build a self-contained packet for one ledger record: the record + block " +
+        "+ validation + a plain-English 'how to verify without trusting " +
+        "Clockchain' note. Deterministic pkgHash. Testnet.",
+      inputSchema: {
+        ledger_id: z.string().describe("The ledgerId to package."),
+      },
+    },
+    async ({ ledger_id }) =>
+      run("build_evidence_package", () => client.buildEvidencePackage(ledger_id)),
+  );
+
+  server.registerTool(
+    "verify_package",
+    {
+      title: "Verify an evidence package",
+      description:
+        "Recompute an evidence package's hash and compare its anchored hash " +
+        "against the Clockchain ledger (never a local store). Returns a match " +
+        "boolean. Pass the full package object from build_evidence_package.",
+      inputSchema: {
+        package: z
+          .record(z.string(), z.unknown())
+          .describe("The package object from build_evidence_package."),
+      },
+    },
+    async ({ package: pkg }) =>
+      run("verify_package", () =>
+        client.verifyPackage(pkg as unknown as EvidencePackage),
+      ),
+  );
+
+  // ===== AGENT IDENTITY MCP (writes) =====
+  // Hash-anchored identity writes via the /log convention (did:mint / did:revoke
+  // / did:delegate). This is identity VERIFICATION (valid-at-T), NOT
+  // authentication. Testnet; metadata is hash-anchored (additionalInfo strips
+  // structure, so the document stays client-side); cross-agent verification and
+  // enumeration are backend-gated.
+
+  server.registerTool(
+    "mint_identity",
+    {
+      title: "Mint an agent identity",
+      description:
+        "Anchor SHA-256 of the canonical identity document under did:mint:{did}. " +
+        "The document stays client-side; only its hash is anchored. This is " +
+        "identity VERIFICATION (valid-at-T), not authentication. Testnet; " +
+        "metadata is hash-anchored (additionalInfo strips structure). " +
+        "Cross-agent verification / enumeration are backend-gated. Write.",
+      inputSchema: {
+        did: z.string().describe("The DID to mint (e.g. did:clockchain:…)."),
+        document: z
+          .record(z.string(), z.unknown())
+          .describe("The identity document (kept client-side; only hashed)."),
+      },
+    },
+    async ({ did, document }) =>
+      run("mint_identity", async () => {
+        budget.check();
+        const result = await client.mintIdentity(did, document);
+        budget.record();
+        return result;
+      }),
+  );
+
+  server.registerTool(
+    "revoke_identity",
+    {
+      title: "Revoke an agent identity",
+      description:
+        "Anchor a revocation under did:revoke:{did}. The revoke-T is attested " +
+        "(load-bearing for valid-at-T). Identity VERIFICATION (valid-at-T), not " +
+        "authentication. Testnet; hash-anchored; cross-agent/enumerate are " +
+        "backend-gated. Write.",
+      inputSchema: {
+        did: z.string().describe("The DID to revoke."),
+      },
+    },
+    async ({ did }) =>
+      run("revoke_identity", async () => {
+        budget.check();
+        const result = await client.revokeIdentity(did);
+        budget.record();
+        return result;
+      }),
+  );
+
+  server.registerTool(
+    "delegate_authority",
+    {
+      title: "Delegate scoped, time-boxed authority",
+      description:
+        "Anchor a scoped, time-boxed delegation under " +
+        "did:delegate:{parent}:{child}. The scope SHOULD be a subset of the " +
+        "parent's capabilities. Identity VERIFICATION (valid-at-T), not " +
+        "authentication. Testnet; hash-anchored (document stays client-side); " +
+        "cross-agent/enumerate are backend-gated. Write.",
+      inputSchema: {
+        parent_did: z.string().describe("The delegating parent DID."),
+        child_did: z.string().describe("The delegate (child) DID."),
+        scope: z
+          .array(z.string())
+          .describe("The delegated capabilities (a subset of the parent's)."),
+        until: z
+          .string()
+          .describe("Delegation expiry (RFC 3339). Time-boxed; expiry is a valid-at-T fact."),
+      },
+    },
+    async ({ parent_did, child_did, scope, until }) =>
+      run("delegate_authority", async () => {
+        budget.check();
+        const result = await client.delegateAuthority({
+          parentDid: parent_did,
+          childDid: child_did,
+          scope,
+          until,
+        });
+        budget.record();
+        return result;
+      }),
+  );
+
+  server.registerTool(
+    "get_identity_history",
+    {
+      title: "Get a DID's attested activity history",
+      description:
+        "Assemble a DID's mint / revoke / delegate history (ordered) by " +
+        "exact-match search over the identity references. Identity VERIFICATION " +
+        "(valid-at-T), not authentication. Testnet; cross-agent enumeration is " +
+        "backend-gated (searchAsset is exact-match + client-scoped). Read-only.",
+      inputSchema: {
+        did: z.string().describe("The DID to assemble history for."),
+      },
+    },
+    async ({ did }) =>
+      run("get_identity_history", () => client.getIdentityHistory(did)),
+  );
+
+  server.registerTool(
+    "verify_identity_at",
+    {
+      title: "Verify a DID's authorization VALID-AT-T",
+      description:
+        "VALID-AT-T, the dispute-winning query: was this DID's identity " +
+        "authorized at the instant T? Authorized iff an attested mint exists at " +
+        "or before T and no revoke does (acted-at-T1 vs revoked-at-T2 with " +
+        "T1 > T2 ⟹ provably unauthorized). This is identity VERIFICATION (was " +
+        "the binding valid at T?), not authentication. Both timestamps are " +
+        "independently attested on-chain; a counterparty can re-verify them " +
+        "keylessly via /ledger/{id}. Testnet; own-client history (cross-client " +
+        "discovery is backend-gated). Read-only.",
+      inputSchema: {
+        did: z.string().describe("The DID to check authorization for."),
+        at: z
+          .string()
+          .describe("The instant T to check (RFC 3339, e.g. 2026-06-11T14:00:00Z)."),
+      },
+    },
+    async ({ did, at }) =>
+      run("verify_identity_at", () => client.verifyIdentityAt(did, at)),
+  );
+
+  // ===== CROSS-PARTY (keyless) VERIFICATION MCP =====
+  // VERIFIED live: GET /ledger/{id} and POST /verifyAsset need NO api key. This
+  // is what an outside counterparty runs with no Clockchain account — present-
+  // and-verify works cross-party today. (Only discovery/searchAsset is scoped.)
+
+  server.registerTool(
+    "verify_cross_party",
+    {
+      title: "Cross-party (keyless) verification",
+      description:
+        "KEYLESS verification — what an outside counterparty runs with NO " +
+        "Clockchain account. Pass a ledger_id to read the anchored record (GET " +
+        "/ledger/{id}) and/or a hash to confirm it is anchored (POST " +
+        "/verifyAsset). Neither call sends an api key, proving present-and-verify " +
+        "needs no privileged access. Testnet; read-only. Provide at least one of " +
+        "ledger_id or hash.",
+      inputSchema: {
+        ledger_id: z
+          .string()
+          .optional()
+          .describe("A receipt's ledgerId to read keylessly (GET /ledger/{id})."),
+        hash: z
+          .string()
+          .optional()
+          .describe("An asset hash to verify keylessly (POST /verifyAsset)."),
+      },
+    },
+    async ({ ledger_id, hash }) =>
+      run("verify_cross_party", async () => {
+        if (!ledger_id && !hash) {
+          throw new ApiError(
+            "Provide at least one of ledger_id or hash.",
+            400,
+          );
+        }
+        const ledger = ledger_id
+          ? await client.publicGetLedger(ledger_id)
+          : null;
+        const verification = hash ? await client.publicVerifyHash(hash) : null;
+        return { ledger, verification };
+      }),
   );
 }
