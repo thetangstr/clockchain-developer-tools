@@ -100,6 +100,30 @@ claude mcp add clockchain --transport http https://mcp.<domain>/mcp \
   --header "x-api-key: <your tester token>"
 ```
 
+### Claude Cowork / claude.ai / Claude Desktop (cloud connectors)
+
+These clients reach your MCP server **from Anthropic's cloud, not from your
+machine** - so the **local stdio install above does NOT work for them**. They
+require the **remote HTTPS endpoint**, and it must be reachable over the public
+internet from Anthropic's IP ranges (a server on localhost, a VPN, or behind a
+firewall won't connect).
+
+> **Status:** the hosted endpoint (`mcp.clockchain.network`) isn't live yet - see
+> [`ROADMAP.md`](ROADMAP.md) (this is the Phase 2 / "hosted MCP" work). Until it's
+> up, use **Claude Code** with the local stdio install above; Cowork/claude.ai/
+> Desktop can't be connected to Clockchain yet.
+
+Once the endpoint is hosted, add it as a **custom connector**:
+1. In Cowork (or claude.ai / Desktop): **Settings → Connectors → Add custom connector**.
+2. Paste the MCP server URL, e.g. `https://mcp.clockchain.network/mcp`.
+3. Authenticate when prompted (OAuth or the per-user token the host issues - the
+   Clockchain key stays server-side).
+
+See Anthropic's guide: *Get started with custom connectors using remote MCP*
+(support.claude.com). The server already speaks the right protocol
+(StreamableHTTP, `packages/mcp-server/src/http.ts`); only hosting + a
+connector-compatible auth layer remain.
+
 ---
 
 ## Network & tokens at a glance
