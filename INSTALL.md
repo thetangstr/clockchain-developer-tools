@@ -1,8 +1,9 @@
 # Install the Clockchain MCP server
 
-Add Clockchain's tools (consensus time, notarization, agent-attested receipts,
-ERC-8004 identity read) to your AI coding agent. Two ways: **local** (you run it,
-recommended) or **remote** (you connect to a hosted endpoint).
+Add Clockchain's tools (consensus time, notarization, smart-contract scheduling,
+audit trails, agent identity verification — 25 tools across five modules) to your
+AI coding agent. Two ways: **local** (you run it, recommended) or **remote** (you
+connect to a hosted endpoint).
 
 ## Prerequisites
 - **Node.js 18+**
@@ -136,10 +137,22 @@ connector-compatible auth layer remain.
 | Non-custodial | yes - no private keys in the server | yes - key custodied on the host, not shared |
 
 ## The tools you get
-`get_time`, `get_timestamp`, `get_block`, `get_validation` (time oracle) ·
-`log_action`, `get_log_entry`, `search_actions`, `verify_asset` (notarization) ·
-`attest_action`, `verify_receipt` (agent attested receipt) · `resolve_agent`
-(ERC-8004 identity, read).
+**25 tools across five modules** (`/mcp` should list `clockchain` with all 25):
+
+- **Time oracle:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
+- **Notarization:** `log_action`, `get_log_entry`, `search_actions`, `verify_asset`.
+- **Scheduler:** `get_contract_types`, `estimate_schedule`, `create_schedule`,
+  `list_schedules` (types/estimate/list live; `create_schedule` is a preview,
+  blocked on the backend signing-message spec — non-custodial, the caller's EVM
+  wallet signs).
+- **Audit:** `generate_audit_trail`, `generate_compliance_report` (EU AI Act
+  Art. 12 / SEC 17a-4 / ISO 27001 presets), `build_evidence_package`,
+  `verify_package`.
+- **Agent identity (verification, valid-at-T — not authentication):**
+  `resolve_agent`, `attest_action`, `verify_receipt`, `mint_identity`,
+  `revoke_identity`, `delegate_authority`, `get_identity_history`,
+  `verify_identity_at`, `verify_cross_party`. Cross-party verification is keyless
+  — it reads the immutable on-chain block, not the mutable ledger cache.
 
 ## Troubleshooting
 - `command not found: npx` -> install Node.js 18+.

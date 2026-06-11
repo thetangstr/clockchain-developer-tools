@@ -156,6 +156,39 @@ export interface ReceiptVerification {
   anchoredHash: string;
   blockHeight: string | null;
   ledgerId: string;
+  /**
+   * Where the anchored hash was read from: the IMMUTABLE on-chain block
+   * ("on-chain block") or, when not yet anchored, the mutable record cache
+   * ("record cache (not yet anchored on-chain)").
+   */
+  verifiedAgainst: string;
+}
+
+/**
+ * A record read from the IMMUTABLE on-chain block (GET /searchAssetFromChain).
+ * Unlike GET /ledger/{id} and /verifyAsset (which read a mutable convenience
+ * cache an api-key holder can rewrite via PUT /ledger/{id}), the block cannot be
+ * altered — this is the AUTHORITATIVE record.
+ */
+export interface ChainRecord {
+  assetHash: string;
+  assetReferenceId: string;
+  blockHeight: string;
+}
+
+/**
+ * Result of {@link ClockchainClient.verifyOnChain} — the authoritative,
+ * keyless cross-party check against the immutable on-chain block.
+ */
+export interface OnChainVerification {
+  verifiedAgainst: string;
+  keyless?: boolean;
+  ledgerId: string;
+  blockHeight?: string;
+  heightSource?: string;
+  anchoredHash?: string;
+  assetReferenceId?: string;
+  note: string;
 }
 
 // ===== SCHEDULER (smart-contract /api/contract/*) =====

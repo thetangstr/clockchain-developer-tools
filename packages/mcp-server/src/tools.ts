@@ -355,8 +355,12 @@ export function registerTools(
       title: "Verify an Agent Attested Receipt",
       description:
         "Independently re-verify a receipt: recompute the event hash from the " +
-        "receipt's own payload and confirm it matches what is anchored on-chain. " +
-        "Pass the full receipt object returned by attest_action.",
+        "receipt's own payload and confirm it matches the hash anchored in the " +
+        "IMMUTABLE on-chain block (keyless GET /searchAssetFromChain, keyed by the " +
+        "receipt's own blockHeight) — NOT the rewritable record cache, so a " +
+        "tampered cache cannot redirect the check. Falls back to the cache only " +
+        "when not yet anchored on-chain (see verifiedAgainst). Pass the full " +
+        "receipt object returned by attest_action.",
       inputSchema: {
         receipt: z.record(z.string(), z.unknown()).describe("The receipt object from attest_action."),
       },
@@ -717,23 +721,38 @@ export function registerTools(
       title: "Cross-party (keyless) verification",
       description:
         "KEYLESS verification — what an outside counterparty runs with NO " +
-        "Clockchain account. Pass a ledger_id to read the anchored record (GET " +
-        "/ledger/{id}) and/or a hash to confirm it is anchored (POST " +
-        "/verifyAsset). Neither call sends an api key, proving present-and-verify " +
-        "needs no privileged access. Testnet; read-only. Provide at least one of " +
-        "ledger_id or hash.",
+        "Clockchain account. Verifies against the IMMUTABLE on-chain block (GET " +
+        "/searchAssetFromChain, keyed by block_height) — the AUTHORITATIVE record " +
+        "a tampered cache (PUT /ledger/{id}) cannot redirect. Pass a ledger_id " +
+        "(and block_height when known — e.g. from a receipt's anchor) to read the " +
+        "on-chain record; if block_height is omitted it is discovered via the " +
+        "record cache (advisory) then still checked against the chain. Optionally " +
+        "pass a hash for an ADVISORY POST /verifyAsset cache lookup. No call sends " +
+        "an api key. Testnet; read-only. Provide at least one of ledger_id or hash.",
       inputSchema: {
         ledger_id: z
           .string()
           .optional()
-          .describe("A receipt's ledgerId to read keylessly (GET /ledger/{id})."),
+          .describe(
+            "A receipt's ledgerId to verify on-chain (GET /searchAssetFromChain).",
+          ),
+        block_height: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe(
+            "The receipt's anchor blockHeight. Lets verification resolve directly " +
+              "to the immutable block instead of discovering the height via the " +
+              "rewritable cache.",
+          ),
         hash: z
           .string()
           .optional()
-          .describe("An asset hash to verify keylessly (POST /verifyAsset)."),
+          .describe(
+            "An asset hash for an ADVISORY keyless cache lookup (POST /verifyAsset).",
+          ),
       },
     },
-    async ({ ledger_id, hash }) =>
+    async ({ ledger_id, block_height, hash }) =>
       run("verify_cross_party", async () => {
         if (!ledger_id && !hash) {
           throw new ApiError(
@@ -741,11 +760,15 @@ export function registerTools(
             400,
           );
         }
-        const ledger = ledger_id
-          ? await client.publicGetLedger(ledger_id)
+        // Authoritative: resolve to the immutable on-chain block.
+        const onChain = ledger_id
+          ? await client.verifyOnChain(ledger_id, block_height)
           : null;
-        const verification = hash ? await client.publicVerifyHash(hash) : null;
-        return { ledger, verification };
+        // Advisory only (reads the mutable cache an api-key holder can rewrite).
+        const advisoryHashCheck = hash
+          ? await client.publicVerifyHash(hash)
+          : null;
+        return { onChain, advisoryHashCheck };
       }),
   );
 }

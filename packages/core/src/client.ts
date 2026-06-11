@@ -12,6 +12,7 @@ import type {
   AuditEvent,
   AuditTrail,
   BlockResponse,
+  ChainRecord,
   ComplianceFormat,
   ComplianceReport,
   ContractEstimate,
@@ -24,6 +25,7 @@ import type {
   LedgerRecord,
   LogEntry,
   LogResponse,
+  OnChainVerification,
   PackageVerification,
   ReceiptVerification,
   ScheduleApproval,
@@ -340,23 +342,47 @@ export class ClockchainClient {
   }
 
   /**
-   * Independently re-verify a receipt: recompute the event hash from the receipt's
-   * own payload and confirm it matches what is anchored on-chain at its ledgerId.
+   * Independently re-verify a receipt against the IMMUTABLE on-chain block.
+   *
+   * Recompute the event hash from the receipt's own payload, then confirm it
+   * matches the hash anchored in the on-chain block. The receipt carries its own
+   * block height + ledgerId, so a tampered record cache (PUT /ledger/{id} rewrites
+   * the mutable convenience cache, which keyless GET /ledger/{id} and /verifyAsset
+   * serve) cannot redirect the check. We fall back to the mutable cache ONLY when
+   * the receipt is not yet anchored in a queryable block — and say so via
+   * `verifiedAgainst`.
    */
   async verifyReceipt(receipt: AgentReceipt): Promise<ReceiptVerification> {
-    const record = await this.getLedgerEntry(receipt.anchor.ledgerId);
     const recomputed = eventHashOf({
       agentId: receipt.agentId,
       action: receipt.action,
       inputs: receipt.payload.inputs,
       outputs: receipt.payload.outputs,
     });
+    const blockHeight = receipt.anchor.blockHeight;
+    let anchoredHash: string | null = null;
+    let verifiedAgainst = "on-chain block";
+    if (blockHeight != null) {
+      const chain = await this.getChainRecord(
+        blockHeight,
+        receipt.anchor.ledgerId,
+      );
+      if (chain) anchoredHash = chain.assetHash;
+    }
+    if (anchoredHash == null) {
+      // Not yet anchored on-chain (or absent from the block): fall back to the
+      // mutable record cache, and flag that this is NOT the authoritative read.
+      const record = await this.getLedgerEntry(receipt.anchor.ledgerId);
+      anchoredHash = record.assetHash;
+      verifiedAgainst = "record cache (not yet anchored on-chain)";
+    }
     return {
-      match: recomputed === record.assetHash && recomputed === receipt.eventHash,
+      match: recomputed === anchoredHash && recomputed === receipt.eventHash,
       eventHash: recomputed,
-      anchoredHash: record.assetHash,
-      blockHeight: record.blockHeight,
-      ledgerId: record.ledgerId,
+      anchoredHash,
+      blockHeight,
+      ledgerId: receipt.anchor.ledgerId,
+      verifiedAgainst,
     };
   }
 
@@ -545,8 +571,13 @@ export class ClockchainClient {
   /**
    * Recompute an evidence package's pkgHash and compare its anchored hash to the
    * ledger. Reuses the same canonicalization used to build the packet, so a
-   * faithful packet round-trips to the same digest. Resolves the anchored hash
-   * against Clockchain, never a local store.
+   * faithful packet round-trips to the same digest.
+   *
+   * Resolves the anchored hash against the IMMUTABLE on-chain block
+   * ({@link getChainRecord}) when the record carries a blockHeight — the
+   * authoritative read a tampered cache (PUT /ledger/{id}) cannot redirect. Falls
+   * back to the mutable cache (GET /ledger/{id}) only when not yet anchored. Never
+   * a local store.
    */
   async verifyPackage(pkg: EvidencePackage): Promise<PackageVerification> {
     const recomputedPkgHash = computeHash(
@@ -557,18 +588,31 @@ export class ClockchainClient {
         plainEnglish: pkg.plainEnglish,
       }),
     );
-    const record = await this.getLedgerEntry(pkg.record.ledgerId);
-    const anchorMatch = record.assetHash === pkg.record.assetHash;
+    let anchoredHash: string | null = null;
+    let verifiedAgainst = "on-chain block";
+    if (pkg.record.blockHeight != null) {
+      const chain = await this.getChainRecord(
+        pkg.record.blockHeight,
+        pkg.record.ledgerId,
+      );
+      if (chain) anchoredHash = chain.assetHash;
+    }
+    if (anchoredHash == null) {
+      const record = await this.getLedgerEntry(pkg.record.ledgerId);
+      anchoredHash = record.assetHash;
+      verifiedAgainst = "record cache (not yet anchored on-chain)";
+    }
+    const anchorMatch = anchoredHash === pkg.record.assetHash;
     const pkgHashMatch = recomputedPkgHash === pkg.pkgHash;
     return {
       valid: pkgHashMatch && anchorMatch,
       pkgHashMatch,
       anchorMatch,
       recomputedPkgHash,
-      anchoredHash: record.assetHash,
+      anchoredHash,
       note:
-        "Verified against the Clockchain ledger. Testnet; designed-for " +
-        "court-grade, not certified.",
+        `Verified against the Clockchain ${verifiedAgainst}. Testnet; ` +
+        "designed-for court-grade, not certified.",
     };
   }
 
@@ -766,12 +810,100 @@ export class ClockchainClient {
    * Keyless verify-by-hash (POST /verifyAsset, body a JSON array of hashes, NO
    * x-api-key) — anyone holding the hash can confirm it is anchored, without an
    * account. Proves Clockchain stores no privileged gate on present-and-verify.
+   *
+   * ADVISORY ONLY: this reads the MUTABLE record cache, which an api-key holder
+   * can rewrite via PUT /ledger/{id}. It is a convenience lookup, NOT the
+   * authoritative check. For the authoritative, tamper-proof result use
+   * {@link verifyOnChain} (reads the immutable on-chain block).
    */
   async publicVerifyHash(hash: string): Promise<Record<string, unknown>> {
     return this.keylessRequest<Record<string, unknown>>("/verifyAsset", {
       method: "POST",
       body: [hash],
     });
+  }
+
+  /**
+   * Read a record from the IMMUTABLE on-chain block (GET
+   * /searchAssetFromChain?blockHeight={h}, NO x-api-key). This is the
+   * AUTHORITATIVE record. Unlike GET /ledger/{id} and /verifyAsset (which read a
+   * mutable convenience cache an api-key holder can rewrite via PUT /ledger/{id}),
+   * the block cannot be altered. The block stores records as stringified Java
+   * objects (e.g. `Ledger(ledgerId=..., assetHash=a077..., assetReferenceId=...)`);
+   * parse the matching ledgerId's assetHash. Returns null when the block has no
+   * record for that ledgerId (e.g. not yet anchored).
+   */
+  async getChainRecord(
+    blockHeight: string | number,
+    ledgerId: string,
+  ): Promise<ChainRecord | null> {
+    const res = await this.keylessRequest<{
+      blockHeight?: string;
+      transactions?: string[];
+    }>(
+      `/searchAssetFromChain?blockHeight=${encodeURIComponent(String(blockHeight))}`,
+    ).catch(() => null);
+    for (const t of res?.transactions ?? []) {
+      const id = (String(t).match(/ledgerId=([^,]+)/) || [])[1];
+      if (id === ledgerId) {
+        return {
+          assetHash: (String(t).match(/assetHash=([0-9a-fx]+)/) || [])[1] ?? "",
+          assetReferenceId:
+            (String(t).match(/assetReferenceId=([^,]+)/) || [])[1] ?? "",
+          blockHeight: String(res?.blockHeight ?? blockHeight),
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Cross-party verify against the IMMUTABLE chain (keyless) — what an outside
+   * counterparty runs. The receipt carries its block height; the hash is confirmed
+   * against the on-chain block, never the rewritable cache. When only a ledgerId is
+   * known, the height is discovered via the cache (advisory) and the hash is still
+   * checked against the chain. This is the AUTHORITATIVE check — a tampered cache
+   * (PUT /ledger/{id}) cannot redirect it.
+   */
+  async verifyOnChain(
+    ledgerId: string,
+    blockHeight?: string | number,
+  ): Promise<OnChainVerification> {
+    let height = blockHeight;
+    let heightSource = "from the receipt";
+    if (height == null) {
+      const cached = await this.publicGetLedger(ledgerId).catch(() => null);
+      if (cached?.blockHeight != null) height = cached.blockHeight;
+      heightSource = "discovered via the record cache (advisory)";
+    }
+    if (height == null) {
+      return {
+        verifiedAgainst: "none",
+        ledgerId,
+        note: "No block height available — the record may not be anchored on-chain yet.",
+      };
+    }
+    const chain = await this.getChainRecord(height, ledgerId);
+    if (!chain) {
+      return {
+        verifiedAgainst: "none",
+        ledgerId,
+        blockHeight: String(height),
+        note: "No matching record in that on-chain block.",
+      };
+    }
+    return {
+      verifiedAgainst: "on-chain block",
+      keyless: true,
+      ledgerId,
+      blockHeight: String(height),
+      heightSource,
+      anchoredHash: chain.assetHash,
+      assetReferenceId: chain.assetReferenceId,
+      note:
+        "Read from the immutable on-chain block (/searchAssetFromChain) with NO " +
+        "api key — not the rewritable record cache. This is the authoritative check.",
+    };
   }
 
   // --- internals ---

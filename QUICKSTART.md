@@ -1,11 +1,14 @@
-# Quickstart - Clockchain MCP Server (v1)
+# Quickstart - Clockchain MCP Server
 
-Run and verify the Clockchain MCP server locally. v1 is the verified core: 8 tools
-(time oracle + notarization) over stdio. Everything below is copy-paste tested.
+Run and verify the Clockchain MCP server locally. The server exposes **25 tools
+across five modules** (time, notarization, scheduler, audit, agent identity) over
+stdio; this quickstart drives the verified core — the 8 time + notarization tools.
+Everything below is copy-paste tested.
 
-> `resolve_agent` (ERC-8004 identity) is present but returns `status: "unknown"`
-> until the EVM env vars are set - see the bottom. Smart-contract triggers are not
-> available (gateway 404).
+> The identity module is **verification (valid-at-T), not authentication**.
+> `resolve_agent` returns `status: "unknown"` until the EVM env vars are set - see
+> the bottom. Smart-contract scheduling is live for contract types / estimate /
+> list; `create_schedule` is a preview, blocked on the backend signing-message spec.
 
 ## 1. Get + build
 
@@ -46,7 +49,7 @@ claude mcp add clockchain \
 ```
 
 Then open a **new** Claude Code session (MCP servers load at startup), run `/mcp`
-(should list `clockchain` with 9 tools), and ask: *"use clockchain to timestamp the
+(should list `clockchain` with 25 tools), and ask: *"use clockchain to timestamp the
 text 'hello' and then verify it."*
 
 **b) Narrated live demo** (spends one log credit):
@@ -75,6 +78,15 @@ cd packages/mcp-server && npm run demo
 **Time oracle:** `get_time`, `get_timestamp`, `get_block`, `get_validation`
 **Notarization:** `log_action`, `get_log_entry`, `search_actions`, `verify_asset`
 (`log_action` accepts `wait: true` to return only once the write is confirmed on-chain.)
+
+The full server also ships the **scheduler** (`get_contract_types`,
+`estimate_schedule`, `create_schedule`, `list_schedules`), **audit**
+(`generate_audit_trail`, `generate_compliance_report`, `build_evidence_package`,
+`verify_package`), and **agent identity** (`resolve_agent`, `attest_action`,
+`verify_receipt`, `mint_identity`, `revoke_identity`, `delegate_authority`,
+`get_identity_history`, `verify_identity_at`, `verify_cross_party`) modules — 25
+tools total. Cross-party verification is keyless: it reads the immutable on-chain
+block (`/searchAssetFromChain?blockHeight={h}`), not the mutable ledger cache.
 
 ## Optional: ERC-8004 identity read
 

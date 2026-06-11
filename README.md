@@ -1,9 +1,10 @@
 # Clockchain Developer Tools
 
 A **CLI** and an **MCP server** that add Clockchain's tools — **consensus time,
-notarization, agent-attested receipts, and ERC-8004 identity reads** — to your AI
-agent (Claude Code / Desktop / Cursor) and your terminal. It wraps the live D4 node
-gateway at `node.clockchain.network`; it does **not** change the blockchain protocol.
+notarization, smart-contract scheduling, audit trails, and agent identity
+verification** — to your AI agent (Claude Code / Desktop / Cursor) and your
+terminal. It wraps the live D4 node gateway at `node.clockchain.network`; it does
+**not** change the blockchain protocol.
 
 > **Install it in your AI agent:** [`INSTALL.md`](INSTALL.md) — local stdio (recommended) or remote HTTP.
 > **Non-engineer? Try it in ~10 min:** [`TRY-IT.md`](TRY-IT.md) · **Engineers:** [`QUICKSTART.md`](QUICKSTART.md)
@@ -35,10 +36,27 @@ config, the remote-HTTP option, and troubleshooting are in [`INSTALL.md`](INSTAL
 
 ## What you get
 
-**Tools:** `get_time`, `get_timestamp`, `get_block`, `get_validation` (time) ·
-`log_action`, `get_log_entry`, `search_actions`, `verify_asset` (notarization) ·
-`attest_action`, `verify_receipt` (agent-attested receipt) · `resolve_agent`
-(ERC-8004 identity, read).
+**25 tools across five modules:**
+
+- **Time:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
+- **Logging (notarization):** `log_action`, `get_log_entry`, `search_actions`,
+  `verify_asset`.
+- **Scheduler (smart-contract):** `get_contract_types`, `estimate_schedule`,
+  `create_schedule`, `list_schedules`. Types/estimate/list are live;
+  `create_schedule` is a preview — it's blocked on the backend signing-message
+  spec. Scheduling is **non-custodial**: the caller's own EVM wallet signs, the
+  server never fabricates a signature.
+- **Audit (derivative — composes Time + Logging + Identity, no new primitive):**
+  `generate_audit_trail`, `generate_compliance_report` (EU AI Act Art. 12 /
+  SEC 17a-4 / ISO 27001 presets), `build_evidence_package`, `verify_package`.
+- **Agent identity (verification, valid-at-T — not authentication):**
+  `resolve_agent`, `attest_action`, `verify_receipt`, `mint_identity`,
+  `revoke_identity`, `delegate_authority`, `get_identity_history`,
+  `verify_identity_at`, `verify_cross_party`.
+
+**Cross-party verification is live and keyless:** `GET /searchAssetFromChain?blockHeight={h}`
+reads the immutable on-chain block with no API key. That block — not the mutable
+`/ledger/{id}` cache — is the authoritative record; verification resolves to the chain.
 
 **Packages (this monorepo):**
 
@@ -52,17 +70,24 @@ A `@clockchain/cli` for the terminal is planned — see [ROADMAP.md](./ROADMAP.m
 
 ## Status
 
-Working against the live gateway. Verified surface (updated 2026-06-10):
+Working against the live gateway. The MCP server is **verified working** —
+`initialize` + `tools/list` returns 25 tools and live calls succeed. Verified
+surface (updated 2026-06-11):
 
 - **Time:** read consensus time from the **public `/getTime`** (no key scope). The
   `/api/time/*` family 401s on logging-scope keys.
 - **Notarization:** `/log`, `/ledger/{id}`, `/searchAsset`, `/getValidationBlock`
   all confirmed working — log, confirm on-chain, retrieve, verify.
-- **Smart-contract scheduling:** **live** at `POST /api/contract/schedule`
-  (signature-based, non-custodial) — *not* blocked, and *not* `/schedule`.
-- **Agent identity:** the ERC-8004 registry is live and resolving; `resolve_agent`
-  just needs `EVM_RPC_URL` + registry + chain set.
-- Single-validator testnet; tight rate limits; no cross-client verification yet.
+- **Cross-party verification:** **live and keyless** —
+  `GET /searchAssetFromChain?blockHeight={h}` reads the immutable on-chain block
+  with no API key, and that block is the authoritative record.
+- **Smart-contract scheduling:** contract types, estimate, and list are **live**;
+  `create_schedule` is a preview, blocked on the backend signing-message spec.
+  Signature-based and non-custodial (the caller's EVM wallet signs).
+- **Agent identity:** verification (valid-at-T), not authentication. The ERC-8004
+  registry is live and resolving; identity-graph writes (`mint`/`revoke`/`delegate`)
+  resolve against a directory that is still preview.
+- Designed for **court-grade** evidence. Single-validator testnet; tight rate limits.
 
 **Full current limitations + v1/v2/v3 plan: [ROADMAP.md](./ROADMAP.md).**
 

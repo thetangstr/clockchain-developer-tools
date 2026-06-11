@@ -3,7 +3,8 @@
 A minimal TypeScript monorepo exposing the Clockchain network API as MCP tools.
 
 - `@clockchain/core` — typed client for the Clockchain gateway (time, blocks,
-  validation, ledger logging/search, ERC-8004 stub).
+  validation, ledger logging/search, smart-contract scheduling, and ERC-8004
+  agent-identity reads).
 - `@clockchain/mcp-server` — an `npx`-able MCP server (stdio primary, HTTP
   optional) that surfaces the core client as tools for Claude Code.
 
@@ -81,11 +82,23 @@ Add an entry under `mcpServers` (stdio):
 
 ## Tools
 
-`get_time`, `get_timestamp`, `get_block`, `get_validation`, `log_action`,
-`search_actions`, `get_log_entry`, `verify_asset`, `resolve_agent`.
+**25 tools across five modules:**
 
-`schedule_trigger` is intentionally omitted (the gateway returns 404 for
-`/schedule`, and on-chain scheduling conflicts with the non-custodial model).
+- **Time:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
+- **Logging:** `log_action`, `get_log_entry`, `search_actions`, `verify_asset`.
+- **Scheduler:** `get_contract_types`, `estimate_schedule`, `create_schedule`,
+  `list_schedules`. Types/estimate/list are live; `create_schedule` is a preview
+  (blocked on the backend signing-message spec). Scheduling is non-custodial — the
+  caller's own EVM wallet signs; the server never fabricates a signature.
+- **Audit** (derivative — composes Time + Logging + Identity, no new primitive):
+  `generate_audit_trail`, `generate_compliance_report` (EU AI Act Art. 12 /
+  SEC 17a-4 / ISO 27001 presets), `build_evidence_package`, `verify_package`.
+- **Agent identity** (verification, valid-at-T — not authentication):
+  `resolve_agent`, `attest_action`, `verify_receipt`, `mint_identity`,
+  `revoke_identity`, `delegate_authority`, `get_identity_history`,
+  `verify_identity_at`, `verify_cross_party`. Cross-party verification is keyless
+  — `GET /searchAssetFromChain?blockHeight={h}` reads the immutable on-chain block
+  (the authoritative record), not the mutable `/ledger/{id}` cache.
 
 ### Notes / gotchas
 

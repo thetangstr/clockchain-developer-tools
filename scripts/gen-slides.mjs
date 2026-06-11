@@ -210,35 +210,32 @@ function column(reqs, sid, x, y0, w, items, opt = {}) {
   }
 }
 
-// The five modules — design + status, mirroring the public /architecture page.
+// The five lane-A modules — the per-module FEATURE LIST + status, mirroring the
+// public /architecture page. Each module shows its three capabilities.
 function slideModules(reqs, sid) {
   header(reqs, sid);
-  eyebrow(reqs, sid, MX, 36, 'architecture · one server, five modules', C.v1);
-  heading(reqs, sid, MX, 52, 'The five modules');
-  text(reqs, sid, MX, 94, CW, 22,
-    'One MCP server, non-custodial (it never holds your keys). Only hash fingerprints go on-chain — and anyone can re-verify them, no account needed.',
-    { size: 10.5, color: C.mut, line: 118 });
-  rule(reqs, sid, MX, 126, CW);
+  eyebrow(reqs, sid, MX, 34, 'lane A · the MCP feature set', C.v1);
+  heading(reqs, sid, MX, 50, 'The five modules');
+  text(reqs, sid, MX, 90, CW, 20,
+    'One non-custodial MCP server. Three capabilities each — Time, Logging, Scheduler free; Audit + Agent Identity paid.',
+    { size: 10.5, color: C.mut, line: 116 });
+  rule(reqs, sid, MX, 116, CW);
 
   const rows = [
-    { name: 'Time', live: 'LIVE', amber: false,
-      d: 'The clock no single party controls — validators agree on each instant; records bind to a network fact, not a server claim.' },
-    { name: 'Logging', live: 'LIVE', amber: false,
-      d: 'Hash-anchored attested receipts: your content stays with you; one altered character and verification fails.' },
-    { name: 'Scheduler', live: 'LIVE · CREATE=PREVIEW', amber: true,
-      d: 'Promised-T vs actual-T accountability. Live cost quotes + listing; committing is propose-then-approve with your wallet signature.' },
-    { name: 'Audit', live: 'LIVE', amber: false,
-      d: 'A derivative — composes attested records into EU AI Act Art. 12 / SEC 17a-4 / ISO 27001 presets and self-verifying evidence packs.' },
-    { name: 'Identity', live: 'LIVE · DIRECTORY=PREVIEW', amber: true,
-      d: 'did:clockchain + valid-at-T: was the agent authorized at the instant it acted? Verification, not authentication.' },
+    { name: 'Time',      live: 'LIVE',                 amber: false, caps: 'trusted time   ·   verify timestamps   ·   time attestations',          note: 'the clock no single party controls' },
+    { name: 'Logging',   live: 'LIVE',                 amber: false, caps: 'write logs   ·   query logs   ·   verify integrity',                    note: 'hash-anchored receipts — your content never leaves you' },
+    { name: 'Scheduler', live: 'LIVE · CREATE=PREVIEW', amber: true,  caps: 'cron jobs   ·   schedule future executions   ·   manage recurring tasks', note: 'promised-T vs actual-T; committing needs your wallet signature' },
+    { name: 'Audit',     live: 'LIVE',                 amber: false, caps: 'audit trails   ·   compliance reports   ·   evidence packages',         note: 'EU AI Act Art.12 / SEC 17a-4 / ISO 27001 presets (a derivative)' },
+    { name: 'Identity',  live: 'LIVE · DIRECTORY=PREVIEW', amber: true, caps: 'registration   ·   verification (valid-at-T)   ·   activity history',  note: 'which agent acted, and whether it was authorized then — not auth' },
   ];
-  let y = 138;
+  let y = 128;
   for (const r of rows) {
-    text(reqs, sid, MX, y, 92, 16, r.name, { size: 12, bold: true, color: C.ink });
-    chip(reqs, sid, MX + 92, y + 1, r.amber ? 142 : 44, 15, r.live, r.amber ? C.tAmber : C.tGreen, r.amber ? C.amber : C.green, 7.5);
-    text(reqs, sid, MX + 248, y - 1, CW - 248, 44, r.d, { size: 9, color: C.mut, line: 113 });
-    y += 49;
-    if (r !== rows[rows.length - 1]) rule(reqs, sid, MX, y - 8, CW);
+    text(reqs, sid, MX, y, 110, 16, r.name, { size: 12, bold: true, color: C.ink });
+    chip(reqs, sid, MX + 92, y + 1, r.amber ? 150 : 46, 15, r.live, r.amber ? C.tAmber : C.tGreen, r.amber ? C.amber : C.green, 7.5);
+    text(reqs, sid, MX, y + 17, CW, 14, r.caps, { size: 10.5, bold: true, color: C.v1, line: 115 });
+    text(reqs, sid, MX, y + 30, CW, 12, r.note, { size: 8.5, color: C.mut });
+    y += 53;
+    if (r !== rows[rows.length - 1]) rule(reqs, sid, MX, y - 7, CW);
   }
 }
 
