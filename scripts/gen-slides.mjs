@@ -228,15 +228,20 @@ function slideModules(reqs, sid) {
     { name: 'Audit',     live: 'LIVE',                 amber: false, caps: 'audit trails   ·   compliance reports   ·   evidence packages',         note: 'EU AI Act Art.12 / SEC 17a-4 / ISO 27001 presets (a derivative)' },
     { name: 'Identity',  live: 'LIVE · DIRECTORY=PREVIEW', amber: true, caps: 'registration   ·   verification (valid-at-T)   ·   activity history',  note: 'which agent acted, and whether it was authorized then — not auth' },
   ];
-  let y = 128;
+  let y = 124;
   for (const r of rows) {
     text(reqs, sid, MX, y, 110, 16, r.name, { size: 12, bold: true, color: C.ink });
     chip(reqs, sid, MX + 92, y + 1, r.amber ? 150 : 46, 15, r.live, r.amber ? C.tAmber : C.tGreen, r.amber ? C.amber : C.green, 7.5);
     text(reqs, sid, MX, y + 17, CW, 14, r.caps, { size: 10.5, bold: true, color: C.v1, line: 115 });
-    text(reqs, sid, MX, y + 30, CW, 12, r.note, { size: 8.5, color: C.mut });
-    y += 53;
+    text(reqs, sid, MX, y + 29, CW, 12, r.note, { size: 8.5, color: C.mut });
+    y += 48;
     if (r !== rows[rows.length - 1]) rule(reqs, sid, MX, y - 7, CW);
   }
+  // Legend — decode the status chips so the deck stands alone.
+  rule(reqs, sid, MX, y - 1, CW);
+  text(reqs, sid, MX, y + 5, CW, 24,
+    'Reading the chips:  LIVE = working on the testnet now.   ·   =PREVIEW = built but not yet fireable — Scheduler “create” needs your wallet signature (non-custodial); Identity “directory” needs the public resolver. Neither is faked.',
+    { size: 8.5, color: C.amber, line: 122 });
 }
 
 function slideOpen(reqs, sid) {
