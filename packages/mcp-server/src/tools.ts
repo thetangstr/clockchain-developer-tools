@@ -14,7 +14,7 @@ import {
 } from "@clockchain/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { BudgetExceededError, createLogBudget } from "./budget.js";
+import { BudgetExceededError, getSharedLogBudget, unlimitedLogBudget } from "./budget.js";
 
 /** Standard MCP success payload from a JSON-serializable result. */
 function ok(result: unknown) {
@@ -91,11 +91,14 @@ async function run(name: string, work: () => Promise<unknown>) {
 export function registerTools(
   server: McpServer,
   config: ClockchainConfig,
+  opts: { delegated?: boolean } = {},
 ): void {
   const client = new ClockchainClient(config);
-  // Optional per-process cap on successful log writes (MCP_LOG_BUDGET).
-  // Disabled when unset -> identical to v1.
-  const budget = createLogBudget();
+  // Budget (MCP_LOG_BUDGET) caps writes that spend OUR delegated key's credits.
+  // Delegated requests share the process-wide cap; bring-your-own-key requests
+  // (opts.delegated === false) spend the caller's own credits, so we don't cap
+  // them. Disabled when MCP_LOG_BUDGET is unset -> identical to v1.
+  const budget = opts.delegated === false ? unlimitedLogBudget() : getSharedLogBudget();
 
   // ===== TIME MCP =====
 

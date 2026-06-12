@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 
 /**
@@ -22,6 +23,26 @@ export function parseTokens(raw: string | undefined): string[] {
 
 const firstHeader = (h: string | string[] | undefined): string =>
   (Array.isArray(h) ? h[0] : h) ?? "";
+
+/**
+ * Bring-your-own-key: if the caller presents their own Clockchain credentials as
+ * request headers, return them as a config override so the per-request server
+ * uses THEIR key (their credits). Returns undefined when no `x-clockchain-api-key`
+ * is present, in which case the server uses the delegated (env) key. The endpoint
+ * is fixed server-side (callers cannot redirect it).
+ */
+export function clockchainOverrides(
+  headers: Record<string, string | string[] | undefined>,
+): Partial<ClockchainConfig> | undefined {
+  const apiKey = firstHeader(headers["x-clockchain-api-key"]).trim();
+  if (!apiKey) return undefined;
+  const o: Partial<ClockchainConfig> = { apiKey };
+  const clientId = firstHeader(headers["x-clockchain-client-id"]).trim();
+  const walletId = firstHeader(headers["x-clockchain-wallet-id"]).trim();
+  if (clientId) o.clientId = clientId;
+  if (walletId) o.walletId = walletId;
+  return o;
+}
 
 /**
  * Authorize a request against the token list. When no tokens are configured,
@@ -56,13 +77,21 @@ export function isHealthCheck(
  * the token gives a per-tester limit; the IP fallback covers health/edge cases.
  */
 export function callerKey(
-  headers: { authorization?: string | string[]; "x-api-key"?: string | string[] },
+  headers: {
+    authorization?: string | string[];
+    "x-api-key"?: string | string[];
+    "x-clockchain-api-key"?: string | string[];
+  },
   remoteAddr: string | undefined,
 ): string {
   const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
   if (bearer) return `tok:${bearer[1].trim()}`;
   const apiKey = firstHeader(headers["x-api-key"]).trim();
   if (apiKey) return `tok:${apiKey}`;
+  // Bring-your-own-key requests carry no MCP token; key them by their own
+  // Clockchain key so the per-caller rate limit still applies.
+  const cck = firstHeader(headers["x-clockchain-api-key"]).trim();
+  if (cck) return `cck:${cck}`;
   return `ip:${remoteAddr ?? "unknown"}`;
 }
 
@@ -129,7 +158,11 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
-    if (!checkAuth(req)) {
+    // Bring-your-own-key: a caller presenting their own Clockchain credentials is
+    // authenticated by that key itself (the gateway validates it), so they need no
+    // MCP token. Otherwise a configured MCP token is required.
+    const byo = clockchainOverrides(req.headers);
+    if (!byo && !checkAuth(req)) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
@@ -143,7 +176,7 @@ export async function runHttp(): Promise<void> {
     }
 
     try {
-      const server = buildServer();
+      const server = buildServer(byo);
       const transport = new StreamableHTTPServerTransport({
         // Stateless: no session id generation.
         sessionIdGenerator: undefined,

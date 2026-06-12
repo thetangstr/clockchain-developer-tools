@@ -29,6 +29,27 @@ export interface LogBudget {
   readonly enabled: boolean;
 }
 
+/**
+ * Process-wide shared budget. Each HTTP request builds a fresh server, so a
+ * per-call budget would reset every request and never cap anything. The shared
+ * singleton accumulates across requests within the process, making MCP_LOG_BUDGET
+ * a real per-process cap on writes that spend OUR delegated key's credits.
+ */
+let sharedBudget: LogBudget | null = null;
+export function getSharedLogBudget(env: NodeJS.ProcessEnv = process.env): LogBudget {
+  if (sharedBudget === null) sharedBudget = createLogBudget(env);
+  return sharedBudget;
+}
+
+/**
+ * A no-op budget (never caps). Used for bring-your-own-key requests: the caller
+ * presented their own Clockchain credentials, so writes spend THEIR credits, not
+ * ours — our delegated cap must not apply to them.
+ */
+export function unlimitedLogBudget(): LogBudget {
+  return { enabled: false, check() {}, record() {}, remaining() { return null; } };
+}
+
 export function createLogBudget(
   env: NodeJS.ProcessEnv = process.env,
 ): LogBudget {
