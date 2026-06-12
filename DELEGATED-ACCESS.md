@@ -1,5 +1,13 @@
 # Delegated Access for Testers (no VPN)
 
+> **⚠️ Superseded for hosting.** The MCP endpoint is now hosted on **GCP Cloud Run**
+> at **`https://mcp.clockchain.network/mcp`** (live, token-gated, + bring-your-own-key).
+> Use **[`CLOUD-RUN.md`](CLOUD-RUN.md)** for deploy/ops and **[`INSTALL.md`](INSTALL.md)**
+> for connecting. The **Mac-mini + `cloudflared` tunnel** path below is **retired** —
+> kept only as historical reference / an alternative self-host recipe. The
+> **protection model** (two gates: token + edge) and **per-tester token** sections
+> still apply conceptually.
+
 How to give business testers access to a Clockchain test endpoint **without**
 handing out the real API key and **without** a VPN - while keeping "just anyone"
 out. Two access products, one protection model.
