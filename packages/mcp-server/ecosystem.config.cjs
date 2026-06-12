@@ -23,6 +23,11 @@ module.exports = {
       env: {
         MCP_TRANSPORT: process.env.MCP_TRANSPORT || "http",
         MCP_PORT: process.env.MCP_PORT || "3000",
+        // Safe-by-default for a networked host: refuse to start without tokens,
+        // cap per-token rate + total writes. Your sourced .env overrides these.
+        MCP_REQUIRE_AUTH: process.env.MCP_REQUIRE_AUTH || "1",
+        MCP_RATE_PER_MIN: process.env.MCP_RATE_PER_MIN || "30",
+        MCP_LOG_BUDGET: process.env.MCP_LOG_BUDGET || "200",
       },
     },
   ],
