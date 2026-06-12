@@ -101,6 +101,26 @@ claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
   --header "x-api-key: <your tester token>"
 ```
 
+### Bring your own Clockchain key (own credits)
+
+Two ways to use the hosted endpoint:
+
+- **Delegated** (above): authenticate with the per-user MCP token; the server's own
+  Clockchain key does the work, so writes spend *our* credits. Easiest for a quick
+  test — you don't need a Clockchain key.
+- **Bring-your-own-key**: send *your* Clockchain credentials as headers. The server
+  uses them for your calls, so writes spend *your* credits. No MCP token needed —
+  your Clockchain key authenticates you (the gateway validates it).
+
+```bash
+claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
+  --header "x-clockchain-api-key: <your clockchain api key>" \
+  --header "x-clockchain-client-id: <you@example.com>" \
+  --header "x-clockchain-wallet-id: <you@example.com>"
+```
+
+The endpoint is fixed server-side; you cannot redirect it. Headers travel over TLS.
+
 ### Claude Cowork / claude.ai / Claude Desktop (cloud connectors)
 
 These clients reach your MCP server **from Anthropic's cloud, not from your
