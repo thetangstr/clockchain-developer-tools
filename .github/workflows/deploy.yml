@@ -1,0 +1,54 @@
+name: Deploy MCP to Cloud Run
+
+# Auto-deploy the hosted Clockchain MCP server (mcp.clockchain.network) on push to
+# main. Keyless auth via Workload Identity Federation (no SA key stored in GitHub).
+# `gcloud run deploy --source` preserves the service's existing env/secrets/scaling.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: clockchain-mcp-yarda
+          workload_identity_provider: projects/371358326490/locations/global/workloadIdentityPools/github/providers/github-provider
+          service_account: gh-deploy@clockchain-mcp-yarda.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy clockchain-mcp \
+            --source . \
+            --region us-central1 \
+            --quiet
+
+      - name: Smoke test the deployment
+        run: |
+          URL=$(gcloud run services describe clockchain-mcp --region us-central1 --format='value(status.url)')
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/health")
+          echo "health -> $code"
+          test "$code" = "200"
