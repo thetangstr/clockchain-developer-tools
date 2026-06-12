@@ -19,6 +19,9 @@ module.exports = {
       script: "dist/index.js",
       cwd: __dirname,
       instances: 1,
+      // fork (NOT cluster): this is a single raw node:http server; pm2's cluster
+      // mode does not bind it (it starts "online" but never listens on the port).
+      exec_mode: "fork",
       autorestart: true,
       env: {
         MCP_TRANSPORT: process.env.MCP_TRANSPORT || "http",
