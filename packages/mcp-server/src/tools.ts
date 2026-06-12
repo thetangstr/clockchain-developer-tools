@@ -163,7 +163,13 @@ export function registerTools(
         "Anchor an asset hash to the Clockchain ledger. Returns a ledgerId; " +
         "blockHeight is null (pending) until the leader writes the block ~0.6s later.",
       inputSchema: {
-        asset_hash: z.string().describe("Hex hash of the asset/content."),
+        asset_hash: z
+          .string()
+          .regex(
+            /^[0-9a-fA-F]+$/,
+            "asset_hash must be a hex string (e.g. a SHA-256 digest).",
+          )
+          .describe("Hex hash of the asset/content (64 hex chars for SHA-256)."),
         asset_reference_id: z
           .string()
           .describe("Stable reference id for the asset (exact-match on search)."),
@@ -215,6 +221,16 @@ export function registerTools(
       run("log_action", async () => {
         // Enforce the optional per-process write cap before spending a credit.
         budget.check();
+        // Reject a hash whose length doesn't match its algorithm's digest, so a
+        // malformed value can't be permanently anchored as if it were a real hash.
+        const hashAlg = (hash_type ?? "SHA-256").toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const HASH_HEX_LEN: Record<string, number> = { SHA256: 64, SHA1: 40, SHA224: 56, SHA384: 96, SHA512: 128, MD5: 32 };
+        const need = HASH_HEX_LEN[hashAlg];
+        if (need && asset_hash.length !== need) {
+          throw new Error(
+            `asset_hash is ${asset_hash.length} hex chars but ${hash_type ?? "SHA-256"} digests are ${need}. Pass the real ${hash_type ?? "SHA-256"} hex digest.`,
+          );
+        }
         // If a DID is provided, fold it into the reference id so the anchor is
         // attributable to the agent identity. (additionalInfo is plain-text-only
         // and sanitized server-side, so identity must not be stored there.)
