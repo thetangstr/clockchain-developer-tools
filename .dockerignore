@@ -1,0 +1,15 @@
+# Keep the build context small and never ship secrets or build output.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.github
+# secrets / local creds — must never enter the image
+.env
+**/.env
+scripts/credentials.json
+scripts/token.json
+scripts/slides-created.json
+# docs / planning — not needed in the image
+*.md
+docs

@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 // gen-slides.mjs
-// "Clockchain MCP - Roadmap (v1 to v3)" — 9 elegant, NATIVE Google Slides
+// "Clockchain MCP - Roadmap (v1 to v3)" — 11 elegant, NATIVE Google Slides
 // (real editable text boxes + shapes, not images):
-//   1. Status & roadmap (v1/v2/v3 overview)
-//   2. The five modules (Time/Logging/Scheduler/Audit/Identity — design + status)
-//   3. Two lanes, one launch (Lane A features / Lane B hosting+CI-CD, phased)
-//   4. Our first customer (discovery thesis)
-//   5. The AI Act CISO (who-buys customer journey)
-//   6. Three ways in (how real users reach the MCP)
-//   7. What's in v1 — in scope / out of scope
-//   8. Testnet now, mainnet later
-//   9. Open questions & dependencies
+//   1.  Status & roadmap (v1/v2/v3 overview)
+//   2.  The five modules (Time/Logging/Scheduler/Audit/Identity — design + status)
+//   3.  The MCP server vs the playground (two surfaces, one lane A)
+//   4.  Meridian Pay (demo company dogfooded in AgentDash)
+//   5.  Two lanes, one launch (Lane A features / Lane B hosting+CI-CD, phased)
+//   6.  Our first customer (discovery thesis)
+//   7.  The AI Act CISO (who-buys customer journey)
+//   8.  Three ways in (how real users reach the MCP)
+//   9.  What's in v1 — in scope / out of scope
+//   10. Testnet now, mainnet later
+//   11. Open questions & dependencies
 //
 //   node gen-slides.mjs            # create or update-in-place
 //   node gen-slides.mjs trash ID   # move a deck to Trash (reversible)
@@ -243,6 +245,45 @@ function slideModules(reqs, sid) {
   text(reqs, sid, MX, y + 7, CW, 24,
     'Reading the chips:  LIVE = working on the testnet now.   ·   =PREVIEW = built but not yet fireable — Scheduler “create” needs your wallet signature (non-custodial); Identity “directory” needs the public resolver. Neither is faked.',
     { size: 8.5, color: C.amber, line: 122 });
+}
+
+// Two surfaces, one lane A — the standalone MCP server (what agents connect to)
+// vs the playground (a browser demo of the same tools, NOT an MCP endpoint).
+// Settles the recurring "is the Vercel site our MCP?" question: it is not.
+function slideSurfaces(reqs, sid) {
+  header(reqs, sid);
+  eyebrow(reqs, sid, MX, 40, 'what we ship · two surfaces, one lane A', C.v1);
+  heading(reqs, sid, MX, 56, 'The MCP server vs the playground');
+  text(reqs, sid, MX, 100, CW, 24,
+    'The standalone MCP server is the product agents connect to. The playground is a browser demo of the same tools — not an MCP endpoint.',
+    { size: 12, color: C.mut, line: 120 });
+  rule(reqs, sid, MX, 138, CW);
+
+  const colW = (CW - 36) / 2, lx = MX, rx = MX + colW + 36, colY = 156;
+  rule(reqs, sid, MX + colW + 18, colY, 1, C.line, 168); // vertical divider
+
+  chip(reqs, sid, lx, colY, 232, 22, 'THE MCP SERVER · WHAT AGENTS CONNECT TO', C.tV1, C.v1, 8.5);
+  text(reqs, sid, lx, colY + 34, colW, 180, [
+    'Real MCP endpoint over HTTPS — 25 tools, token-gated',
+    'Connects Cowork, claude.ai, Desktop, Claude Code, any agent',
+    'Self-hosted, non-custodial — Mac mini now → AWS / GCP later',
+    'StreamableHTTP + initialize handshake; Bearer / x-api-key auth',
+    'This is the product — what developers and agents integrate',
+  ].join('\n'), { size: 11, color: C.ink, line: 128, space: 5, bullets: 'BULLET_DISC_CIRCLE_SQUARE' });
+
+  chip(reqs, sid, rx, colY, 196, 22, 'THE PLAYGROUND · A BROWSER DEMO', C.tV3, C.v3, 8.5);
+  text(reqs, sid, rx, colY + 34, colW, 180, [
+    'Web chatbot on our marketing site — not an MCP endpoint',
+    'For humans: prospects and design partners, zero-install',
+    'Vercel serverless · delegated access (our key, gated)',
+    'Surfaces 17 of the 25 tools through chat — same lane A logic',
+    'Purpose: a try-before-you-connect front door',
+  ].join('\n'), { size: 11, color: C.mut, line: 128, space: 5, bullets: 'BULLET_DISC_CIRCLE_SQUARE' });
+
+  rule(reqs, sid, MX, 350, CW, C.tV1, 44);
+  text(reqs, sid, MX + 16, 356, CW - 32, 32,
+    'One lane A underneath — every playground capability is a subset of the MCP. The hosted server is a strict superset: it adds the raw Time / Logging primitives, verify_package, and delegate_authority. Nothing the playground demos is missing from what agents get.',
+    { size: 9, bold: true, color: C.ink, line: 116 });
 }
 
 // Meridian Pay — the demo customer dogfooded in AgentDash: 7 agents, a weekly
@@ -535,21 +576,22 @@ async function upsertDeck(token, prior) {
   // Order: exec overview → the five modules (architecture) → the two-lane roadmap
   // (centerpiece) → the business case (first customer, who-buys journey, three
   // ways in) → v1 scope → network → open Qs.
-  const ids = ['sldOverview', 'sldModules', 'sldMeridian', 'sldLanes', 'sldCustomer', 'sldJourney', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen'];
+  const ids = ['sldOverview', 'sldModules', 'sldSurfaces', 'sldMeridian', 'sldLanes', 'sldCustomer', 'sldJourney', 'sldChannels', 'sldScope', 'sldNetwork', 'sldOpen'];
   const reqs = [];
   // delete old slides FIRST so the deterministic new IDs don't collide with them
   old.forEach((objectId) => reqs.push({ deleteObject: { objectId } }));
   ids.forEach((s) => reqs.push({ createSlide: { objectId: s, slideLayoutReference: { predefinedLayout: 'BLANK' } } }));
   slideOverview(reqs, ids[0]);
   slideModules(reqs, ids[1]);
-  slideMeridian(reqs, ids[2]);
-  slideLanes(reqs, ids[3]);
-  slideTLDR(reqs, ids[4]);
-  slideJourney(reqs, ids[5]);
-  slideChannels(reqs, ids[6]);
-  slideScope(reqs, ids[7]);
-  slideNetwork(reqs, ids[8]);
-  slideOpen(reqs, ids[9]);
+  slideSurfaces(reqs, ids[2]);
+  slideMeridian(reqs, ids[3]);
+  slideLanes(reqs, ids[4]);
+  slideTLDR(reqs, ids[5]);
+  slideJourney(reqs, ids[6]);
+  slideChannels(reqs, ids[7]);
+  slideScope(reqs, ids[8]);
+  slideNetwork(reqs, ids[9]);
+  slideOpen(reqs, ids[10]);
 
   await api(token, `https://slides.googleapis.com/v1/presentations/${presentationId}:batchUpdate`, 'POST', { requests: reqs });
   await setCommentable(token, presentationId);
@@ -565,7 +607,7 @@ async function main() {
   const token = await getAccessToken();
   if (args[0] === 'trash') return trash(token, args.slice(1));
   const prior = existsSync(LEDGER_PATH) ? JSON.parse(await readFile(LEDGER_PATH, 'utf8')) : {};
-  console.log(`Building elegant native deck "${DECK_TITLE}" (10 slides):`);
+  console.log(`Building elegant native deck "${DECK_TITLE}" (11 slides):`);
   const data = await upsertDeck(token, prior[DECK_TITLE]);
   await writeFile(LEDGER_PATH, JSON.stringify({ ...prior, [DECK_TITLE]: data }, null, 2));
   console.log(`\nDone.\n  ${DECK_TITLE}\n  -> ${data.url}\nLedger: ${LEDGER_PATH}`);

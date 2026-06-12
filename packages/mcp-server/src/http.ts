@@ -91,7 +91,9 @@ export function createRateLimiter(perMin: number) {
 }
 
 export async function runHttp(): Promise<void> {
-  const port = Number(process.env.MCP_PORT ?? "3000");
+  // PORT is injected by Cloud Run / most PaaS hosts (8080); MCP_PORT is our own
+  // override; 3000 is the local default. Honor them in that order.
+  const port = Number(process.env.PORT ?? process.env.MCP_PORT ?? "3000");
   const tokens = parseTokens(process.env.MCP_AUTH_TOKENS);
 
   // Footgun guard: for a delegated/hosted deploy, set MCP_REQUIRE_AUTH=1 so the

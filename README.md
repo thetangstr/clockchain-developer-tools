@@ -34,6 +34,23 @@ Open a **new** session, run `/mcp` (you should see `clockchain`), and ask:
 *"use clockchain to get the current consensus time."* Claude Desktop / Cursor
 config, the remote-HTTP option, and troubleshooting are in [`INSTALL.md`](INSTALL.md).
 
+## Use it in the browser — no install (Claude Code web)
+
+No machine to set up? Connect a browser-based agent to our **hosted** endpoint —
+nothing to clone or build. In **Claude Code on the web**, paste this prompt:
+
+> I want to use the Clockchain MCP server. It's already hosted, so do NOT clone or
+> build any repo — just connect to the remote server over HTTP. Register it by
+> running exactly this:
+> `claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp --header "x-api-key: <your token>"`
+> Then run `/mcp` to confirm `clockchain` is connected, and call its `get_time`
+> tool to show me the current Clockchain consensus time.
+
+Ask the team for a per-user token — the Clockchain key stays on the server. The
+same hosted endpoint (`https://mcp.clockchain.network/mcp`) works from Claude Code
+(CLI or web) and Cursor. Chat-connector clients (claude.ai chat, Cowork) are
+different — see [`INSTALL.md`](INSTALL.md).
+
 ## What you get
 
 **25 tools across five modules:**

@@ -97,7 +97,7 @@ EVM_RPC_URL=<rpc url>  ERC8004_CHAIN=<chain>  ERC8004_REGISTRY_ADDRESS=<0x...>
 Connect to a hosted Clockchain MCP endpoint with a per-user token (the Clockchain
 key stays on the server). See `DELEGATED-ACCESS.md` for hosting + token issuance.
 ```bash
-claude mcp add clockchain --transport http https://mcp.<domain>/mcp \
+claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
   --header "x-api-key: <your tester token>"
 ```
 
@@ -109,10 +109,12 @@ require the **remote HTTPS endpoint**, and it must be reachable over the public
 internet from Anthropic's IP ranges (a server on localhost, a VPN, or behind a
 firewall won't connect).
 
-> **Status:** the hosted endpoint (`mcp.clockchain.network`) isn't live yet - see
-> [`ROADMAP.md`](ROADMAP.md) (this is the Phase 2 / "hosted MCP" work). Until it's
-> up, use **Claude Code** with the local stdio install above; Cowork/claude.ai/
-> Desktop can't be connected to Clockchain yet.
+> **Status:** the hosted endpoint is **live** at `https://mcp.clockchain.network/mcp`
+> (Cloud Run, token-gated). Config-file clients — **Claude Code (CLI or web)** and
+> **Cursor** — connect with the `--header "x-api-key: <token>"` command above. The
+> **chat-connector** clients (claude.ai chat, Cowork) only accept OAuth/authless in
+> their connector UI, not a static token — so those need either an authless setup or
+> the Claude-Desktop bridge; see the auth notes in [`auth-and-traffic-decision.md`](auth-and-traffic-decision.md).
 
 Once the endpoint is hosted, add it as a **custom connector**:
 1. In Cowork (or claude.ai / Desktop): **Settings → Connectors → Add custom connector**.
