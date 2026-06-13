@@ -53,7 +53,7 @@ different — see [`INSTALL.md`](INSTALL.md).
 
 ## What you get
 
-**25 tools across five modules:**
+**30 tools across six modules:**
 
 - **Time:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
 - **Logging (notarization):** `log_action`, `get_log_entry`, `search_actions`,
@@ -70,6 +70,11 @@ different — see [`INSTALL.md`](INSTALL.md).
   `resolve_agent`, `attest_action`, `verify_receipt`, `mint_identity`,
   `revoke_identity`, `delegate_authority`, `get_identity_history`,
   `verify_identity_at`, `verify_cross_party`.
+- **Commitments (TSA):** `tsa_issue`, `tsa_checkpoint`, `tsa_attest`,
+  `tsa_settle`, `tsa_status`. A commitment lifecycle on the anchor primitives —
+  issue → checkpoint → attest (kept/broken) → settle, plus status. `tsa_attest`
+  reconciles the on-chain anchor time vs the deadline into a kept/`broken-late`/
+  `broken` verdict; the consequence is **recorded, not enforced** (MVP).
 
 **Cross-party verification is live and keyless:** `GET /searchAssetFromChain?blockHeight={h}`
 reads the immutable on-chain block with no API key. That block — not the mutable
@@ -88,7 +93,7 @@ A `@clockchain/cli` for the terminal is planned — see [ROADMAP.md](./ROADMAP.m
 ## Status
 
 Working against the live gateway. The MCP server is **verified working** —
-`initialize` + `tools/list` returns 25 tools and live calls succeed. Verified
+`initialize` + `tools/list` returns 30 tools and live calls succeed. Verified
 surface (updated 2026-06-11):
 
 - **Time:** read consensus time from the **public `/getTime`** (no key scope). The

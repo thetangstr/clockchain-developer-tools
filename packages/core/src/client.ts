@@ -153,7 +153,7 @@ export function solidityName(name: string): string {
  * pattern-matched BEFORE Date.parse: V8 leniently mis-parses them month-first
  * (Nov 6 instead of Jun 11). Order: gateway regex → Date.parse (ISO) → epoch.
  */
-function parseClockTime(value: unknown): number {
+export function parseClockTime(value: unknown): number {
   const s = String(value ?? "");
   const m = s.match(
     /^(\d{2})-(\d{2})-(\d{4})[_ ](\d{2}):(\d{2}):(\d{2}):(\d{3})(?: UTC)?$/,
