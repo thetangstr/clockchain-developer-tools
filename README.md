@@ -113,6 +113,23 @@ surface (updated 2026-06-11):
 
 **Full current limitations + v1/v2/v3 plan: [ROADMAP.md](./ROADMAP.md).**
 
+## Hosting, CI/CD & ops
+
+Hosted on **GCP Cloud Run** at `https://mcp.clockchain.network/mcp` (token-gated +
+bring-your-own-key), auto-deployed on push to `main` behind a test gate.
+
+| File | What it is |
+|---|---|
+| [`CLOUD-RUN.md`](CLOUD-RUN.md) | Deploy + ops runbook: keyless WIF CI/CD, Cloud Armor, monitoring, secret/token rotation, rollback. **Canonical hosting doc.** |
+| [`cicd-plan.md`](cicd-plan.md) | CI/CD pipeline, non-negotiable rules, and forward plan. |
+| [`AGENTS.md`](AGENTS.md) | Contributor/agent guide — run tests before push, never bypass the deploy gate, one agent per worktree. |
+| [`auth-and-traffic-decision.md`](auth-and-traffic-decision.md) | Single-ID front door, delegated vs BYO, Cowork vs Claude Code, channel/traffic + cost model. |
+| [`agentdash-mcp-integration-brief.md`](agentdash-mcp-integration-brief.md) | Hand-off brief for the AgentDash team to integrate the hosted MCP. |
+| [`eval/`](eval/) | Execution-scored eval harness — Layer-A perf + Layer-B agent task suite (on-chain checks, no LLM judge). |
+| [`RETRO-2026-06-13.md`](RETRO-2026-06-13.md) | Retro of the 06-11 → 06-13 build (Cloud Run, CI/CD, TSA, eval). |
+
+`DELEGATED-ACCESS.md` below describes the **retired** Mac-mini path — superseded by `CLOUD-RUN.md`.
+
 ## Specs & planning docs
 
 Background, design decisions, and rollout plans (this repo started as the planning
