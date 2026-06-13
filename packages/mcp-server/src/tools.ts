@@ -5,6 +5,11 @@ import {
   InsufficientCreditsError,
   RateLimitError,
   resolveAgent,
+  tsaAttest,
+  tsaCheckpoint,
+  tsaIssue,
+  tsaSettle,
+  tsaStatus,
   type AgentReceipt,
   type ClockchainConfig,
   type ComplianceFormat,
@@ -789,5 +794,168 @@ export function registerTools(
           : null;
         return { onChain, advisoryHashCheck };
       }),
+  );
+
+  // ===== COMMITMENTS (TSA) MCP =====
+  // A commitment lifecycle layered on the anchor primitives: issue -> checkpoint
+  // -> attest (kept/broken) -> settle, plus status. Each write anchors a SHA-256
+  // of a canonical event payload under a shared reference tsa:{commitmentId}; the
+  // payload stays client-side (additionalInfo is plain-text-only). MVP boundary:
+  // attest reconciles the on-chain anchor time vs the deadline into a kept/broken
+  // verdict; the consequence is RECORDED, not enforced. Testnet.
+
+  server.registerTool(
+    "tsa_issue",
+    {
+      title: "Issue a time-stamped commitment",
+      description:
+        "Issue a commitment: anchor a SHA-256 of the agreement under " +
+        "tsa:{commitmentId} and return a receipt the caller holds. The " +
+        "commitmentId is deterministic (agent_id + commitment + deadline). The " +
+        "payload stays client-side; only its hash + neutral time go on-chain. " +
+        "Testnet. Write — spends a log credit.",
+      inputSchema: {
+        agent_id: z.string().describe("Who is committing (agentId or an agent label)."),
+        commitment: z.string().describe("What is being committed to (plain text)."),
+        deadline: z
+          .string()
+          .describe(
+            "The deadline the verdict is judged against (gateway DD-MM-YYYY or ISO 8601).",
+          ),
+        consequence: z
+          .string()
+          .optional()
+          .describe("Optional recorded (NOT enforced) consequence of breaking the commitment."),
+      },
+    },
+    async ({ agent_id, commitment, deadline, consequence }) =>
+      run("tsa_issue", async () => {
+        budget.check();
+        const receipt = await tsaIssue(client, {
+          agentId: agent_id,
+          commitment,
+          deadline,
+          consequence,
+        });
+        budget.record();
+        return receipt;
+      }),
+  );
+
+  server.registerTool(
+    "tsa_checkpoint",
+    {
+      title: "Checkpoint progress against a commitment",
+      description:
+        "Anchor a progress checkpoint (a note + optional evidence hash) under the " +
+        "commitment's tsa:{commitmentId} trail. The note stays client-side; only " +
+        "its hash + neutral time go on-chain. Testnet. Write — spends a log credit.",
+      inputSchema: {
+        commitment_id: z.string().describe("The commitmentId from tsa_issue."),
+        note: z.string().describe("Progress note (plain text; kept client-side, only hashed)."),
+        evidence_hash: z
+          .string()
+          .optional()
+          .describe("Optional hash of supporting evidence to anchor alongside the note."),
+      },
+    },
+    async ({ commitment_id, note, evidence_hash }) =>
+      run("tsa_checkpoint", async () => {
+        budget.check();
+        const receipt = await tsaCheckpoint(client, {
+          commitmentId: commitment_id,
+          note,
+          evidenceHash: evidence_hash,
+        });
+        budget.record();
+        return receipt;
+      }),
+  );
+
+  server.registerTool(
+    "tsa_attest",
+    {
+      title: "Attest a commitment as kept/broken (with verdict)",
+      description:
+        "Attest a commitment kept/broken and reconcile it with on-chain time. The " +
+        "neutral anchor time is judged against the deadline: onTime = attestTime <= " +
+        "deadline (both parsed gateway DD-MM-YYYY first). Verdict: kept+onTime -> " +
+        "'kept'; kept+late -> 'broken-late'; broken -> 'broken'. Returns the " +
+        "outcome, onTime, verdict, attestedAt, deadline, anchor, and eventHash. " +
+        "MVP: the verdict is RECORDED, not enforced. Testnet. Write — spends a log credit.",
+      inputSchema: {
+        commitment_id: z.string().describe("The commitmentId from tsa_issue."),
+        outcome: z
+          .enum(["kept", "broken"])
+          .describe("The agent's self-reported outcome (reconciled with on-chain time)."),
+        deadline: z
+          .string()
+          .describe("The deadline to judge onTime against (gateway DD-MM-YYYY or ISO 8601)."),
+        evidence: z
+          .string()
+          .optional()
+          .describe("Optional evidence reference (plain text; kept client-side, only hashed)."),
+      },
+    },
+    async ({ commitment_id, outcome, deadline, evidence }) =>
+      run("tsa_attest", async () => {
+        budget.check();
+        const receipt = await tsaAttest(client, {
+          commitmentId: commitment_id,
+          outcome,
+          deadline,
+          evidence,
+        });
+        budget.record();
+        return receipt;
+      }),
+  );
+
+  server.registerTool(
+    "tsa_settle",
+    {
+      title: "Settle a commitment (record outcome + consequence)",
+      description:
+        "Settle a commitment: RECORD (not enforce) the final outcome + consequence " +
+        "as a terminal anchor in the tsa:{commitmentId} trail. Testnet. Write — " +
+        "spends a log credit.",
+      inputSchema: {
+        commitment_id: z.string().describe("The commitmentId from tsa_issue."),
+        outcome: z
+          .enum(["kept", "broken"])
+          .describe("The final settled outcome."),
+        consequence: z
+          .string()
+          .describe("The recorded (NOT enforced) consequence of this outcome."),
+      },
+    },
+    async ({ commitment_id, outcome, consequence }) =>
+      run("tsa_settle", async () => {
+        budget.check();
+        const receipt = await tsaSettle(client, {
+          commitmentId: commitment_id,
+          outcome,
+          consequence,
+        });
+        budget.record();
+        return receipt;
+      }),
+  );
+
+  server.registerTool(
+    "tsa_status",
+    {
+      title: "Read a commitment's on-chain trail",
+      description:
+        "Read the on-chain trail for a commitment via exact-match " +
+        "searchAsset('tsa:{commitmentId}'). Reports the anchored SEQUENCE (count, " +
+        "ledgerIds, block heights, times, hashes) — payloads live in the caller's " +
+        "receipts, never on-chain. Testnet. Read-only.",
+      inputSchema: {
+        commitment_id: z.string().describe("The commitmentId to read the trail for."),
+      },
+    },
+    async ({ commitment_id }) =>
+      run("tsa_status", () => tsaStatus(client, commitment_id)),
   );
 }
