@@ -41,6 +41,11 @@ export function getSharedLogBudget(env: NodeJS.ProcessEnv = process.env): LogBud
   return sharedBudget;
 }
 
+/** Test-only: clear the process-wide budget so the next call re-reads env. */
+export function __resetSharedLogBudget(): void {
+  sharedBudget = null;
+}
+
 /**
  * A no-op budget (never caps). Used for bring-your-own-key requests: the caller
  * presented their own Clockchain credentials, so writes spend THEIR credits, not

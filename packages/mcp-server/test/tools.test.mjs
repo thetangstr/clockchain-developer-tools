@@ -4,8 +4,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerTools } from "../dist/tools.js";
+import { __resetSharedLogBudget } from "../dist/budget.js";
 
 const cfg = { apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://test.local" };
+// A valid 64-char hex SHA-256 digest for log_action tests. The value is irrelevant
+// to the stubbed gateway; it just has to pass asset_hash format validation.
+const HEX = "a".repeat(64);
 
 // Collect the handlers registerTools() registers, keyed by tool name.
 function collectTools() {
@@ -54,14 +58,14 @@ test("log_action with wait=true polls until blockHeight populates", async () => 
     ["/log", { body: { ledgerId: "L1", blockHeight: null, assetHash: "h" } }],
     ["/ledger/", { body: { ledgerId: "L1", blockHeight: "777", assetHash: "h", assetReferenceId: "r" } }],
   ]);
-  const res = await collectTools().log_action({ asset_hash: "h", asset_reference_id: "r", wait: true, wait_ms: 5000 });
+  const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r", wait: true, wait_ms: 5000 });
   assert.ok(!res.isError);
   assert.equal(JSON.parse(textOf(res)).blockHeight, "777");
 });
 
 test("log_action without wait returns the pending record (blockHeight null)", async () => {
   routeFetch([["/log", { body: { ledgerId: "L2", blockHeight: null, assetHash: "h" } }]]);
-  const res = await collectTools().log_action({ asset_hash: "h", asset_reference_id: "r" });
+  const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r" });
   const out = JSON.parse(textOf(res));
   assert.equal(out.ledgerId, "L2");
   assert.equal(out.blockHeight, null);
@@ -75,7 +79,7 @@ test("log_action folds a DID into the reference id", async () => {
     sentBody = JSON.parse(opts.body);
     return origFetch(url, opts);
   };
-  await collectTools().log_action({ asset_hash: "h", asset_reference_id: "r", did: "did:x:1" });
+  await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r", did: "did:x:1" });
   assert.equal(sentBody.assetReferenceId, "did:x:1:r");
 });
 
@@ -88,7 +92,7 @@ test("verify_asset reports match true and false", async () => {
 
 test("insufficient credits surfaces an actionable message", async () => {
   routeFetch([["/log", { status: 400, body: { message: "No enough tokens to facilitate this logging" } }]]);
-  const res = await collectTools().log_action({ asset_hash: "h", asset_reference_id: "r" });
+  const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r" });
   assert.equal(res.isError, true);
   assert.match(textOf(res), /credit/i);
 });
@@ -161,15 +165,17 @@ test("log_action honors MCP_LOG_BUDGET cap across calls", async () => {
   routeFetch([["/log", { body: { ledgerId: "LB", blockHeight: null } }]]);
   const prev = process.env.MCP_LOG_BUDGET;
   process.env.MCP_LOG_BUDGET = "1";
+  __resetSharedLogBudget(); // process-wide budget: force a re-read of the cap
   try {
     const tools = collectTools(); // budget bound at registration time
-    const first = await tools.log_action({ asset_hash: "h", asset_reference_id: "r1" });
+    const first = await tools.log_action({ asset_hash: HEX, asset_reference_id: "r1" });
     assert.ok(!first.isError, "first write within budget");
-    const second = await tools.log_action({ asset_hash: "h", asset_reference_id: "r2" });
+    const second = await tools.log_action({ asset_hash: HEX, asset_reference_id: "r2" });
     assert.equal(second.isError, true, "second write exceeds budget");
     assert.match(textOf(second), /budget/i);
   } finally {
     if (prev === undefined) delete process.env.MCP_LOG_BUDGET;
     else process.env.MCP_LOG_BUDGET = prev;
+    __resetSharedLogBudget(); // clean up so later tests get a fresh budget
   }
 });
