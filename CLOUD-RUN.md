@@ -90,3 +90,59 @@ Once the `*.run.app` URL passes the checks above and the docs point at it:
 ```bash
 ssh maxiaoer@192.168.86.48 'pm2 delete clockchain-mcp; pkill -f "cloudflared tunnel"'
 ```
+
+## Operations & security (current state)
+
+- **CI/CD:** push to `main` (code paths) auto-builds + deploys via GitHub Actions
+  (`.github/workflows/deploy.yml`) using **Workload Identity Federation** — keyless,
+  deploy SA `gh-deploy@clockchain-mcp-yarda`, WIF pool `github` bound to
+  `thetangstr/clockchain-developer-tools`. Manual deploy is still `gcloud run deploy
+  --source` (preserves env/secrets/scaling).
+- **Networking:** external HTTPS LB on static IP `34.111.4.193`; managed cert for
+  `mcp.clockchain.network`; **HTTP(:80) → HTTPS 301 redirect**; `min-instances=1`
+  (no cold start).
+- **Edge protection:** Cloud Armor policy `clockchain-mcp-armor` on backend
+  `clockchain-mcp-be` — per-IP rate limit **120 req / 60s**, 5-min ban on abuse. (App
+  layer also rate-limits per token: `MCP_RATE_PER_MIN`.)
+- **Monitoring:** uptime check `clockchain-mcp-health` on `/health` + alert policy
+  "clockchain-mcp endpoint down" → email `yt@d4d.group`.
+
+### Rotate the Clockchain key
+
+```bash
+printf '%s' '<NEW_KEY>' | gcloud secrets versions add clockchain-api-key --data-file=-
+gcloud run services update clockchain-mcp --region us-central1 \
+  --update-secrets=CLOCKCHAIN_API_KEY=clockchain-api-key:latest   # rolls a new revision
+```
+
+### Mint / revoke an MCP token
+
+```bash
+CUR=$(gcloud secrets versions access latest --secret=mcp-auth-tokens)
+# mint: append a new token
+printf '%s,%s' "$CUR" "$(openssl rand -hex 24)" | gcloud secrets versions add mcp-auth-tokens --data-file=-
+# revoke: re-add the set WITHOUT the token to remove, then roll the revision:
+V=$(gcloud secrets versions add mcp-auth-tokens --data-file=- <<<"<remaining,tokens>" --format='value(name)' | grep -o '[0-9]*$')
+gcloud run services update clockchain-mcp --region us-central1 --update-secrets=MCP_AUTH_TOKENS=mcp-auth-tokens:${V}
+```
+Tokens currently issued: tester, playground (Vercel `MCP_SERVER_TOKEN`), exec.
+
+### Security review item — `allUsers` org-policy override
+
+This project has a **project-scoped override** of `iam.allowedPolicyMemberDomains`
+(set to `allValues: ALLOW`) so `allUsers` could be granted `run.invoker` — **required**
+to expose a public, token-gated MCP endpoint (the app, not Google IAM, gates access).
+It loosens the yarda org's Domain-Restricted-Sharing **for this project only**; every
+other project keeps the restriction. It is **reversible** (reset the policy / delete the
+project). **Action:** have the yarda security owner review + bless this exception.
+
+## Not yet done (D4-owned decisions, not solo-buildable)
+
+- **OAuth 2.1 for the Cowork/claude.ai cloud connector** — the only client surface still
+  unsupported (chat connectors require OAuth, not static tokens). Recommended path:
+  an OAuth server that delegates to the network identity (Ory Hydra) — see
+  `auth-and-traffic-decision.md`. Needs the "which identity system" decision first.
+- **Per-tenant metering + BYO-by-default** for real users (so usage funds its own
+  credits). Today: delegated (our credits) + BYO available.
+- **Multi-region / formal SLA** — single region (`us-central1`); only worth it once
+  this is a product, not a demo.
