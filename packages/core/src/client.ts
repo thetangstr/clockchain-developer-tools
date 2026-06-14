@@ -1008,11 +1008,17 @@ export class ClockchainClient {
     }
     fd.append(fileField, new Blob([source], { type: "text/plain" }), `${name}.sol`);
 
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: { "x-api-key": this.config.apiKey, accept: "application/json" },
-      body: fd,
-    });
+    // POST → resilientFetch gives this a timeout + breaker but NO retry
+    // (re-POSTing a contract deploy could double-deploy).
+    const res = await resilientFetch(
+      `${this.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: { "x-api-key": this.config.apiKey, accept: "application/json" },
+        body: fd,
+      },
+      { method: "POST" },
+    );
     const raw = await res.text();
     let parsed: unknown = undefined;
     if (raw.length > 0) {
