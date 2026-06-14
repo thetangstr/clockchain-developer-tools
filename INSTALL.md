@@ -1,7 +1,7 @@
 # Install the Clockchain MCP server
 
 Add Clockchain's tools (consensus time, notarization, smart-contract scheduling,
-audit trails, agent identity verification, commitment lifecycle — 30 tools across
+audit trails, agent identity verification, commitment lifecycle — 31 tools across
 six modules) to your
 AI coding agent. Two ways: **local** (you run it, recommended) or **remote** (you
 connect to a hosted endpoint).
@@ -160,7 +160,7 @@ connector-compatible auth layer remain.
 | Non-custodial | yes - no private keys in the server | yes - key custodied on the host, not shared |
 
 ## The tools you get
-**30 tools across six modules** (`/mcp` should list `clockchain` with all 30):
+**31 tools across six modules** (`/mcp` should list `clockchain` with all 31):
 
 - **Time oracle:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
 - **Notarization:** `log_action`, `get_log_entry`, `search_actions`, `verify_asset`.
@@ -172,9 +172,11 @@ connector-compatible auth layer remain.
   Art. 12 / SEC 17a-4 / ISO 27001 presets), `build_evidence_package`,
   `verify_package`.
 - **Agent identity (verification, valid-at-T — not authentication):**
-  `resolve_agent`, `attest_action`, `verify_receipt`, `mint_identity`,
-  `revoke_identity`, `delegate_authority`, `get_identity_history`,
-  `verify_identity_at`, `verify_cross_party`. Cross-party verification is keyless
+  `resolve_agent`, `attest_action`, `complete_attestation`, `verify_receipt`,
+  `mint_identity`, `revoke_identity`, `delegate_authority`,
+  `get_identity_history`, `verify_identity_at`, `verify_cross_party`.
+  `attest_action` with `wait=false` + `complete_attestation` is the non-blocking
+  submit→poll path. Cross-party verification is keyless
   — it reads the immutable on-chain block, not the mutable ledger cache.
 - **Commitments (TSA):** `tsa_issue`, `tsa_checkpoint`, `tsa_attest`,
   `tsa_settle`, `tsa_status` — a commitment lifecycle (issue → checkpoint →

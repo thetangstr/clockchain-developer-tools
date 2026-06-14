@@ -354,6 +354,49 @@ export class ClockchainClient {
   }
 
   /**
+   * Complete a (possibly pending) receipt — the poll half of the submit→poll
+   * pattern. After `attestAction({ wait: false })` returns a pending receipt
+   * immediately (no held connection), call this to check whether the block has
+   * landed: re-fetch the ledger entry and, once `blockHeight` is populated,
+   * re-enrich with block + validation and rebuild the CONFIRMED receipt. If the
+   * block has not landed yet, returns a fresh pending receipt (idempotent).
+   *
+   * Read-only: it fetches but anchors nothing, so it spends no log credit. The
+   * event hash is taken from the original receipt so the receipt's identity is
+   * preserved across completion.
+   */
+  async completeReceipt(receipt: AgentReceipt): Promise<AgentReceipt> {
+    const input: AttestActionInput = {
+      agentId: receipt.agentId,
+      action: receipt.action,
+      inputs: receipt.payload.inputs ?? undefined,
+      outputs: receipt.payload.outputs ?? undefined,
+    };
+    const log = await this.getLedgerEntry(receipt.anchor.ledgerId);
+
+    let block: BlockResponse | null = null;
+    let validation: ValidationBlock | null = null;
+    if (log.blockHeight != null) {
+      block = await this.getBlock(log.blockHeight).catch(() => null);
+      validation = await this.getValidationBlock(log.blockHeight).catch(() => null);
+    }
+    // Preserve any identity resolution already on the receipt (don't re-resolve).
+    const identity = receipt.identity?.resolved
+      ? { resolved: true, status: receipt.identity.status }
+      : null;
+
+    return buildReceipt({
+      input,
+      eventHash: receipt.eventHash,
+      network: receipt.network,
+      log,
+      block,
+      validation,
+      identity,
+    });
+  }
+
+  /**
    * Independently re-verify a receipt against the IMMUTABLE on-chain block.
    *
    * Recompute the event hash from the receipt's own payload, then confirm it

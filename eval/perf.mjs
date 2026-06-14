@@ -1,6 +1,6 @@
 // Layer-A: server/transport performance for the Clockchain MCP.
 // Measures per-tool latency (p50/p95/p99 over N samples) for cheap reads, plus
-// the "token tax" — how many tokens the 30 tool definitions cost per request.
+// the "token tax" — how many tokens the full tool-definition set costs per request.
 // Reads only (no credit spend). Run: MCP_TOKEN=... node eval/perf.mjs
 import { callTool, listTools, estTokens, pct, round, MCP_URL } from "./lib.mjs";
 

@@ -227,3 +227,27 @@ test("log_action with the same idempotency_key hits /log once and replays the re
   assert.equal(logHits, 2, "a different key hits /log again");
   assert.equal(JSON.parse(textOf(c)).ledgerId, "L2");
 });
+
+test("attest_action wait=false submits, complete_attestation polls to confirmed", async () => {
+  const tools = collectTools();
+  // SUBMIT: wait=false -> only /log is hit, returns a pending receipt.
+  routeFetch([["/log", { body: { ledgerId: "LP", assetReferenceId: "ref", blockHeight: null, createdTimestamp: "t" } }]]);
+  const subRes = await tools.attest_action({ agent_id: "agent:bot", action: "act", inputs: { a: 1 }, wait: false });
+  assert.ok(!subRes.isError, "submit ok");
+  const pending = JSON.parse(textOf(subRes));
+  assert.equal(pending.anchor.confirmed, false);
+  assert.equal(pending.anchor.blockHeight, null);
+
+  // POLL: block has landed -> complete_attestation returns the confirmed receipt.
+  routeFetch([
+    ["/ledger/", { body: { ledgerId: "LP", assetReferenceId: "ref", blockHeight: "910", createdTimestamp: "t" } }],
+    ["/api/time/block", { body: { success: true, data: { blockHeight: 910, proposerAddress: "0x", blockTime: "2026-06-14T00:00:00Z" } } }],
+    ["/getValidationBlock", { body: { validationBlockData: { blockHeight: 910, positiveVotes: 1, negativeVotes: 0, "Trust value percentage": 0 } } }],
+  ]);
+  const compRes = await tools.complete_attestation({ receipt: pending });
+  assert.ok(!compRes.isError, "complete ok");
+  const done = JSON.parse(textOf(compRes));
+  assert.equal(done.anchor.blockHeight, "910");
+  assert.equal(done.anchor.confirmed, true);
+  assert.equal(done.eventHash, pending.eventHash);
+});
