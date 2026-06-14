@@ -21,6 +21,15 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BudgetExceededError, getSharedLogBudget, unlimitedLogBudget } from "./budget.js";
+import { idempotent } from "./idempotency.js";
+
+/** Shared schema fragment: optional idempotency key for write tools. */
+const idempotencyKeySchema = z
+  .string()
+  .optional()
+  .describe(
+    "Optional: a retry with the same key returns the original result instead of re-anchoring (no duplicate credit/record).",
+  );
 
 /** Standard MCP success payload from a JSON-serializable result. */
 function ok(result: unknown) {
@@ -222,6 +231,7 @@ export function registerTools(
           .positive()
           .optional()
           .describe("Max time to wait for confirmation, in ms. Default 15000. Only used when wait=true."),
+        idempotency_key: idempotencyKeySchema,
       },
     },
     async ({
@@ -234,8 +244,9 @@ export function registerTools(
       did,
       wait,
       wait_ms,
+      idempotency_key,
     }) =>
-      run("log_action", async () => {
+      run("log_action", () => idempotent(idempotency_key, async () => {
         // Enforce the optional per-process write cap before spending a credit.
         budget.check();
         // Derive the asset hash: prefer hashing `content` server-side (agent-friendly —
@@ -281,7 +292,7 @@ export function registerTools(
           return client.waitForConfirmation(result.ledgerId, wait_ms ?? 15000);
         }
         return result;
-      }),
+      })),
   );
 
   server.registerTool(
@@ -375,10 +386,11 @@ export function registerTools(
         outputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision outputs."),
         wait: z.boolean().optional().describe("Wait for on-chain confirmation. Default true."),
         wait_ms: z.number().int().positive().optional().describe("Max wait, ms. Default 15000."),
+        idempotency_key: idempotencyKeySchema,
       },
     },
-    async ({ agent_id, action, inputs, outputs, wait, wait_ms }) =>
-      run("attest_action", async () => {
+    async ({ agent_id, action, inputs, outputs, wait, wait_ms, idempotency_key }) =>
+      run("attest_action", () => idempotent(idempotency_key, async () => {
         budget.check();
         const receipt = await client.attestAction({
           agentId: agent_id,
@@ -390,7 +402,7 @@ export function registerTools(
         });
         budget.record();
         return receipt;
-      }),
+      })),
   );
 
   server.registerTool(
@@ -846,10 +858,11 @@ export function registerTools(
           .string()
           .optional()
           .describe("Optional recorded (NOT enforced) consequence of breaking the commitment."),
+        idempotency_key: idempotencyKeySchema,
       },
     },
-    async ({ agent_id, commitment, deadline, consequence }) =>
-      run("tsa_issue", async () => {
+    async ({ agent_id, commitment, deadline, consequence, idempotency_key }) =>
+      run("tsa_issue", () => idempotent(idempotency_key, async () => {
         budget.check();
         const receipt = await tsaIssue(client, {
           agentId: agent_id,
@@ -859,7 +872,7 @@ export function registerTools(
         });
         budget.record();
         return receipt;
-      }),
+      })),
   );
 
   server.registerTool(
@@ -877,10 +890,11 @@ export function registerTools(
           .string()
           .optional()
           .describe("Optional hash of supporting evidence to anchor alongside the note."),
+        idempotency_key: idempotencyKeySchema,
       },
     },
-    async ({ commitment_id, note, evidence_hash }) =>
-      run("tsa_checkpoint", async () => {
+    async ({ commitment_id, note, evidence_hash, idempotency_key }) =>
+      run("tsa_checkpoint", () => idempotent(idempotency_key, async () => {
         budget.check();
         const receipt = await tsaCheckpoint(client, {
           commitmentId: commitment_id,
@@ -889,7 +903,7 @@ export function registerTools(
         });
         budget.record();
         return receipt;
-      }),
+      })),
   );
 
   server.registerTool(
@@ -915,10 +929,11 @@ export function registerTools(
           .string()
           .optional()
           .describe("Optional evidence reference (plain text; kept client-side, only hashed)."),
+        idempotency_key: idempotencyKeySchema,
       },
     },
-    async ({ commitment_id, outcome, deadline, evidence }) =>
-      run("tsa_attest", async () => {
+    async ({ commitment_id, outcome, deadline, evidence, idempotency_key }) =>
+      run("tsa_attest", () => idempotent(idempotency_key, async () => {
         budget.check();
         const receipt = await tsaAttest(client, {
           commitmentId: commitment_id,
@@ -928,7 +943,7 @@ export function registerTools(
         });
         budget.record();
         return receipt;
-      }),
+      })),
   );
 
   server.registerTool(
@@ -947,10 +962,11 @@ export function registerTools(
         consequence: z
           .string()
           .describe("The recorded (NOT enforced) consequence of this outcome."),
+        idempotency_key: idempotencyKeySchema,
       },
     },
-    async ({ commitment_id, outcome, consequence }) =>
-      run("tsa_settle", async () => {
+    async ({ commitment_id, outcome, consequence, idempotency_key }) =>
+      run("tsa_settle", () => idempotent(idempotency_key, async () => {
         budget.check();
         const receipt = await tsaSettle(client, {
           commitmentId: commitment_id,
@@ -959,7 +975,7 @@ export function registerTools(
         });
         budget.record();
         return receipt;
-      }),
+      })),
   );
 
   server.registerTool(
