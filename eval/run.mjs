@@ -66,9 +66,9 @@ async function main() {
   for (const task of suite) {
     process.stdout.write(`▶ ${task.id} … `);
     const { out, err } = await runClaude(task.prompt, allowed);
-    const { trajectory, usage } = parseStream(out);
+    const { trajectory, usage, finalText } = parseStream(out);
     let pass = false, detail = "";
-    try { ({ pass, detail } = await task.check({ callTool, trajectory })); }
+    try { ({ pass, detail } = await task.check({ callTool, trajectory, finalText })); }
     catch (e) { detail = "check error: " + e.message; }
     const usedTools = trajectory.map((c) => (c.name || "").replace("mcp__clockchain__", ""));
     const expected = task.expectTools.filter((t) => usedTools.includes(t));
