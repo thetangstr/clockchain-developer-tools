@@ -2,6 +2,7 @@ import {
   ApiError,
   AuthError,
   ClockchainClient,
+  computeHash,
   InsufficientCreditsError,
   RateLimitError,
   resolveAgent,
@@ -168,16 +169,23 @@ export function registerTools(
     {
       title: "Log an action to the ledger",
       description:
-        "Anchor an asset hash to the Clockchain ledger. Returns a ledgerId; " +
-        "blockHeight is null (pending) until the leader writes the block ~0.6s later.",
+        "Anchor content to the Clockchain ledger. Pass `content` (the server " +
+        "SHA-256-hashes it — the content is hashed, never stored) OR a pre-computed " +
+        "`asset_hash`. Returns a ledgerId; blockHeight is null (pending) until the " +
+        "leader writes the block ~0.6s later.",
       inputSchema: {
+        content: z
+          .string()
+          .optional()
+          .describe("Raw content to notarize; the server SHA-256-hashes it (hashed, never stored). Provide this OR asset_hash."),
         asset_hash: z
           .string()
           .regex(
             /^[0-9a-fA-F]+$/,
             "asset_hash must be a hex string (e.g. a SHA-256 digest).",
           )
-          .describe("Hex hash of the asset/content (64 hex chars for SHA-256)."),
+          .optional()
+          .describe("Pre-computed hex hash (64 hex chars for SHA-256). Provide this OR content."),
         asset_reference_id: z
           .string()
           .describe("Stable reference id for the asset (exact-match on search)."),
@@ -217,6 +225,7 @@ export function registerTools(
       },
     },
     async ({
+      content,
       asset_hash,
       asset_reference_id,
       hash_type,
@@ -229,15 +238,26 @@ export function registerTools(
       run("log_action", async () => {
         // Enforce the optional per-process write cap before spending a credit.
         budget.check();
-        // Reject a hash whose length doesn't match its algorithm's digest, so a
-        // malformed value can't be permanently anchored as if it were a real hash.
-        const hashAlg = (hash_type ?? "SHA-256").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const HASH_HEX_LEN: Record<string, number> = { SHA256: 64, SHA1: 40, SHA224: 56, SHA384: 96, SHA512: 128, MD5: 32 };
-        const need = HASH_HEX_LEN[hashAlg];
-        if (need && asset_hash.length !== need) {
-          throw new Error(
-            `asset_hash is ${asset_hash.length} hex chars but ${hash_type ?? "SHA-256"} digests are ${need}. Pass the real ${hash_type ?? "SHA-256"} hex digest.`,
-          );
+        // Derive the asset hash: prefer hashing `content` server-side (agent-friendly —
+        // an LLM can't compute SHA-256, and the content is hashed, never stored), else
+        // accept a pre-computed `asset_hash` (validated against its digest length).
+        let assetHash: string;
+        let effectiveHashType = hash_type;
+        if (content != null && content !== "") {
+          assetHash = computeHash(content);
+          effectiveHashType = "SHA-256";
+        } else if (asset_hash) {
+          const hashAlg = (hash_type ?? "SHA-256").toUpperCase().replace(/[^A-Z0-9]/g, "");
+          const HASH_HEX_LEN: Record<string, number> = { SHA256: 64, SHA1: 40, SHA224: 56, SHA384: 96, SHA512: 128, MD5: 32 };
+          const need = HASH_HEX_LEN[hashAlg];
+          if (need && asset_hash.length !== need) {
+            throw new Error(
+              `asset_hash is ${asset_hash.length} hex chars but ${hash_type ?? "SHA-256"} digests are ${need}. Pass the real ${hash_type ?? "SHA-256"} hex digest.`,
+            );
+          }
+          assetHash = asset_hash;
+        } else {
+          throw new Error("Provide either `content` (the server hashes it) or a pre-computed `asset_hash`.");
         }
         // If a DID is provided, fold it into the reference id so the anchor is
         // attributable to the agent identity. (additionalInfo is plain-text-only
@@ -246,9 +266,9 @@ export function registerTools(
           ? `${did}:${asset_reference_id}`
           : asset_reference_id;
         const result = await client.log({
-          assetHash: asset_hash,
+          assetHash,
           assetReferenceId,
-          hashType: hash_type,
+          hashType: effectiveHashType,
           versionNumber: version_number,
           additionalInfo: additional_info,
         });
