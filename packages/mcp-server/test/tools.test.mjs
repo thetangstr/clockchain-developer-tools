@@ -3,6 +3,7 @@
 // Run: node --test (from packages/mcp-server) or npm test (workspace root).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { registerTools } from "../dist/tools.js";
 import { __resetSharedLogBudget } from "../dist/budget.js";
 
@@ -178,4 +179,22 @@ test("log_action honors MCP_LOG_BUDGET cap across calls", async () => {
     else process.env.MCP_LOG_BUDGET = prev;
     __resetSharedLogBudget(); // clean up so later tests get a fresh budget
   }
+});
+
+test("log_action hashes raw content server-side (no asset_hash needed)", async () => {
+  let sentBody = null;
+  routeFetch([["/log", { body: { ledgerId: "LC", blockHeight: null } }]]);
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => { sentBody = JSON.parse(opts.body); return orig(url, opts); };
+  const res = await collectTools().log_action({ content: "hello eval", asset_reference_id: "r" });
+  assert.ok(!res.isError);
+  assert.equal(sentBody.assetHash, createHash("sha256").update("hello eval").digest("hex"));
+  assert.equal(sentBody.hashType, "SHA-256");
+});
+
+test("log_action requires content or asset_hash", async () => {
+  routeFetch([["/log", { body: { ledgerId: "x" } }]]);
+  const res = await collectTools().log_action({ asset_reference_id: "r" });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /content|asset_hash/i);
 });
