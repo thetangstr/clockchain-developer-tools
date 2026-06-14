@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { registerTools } from "../dist/tools.js";
 import { __resetSharedLogBudget } from "../dist/budget.js";
+import { __resetIdempotency } from "../dist/idempotency.js";
 
 const cfg = { apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://test.local" };
 // A valid 64-char hex SHA-256 digest for log_action tests. The value is irrelevant
@@ -197,4 +198,32 @@ test("log_action requires content or asset_hash", async () => {
   const res = await collectTools().log_action({ asset_reference_id: "r" });
   assert.equal(res.isError, true);
   assert.match(textOf(res), /content|asset_hash/i);
+});
+
+test("log_action with the same idempotency_key hits /log once and replays the result", async () => {
+  __resetIdempotency(); // process-wide cache: start clean
+  // Count /log hits and return a distinct ledgerId per hit so a replay is detectable.
+  let logHits = 0;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/log")) {
+      logHits++;
+      return { status: 200, ok: true, statusText: "stub", text: async () => JSON.stringify({ ledgerId: "L" + logHits, blockHeight: null }) };
+    }
+    throw new Error("no route " + u);
+  };
+  const tools = collectTools();
+
+  const a = await tools.log_action({ asset_hash: HEX, asset_reference_id: "r", idempotency_key: "key-1" });
+  const b = await tools.log_action({ asset_hash: HEX, asset_reference_id: "r", idempotency_key: "key-1" });
+  assert.ok(!a.isError && !b.isError);
+  assert.equal(logHits, 1, "same key hits /log only once");
+  assert.equal(JSON.parse(textOf(a)).ledgerId, "L1");
+  assert.equal(JSON.parse(textOf(b)).ledgerId, "L1", "retry returns the original ledgerId");
+
+  // A different key re-runs the work and hits /log again.
+  const c = await tools.log_action({ asset_hash: HEX, asset_reference_id: "r", idempotency_key: "key-2" });
+  assert.ok(!c.isError);
+  assert.equal(logHits, 2, "a different key hits /log again");
+  assert.equal(JSON.parse(textOf(c)).ledgerId, "L2");
 });
