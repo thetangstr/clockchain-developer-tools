@@ -179,3 +179,44 @@ test("waitForConfirmation returns the pending record on timeout (no throw)", asy
   assert.equal(rec.ledgerId, "L");
   assert.equal(rec.blockHeight, null);
 });
+
+test("attestAction({wait:false}) SUBMITS a pending receipt without blocking", async () => {
+  // Only /log is hit on submit; enrichment is skipped while blockHeight is null.
+  routeFetch([["/log", { body: { ledgerId: "LA", assetReferenceId: "ref", blockHeight: null, createdTimestamp: "t" } }]]);
+  const receipt = await new ClockchainClient(cfg).attestAction({
+    agentId: "agent:bot", action: "execute_trade", inputs: { size: 1 }, outputs: { ok: true }, wait: false,
+  });
+  assert.equal(receipt.anchor.ledgerId, "LA");
+  assert.equal(receipt.anchor.blockHeight, null);
+  assert.equal(receipt.anchor.confirmed, false);
+});
+
+test("completeReceipt POLLS: still pending when the block has not landed", async () => {
+  routeFetch([["/log", { body: { ledgerId: "LB", assetReferenceId: "ref", blockHeight: null, createdTimestamp: "t" } }]]);
+  const c = new ClockchainClient(cfg);
+  const pending = await c.attestAction({ agentId: "a", action: "x", wait: false });
+  // Ledger still has no blockHeight -> completeReceipt returns a pending receipt.
+  routeFetch([["/ledger/", { body: { ledgerId: "LB", assetReferenceId: "ref", blockHeight: null, createdTimestamp: "t" } }]]);
+  const polled = await c.completeReceipt(pending);
+  assert.equal(polled.anchor.confirmed, false);
+  assert.equal(polled.anchor.blockHeight, null);
+});
+
+test("completeReceipt POLLS: returns the COMPLETED receipt once the block lands", async () => {
+  routeFetch([["/log", { body: { ledgerId: "LC", assetReferenceId: "ref", blockHeight: null, createdTimestamp: "t" } }]]);
+  const c = new ClockchainClient(cfg);
+  const pending = await c.attestAction({ agentId: "a", action: "x", inputs: { n: 1 }, wait: false });
+  const eventHash = pending.eventHash;
+  // Block has now landed: ledger reports a height, and enrichment succeeds.
+  routeFetch([
+    ["/ledger/", { body: { ledgerId: "LC", assetReferenceId: "ref", blockHeight: "900", createdTimestamp: "t" } }],
+    ["/api/time/block", { body: { success: true, data: { blockHeight: 900, proposerAddress: "0x", blockTime: "2026-06-14T00:00:00Z" } } }],
+    ["/getValidationBlock", { body: { validationBlockData: { blockHeight: 900, positiveVotes: 1, negativeVotes: 0, "Trust value percentage": 0 } } }],
+  ]);
+  const done = await c.completeReceipt(pending);
+  assert.equal(done.anchor.blockHeight, "900");
+  assert.equal(done.anchor.confirmed, true);
+  assert.equal(done.anchor.consensusTime, "2026-06-14T00:00:00Z");
+  // Event hash is preserved across completion -> same receipt identity.
+  assert.equal(done.eventHash, eventHash);
+});

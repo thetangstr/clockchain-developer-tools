@@ -378,13 +378,21 @@ export function registerTools(
         "Fingerprint an agent action (SHA-256 of agent_id + action + inputs + " +
         "outputs), anchor it on-chain, and return a verifiable Agent Attested " +
         "Receipt (event hash, on-chain anchor, consensus timestamp). This is a " +
-        "write; it spends a log credit.",
+        "write; it spends a log credit. For scale, set wait=false to SUBMIT " +
+        "without blocking (returns a pending receipt immediately) and poll with " +
+        "complete_attestation.",
       inputSchema: {
         agent_id: z.string().describe("Who acted (ERC-8004 agentId or an agent label)."),
         action: z.string().describe('What they did, e.g. "execute_trade".'),
         inputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision inputs."),
         outputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision outputs."),
-        wait: z.boolean().optional().describe("Wait for on-chain confirmation. Default true."),
+        wait: z
+          .boolean()
+          .optional()
+          .describe(
+            "Wait for on-chain confirmation. Default true. Set false to submit " +
+              "without blocking and poll with complete_attestation.",
+          ),
         wait_ms: z.number().int().positive().optional().describe("Max wait, ms. Default 15000."),
         idempotency_key: idempotencyKeySchema,
       },
@@ -423,6 +431,30 @@ export function registerTools(
     },
     async ({ receipt }) =>
       run("verify_receipt", () => client.verifyReceipt(receipt as unknown as AgentReceipt)),
+  );
+
+  server.registerTool(
+    "complete_attestation",
+    {
+      title: "Complete a pending Agent Attested Receipt (submit → poll)",
+      description:
+        "The poll half of the non-blocking attest path. Run attest_action with " +
+        "wait=false to SUBMIT — it returns a pending receipt immediately " +
+        "(anchor.confirmed=false, blockHeight null) without holding the connection " +
+        "for the ~15s block wait. Then call this to POLL: it re-checks the ledger " +
+        "and, once the block has landed, returns the COMPLETED receipt (blockHeight, " +
+        "consensus time, validation filled in, anchor.confirmed=true). If the block " +
+        "has not landed yet it returns the still-pending receipt — call again. " +
+        "Read-only; spends no log credit.",
+      inputSchema: {
+        receipt: z
+          .record(z.string(), z.unknown())
+          .describe("The (possibly pending) receipt object from attest_action."),
+      },
+    },
+    async ({ receipt }) =>
+      run("complete_attestation", () =>
+        client.completeReceipt(receipt as unknown as AgentReceipt)),
   );
 
   // ===== SCHEDULER MCP =====
