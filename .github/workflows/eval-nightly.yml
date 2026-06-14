@@ -1,0 +1,37 @@
+name: Eval (nightly perf)
+
+# Layer-A performance eval against the live endpoint: per-tool read latency
+# (p50/p95/p99) + the tool-definition "token tax". Reads only — no credit spend,
+# no `claude` CLI needed (unlike the Layer-B agent eval in eval/run.mjs, which is
+# run on demand locally). Scheduled nightly + manual; never gates a PR.
+#
+# Requires repo secret MCP_EVAL_TOKEN (a tester x-api-key). If unset, the job
+# skips cleanly rather than failing.
+
+on:
+  schedule:
+    - cron: "17 8 * * *" # 08:17 UTC nightly
+  workflow_dispatch: {}
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Guard on token
+        id: guard
+        run: |
+          if [ -z "${{ secrets.MCP_EVAL_TOKEN }}" ]; then
+            echo "MCP_EVAL_TOKEN not set — skipping live perf eval."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Layer-A perf
+        if: steps.guard.outputs.run == 'true'
+        env:
+          MCP_TOKEN: ${{ secrets.MCP_EVAL_TOKEN }}
+        run: node eval/perf.mjs
