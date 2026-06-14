@@ -38,6 +38,7 @@ import { buildReceipt, eventHashOf } from "./receipt.js";
 import { canonicalize } from "./receipt.js";
 import { computeHash } from "./hash.js";
 import { resolveAgent } from "./erc8004.js";
+import { resilientFetch } from "./resilience.js";
 
 /** Standard {success, data, meta} envelope used by some endpoints. */
 interface SuccessEnvelope<T> {
@@ -954,11 +955,16 @@ export class ClockchainClient {
     if (opts.body !== undefined) {
       headers["content-type"] = "application/json";
     }
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: opts.method ?? "GET",
-      headers, // NO x-api-key — that is the point
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    });
+    const method = opts.method ?? "GET";
+    const res = await resilientFetch(
+      `${this.baseUrl}${path}`,
+      {
+        method,
+        headers, // NO x-api-key — that is the point
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      },
+      { method },
+    );
     if (!res.ok) {
       throw new ApiError(
         `Clockchain request failed: ${res.status} ${res.statusText}`,
@@ -1002,11 +1008,17 @@ export class ClockchainClient {
     }
     fd.append(fileField, new Blob([source], { type: "text/plain" }), `${name}.sol`);
 
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: { "x-api-key": this.config.apiKey, accept: "application/json" },
-      body: fd,
-    });
+    // POST → resilientFetch gives this a timeout + breaker but NO retry
+    // (re-POSTing a contract deploy could double-deploy).
+    const res = await resilientFetch(
+      `${this.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: { "x-api-key": this.config.apiKey, accept: "application/json" },
+        body: fd,
+      },
+      { method: "POST" },
+    );
     const raw = await res.text();
     let parsed: unknown = undefined;
     if (raw.length > 0) {
@@ -1082,11 +1094,16 @@ export class ClockchainClient {
       headers["content-type"] = "application/json";
     }
 
-    const res = await fetch(url, {
-      method: opts.method ?? "GET",
-      headers,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    });
+    const method = opts.method ?? "GET";
+    const res = await resilientFetch(
+      url,
+      {
+        method,
+        headers,
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      },
+      { method },
+    );
 
     const raw = await res.text();
     let parsed: unknown = undefined;
