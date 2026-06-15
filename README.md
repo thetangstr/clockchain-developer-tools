@@ -8,7 +8,7 @@ terminal. It wraps the live D4 node gateway at `node.clockchain.network`; it doe
 
 > **Install it in your AI agent:** [`INSTALL.md`](INSTALL.md) — local stdio (recommended) or remote HTTP.
 > **Non-engineer? Try it in ~10 min:** [`TRY-IT.md`](TRY-IT.md) · **Engineers:** [`QUICKSTART.md`](QUICKSTART.md)
-> **Roadmap + current limitations:** [`ROADMAP.md`](ROADMAP.md)
+> **Roadmap + current limitations:** [`roadmap.md`](roadmap.md)
 
 ## Quick install (local stdio — recommended)
 
@@ -90,7 +90,7 @@ reads the immutable on-chain block with no API key. That block — not the mutab
 | [`@clockchain/core`](packages/core) | Shared client, types, hashing/receipt + ERC-8004 helpers (Node-only, no extra deps). |
 | [`@clockchain/web-demo`](packages/web-demo) | Browser chat demo — an LLM agent driving the tools over MCP. |
 
-A `@clockchain/cli` for the terminal is planned — see [ROADMAP.md](./ROADMAP.md).
+A `@clockchain/cli` for the terminal is planned — see [roadmap.md](./roadmap.md).
 
 ## Status
 
@@ -113,7 +113,7 @@ surface (updated 2026-06-11):
   resolve against a directory that is still preview.
 - Designed for **court-grade** evidence. Single-validator testnet; tight rate limits.
 
-**Full current limitations + v1/v2/v3 plan: [ROADMAP.md](./ROADMAP.md).**
+**Full current limitations + roadmap: [roadmap.md](./roadmap.md).**
 
 ## Hosting, CI/CD & ops
 
@@ -151,7 +151,7 @@ surface for the work, and those docs still live here):
 | [`product-a-identity-decision.md`](product-a-identity-decision.md) | Decision memo: proprietary DID vs ERC-8004 + SIWA for agent identity. Recommends a hybrid — adopt the standard, differentiate on time/validation. | Product / leadership |
 | [`deployment.md`](deployment.md) | Hosting plan: local stdio (devs), Mac mini test host (business users + AgentDash), and the AWS production plan + info checklist. | Engineering / ops |
 | [`poc-build-plan.md`](poc-build-plan.md) | Goal + sequenced plan to get the MCP server running on the Mac mini (and how it connects to Clockchain). | Engineering / leadership |
-| [`roadmap.md`](roadmap.md) | Original v1/v2/v3 milestones + MCP feature inventory. (Current status: [ROADMAP.md](./ROADMAP.md).) | Product / engineering |
+| [`roadmap.md`](roadmap.md) | Current roadmap, what works, and known limitations. | Product / engineering |
 
 Open either `.html` file in a browser to present (arrow keys to navigate,
 `Esc` for the slide overview).
