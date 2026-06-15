@@ -87,6 +87,8 @@ export const LANDING_HTML = `<!doctype html>
   .brand { display: flex; align-items: center; gap: 10px; font-family: var(--display); font-weight: 700; font-size: 19px; letter-spacing: -.01em; }
   .nav-links { display: flex; align-items: center; gap: 30px; font-size: 14px; color: var(--fg-2); }
   .nav-links a:hover { color: var(--ink); }
+  .nav-left { display: flex; align-items: center; gap: 12px; }
+  .tnet { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--green); border: 1px solid var(--green); border-radius: 99px; padding: 3px 9px; }
   .pill { background: var(--green); color: #fff; font-weight: 600; font-size: 13px; padding: 9px 18px; border-radius: 99px; transition: background .2s; }
   .pill:hover { background: #0b8f40; }
   .ndot { width: 7px; height: 7px; border-radius: 99px; background: var(--green); display: inline-block; margin-right: 7px; }
@@ -172,23 +174,23 @@ export const LANDING_HTML = `<!doctype html>
 </head>
 <body>
 <nav><div class="wrap nav-in">
-  <a class="brand" href="/">${LOGO_SVG}Clockchain</a>
+  <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">Testnet</span></div>
   <div class="nav-links">
     <a href="#modules">Modules</a>
     <a href="#install">Install</a>
-    <a href="https://status.clockchain.network"><span class="ndot"></span>Status</a>
+    <a href="https://clockchain-research.vercel.app/dashboard"><span class="ndot"></span>Status</a>
     <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
     <a class="pill" href="#install">Add to your agent</a>
   </div>
 </div></nav>
 
 <header class="hero"><div class="wrap">
-  <span class="eyebrow">Model Context Protocol</span>
+  <span class="eyebrow">Model Context Protocol · Testnet</span>
   <h1>Time your agents can <span class="green">prove.</span></h1>
   <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — 31 tools across six modules, one endpoint.</p>
   <div class="cta">
     <a class="btn btn-green" href="#install">Add to your agent</a>
-    <a class="btn btn-ghost" href="https://status.clockchain.network">View live status</a>
+    <a class="btn btn-ghost" href="https://clockchain-research.vercel.app/dashboard">View live status</a>
   </div>
   <div class="endpoint">
     <code>mcp.clockchain.network/mcp</code>
@@ -274,7 +276,7 @@ export const LANDING_HTML = `<!doctype html>
   <div class="foot-row">
     <a class="brand" href="/">${LOGO_SVG}Clockchain</a>
     <div class="foot-links">
-      <a href="https://status.clockchain.network">Status</a>
+      <a href="https://clockchain-research.vercel.app/dashboard">Status</a>
       <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
       <a href="https://mcp.clockchain.network/health">Health</a>
     </div>

@@ -15,6 +15,10 @@ test("landing page is well-formed HTML with the core message", () => {
 test("landing page points agents at the real endpoint + key headers, not a fake", () => {
   assert.match(LANDING_HTML, /https:\/\/mcp\.clockchain\.network\/mcp/);
   assert.match(LANDING_HTML, /x-api-key/);
-  // Links humans to the live status dashboard.
-  assert.match(LANDING_HTML, /status\.clockchain\.network/);
+  // Links humans to the live status dashboard (the working URL until status DNS lands).
+  assert.match(LANDING_HTML, /clockchain-research\.vercel\.app\/dashboard/);
+});
+
+test("landing page clearly calls out testnet", () => {
+  assert.match(LANDING_HTML, /Testnet/);
 });
