@@ -5,8 +5,26 @@
 // #f5f5f7), ink #1d1d1f, green accent (#0a9d44 / #00cc00), Space Grotesk display
 // + Inter body + JetBrains Mono. Clean, modern, generous whitespace.
 
-const INSTALL_CMD =
-  'claude mcp add --transport http clockchain https://mcp.clockchain.network/mcp --header "x-api-key: <YOUR_KEY>"';
+// HTML-escape so snippets with <…> placeholders render as text, not tags.
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const CMD_CLAUDE =
+  'claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp --header "x-api-key: <YOUR_TOKEN>"';
+
+const JSON_CONFIG = `{
+  "mcpServers": {
+    "clockchain": {
+      "type": "http",
+      "url": "https://mcp.clockchain.network/mcp",
+      "headers": { "x-api-key": "<YOUR_TOKEN>" }
+    }
+  }
+}`;
+
+const CMD_BYOK = `claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \\
+  --header "x-clockchain-api-key: <YOUR_CLOCKCHAIN_KEY>" \\
+  --header "x-clockchain-client-id: <you@example.com>" \\
+  --header "x-clockchain-wallet-id: <you@example.com>"`;
 
 const MODULES = [
   { i: "01", name: "Time", body: "Consensus block time and height — the network's consented clock, not a single server's. Provable after the fact." },
@@ -118,12 +136,25 @@ export const LANDING_HTML = `<!doctype html>
   .tenet p { color: var(--fg-2); font-size: 15px; }
 
   /* install */
-  .install { max-width: 800px; margin: 0 auto; text-align: center; }
-  .code { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 30px; background: #0c0e10; border-radius: 12px; padding: 18px 20px; text-align: left; }
-  .code code { font-family: var(--mono); font-size: 12.5px; color: #e6e9ee; overflow-x: auto; white-space: nowrap; }
-  .code button { flex: none; background: var(--green); color: #fff; border: none; font-weight: 600; font-size: 12px; padding: 9px 16px; border-radius: 8px; cursor: pointer; }
-  .code button:hover { background: #0b8f40; }
-  .install .note { color: var(--fg-3); font-size: 13.5px; margin-top: 18px; line-height: 1.7; }
+  .install { max-width: 820px; margin: 0 auto; }
+  .steps { list-style: none; display: flex; flex-direction: column; gap: 30px; }
+  .step { display: flex; gap: 18px; }
+  .sn { flex: none; width: 30px; height: 30px; border-radius: 99px; background: var(--green-soft); color: var(--green); font-family: var(--display); font-weight: 600; display: grid; place-items: center; font-size: 15px; }
+  .sbody { flex: 1; min-width: 0; }
+  .sbody h4 { font-family: var(--display); font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+  .sbody p { color: var(--fg-2); font-size: 14.5px; }
+  .sbody p a { color: var(--green); }
+  .sbody em { color: var(--ink); font-style: italic; }
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 12px; }
+  .tabbtn { font-size: 13px; padding: 8px 15px; border-radius: 99px; border: 1px solid var(--line-2); background: var(--bg); color: var(--fg-2); cursor: pointer; }
+  .tabbtn.active { border-color: var(--green); background: var(--green-soft); color: #0b8f40; font-weight: 600; }
+  .code { position: relative; background: #0c0e10; border-radius: 12px; padding: 16px 18px; }
+  .code pre { margin: 0; overflow-x: auto; }
+  .code code { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: #e6e9ee; white-space: pre; }
+  .code .cpy { position: absolute; top: 10px; right: 10px; background: var(--green); color: #fff; border: none; font-weight: 600; font-size: 11px; padding: 6px 12px; border-radius: 7px; cursor: pointer; }
+  .code .cpy:hover { background: #0b8f40; }
+  .hint { color: var(--fg-3); font-size: 12.5px; margin-top: 10px; }
+  .install .note { color: var(--fg-3); font-size: 13.5px; margin-top: 32px; line-height: 1.7; text-align: center; }
   .install .note a { color: var(--green); }
 
   /* footer */
@@ -156,7 +187,7 @@ export const LANDING_HTML = `<!doctype html>
   <h1>Time your agents can <span class="green">prove.</span></h1>
   <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — 31 tools across six modules, one endpoint.</p>
   <div class="cta">
-    <button class="btn btn-green" onclick="copyText(window.__INSTALL__,'Install command copied')">Add to your agent</button>
+    <a class="btn btn-green" href="#install">Add to your agent</a>
     <a class="btn btn-ghost" href="https://status.clockchain.network">View live status</a>
   </div>
   <div class="endpoint">
@@ -194,12 +225,49 @@ export const LANDING_HTML = `<!doctype html>
 </div></section>
 
 <section id="install"><div class="wrap install">
-  <div class="head" style="margin-bottom:0"><span class="eyebrow">Install</span><h2>Add it in one line</h2><p>Hosted and ready. Bring your Clockchain key.</p></div>
-  <div class="code">
-    <code id="installcmd"></code>
-    <button onclick="copyText(window.__INSTALL__,'Install command copied')">Copy</button>
-  </div>
-  <p class="note">Works with Claude Code, Claude Desktop, Cursor, and any MCP-compatible client — or point your client at <span class="mono">mcp.clockchain.network/mcp</span> with an <span class="mono">x-api-key</span> header. See the <a href="https://github.com/thetangstr/clockchain-developer-tools">documentation</a>.</p>
+  <div class="head"><span class="eyebrow">Install</span><h2>Add Clockchain to your agent</h2><p>Hosted endpoint — connect any MCP client in under a minute.</p></div>
+
+  <ol class="steps">
+    <li class="step">
+      <span class="sn">1</span>
+      <div class="sbody">
+        <h4>Get a key</h4>
+        <p>Use a per-user <b>token</b> (delegated — writes spend our testnet credits, easiest for a quick test) or your own <b>Clockchain API key</b> (writes spend your credits). <a href="https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md">How to get a key →</a></p>
+      </div>
+    </li>
+    <li class="step">
+      <span class="sn">2</span>
+      <div class="sbody">
+        <h4>Add the server</h4>
+        <div class="tabs">
+          <button class="tabbtn active" onclick="showTab('t-cc',this)">Claude Code</button>
+          <button class="tabbtn" onclick="showTab('t-json',this)">Cursor / JSON config</button>
+          <button class="tabbtn" onclick="showTab('t-byok',this)">Bring your own key</button>
+        </div>
+        <div id="t-cc" class="tabpane">
+          <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(CMD_CLAUDE)}</code></pre></div>
+          <p class="hint">Delegated access — authenticate with a per-user token; the server's key does the work.</p>
+        </div>
+        <div id="t-json" class="tabpane" hidden>
+          <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(JSON_CONFIG)}</code></pre></div>
+          <p class="hint">Add to your client's MCP config — Cursor, Claude Desktop, or <span class="mono">~/.claude.json</span> under <span class="mono">mcpServers</span>.</p>
+        </div>
+        <div id="t-byok" class="tabpane" hidden>
+          <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(CMD_BYOK)}</code></pre></div>
+          <p class="hint">Bring-your-own-key — your Clockchain credentials authenticate you; no MCP token needed. Headers travel over TLS; the endpoint is fixed server-side.</p>
+        </div>
+      </div>
+    </li>
+    <li class="step">
+      <span class="sn">3</span>
+      <div class="sbody">
+        <h4>Verify</h4>
+        <p>Open a <b>new</b> session, run <span class="mono">/mcp</span> (you should see <span class="mono">clockchain</span> with all 31 tools), then ask: <em>"use clockchain to get the current consensus time."</em></p>
+      </div>
+    </li>
+  </ol>
+
+  <p class="note">Local (stdio) install, ERC-8004 reads, and chat-connector setup (Cowork / claude.ai) are in the <a href="https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md">full documentation</a>.</p>
 </div></section>
 
 <footer><div class="wrap">
@@ -216,9 +284,13 @@ export const LANDING_HTML = `<!doctype html>
 
 <div class="toast" id="toast"></div>
 <script>
-  window.__INSTALL__ = ${JSON.stringify(INSTALL_CMD)};
-  document.getElementById('installcmd').textContent = window.__INSTALL__;
   function copyText(t, msg){ navigator.clipboard.writeText(t).then(function(){toast(msg||'Copied');}).catch(function(){toast('Copy failed — select manually');}); }
+  function copyEl(btn){ var c = btn.parentElement.querySelector('code'); copyText(c.innerText, 'Copied'); }
+  function showTab(id, btn){ var tabs = btn.closest('.tabs'); var box = tabs.parentElement;
+    box.querySelectorAll('.tabpane').forEach(function(x){ x.hidden = true; });
+    box.querySelector('#' + id).hidden = false;
+    tabs.querySelectorAll('.tabbtn').forEach(function(b){ b.classList.remove('active'); });
+    btn.classList.add('active'); }
   function toast(m){ var e=document.getElementById('toast'); e.textContent=m; e.classList.add('show'); clearTimeout(window.__t); window.__t=setTimeout(function(){e.classList.remove('show');},1800); }
 </script>
 </body>
