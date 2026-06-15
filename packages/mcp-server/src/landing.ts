@@ -1,41 +1,26 @@
 // Marketing landing page served at GET / on mcp.clockchain.network (browsers).
 // Agents POST /mcp; probes use /health. Self-contained (one Google Fonts link).
 //
-// Design language: haute horlogerie — deep warm black, ivory, champagne gold,
-// a high-contrast serif (Cormorant), Roman numerals, hairline rules, restraint.
+// Design synced to the Clockchain site redesign: light/Apple-clean (white +
+// #f5f5f7), ink #1d1d1f, green accent (#0a9d44 / #00cc00), Space Grotesk display
+// + Inter body + JetBrains Mono. Clean, modern, generous whitespace.
 
 const INSTALL_CMD =
   'claude mcp add --transport http clockchain https://mcp.clockchain.network/mcp --header "x-api-key: <YOUR_KEY>"';
 
-const COMPLICATIONS = [
-  { n: "I", name: "Time", body: "Consensus block time and height — the network's consented clock, not a single server's. Provable after the fact." },
-  { n: "II", name: "Notarization", body: "Anchor any hash to an append-only ledger, then verify it against the immutable on-chain block." },
-  { n: "III", name: "Scheduler", body: "Time-triggered smart contracts. Non-custodial — the caller's wallet signs; the server holds no key." },
-  { n: "IV", name: "Audit", body: "Audit trails, compliance reports (EU AI Act Art. 12, SEC 17a-4, ISO 27001), and portable evidence packages." },
-  { n: "V", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
-  { n: "VI", name: "Commitments", body: "Issue, checkpoint, attest, settle. Every commitment's outcome — kept or broken — entered on the record." },
+const MODULES = [
+  { i: "01", name: "Time", body: "Consensus block time and height — the network's consented clock, not a single server's. Provable after the fact." },
+  { i: "02", name: "Notarization", body: "Anchor any hash to an append-only ledger, then verify it against the immutable on-chain block." },
+  { i: "03", name: "Scheduler", body: "Time-triggered smart contracts. Non-custodial — the caller's wallet signs; the server holds no key." },
+  { i: "04", name: "Audit", body: "Audit trails, compliance reports (EU AI Act Art. 12, SEC 17a-4, ISO 27001), and portable evidence packages." },
+  { i: "05", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
+  { i: "06", name: "Commitments", body: "Issue, checkpoint, attest, settle — every commitment's outcome, kept or broken, on the record." },
 ];
 
-// A minimal engraved dial — gold hairlines, twelve ticks, hands at the classic
-// 10:10 advertising position. Pure SVG, no assets.
-const DIAL_SVG = `<svg class="dial" width="92" height="92" viewBox="0 0 130 130" fill="none" aria-hidden="true">
-  <circle cx="65" cy="65" r="60" stroke="#c2a36b" stroke-opacity="0.45" stroke-width="0.75"/>
-  <circle cx="65" cy="65" r="54" stroke="#c2a36b" stroke-opacity="0.16" stroke-width="0.5"/>
-  <g stroke="#c2a36b" stroke-opacity="0.9" stroke-width="1.4" stroke-linecap="round">
-    <line x1="65" y1="7" x2="65" y2="18"/><line x1="123" y1="65" x2="112" y2="65"/>
-    <line x1="65" y1="123" x2="65" y2="112"/><line x1="7" y1="65" x2="18" y2="65"/>
-  </g>
-  <g stroke="#c2a36b" stroke-opacity="0.55" stroke-width="0.9" stroke-linecap="round">
-    <line x1="94" y1="14.8" x2="91.5" y2="19.1"/><line x1="115.2" y1="36" x2="110.9" y2="38.5"/>
-    <line x1="115.2" y1="94" x2="110.9" y2="91.5"/><line x1="94" y1="115.2" x2="91.5" y2="110.9"/>
-    <line x1="36" y1="115.2" x2="38.5" y2="110.9"/><line x1="14.8" y1="94" x2="19.1" y2="91.5"/>
-    <line x1="14.8" y1="36" x2="19.1" y2="38.5"/><line x1="36" y1="14.8" x2="38.5" y2="19.1"/>
-  </g>
-  <g stroke="#ddc28a" stroke-linecap="round">
-    <line x1="65" y1="65" x2="40.4" y2="47.8" stroke-width="2.2"/>
-    <line x1="65" y1="65" x2="103.1" y2="43" stroke-width="1.6"/>
-  </g>
-  <circle cx="65" cy="65" r="2.2" fill="#ddc28a"/>
+// Green clock mark, echoing the Clockchain site logo.
+const LOGO_SVG = `<svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true" style="flex:none">
+  <circle cx="16" cy="16" r="14" stroke="#0a9d44" stroke-width="2.4"/>
+  <path d="M16 8.5V16l5 3" stroke="#0a9d44" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>`;
 
 export const LANDING_HTML = `<!doctype html>
@@ -43,219 +28,191 @@ export const LANDING_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Clockchain MCP — verifiable time for autonomous agents</title>
-<meta name="description" content="Clockchain MCP gives autonomous agents consensus-anchored time, tamper-evident receipts, and on-chain verification. Thirty-one instruments, one endpoint." />
+<title>Clockchain MCP — time your agents can prove</title>
+<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. 31 tools across 6 modules, one endpoint." />
 <meta property="og:title" content="Clockchain MCP" />
-<meta property="og:description" content="Verifiable time for autonomous agents. Thirty-one instruments. One endpoint." />
+<meta property="og:description" content="Time your agents can prove. 31 tools, one endpoint." />
 <meta property="og:type" content="website" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <style>
   :root {
-    --ink: #0a0a0b;
-    --ink-2: #100f10;
-    --ink-3: #161514;
-    --ivory: #f3efe6;
-    --muted: #a39d90;
-    --faint: #726c61;
-    --gold: #c2a36b;
-    --gold-bright: #ddc28a;
-    --line: rgba(255,255,255,.08);
-    --line-gold: rgba(194,163,107,.30);
-    --serif: "Cormorant Garamond", Georgia, "Times New Roman", serif;
-    --sans: "Inter", system-ui, -apple-system, Segoe UI, sans-serif;
-    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --bg: #ffffff;
+    --alt: #f5f5f7;
+    --ink: #1d1d1f;
+    --fg-2: #6e6e73;
+    --fg-3: #86868b;
+    --line: #e9e9ee;
+    --line-2: #d8d8df;
+    --green: #0a9d44;
+    --green-vivid: #00cc00;
+    --green-soft: rgba(10,157,68,.08);
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 18px 50px -28px rgba(0,0,0,.22);
+    --display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+    --body: "Inter", ui-sans-serif, system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { scroll-behavior: smooth; }
-  body {
-    background: var(--ink); color: var(--ivory);
-    font-family: var(--sans); font-size: 16px; line-height: 1.6;
-    -webkit-font-smoothing: antialiased; overflow-x: hidden;
-  }
-  body::before {
-    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
-    background: radial-gradient(75rem 50rem at 50% -8%, rgba(194,163,107,.09), transparent 60%);
-  }
-  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 28px; position: relative; z-index: 1; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
   a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; }
   .mono { font-family: var(--mono); }
-  .label {
-    font-family: var(--sans); font-size: 11px; font-weight: 500;
-    letter-spacing: .28em; text-transform: uppercase; color: var(--gold);
-  }
-  .rule { width: 44px; height: 1px; background: var(--gold); opacity: .65; margin: 22px auto; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .22em; text-transform: uppercase; color: var(--fg-3); }
+  h1, h2, h3 { font-family: var(--display); letter-spacing: -.02em; font-weight: 600; }
+  .green { color: var(--green); }
 
   /* nav */
-  nav { display: flex; align-items: center; justify-content: space-between; padding: 30px 0 14px; }
-  .brand { font-family: var(--serif); font-size: 23px; font-weight: 500; letter-spacing: .01em; }
-  .brand b { color: var(--gold); font-weight: 500; }
-  .nav-links { display: flex; gap: 32px; font-size: 13px; letter-spacing: .04em; color: var(--muted); }
-  .nav-links a { transition: color .2s; }
-  .nav-links a:hover { color: var(--ivory); }
-  .live { display: inline-block; width: 6px; height: 6px; border-radius: 99px; background: var(--gold); margin-right: 7px; vertical-align: middle; box-shadow: 0 0 8px rgba(194,163,107,.8); }
+  nav { position: sticky; top: 0; z-index: 50; background: rgba(255,255,255,.72); backdrop-filter: saturate(180%) blur(18px); -webkit-backdrop-filter: saturate(180%) blur(18px); border-bottom: 1px solid var(--line); }
+  .nav-in { display: flex; align-items: center; justify-content: space-between; height: 62px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--display); font-weight: 700; font-size: 19px; letter-spacing: -.01em; }
+  .nav-links { display: flex; align-items: center; gap: 30px; font-size: 14px; color: var(--fg-2); }
+  .nav-links a:hover { color: var(--ink); }
+  .pill { background: var(--green); color: #fff; font-weight: 600; font-size: 13px; padding: 9px 18px; border-radius: 99px; transition: background .2s; }
+  .pill:hover { background: #0b8f40; }
+  .ndot { width: 7px; height: 7px; border-radius: 99px; background: var(--green); display: inline-block; margin-right: 7px; }
 
   /* hero */
-  .hero { text-align: center; padding: 64px 0 30px; }
-  .dial { margin: 0 auto 30px; display: block; }
-  h1 { font-family: var(--serif); font-weight: 300; font-size: clamp(46px, 9vw, 94px); line-height: .98; letter-spacing: -.01em; margin-top: 24px; }
-  h1 em { font-style: italic; color: var(--gold-bright); }
-  .sub { max-width: 540px; margin: 26px auto 0; font-size: 17px; color: var(--muted); line-height: 1.7; }
-  .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 38px; }
-  .btn {
-    display: inline-flex; align-items: center; gap: 9px; font-family: var(--sans);
-    font-size: 13px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
-    padding: 15px 28px; border-radius: 2px; cursor: pointer; transition: all .22s ease; border: 1px solid;
-  }
-  .btn-gold { background: var(--gold); color: #15120c; border-color: var(--gold); }
-  .btn-gold:hover { background: var(--gold-bright); border-color: var(--gold-bright); }
-  .btn-ghost { background: transparent; color: var(--ivory); border-color: var(--line-gold); }
-  .btn-ghost:hover { border-color: var(--gold); color: var(--gold-bright); }
+  .hero { text-align: center; padding: 96px 0 64px; }
+  .hero .eyebrow { display: block; margin-bottom: 22px; }
+  h1 { font-size: clamp(42px, 7vw, 76px); line-height: 1.04; }
+  .sub { max-width: 600px; margin: 24px auto 0; font-size: 18px; color: var(--fg-2); }
+  .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 34px; }
+  .btn { display: inline-flex; align-items: center; gap: 9px; font-weight: 600; font-size: 15px; padding: 14px 26px; border-radius: 99px; cursor: pointer; border: 1px solid transparent; transition: all .2s; }
+  .btn-green { background: var(--green); color: #fff; }
+  .btn-green:hover { background: #0b8f40; transform: translateY(-1px); }
+  .btn-ghost { background: var(--bg); color: var(--ink); border-color: var(--line-2); }
+  .btn-ghost:hover { border-color: var(--ink); }
+  .endpoint { display: inline-flex; align-items: center; gap: 12px; margin-top: 34px; background: var(--alt); border: 1px solid var(--line); border-radius: 99px; padding: 9px 8px 9px 16px; font-size: 13px; }
+  .endpoint code { font-family: var(--mono); color: var(--ink); }
+  .endpoint button { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--green); background: #fff; border: 1px solid var(--line); border-radius: 99px; padding: 6px 12px; cursor: pointer; }
+  .endpoint button:hover { border-color: var(--green); }
 
-  .endpoint { display: inline-flex; align-items: center; gap: 14px; margin-top: 40px; font-size: 13px; color: var(--faint); }
-  .endpoint code { color: var(--muted); letter-spacing: .02em; }
-  .endpoint .sep { width: 1px; height: 13px; background: var(--line); }
-  .endpoint button { background: none; border: none; color: var(--gold); cursor: pointer; font-family: var(--sans); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
-  .endpoint button:hover { color: var(--gold-bright); }
-
-  /* spec row */
-  .specs { display: flex; justify-content: center; gap: 0; margin: 72px auto 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); max-width: 760px; }
-  .spec { flex: 1; text-align: center; padding: 26px 12px; border-left: 1px solid var(--line); }
-  .spec:first-child { border-left: none; }
-  .spec .v { font-family: var(--serif); font-size: 34px; font-weight: 400; color: var(--ivory); line-height: 1; }
-  .spec .k { font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--faint); margin-top: 10px; }
+  /* stat strip */
+  .strip { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--alt); }
+  .strip-in { display: flex; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 140px; text-align: center; padding: 26px 14px; border-left: 1px solid var(--line); }
+  .stat:first-child { border-left: none; }
+  .stat .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--fg-3); }
+  .stat .v { font-family: var(--display); font-size: 26px; font-weight: 600; margin-top: 8px; }
 
   /* sections */
-  section { padding: 96px 0; }
+  section { padding: 100px 0; }
+  section.tint { background: var(--alt); }
   .head { text-align: center; margin-bottom: 56px; }
-  .head h2 { font-family: var(--serif); font-weight: 400; font-size: clamp(30px, 5vw, 44px); margin-top: 16px; letter-spacing: -.005em; }
-  .head p { color: var(--muted); margin-top: 12px; font-size: 16px; }
+  .head .eyebrow { display: block; margin-bottom: 14px; }
+  .head h2 { font-size: clamp(30px, 4.5vw, 44px); }
+  .head p { color: var(--fg-2); margin-top: 12px; font-size: 17px; }
 
-  .complications { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0; border-top: 1px solid var(--line); }
-  .comp { padding: 34px 30px; border-bottom: 1px solid var(--line); border-left: 1px solid var(--line); transition: background .25s; }
-  .comp:nth-child(odd) { border-left: none; }
-  .comp:hover { background: var(--ink-2); }
-  .comp .num { font-family: var(--serif); font-size: 26px; color: var(--gold); font-weight: 400; }
-  .comp h3 { font-family: var(--serif); font-size: 25px; font-weight: 500; margin: 6px 0 12px; }
-  .comp p { color: var(--muted); font-size: 15px; line-height: 1.65; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .card { background: var(--bg); border: 1px solid var(--line); border-radius: 16px; padding: 26px; transition: box-shadow .25s, transform .25s; }
+  .card:hover { box-shadow: var(--shadow); transform: translateY(-3px); }
+  .card .i { font-family: var(--mono); font-size: 12px; color: var(--green); letter-spacing: .1em; }
+  .card h3 { font-size: 21px; margin: 12px 0 10px; }
+  .card p { color: var(--fg-2); font-size: 14.5px; line-height: 1.6; }
 
-  /* tenets */
-  .tenets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 40px; }
-  .tenet { text-align: center; }
-  .tenet .mk { font-family: var(--serif); font-style: italic; font-size: 21px; color: var(--gold); }
-  .tenet h3 { font-family: var(--serif); font-size: 24px; font-weight: 500; margin: 14px 0 10px; }
-  .tenet p { color: var(--muted); font-size: 15px; }
+  .tenets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 44px; }
+  .tenet h3 { font-size: 20px; margin-bottom: 10px; }
+  .tenet h3 .n { font-family: var(--mono); color: var(--green); font-size: 13px; margin-right: 8px; }
+  .tenet p { color: var(--fg-2); font-size: 15px; }
 
   /* install */
-  .install { text-align: center; max-width: 760px; margin: 0 auto; }
-  .code { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 32px; background: var(--ink-2); border: 1px solid var(--line); border-radius: 3px; padding: 18px 20px; text-align: left; }
-  .code code { font-family: var(--mono); font-size: 12.5px; color: var(--ivory); overflow-x: auto; white-space: nowrap; opacity: .9; }
-  .code button { flex: none; }
-  .install .note { color: var(--faint); font-size: 13.5px; margin-top: 18px; line-height: 1.7; }
-  .install .note a { color: var(--gold); }
+  .install { max-width: 800px; margin: 0 auto; text-align: center; }
+  .code { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 30px; background: #0c0e10; border-radius: 12px; padding: 18px 20px; text-align: left; }
+  .code code { font-family: var(--mono); font-size: 12.5px; color: #e6e9ee; overflow-x: auto; white-space: nowrap; }
+  .code button { flex: none; background: var(--green); color: #fff; border: none; font-weight: 600; font-size: 12px; padding: 9px 16px; border-radius: 8px; cursor: pointer; }
+  .code button:hover { background: #0b8f40; }
+  .install .note { color: var(--fg-3); font-size: 13.5px; margin-top: 18px; line-height: 1.7; }
+  .install .note a { color: var(--green); }
 
   /* footer */
-  footer { border-top: 1px solid var(--line); padding: 50px 0 70px; }
+  footer { border-top: 1px solid var(--line); padding: 48px 0 64px; }
   .foot-row { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
-  .foot-links { display: flex; gap: 28px; font-size: 13px; color: var(--muted); letter-spacing: .03em; }
-  .foot-links a:hover { color: var(--gold); }
-  .heritage { font-family: var(--serif); font-style: italic; font-size: 19px; color: var(--muted); text-align: center; margin: 0 auto 40px; max-width: 520px; line-height: 1.5; }
-  .disclaimer { color: var(--faint); font-size: 12px; line-height: 1.7; max-width: 640px; margin-top: 26px; }
+  .foot-links { display: flex; gap: 26px; font-size: 14px; color: var(--fg-2); }
+  .foot-links a:hover { color: var(--green); }
+  .disclaimer { color: var(--fg-3); font-size: 12px; line-height: 1.7; max-width: 660px; margin-top: 26px; }
 
-  .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(16px); background: var(--gold); color: #15120c; font-size: 12px; font-weight: 600; letter-spacing: .04em; padding: 11px 20px; border-radius: 2px; opacity: 0; transition: .25s; z-index: 20; }
+  .toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(16px); background: var(--ink); color: #fff; font-size: 13px; font-weight: 500; padding: 11px 20px; border-radius: 99px; opacity: 0; transition: .25s; z-index: 80; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  @media (max-width: 680px) {
-    .complications, .tenets { grid-template-columns: 1fr; }
-    .comp { border-left: none; }
-    .tenets { gap: 48px; }
-    .specs { flex-wrap: wrap; }
-  }
+  @media (max-width: 760px) { .grid, .tenets { grid-template-columns: 1fr; } .nav-links a:not(.pill) { display: none; } }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <nav>
-    <div class="brand">Clockchain <b>·</b> MCP</div>
-    <div class="nav-links">
-      <a href="#instruments">Instruments</a>
-      <a href="#install">Install</a>
-      <a href="https://status.clockchain.network"><span class="live"></span>Status</a>
-      <a href="https://github.com/thetangstr/clockchain-developer-tools">Documentation</a>
-    </div>
-  </nav>
+<nav><div class="wrap nav-in">
+  <a class="brand" href="/">${LOGO_SVG}Clockchain</a>
+  <div class="nav-links">
+    <a href="#modules">Modules</a>
+    <a href="#install">Install</a>
+    <a href="https://status.clockchain.network"><span class="ndot"></span>Status</a>
+    <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
+    <a class="pill" href="#install">Add to your agent</a>
+  </div>
+</div></nav>
 
-  <header class="hero">
-    ${DIAL_SVG}
-    <div class="label">Model Context Protocol</div>
-    <h1>Time, made <em>provable.</em></h1>
-    <p class="sub">Clockchain MCP gives autonomous agents consensus-anchored time, tamper-evident receipts, and on-chain verification. Thirty-one instruments, a single endpoint.</p>
-    <div class="cta">
-      <button class="btn btn-gold" onclick="copyText(window.__INSTALL__,'Install command copied')">Add to your agent</button>
-      <a class="btn btn-ghost" href="https://status.clockchain.network">View live status</a>
-    </div>
-    <div class="endpoint">
-      <code class="mono">mcp.clockchain.network/mcp</code>
-      <span class="sep"></span>
-      <button onclick="copyText('https://mcp.clockchain.network/mcp','Endpoint copied')">Copy endpoint</button>
-    </div>
-    <div class="specs">
-      <div class="spec"><div class="v">31</div><div class="k">Instruments</div></div>
-      <div class="spec"><div class="v">VI</div><div class="k">Complications</div></div>
-      <div class="spec"><div class="v">∞</div><div class="k">Permanence</div></div>
-    </div>
-  </header>
+<header class="hero"><div class="wrap">
+  <span class="eyebrow">Model Context Protocol</span>
+  <h1>Time your agents can <span class="green">prove.</span></h1>
+  <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — 31 tools across six modules, one endpoint.</p>
+  <div class="cta">
+    <button class="btn btn-green" onclick="copyText(window.__INSTALL__,'Install command copied')">Add to your agent</button>
+    <a class="btn btn-ghost" href="https://status.clockchain.network">View live status</a>
+  </div>
+  <div class="endpoint">
+    <code>mcp.clockchain.network/mcp</code>
+    <button onclick="copyText('https://mcp.clockchain.network/mcp','Endpoint copied')">Copy</button>
+  </div>
+</div></header>
 
-  <section id="instruments">
-    <div class="head">
-      <div class="label">The Movement</div>
-      <h2>Six complications</h2>
-      <p>Every instrument is typed, idempotent where it writes, and degrades with grace.</p>
-    </div>
-    <div class="complications">
-      ${COMPLICATIONS.map((c) => `
-      <div class="comp">
-        <div class="num">${c.n}</div>
-        <h3>${c.name}</h3>
-        <p>${c.body}</p>
-      </div>`).join("")}
-    </div>
-  </section>
+<div class="strip"><div class="wrap strip-in">
+  <div class="stat"><div class="k">Tools</div><div class="v">31</div></div>
+  <div class="stat"><div class="k">Modules</div><div class="v">6</div></div>
+  <div class="stat"><div class="k">Transport</div><div class="v">StreamableHTTP</div></div>
+  <div class="stat"><div class="k">Network</div><div class="v">Testnet</div></div>
+</div></div>
 
-  <section>
-    <div class="head"><div class="label">Why it endures</div><h2>Proof, not assurance</h2></div>
-    <div class="tenets">
-      <div class="tenet"><div class="mk">i.</div><h3>Consensus time</h3><p>Every timestamp is the network's consented block time — anyone may re-check it. No single clock to trust.</p></div>
-      <div class="tenet"><div class="mk">ii.</div><h3>Self-verifying receipts</h3><p>A receipt carries its own payload and anchor. Recompute the hash, compare to the on-chain block. Proof, not a screenshot.</p></div>
-      <div class="tenet"><div class="mk">iii.</div><h3>Tamper-evident</h3><p>Alter one byte and verification fails. The ledger is append-only; the immutable block is authoritative.</p></div>
-    </div>
-  </section>
+<section id="modules"><div class="wrap">
+  <div class="head">
+    <span class="eyebrow">The surface</span>
+    <h2>Six modules</h2>
+    <p>Every tool is typed, idempotent where it writes, and degrades with grace.</p>
+  </div>
+  <div class="grid">
+    ${MODULES.map((m) => `
+    <div class="card"><div class="i">${m.i}</div><h3>${m.name}</h3><p>${m.body}</p></div>`).join("")}
+  </div>
+</div></section>
 
-  <section id="install">
-    <div class="install">
-      <div class="head" style="margin-bottom:0"><div class="label">Acquisition</div><h2>Fitted in a single line</h2><p>Hosted and ready. Bring your Clockchain key.</p></div>
-      <div class="code">
-        <code id="installcmd"></code>
-        <button class="btn btn-ghost" style="padding:10px 16px" onclick="copyText(window.__INSTALL__,'Install command copied')">Copy</button>
-      </div>
-      <p class="note">Works with Claude Code, Claude Desktop, Cursor, and any MCP-compatible client — or point your client at <span class="mono">mcp.clockchain.network/mcp</span> with an <span class="mono">x-api-key</span> header. See the <a href="https://github.com/thetangstr/clockchain-developer-tools">documentation</a>.</p>
-    </div>
-  </section>
+<section class="tint"><div class="wrap">
+  <div class="head"><span class="eyebrow">Why it holds up</span><h2>Proof, not assurance</h2></div>
+  <div class="tenets">
+    <div class="tenet"><h3><span class="n">01</span>Consensus time</h3><p>Every timestamp is the network's consented block time — anyone can re-check it. No single clock to trust.</p></div>
+    <div class="tenet"><h3><span class="n">02</span>Self-verifying receipts</h3><p>A receipt carries its own payload and anchor. Recompute the hash, compare to the on-chain block. Proof, not a screenshot.</p></div>
+    <div class="tenet"><h3><span class="n">03</span>Tamper-evident</h3><p>Change one byte and verification fails. The ledger is append-only; the immutable block is authoritative.</p></div>
+  </div>
+</div></section>
 
-  <footer>
-    <p class="heritage">"A record is not owned. It is kept — for whoever must verify it next."</p>
-    <div class="foot-row">
-      <div class="brand">Clockchain <b>·</b> MCP</div>
-      <div class="foot-links">
-        <a href="https://status.clockchain.network">Status</a>
-        <a href="https://github.com/thetangstr/clockchain-developer-tools">Documentation</a>
-        <a href="https://mcp.clockchain.network/health">Health</a>
-      </div>
+<section id="install"><div class="wrap install">
+  <div class="head" style="margin-bottom:0"><span class="eyebrow">Install</span><h2>Add it in one line</h2><p>Hosted and ready. Bring your Clockchain key.</p></div>
+  <div class="code">
+    <code id="installcmd"></code>
+    <button onclick="copyText(window.__INSTALL__,'Install command copied')">Copy</button>
+  </div>
+  <p class="note">Works with Claude Code, Claude Desktop, Cursor, and any MCP-compatible client — or point your client at <span class="mono">mcp.clockchain.network/mcp</span> with an <span class="mono">x-api-key</span> header. See the <a href="https://github.com/thetangstr/clockchain-developer-tools">documentation</a>.</p>
+</div></section>
+
+<footer><div class="wrap">
+  <div class="foot-row">
+    <a class="brand" href="/">${LOGO_SVG}Clockchain</a>
+    <div class="foot-links">
+      <a href="https://status.clockchain.network">Status</a>
+      <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
+      <a href="https://mcp.clockchain.network/health">Health</a>
     </div>
-    <p class="disclaimer">Presently recorded on a single-validator testnet: the event hash, on-chain anchor, and consensus timestamp are real and independently verifiable. Multi-validator supermajority attestation activates at mainnet. Not yet a court-of-law evidentiary claim.</p>
-  </footer>
-</div>
+  </div>
+  <p class="disclaimer">Presently recorded on a single-validator testnet: the event hash, on-chain anchor, and consensus timestamp are real and independently verifiable. Multi-validator supermajority attestation activates at mainnet. Not yet a court-of-law evidentiary claim.</p>
+</div></footer>
 
 <div class="toast" id="toast"></div>
 <script>

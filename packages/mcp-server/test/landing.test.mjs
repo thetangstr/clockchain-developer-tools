@@ -8,7 +8,7 @@ test("landing page is well-formed HTML with the core message", () => {
   assert.match(LANDING_HTML, /^<!doctype html>/i);
   assert.match(LANDING_HTML, /<\/html>\s*$/i);
   assert.match(LANDING_HTML, /Clockchain/);
-  assert.match(LANDING_HTML, /instruments/i);
+  assert.match(LANDING_HTML, /modules/i);
   assert.match(LANDING_HTML, /\b31\b/);
 });
 
