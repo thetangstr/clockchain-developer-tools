@@ -176,6 +176,8 @@ export const LANDING_HTML = `<!doctype html>
   .toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(16px); background: var(--ink); color: #fff; font-size: 13px; font-weight: 500; padding: 11px 20px; border-radius: 99px; opacity: 0; transition: .25s; z-index: 80; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+  .demo-frame { max-width: 980px; margin: 0 auto; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); background: var(--bg); }
+  .demo-frame video { width: 100%; display: block; aspect-ratio: 16 / 9; }
   @media (max-width: 760px) { .grid, .tenets { grid-template-columns: 1fr; } .nav-links a:not(.pill) { display: none; } }
 </style>
 </head>
@@ -183,6 +185,7 @@ export const LANDING_HTML = `<!doctype html>
 <nav><div class="wrap nav-in">
   <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">Testnet</span></div>
   <div class="nav-links">
+    <a href="#demo">Demo</a>
     <a href="#modules">Modules</a>
     <a href="#install">Install</a>
     <a href="https://clockchain-research.vercel.app/dashboard"><span class="ndot"></span>Status</a>
@@ -211,6 +214,17 @@ export const LANDING_HTML = `<!doctype html>
   <div class="stat"><div class="k">Transport</div><div class="v">StreamableHTTP</div></div>
   <div class="stat"><div class="k">Network</div><div class="v">Testnet</div></div>
 </div></div>
+
+<section id="demo"><div class="wrap">
+  <div class="head">
+    <span class="eyebrow">See it work</span>
+    <h2>Anchor, verify, tamper-detect — live</h2>
+    <p>An agent acts, the action is anchored on a real testnet block, the receipt verifies — and a one-byte change is rejected.</p>
+  </div>
+  <div class="demo-frame">
+    <video src="https://clockchain-research.vercel.app/mcp-demo.mp4" autoplay loop muted playsinline preload="metadata"></video>
+  </div>
+</div></section>
 
 <section id="modules"><div class="wrap">
   <div class="head">
