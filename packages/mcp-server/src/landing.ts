@@ -150,6 +150,13 @@ export const LANDING_HTML = `<!doctype html>
   .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 12px; }
   .tabbtn { font-size: 13px; padding: 8px 15px; border-radius: 99px; border: 1px solid var(--line-2); background: var(--bg); color: var(--fg-2); cursor: pointer; }
   .tabbtn.active { border-color: var(--green); background: var(--green-soft); color: #0b8f40; font-weight: 600; }
+  .substep { color: var(--fg-2); font-size: 13.5px; margin-bottom: 12px; }
+  .byok { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .byok summary { cursor: pointer; font-size: 13.5px; font-weight: 500; color: var(--green); list-style: none; }
+  .byok summary::-webkit-details-marker { display: none; }
+  .byok summary::before { content: "+ "; }
+  .byok[open] summary::before { content: "– "; }
+  .byok em { font-style: italic; }
   .code { position: relative; background: #0c0e10; border-radius: 12px; padding: 16px 18px; }
   .code pre { margin: 0; overflow-x: auto; }
   .code code { font-family: var(--mono); font-size: 12.5px; line-height: 1.6; color: #e6e9ee; white-space: pre; }
@@ -241,23 +248,24 @@ export const LANDING_HTML = `<!doctype html>
       <span class="sn">2</span>
       <div class="sbody">
         <h4>Add the server</h4>
+        <p class="substep">Pick your client. Both use the token from step 1 as <span class="mono">x-api-key</span>.</p>
         <div class="tabs">
           <button class="tabbtn active" onclick="showTab('t-cc',this)">Claude Code</button>
           <button class="tabbtn" onclick="showTab('t-json',this)">Cursor / JSON config</button>
-          <button class="tabbtn" onclick="showTab('t-byok',this)">Bring your own key</button>
         </div>
         <div id="t-cc" class="tabpane">
           <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(CMD_CLAUDE)}</code></pre></div>
-          <p class="hint">Delegated access — authenticate with a per-user token; the server's key does the work.</p>
+          <p class="hint">One line — works in any Claude Code session.</p>
         </div>
         <div id="t-json" class="tabpane" hidden>
           <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(JSON_CONFIG)}</code></pre></div>
           <p class="hint">Add to your client's MCP config — Cursor, Claude Desktop, or <span class="mono">~/.claude.json</span> under <span class="mono">mcpServers</span>.</p>
         </div>
-        <div id="t-byok" class="tabpane" hidden>
+        <details class="byok">
+          <summary>Want writes to spend <em>your</em> credits? Bring your own Clockchain key</summary>
+          <p class="hint" style="margin:10px 0 0">Swap the per-user token for your own Clockchain credentials as headers — no MCP token needed. Same endpoint, your credits.</p>
           <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(CMD_BYOK)}</code></pre></div>
-          <p class="hint">Bring-your-own-key — your Clockchain credentials authenticate you; no MCP token needed. Headers travel over TLS; the endpoint is fixed server-side.</p>
-        </div>
+        </details>
       </div>
     </li>
     <li class="step">
