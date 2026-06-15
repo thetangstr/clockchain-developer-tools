@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
+import { LANDING_HTML } from "./landing.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -155,6 +156,19 @@ export async function runHttp(): Promise<void> {
     if (isHealthCheck(req.method, req.url)) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    // A human browsing to the endpoint (GET with an HTML Accept) gets the
+    // marketing landing page — at "/" and "/mcp" alike. Agents POST JSON-RPC and
+    // MCP's own SSE GETs send Accept: text/event-stream, so the agent endpoint is
+    // untouched. Public (before auth), like the health probe.
+    if (req.method === "GET" && firstHeader(req.headers.accept).includes("text/html")) {
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      });
+      res.end(LANDING_HTML);
       return;
     }
 
