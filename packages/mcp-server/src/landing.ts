@@ -261,6 +261,7 @@ export const LANDING_HTML = `<!doctype html>
           <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(JSON_CONFIG)}</code></pre></div>
           <p class="hint">Add to your client's MCP config — Cursor, Claude Desktop, or <span class="mono">~/.claude.json</span> under <span class="mono">mcpServers</span>.</p>
         </div>
+        <p class="hint" style="margin-top:8px">Also works with <b>Codex</b>, <b>Hermes</b>, <b>OpenClaw</b>, Claude Desktop — any MCP client. CLI agents use the same <span class="mono">mcp add … --transport http</span> form; config-file clients use the JSON above.</p>
         <details class="byok">
           <summary>Want writes to spend <em>your</em> credits? Bring your own Clockchain key</summary>
           <p class="hint" style="margin:10px 0 0">Swap the per-user token for your own Clockchain credentials as headers — no MCP token needed. Same endpoint, your credits.</p>
