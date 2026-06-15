@@ -7,8 +7,9 @@ import { LANDING_HTML } from "../dist/landing.js";
 test("landing page is well-formed HTML with the core message", () => {
   assert.match(LANDING_HTML, /^<!doctype html>/i);
   assert.match(LANDING_HTML, /<\/html>\s*$/i);
-  assert.match(LANDING_HTML, /Clockchain MCP/);
-  assert.match(LANDING_HTML, /31 tools/);
+  assert.match(LANDING_HTML, /Clockchain/);
+  assert.match(LANDING_HTML, /instruments/i);
+  assert.match(LANDING_HTML, /\b31\b/);
 });
 
 test("landing page points agents at the real endpoint + key headers, not a fake", () => {
