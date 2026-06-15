@@ -222,7 +222,7 @@ export const LANDING_HTML = `<!doctype html>
     <p>An agent acts, the action is anchored on a real testnet block, the receipt verifies — and a one-byte change is rejected.</p>
   </div>
   <div class="demo-frame">
-    <video src="https://clockchain-research.vercel.app/mcp-demo.mp4" autoplay loop muted playsinline preload="metadata"></video>
+    <video src="https://clockchain-research.vercel.app/mcp-demo.mp4" poster="https://clockchain-research.vercel.app/mcp-demo-poster.png" autoplay loop muted playsinline preload="auto"></video>
   </div>
 </div></section>
 
