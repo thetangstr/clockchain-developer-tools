@@ -31,6 +31,7 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
 # 2. Store secrets in Secret Manager (pull values from the Mac mini .env)
 printf '%s' '<CLOCKCHAIN_API_KEY>'  | gcloud secrets create clockchain-api-key --data-file=-
 printf '%s' '<token1>,<token2>'     | gcloud secrets create mcp-auth-tokens   --data-file=-
+openssl rand -hex 32                 | gcloud secrets create mcp-token-signing-secret --data-file=-  # signs self-serve tokens
 
 # 3. Deploy from source (Cloud Build uses the repo Dockerfile)
 gcloud run deploy clockchain-mcp \
@@ -39,8 +40,8 @@ gcloud run deploy clockchain-mcp \
   --allow-unauthenticated \
   --min-instances 1 \
   --timeout 300 \
-  --set-env-vars MCP_TRANSPORT=http,MCP_REQUIRE_AUTH=1,MCP_RATE_PER_MIN=30,MCP_LOG_BUDGET=200,CLOCKCHAIN_CLIENT_ID=<you@example.com>,CLOCKCHAIN_WALLET_ID=<you@example.com>,CLOCKCHAIN_ENDPOINT=https://node.clockchain.network \
-  --set-secrets CLOCKCHAIN_API_KEY=clockchain-api-key:latest,MCP_AUTH_TOKENS=mcp-auth-tokens:latest
+  --set-env-vars MCP_TRANSPORT=http,MCP_REQUIRE_AUTH=1,MCP_RATE_PER_MIN=30,MCP_LOG_BUDGET=200,MCP_TOKEN_MINT_PER_HOUR=10,MCP_TOKEN_TTL_DAYS=7,CLOCKCHAIN_CLIENT_ID=<you@example.com>,CLOCKCHAIN_WALLET_ID=<you@example.com>,CLOCKCHAIN_ENDPOINT=https://node.clockchain.network \
+  --set-secrets CLOCKCHAIN_API_KEY=clockchain-api-key:latest,MCP_AUTH_TOKENS=mcp-auth-tokens:latest,MCP_TOKEN_SIGNING_SECRET=mcp-token-signing-secret:latest
 ```
 
 `--min-instances 1` avoids cold starts (keeps the demo snappy; drop to 0 to save
@@ -126,6 +127,32 @@ V=$(gcloud secrets versions add mcp-auth-tokens --data-file=- <<<"<remaining,tok
 gcloud run services update clockchain-mcp --region us-central1 --update-secrets=MCP_AUTH_TOKENS=mcp-auth-tokens:${V}
 ```
 Tokens currently issued: tester, playground (Vercel `MCP_SERVER_TOKEN`), exec.
+
+### Self-serve testnet tokens (`POST /token`)
+
+Anyone can mint a short-lived testnet token at `POST /token` — no signup. These
+are **stateless HMAC-signed** tokens (`cc_<payload>.<hmac>`); the server verifies
+the signature + expiry, no database. A valid one grants the **delegated** key
+(shared testnet pool), exactly like a static `MCP_AUTH_TOKENS` entry.
+
+- **Enable/disable:** controlled entirely by the `MCP_TOKEN_SIGNING_SECRET` secret.
+  Set → `/token` mints and signed tokens validate. Unset/empty → `/token` returns
+  `503` and no signed token validates (fails closed). Startup logs the state.
+- **Knobs:** `MCP_TOKEN_MINT_PER_HOUR` (default 10, per client IP via
+  `X-Forwarded-For`) and `MCP_TOKEN_TTL_DAYS` (default 7).
+- **Revocation is all-or-nothing** — these tokens can't be revoked individually
+  (no DB). To invalidate *every* outstanding self-serve token, rotate the signing
+  secret (this does not affect static `MCP_AUTH_TOKENS` or BYO keys):
+
+```bash
+openssl rand -hex 32 | gcloud secrets versions add mcp-token-signing-secret --data-file=-
+gcloud run services update clockchain-mcp --region us-central1 \
+  --update-secrets=MCP_TOKEN_SIGNING_SECRET=mcp-token-signing-secret:latest   # rolls a revision
+```
+
+> Self-serve grants the **shared testnet** key, so its blast radius is testnet
+> credits (refillable) bounded by the per-IP mint limit and `MCP_RATE_PER_MIN`.
+> Don't enable it on a deploy wired to a production/funded key.
 
 ### Security review item — `allUsers` org-policy override
 
