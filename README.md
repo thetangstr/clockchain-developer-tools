@@ -39,22 +39,25 @@ Then run `/mcp` (or your client's equivalent), confirm `clockchain` (31 tools), 
 ask: *"use clockchain to get the current consensus time."* Self-host (local stdio),
 bring-your-own-key, and chat-connector setup are in [`INSTALL.md`](INSTALL.md).
 
-## Use it in the browser — no install (Claude Code web)
+## Ask an agent to connect it — no install
 
-No machine to set up? Connect a browser-based agent to our **hosted** endpoint —
-nothing to clone or build. In **Claude Code on the web**, paste this prompt:
+No machine to set up? Hand any MCP-capable agent (Claude Code, Cursor, Codex,
+Hermes, OpenClaw, Claude Desktop) the prompt below — the server is already hosted,
+so there's nothing to clone or build:
 
 > I want to use the Clockchain MCP server. It's already hosted, so do NOT clone or
-> build any repo — just connect to the remote server over HTTP. Register it by
-> running exactly this:
-> `claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp --header "x-api-key: <your token>"`
-> Then run `/mcp` to confirm `clockchain` is connected, and call its `get_time`
-> tool to show me the current Clockchain consensus time.
+> build any repo — just connect to the remote server over HTTP. Add an MCP server
+> named `clockchain` with this config (substitute my token):
+> ```json
+> { "mcpServers": { "clockchain": { "type": "http", "url": "https://mcp.clockchain.network/mcp", "headers": { "x-api-key": "<YOUR_TOKEN>" } } } }
+> ```
+> Then list your MCP servers to confirm `clockchain` is connected, and call its
+> `get_time` tool to show me the current Clockchain consensus time.
 
 Ask the team for a per-user token — the Clockchain key stays on the server. The
-same hosted endpoint (`https://mcp.clockchain.network/mcp`) works from Claude Code
-(CLI or web) and Cursor. Chat-connector clients (claude.ai chat, Cowork) are
-different — see [`INSTALL.md`](INSTALL.md).
+same hosted endpoint (`https://mcp.clockchain.network/mcp`) works from any MCP
+client. Chat-connector clients (claude.ai chat, Cowork) are different — see
+[`INSTALL.md`](INSTALL.md).
 
 ## What you get
 
