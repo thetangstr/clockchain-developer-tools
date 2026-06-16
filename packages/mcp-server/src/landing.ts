@@ -67,6 +67,47 @@ Docs:  https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTAL
 Page:  https://mcp.clockchain.network/  (open in a browser for the full page)
 `;
 
+// Machine-readable manifest served at GET /.well-known/mcp.json for ANY Accept
+// header (no auth). Lets an agent that's only handed the bare URL self-configure
+// — endpoint, transport, and that it needs an x-api-key — so the only thing left
+// for the user is to paste a token. Single source of truth: the install block is
+// parsed from JSON_CONFIG above.
+export const MCP_MANIFEST = {
+  name: "clockchain",
+  displayName: "Clockchain MCP",
+  description:
+    "Hosted MCP server: consensus time, notarization, agent-attested receipts, " +
+    "audit trails, agent identity, and commitments. 31 tools, one endpoint.",
+  type: "http",
+  transport: "streamable-http",
+  endpoint: "https://mcp.clockchain.network/mcp",
+  network: "testnet",
+  // No package to install — this is a remote server. Flags exist so tooling
+  // doesn't go hunting a registry for a nonexistent npm/pip package.
+  remote: true,
+  package: null,
+  authentication: {
+    type: "apiKey",
+    in: "header",
+    name: "x-api-key",
+    obtain: "https://clockchain.network",
+    bringYourOwnKey: {
+      description: "Spend your own Clockchain credits — use these headers instead of x-api-key.",
+      headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
+    },
+  },
+  install: {
+    // Drop straight into an MCP client config.
+    mcpConfig: JSON.parse(JSON_CONFIG) as unknown,
+    // For clients that only speak stdio (command + args).
+    stdioBridge: "npx -y mcp-remote https://mcp.clockchain.network/mcp --header \"x-api-key:<YOUR_TOKEN>\"",
+    // CLI shortcut where one exists.
+    claudeCodeCli: CMD_CLAUDE,
+  },
+  instructions: "https://mcp.clockchain.network/llms.txt",
+  docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
+} as const;
+
 const MODULES = [
   { i: "01", name: "Time", body: "Consensus block time and height — the network's consented clock, not a single server's. Provable after the fact." },
   { i: "02", name: "Notarization", body: "Anchor any hash to an append-only ledger, then verify it against the immutable on-chain block." },

@@ -2,7 +2,7 @@
 // MCP host. Keep a light guard on its key content + the install/endpoint facts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LANDING_HTML, INSTALL_TXT } from "../dist/landing.js";
+import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "../dist/landing.js";
 
 test("landing page is well-formed HTML with the core message", () => {
   assert.match(LANDING_HTML, /^<!doctype html>/i);
@@ -32,4 +32,19 @@ test("INSTALL_TXT (served at /llms.txt) gives agents a header-agnostic connect g
   // Must steer agents away from hunting for a package to install.
   assert.match(INSTALL_TXT, /NO package to install/i);
   assert.doesNotMatch(INSTALL_TXT, /npm install clockchain/i);
+});
+
+test("MCP_MANIFEST (served at /.well-known/mcp.json) is self-configuring + remote-only", () => {
+  assert.equal(MCP_MANIFEST.endpoint, "https://mcp.clockchain.network/mcp");
+  assert.equal(MCP_MANIFEST.type, "http");
+  assert.equal(MCP_MANIFEST.remote, true);
+  assert.equal(MCP_MANIFEST.package, null); // no package to hunt for
+  assert.equal(MCP_MANIFEST.authentication.name, "x-api-key");
+  // The embedded MCP config must be valid JSON pointing at the real endpoint.
+  assert.equal(
+    MCP_MANIFEST.install.mcpConfig.mcpServers.clockchain.url,
+    "https://mcp.clockchain.network/mcp",
+  );
+  // Must round-trip through JSON.stringify (it's served that way).
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(MCP_MANIFEST)));
 });

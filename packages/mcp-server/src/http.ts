@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
-import { LANDING_HTML, INSTALL_TXT } from "./landing.js";
+import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -175,6 +175,18 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
+    // Machine-readable manifest, served for ANY Accept header (no auth). An agent
+    // handed only the bare URL can GET this to self-configure (endpoint, transport,
+    // x-api-key) so the user just pastes a token — no "which client?", no package hunt.
+    if (req.method === "GET" && pathOf(req.url) === "/.well-known/mcp.json") {
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      });
+      res.end(JSON.stringify(MCP_MANIFEST, null, 2));
+      return;
+    }
+
     // A human browsing to the endpoint (GET with an HTML Accept) gets the
     // marketing landing page — at "/" and "/mcp" alike. Agents POST JSON-RPC and
     // MCP's own SSE GETs send Accept: text/event-stream, so the agent endpoint is
@@ -205,6 +217,7 @@ export async function runHttp(): Promise<void> {
             "x-api-key: <YOUR_TOKEN>.",
           endpoint: "https://mcp.clockchain.network/mcp",
           transport: "http",
+          manifest: "https://mcp.clockchain.network/.well-known/mcp.json",
           install: "https://mcp.clockchain.network/llms.txt",
           docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
         }),
