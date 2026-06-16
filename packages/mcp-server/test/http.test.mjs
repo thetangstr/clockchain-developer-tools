@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, pathOf } from "../dist/http.js";
 
 const tokens = ["tester-a", "tester-b"];
 
@@ -41,6 +41,13 @@ test("isHealthCheck matches GET /health and /healthz only", () => {
   assert.equal(isHealthCheck("GET", "/mcp"), false);
   assert.equal(isHealthCheck("GET", "/"), false);
   assert.equal(isHealthCheck(undefined, undefined), false);
+});
+
+test("pathOf strips the query string (used to match /llms.txt)", () => {
+  assert.equal(pathOf("/llms.txt"), "/llms.txt");
+  assert.equal(pathOf("/llms.txt?ref=hermes"), "/llms.txt");
+  assert.equal(pathOf("/mcp"), "/mcp");
+  assert.equal(pathOf(undefined), "");
 });
 
 test("callerKey keys on token when present, else IP", () => {

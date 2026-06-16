@@ -26,6 +26,47 @@ const CMD_BYOK = `claude mcp add clockchain --transport http https://mcp.clockch
   --header "x-clockchain-client-id: <you@example.com>" \\
   --header "x-clockchain-wallet-id: <you@example.com>"`;
 
+// Plain-text connect guide for agents/LLMs. Served at GET /llms.txt for ANY
+// Accept header (no browser, no auth) so an agent that fetches the bare URL —
+// instead of getting a dead-end 401 — can read exactly how to connect. One
+// source of truth with the HTML page: it reuses JSON_CONFIG / CMD_CLAUDE above.
+export const INSTALL_TXT = `Clockchain MCP — hosted Model Context Protocol server
+
+This is a REMOTE MCP server. There is NO package to install: nothing to clone,
+build, npm/pip install, npx, or uvx. You connect an MCP client to the hosted
+HTTP endpoint.
+
+Endpoint:   https://mcp.clockchain.network/mcp
+Transport:  streamable HTTP
+Auth:       header  x-api-key: <YOUR_TOKEN>   (ask the team for a testnet token)
+
+Add this to your MCP client config — identical for Claude Code, Cursor, Claude
+Desktop, Codex, Hermes, OpenClaw, and any harness that speaks MCP. If you are an
+agent setting this up yourself, edit the config of the client you are already
+running in; do not ask which client to use:
+
+${JSON_CONFIG}
+
+CLI with an "mcp add" command (Claude Code, for example):
+  ${CMD_CLAUDE}
+
+Client supports stdio only (command + args, no HTTP transport)? Bridge the
+remote server through mcp-remote — works in any stdio-only client:
+  npx -y mcp-remote https://mcp.clockchain.network/mcp --header "x-api-key:<YOUR_TOKEN>"
+
+Bring your own Clockchain key (writes spend YOUR credits) — use these headers
+instead of x-api-key:
+  x-clockchain-api-key:   <YOUR_CLOCKCHAIN_KEY>
+  x-clockchain-client-id: <you@example.com>
+  x-clockchain-wallet-id: <you@example.com>
+
+Then list your MCP servers, confirm "clockchain" is connected (31 tools), and
+call get_time to read the current consensus time.
+
+Docs:  https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md
+Page:  https://mcp.clockchain.network/  (open in a browser for the full page)
+`;
+
 const MODULES = [
   { i: "01", name: "Time", body: "Consensus block time and height — the network's consented clock, not a single server's. Provable after the fact." },
   { i: "02", name: "Notarization", body: "Anchor any hash to an append-only ledger, then verify it against the immutable on-chain block." },

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
-import { LANDING_HTML } from "./landing.js";
+import { LANDING_HTML, INSTALL_TXT } from "./landing.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -24,6 +24,9 @@ export function parseTokens(raw: string | undefined): string[] {
 
 const firstHeader = (h: string | string[] | undefined): string =>
   (Array.isArray(h) ? h[0] : h) ?? "";
+
+/** Path portion of a request URL, without the query string. */
+export const pathOf = (url: string | undefined): string => (url ?? "").split("?")[0];
 
 /**
  * Bring-your-own-key: if the caller presents their own Clockchain credentials as
@@ -159,6 +162,19 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
+    // Plain-text connect guide for agents/LLMs, served for ANY Accept header
+    // (no browser, no auth). An agent that fetches the bare endpoint with a
+    // default Accept gets a 401; this gives it a header-agnostic place to read
+    // exactly how to connect. Public, before auth — like the health probe.
+    if (req.method === "GET" && (pathOf(req.url) === "/llms.txt" || pathOf(req.url) === "/install.txt")) {
+      res.writeHead(200, {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      });
+      res.end(INSTALL_TXT);
+      return;
+    }
+
     // A human browsing to the endpoint (GET with an HTML Accept) gets the
     // marketing landing page — at "/" and "/mcp" alike. Agents POST JSON-RPC and
     // MCP's own SSE GETs send Accept: text/event-stream, so the agent endpoint is
@@ -177,8 +193,22 @@ export async function runHttp(): Promise<void> {
     // MCP token. Otherwise a configured MCP token is required.
     const byo = clockchainOverrides(req.headers);
     if (!byo && !checkAuth(req)) {
+      // Self-documenting 401: an agent that hits the bare endpoint (default
+      // Accept, no token) gets actionable guidance instead of a dead end.
       res.writeHead(401, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "unauthorized" }));
+      res.end(
+        JSON.stringify({
+          error: "unauthorized",
+          message:
+            "Clockchain MCP — a hosted MCP server (no package to install). " +
+            "Connect an MCP client to the endpoint below with header " +
+            "x-api-key: <YOUR_TOKEN>.",
+          endpoint: "https://mcp.clockchain.network/mcp",
+          transport: "http",
+          install: "https://mcp.clockchain.network/llms.txt",
+          docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
+        }),
+      );
       return;
     }
 
