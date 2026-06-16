@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, pathOf } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, pathOf, presentedApiKey, clockchainOverridesFromKey } from "../dist/http.js";
 
 const tokens = ["tester-a", "tester-b"];
 
@@ -41,6 +41,25 @@ test("isHealthCheck matches GET /health and /healthz only", () => {
   assert.equal(isHealthCheck("GET", "/mcp"), false);
   assert.equal(isHealthCheck("GET", "/"), false);
   assert.equal(isHealthCheck(undefined, undefined), false);
+});
+
+test("presentedApiKey reads x-api-key, else Bearer, x-api-key wins", () => {
+  assert.equal(presentedApiKey({ "x-api-key": "k" }), "k");
+  assert.equal(presentedApiKey({ authorization: "Bearer b" }), "b");
+  assert.equal(presentedApiKey({ "x-api-key": "k", authorization: "Bearer b" }), "k");
+  assert.equal(presentedApiKey({}), "");
+  assert.equal(presentedApiKey({ authorization: "k" }), ""); // missing Bearer scheme
+});
+
+test("clockchainOverridesFromKey builds a BYO override (forgiving fallback)", () => {
+  assert.deepEqual(clockchainOverridesFromKey("ck", {}), { apiKey: "ck" });
+  assert.deepEqual(
+    clockchainOverridesFromKey("ck", {
+      "x-clockchain-client-id": "you@x.com",
+      "x-clockchain-wallet-id": "you@x.com",
+    }),
+    { apiKey: "ck", clientId: "you@x.com", walletId: "you@x.com" },
+  );
 });
 
 test("pathOf strips the query string (used to match /llms.txt)", () => {

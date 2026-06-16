@@ -67,6 +67,40 @@ export function isAuthorized(
   return apiKey.length > 0 && tokens.includes(apiKey);
 }
 
+/**
+ * The credential the caller presented as an MCP token — the `x-api-key` value or
+ * the `Authorization: Bearer <token>` value (x-api-key wins if both are set).
+ * Empty string when neither is present. Used by the forgiving auth fallback.
+ */
+export function presentedApiKey(
+  headers: { authorization?: string | string[]; "x-api-key"?: string | string[] },
+): string {
+  const apiKey = firstHeader(headers["x-api-key"]).trim();
+  if (apiKey) return apiKey;
+  const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
+  return bearer ? bearer[1].trim() : "";
+}
+
+/**
+ * Forgiving fallback: build a BYO override from a key presented in the MCP-token
+ * slot. A Clockchain API key pasted into `x-api-key` (the #1 install mistake) is
+ * not a valid MCP token, so instead of a 401 we treat it as a Clockchain key and
+ * let the gateway be the real gate — an invalid key fails on the first tool call
+ * with the gateway's own error, not an opaque 401 here. Picks up client/wallet id
+ * from the x-clockchain-* headers if the caller also set those.
+ */
+export function clockchainOverridesFromKey(
+  apiKey: string,
+  headers: Record<string, string | string[] | undefined>,
+): Partial<ClockchainConfig> {
+  const o: Partial<ClockchainConfig> = { apiKey };
+  const clientId = firstHeader(headers["x-clockchain-client-id"]).trim();
+  const walletId = firstHeader(headers["x-clockchain-wallet-id"]).trim();
+  if (clientId) o.clientId = clientId;
+  if (walletId) o.walletId = walletId;
+  return o;
+}
+
 /** True for the unauthenticated health-probe routes (GET /health|/healthz). */
 export function isHealthCheck(
   method: string | undefined,
@@ -200,14 +234,22 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
-    // Bring-your-own-key: a caller presenting their own Clockchain credentials is
-    // authenticated by that key itself (the gateway validates it), so they need no
-    // MCP token. Otherwise a configured MCP token is required.
-    const byo = clockchainOverrides(req.headers);
+    // Resolve the per-request credential, in priority order:
+    //   1. Explicit BYO headers (x-clockchain-api-key)      -> their Clockchain key
+    //   2. Valid MCP token (x-api-key / Bearer in allowlist) -> delegated env key
+    //   3. Forgiving fallback: any key presented in x-api-key but NOT a valid MCP
+    //      token -> treat it as a Clockchain key (the #1 install mistake — a
+    //      Clockchain key pasted into x-api-key — now just works; the gateway is
+    //      the real gate and rejects a bad key on the first tool call).
+    //   4. No credential at all -> self-documenting 401.
+    let byo = clockchainOverrides(req.headers);
     if (!byo && !checkAuth(req)) {
-      // Self-documenting 401: an agent that hits the bare endpoint (default
-      // Accept, no token) gets actionable guidance instead of a dead end.
-      res.writeHead(401, { "content-type": "application/json" });
+      const presented = presentedApiKey(req.headers);
+      if (presented) {
+        byo = clockchainOverridesFromKey(presented, req.headers);
+      } else {
+        // No credential presented — return actionable guidance, not a dead end.
+        res.writeHead(401, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
           error: "unauthorized",
@@ -234,8 +276,9 @@ export async function runHttp(): Promise<void> {
           install: "https://mcp.clockchain.network/llms.txt",
           docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
         }),
-      );
-      return;
+        );
+        return;
+      }
     }
 
     // Per-tester rate limit (after auth so the key is the validated token).
