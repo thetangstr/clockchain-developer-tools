@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.thetangstr/clockchain-developer-tools",
+  "description": "Hosted MCP server for Clockchain — consensus time, notarization, agent-attested receipts, audit trails, and agent identity. 31 tools, no install: connect any MCP client to the hosted HTTP endpoint.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/thetangstr/clockchain-developer-tools",
+    "source": "github"
+  },
+  "websiteUrl": "https://mcp.clockchain.network",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.clockchain.network/mcp"
+    }
+  ]
+}
