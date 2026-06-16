@@ -30,6 +30,23 @@ const firstHeader = (h: string | string[] | undefined): string =>
 export const pathOf = (url: string | undefined): string => (url ?? "").split("?")[0];
 
 /**
+ * Best-effort client IP for rate limiting. Behind the GCP load balancer / Cloud
+ * Run, the socket's remote address is a Google proxy IP (identical for every
+ * caller), so keying limits on it would create a single global bucket. The real
+ * client is the first entry of `X-Forwarded-For`. This is for abuse mitigation,
+ * not auth — XFF is client-spoofable, but spoofing only rotates the rate-limit
+ * key, and actual tool usage is independently capped per token + at the gateway.
+ */
+export function clientIp(
+  headers: Record<string, string | string[] | undefined>,
+  remoteAddr: string | undefined,
+): string {
+  const xff = firstHeader(headers["x-forwarded-for"]);
+  const first = xff.split(",")[0]?.trim();
+  return first || remoteAddr || "unknown";
+}
+
+/**
  * Bring-your-own-key: if the caller presents their own Clockchain credentials as
  * request headers, return them as a config override so the per-request server
  * uses THEIR key (their credits). Returns undefined when no `x-clockchain-api-key`
@@ -243,7 +260,7 @@ export async function runHttp(): Promise<void> {
     // Self-serve token minting (public, before auth, rate-limited per IP). Mints
     // a signed testnet token that grants the shared delegated key, so a brand-new
     // user can connect without their own Clockchain key. Off if no signing secret.
-    if ((req.method === "POST" || req.method === "GET") && pathOf(req.url) === "/token") {
+    if (req.method === "POST" && pathOf(req.url) === "/token") {
       if (!selfServeEnabled) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({
@@ -255,8 +272,8 @@ export async function runHttp(): Promise<void> {
         }));
         return;
       }
-      const ip = req.socket.remoteAddress;
-      if (mintLimiter.enabled && !mintLimiter.allow(`mint:${ip ?? "unknown"}`)) {
+      const ip = clientIp(req.headers, req.socket.remoteAddress);
+      if (mintLimiter.enabled && !mintLimiter.allow(`mint:${ip}`)) {
         res.writeHead(429, { "content-type": "application/json" });
         res.end(JSON.stringify({
           error: "rate_limited",
@@ -265,6 +282,8 @@ export async function runHttp(): Promise<void> {
         return;
       }
       const { token, payload } = mintToken(signingSecret, tokenTtlDays * 24 * 60 * 60);
+      // Observability: log mint volume (never the token value) so abuse is visible.
+      console.error(`[clockchain-mcp] minted self-serve token (tier=${payload.tier}, ip=${ip})`);
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify({
         token,
@@ -338,7 +357,7 @@ export async function runHttp(): Promise<void> {
     }
 
     // Per-tester rate limit (after auth so the key is the validated token).
-    if (limiter.enabled && !limiter.allow(callerKey(req.headers, req.socket.remoteAddress))) {
+    if (limiter.enabled && !limiter.allow(callerKey(req.headers, clientIp(req.headers, req.socket.remoteAddress)))) {
       res.writeHead(429, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "rate_limited" }));
       return;
@@ -367,5 +386,12 @@ export async function runHttp(): Promise<void> {
 
   httpServer.listen(port, () => {
     console.error(`[clockchain-mcp] http server listening on :${port}`);
+    console.error(
+      `[clockchain-mcp] self-serve tokens: ${
+        selfServeEnabled
+          ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
+          : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
+      }`,
+    );
   });
 }

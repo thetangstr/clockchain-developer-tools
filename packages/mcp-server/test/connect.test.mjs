@@ -89,6 +89,13 @@ test("self-serve: POST /token mints a token that then authorizes initialize", as
   assert.equal(res.status, 200);
 });
 
+test("GET /token does NOT mint (POST-only) — falls through to auth → 401", async () => {
+  const res = await fetch(`${BASE}/token`, { method: "GET" });
+  assert.equal(res.status, 401);
+  const body = await res.json();
+  assert.equal(body.error, "unauthorized"); // not a token payload
+});
+
 test("no credential → self-documenting 401 naming BOTH credential types", async () => {
   const res = await initialize({});
   assert.equal(res.status, 401);

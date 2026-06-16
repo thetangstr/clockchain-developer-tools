@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, pathOf, presentedApiKey, clockchainOverridesFromKey } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
 
 const tokens = ["tester-a", "tester-b"];
 
@@ -80,6 +80,24 @@ test("rate limiter disabled when perMin <= 0 (always allows)", () => {
   const rl = createRateLimiter(0);
   assert.equal(rl.enabled, false);
   for (let i = 0; i < 1000; i++) assert.equal(rl.allow("k", 1000), true);
+});
+
+test("clientIp prefers X-Forwarded-For (real client behind the LB), else socket addr", () => {
+  // Behind the GCP LB the socket addr is a proxy; XFF carries the real client.
+  assert.equal(clientIp({ "x-forwarded-for": "203.0.113.7, 35.191.0.1" }, "10.0.0.1"), "203.0.113.7");
+  assert.equal(clientIp({ "x-forwarded-for": " 198.51.100.2 " }, "10.0.0.1"), "198.51.100.2");
+  assert.equal(clientIp({}, "10.0.0.1"), "10.0.0.1"); // no XFF → socket addr
+  assert.equal(clientIp({}, undefined), "unknown");
+  assert.equal(clientIp({ "x-forwarded-for": ["1.1.1.1, 2.2.2.2"] }, "10.0.0.1"), "1.1.1.1");
+});
+
+test("rate limiter honors a custom window (e.g. hourly mint limit)", () => {
+  const rl = createRateLimiter(2, 60 * 60_000); // 2 per hour
+  assert.equal(rl.allow("ip", 0), true);
+  assert.equal(rl.allow("ip", 1000), true);
+  assert.equal(rl.allow("ip", 2000), false);       // over limit within the hour
+  assert.equal(rl.allow("ip", 59 * 60_000), false); // still within the hour window
+  assert.equal(rl.allow("ip", 60 * 60_000 + 1), true); // window rolled over
 });
 
 test("rate limiter enforces per-key fixed window", () => {
