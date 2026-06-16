@@ -176,8 +176,9 @@ export const LANDING_HTML = `<!doctype html>
   .toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(16px); background: var(--ink); color: #fff; font-size: 13px; font-weight: 500; padding: 11px 20px; border-radius: 99px; opacity: 0; transition: .25s; z-index: 80; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  .demo-frame { max-width: 980px; margin: 0 auto; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); background: var(--bg); }
-  .demo-frame video { width: 100%; display: block; aspect-ratio: 16 / 9; }
+  .demo-frame { max-width: 980px; margin: 0 auto; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); background: var(--bg) url('https://clockchain-research.vercel.app/mcp-demo-poster.png') center/cover no-repeat; }
+  .demo-frame video { width: 100%; display: block; aspect-ratio: 16 / 9; opacity: 0; transition: opacity .45s ease; }
+  .demo-frame video.playing { opacity: 1; }
   @media (max-width: 760px) { .grid, .tenets { grid-template-columns: 1fr; } .nav-links a:not(.pill) { display: none; } }
 </style>
 </head>
@@ -222,7 +223,7 @@ export const LANDING_HTML = `<!doctype html>
     <p>An agent acts, the action is anchored on a real testnet block, the receipt verifies — and a one-byte change is rejected.</p>
   </div>
   <div class="demo-frame">
-    <video src="https://clockchain-research.vercel.app/mcp-demo.mp4" poster="https://clockchain-research.vercel.app/mcp-demo-poster.png" autoplay loop muted playsinline preload="auto"></video>
+    <video id="demoVideo" src="https://clockchain-research.vercel.app/mcp-demo.mp4" poster="https://clockchain-research.vercel.app/mcp-demo-poster.png" loop muted playsinline preload="metadata"></video>
   </div>
 </div></section>
 
@@ -255,7 +256,7 @@ export const LANDING_HTML = `<!doctype html>
       <span class="sn">1</span>
       <div class="sbody">
         <h4>Get a key</h4>
-        <p>Use a per-user <b>token</b> (delegated — writes spend our testnet credits, easiest for a quick test) or your own <b>Clockchain API key</b> (writes spend your credits). <a href="https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md">How to get a key →</a></p>
+        <p>Use a per-user <b>token</b> (delegated — writes spend our testnet credits, easiest for a quick test) or your own <b>Clockchain API key</b> (writes spend your credits). <a href="https://clockchain.network" target="_blank" rel="noopener">How to get a key →</a></p>
       </div>
     </li>
     <li class="step">
@@ -307,6 +308,20 @@ export const LANDING_HTML = `<!doctype html>
     tabs.querySelectorAll('.tabbtn').forEach(function(b){ b.classList.remove('active'); });
     btn.classList.add('active'); }
   function toast(m){ var e=document.getElementById('toast'); e.textContent=m; e.classList.add('show'); clearTimeout(window.__t); window.__t=setTimeout(function(){e.classList.remove('show');},1800); }
+  (function(){
+    var v = document.getElementById('demoVideo'); if(!v) return;
+    // Reveal the video only once it is actually playing; until then the frame's
+    // poster background shows, so the demo is never a blank box (autoplay can be
+    // deferred off-screen, and some browsers stall the media load entirely).
+    v.addEventListener('playing', function(){ v.classList.add('playing'); });
+    var tryPlay = function(){ var p = v.play(); if (p && p.catch) p.catch(function(){}); };
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function(entries){
+        entries.forEach(function(e){ if (e.isIntersecting) { tryPlay(); } else { v.pause(); } });
+      }, { threshold: 0.25 });
+      io.observe(v);
+    } else { tryPlay(); }
+  })();
 </script>
 </body>
 </html>`;
