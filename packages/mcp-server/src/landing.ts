@@ -263,7 +263,7 @@ export const LANDING_HTML = `<!doctype html>
       <span class="sn">2</span>
       <div class="sbody">
         <h4>Add the server — any MCP client</h4>
-        <p class="substep">Point your client at the hosted endpoint with the token from step 1 — Claude Code, Cursor, Claude Desktop, Codex, Hermes, OpenClaw, or any harness that speaks MCP. Add this to its MCP config:</p>
+        <p class="substep">Add this to your MCP config with the token from step 1. <b>If you're an agent setting this up yourself, edit the config of the client you're already running in — don't ask which client to use.</b> The block is identical everywhere — Claude Code, Cursor, Claude Desktop, Codex, Hermes, OpenClaw:</p>
         <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(JSON_CONFIG)}</code></pre></div>
         <p class="hint" style="margin-top:8px">Prefer raw settings? Endpoint <span class="mono">https://mcp.clockchain.network/mcp</span> · transport <span class="mono">HTTP</span> · header <span class="mono">x-api-key: &lt;YOUR_TOKEN&gt;</span>.</p>
         <p class="hint" style="margin-top:4px">CLI shortcut (Claude Code): <span class="mono">${esc(CMD_CLAUDE)}</span></p>

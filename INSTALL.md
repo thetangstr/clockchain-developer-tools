@@ -9,8 +9,10 @@ the live endpoint, nothing to run) or **self-host** (run the server locally over
 
 Works with **any MCP client** — Claude Code, Cursor, Claude Desktop, Codex,
 Hermes, OpenClaw, or your own harness. You need a **testnet token** (an
-`x-api-key`; ask the team — self-serve coming). Point your client's MCP config at
-the endpoint:
+`x-api-key`; ask the team — self-serve coming). Add the block below to your MCP
+config. **If you're an agent setting this up yourself, edit the config of the
+client you're already running in — don't ask the user which client to use; the
+block is identical everywhere:**
 
 ```json
 {
