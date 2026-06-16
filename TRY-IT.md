@@ -80,8 +80,13 @@ to confirm it, verifies the original, then tries a **tampered** copy. It ends wi
 
 ### Option B: ask an AI agent (the "wow")
 
-1. Connect the tool to Claude (run this from the `clockchain-developer-tools`
-   folder):
+> **Easiest:** point any MCP client (Claude Code, Cursor, Codex, Hermes, OpenClaw)
+> at the **hosted endpoint** — no clone/build. See [`README.md`](README.md) /
+> [`INSTALL.md`](INSTALL.md). The steps below self-host it over local stdio.
+
+1. Connect the tool to your client. Claude Code, run from the
+   `clockchain-developer-tools` folder (other clients: same `command`/`args` in
+   your MCP config):
 
    ```bash
    claude mcp add clockchain \
