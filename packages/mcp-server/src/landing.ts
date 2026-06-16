@@ -40,8 +40,9 @@ Endpoint:   https://mcp.clockchain.network/mcp
 Transport:  streamable HTTP
 
 AUTH — pick ONE (using the wrong header is the #1 cause of a 401):
-  (a) MCP token — a per-user token from the team (shared testnet pool):
-        header  x-api-key: <YOUR_TOKEN>
+  (a) Testnet token (shared testnet pool) — get one INSTANTLY, no signup:
+        curl -X POST https://mcp.clockchain.network/token
+      then send it as:  x-api-key: <YOUR_TOKEN>
   (b) Your own Clockchain API key — if you already have one (writes spend YOUR
       credits). Do NOT put a Clockchain key in x-api-key; use these three headers:
         x-clockchain-api-key:   <YOUR_CLOCKCHAIN_KEY>
@@ -96,13 +97,14 @@ export const MCP_MANIFEST = {
       "Pick ONE method. Using the wrong header is the #1 cause of a 401: a " +
       "Clockchain API key sent as x-api-key is rejected — it must go in " +
       "x-clockchain-api-key.",
-    obtain: "https://clockchain.network",
+    obtain: "POST https://mcp.clockchain.network/token (instant, no signup)",
     methods: [
       {
         name: "mcp-token",
         in: "header",
         header: "x-api-key",
-        note: "per-user MCP token from the team (shared testnet pool)",
+        obtain: "https://mcp.clockchain.network/token",
+        note: "instant self-serve testnet token (shared pool); POST /token to mint one",
       },
       {
         name: "clockchain-key",
@@ -358,8 +360,11 @@ export const LANDING_HTML = `<!doctype html>
     <li class="step">
       <span class="sn">1</span>
       <div class="sbody">
-        <h4>Get a key</h4>
-        <p>Use a per-user <b>token</b> (delegated — writes spend our testnet credits, easiest for a quick test) or your own <b>Clockchain API key</b> (writes spend your credits). <a href="https://clockchain.network" target="_blank" rel="noopener">How to get a key →</a></p>
+        <h4>Get a testnet token</h4>
+        <p>Click for an instant <b>testnet token</b> (delegated — writes spend our testnet credits, easiest for a quick test). Or bring your own <b>Clockchain API key</b> (writes spend your credits) — <a href="https://clockchain.network" target="_blank" rel="noopener">how to get one →</a></p>
+        <p><button class="cpy" id="getTokenBtn" onclick="getToken(this)" style="cursor:pointer">Get a testnet token</button></p>
+        <div class="code" id="tokenOut" hidden><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="tokenVal"></code></pre></div>
+        <p class="hint" id="tokenHint" hidden></p>
       </div>
     </li>
     <li class="step">
@@ -412,6 +417,25 @@ export const LANDING_HTML = `<!doctype html>
     tabs.querySelectorAll('.tabbtn').forEach(function(b){ b.classList.remove('active'); });
     btn.classList.add('active'); }
   function toast(m){ var e=document.getElementById('toast'); e.textContent=m; e.classList.add('show'); clearTimeout(window.__t); window.__t=setTimeout(function(){e.classList.remove('show');},1800); }
+  function getToken(btn){
+    btn.disabled = true; var old = btn.textContent; btn.textContent = 'Minting…';
+    fetch('/token', { method: 'POST' }).then(function(r){ return r.json().then(function(j){ return { ok: r.ok, j: j }; }); })
+      .then(function(res){
+        if (!res.ok) {
+          toast(res.j && res.j.message ? res.j.message : 'Could not mint a token');
+          btn.disabled = false; btn.textContent = old; return;
+        }
+        document.getElementById('tokenVal').textContent = res.j.token;
+        document.getElementById('tokenOut').hidden = false;
+        var hint = document.getElementById('tokenHint');
+        hint.textContent = 'Testnet token — expires ' + (res.j.expires_at || '').slice(0,10) + '. Use it as x-api-key in the config below.';
+        hint.hidden = false;
+        btn.textContent = 'New token';
+        btn.disabled = false;
+        toast('Token ready — copy it into the config');
+      })
+      .catch(function(){ toast('Network error minting token'); btn.disabled = false; btn.textContent = old; });
+  }
   (function(){
     var v = document.getElementById('demoVideo'); if(!v) return;
     // Reveal the video only once it is actually playing; until then the frame's

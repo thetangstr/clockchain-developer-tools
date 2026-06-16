@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
+import { mintToken, verifyToken, looksLikeSelfServe } from "./token.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -135,10 +136,10 @@ export function callerKey(
 
 /**
  * Fixed-window per-key rate limiter. Disabled (always allows) when perMin <= 0.
- * Pure and injectable (`now`) so it can be unit-tested without timers.
+ * `windowMs` defaults to one minute; pass a larger window (e.g. one hour) to cap
+ * a slower action like token minting. Pure and injectable (`now`) for tests.
  */
-export function createRateLimiter(perMin: number) {
-  const windowMs = 60_000;
+export function createRateLimiter(perMin: number, windowMs = 60_000) {
   const hits = new Map<string, { count: number; resetAt: number }>();
   return {
     enabled: perMin > 0,
@@ -183,8 +184,26 @@ export async function runHttp(): Promise<void> {
   const perMin = Number(process.env.MCP_RATE_PER_MIN ?? "0");
   const limiter = createRateLimiter(Number.isFinite(perMin) ? perMin : 0);
 
-  const checkAuth = (req: IncomingMessage): boolean =>
-    isAuthorized(req.headers, tokens);
+  // Self-serve testnet tokens (instant, signed, no DB). Enabled only when a
+  // signing secret is configured; otherwise /token is off and no signed token
+  // validates. Minting is rate-limited per IP (default 10/hour).
+  const signingSecret = process.env.MCP_TOKEN_SIGNING_SECRET ?? "";
+  const selfServeEnabled = signingSecret.length > 0;
+  const mintPerHour = Number(process.env.MCP_TOKEN_MINT_PER_HOUR ?? "10");
+  const mintLimiter = createRateLimiter(
+    Number.isFinite(mintPerHour) ? mintPerHour : 10,
+    60 * 60_000,
+  );
+  const tokenTtlDays = Number(process.env.MCP_TOKEN_TTL_DAYS ?? "7");
+
+  // A request is authorized if it carries a valid static MCP token OR a valid
+  // self-serve signed token. Both grant the delegated (shared testnet) key.
+  const checkAuth = (req: IncomingMessage): boolean => {
+    if (isAuthorized(req.headers, tokens)) return true;
+    if (!selfServeEnabled) return false;
+    const presented = presentedApiKey(req.headers);
+    return looksLikeSelfServe(presented) && verifyToken(signingSecret, presented).valid;
+  };
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     // Unauthenticated, lightweight health check for the Mac mini runbook and the
@@ -218,6 +237,42 @@ export async function runHttp(): Promise<void> {
         "cache-control": "public, max-age=300",
       });
       res.end(JSON.stringify(MCP_MANIFEST, null, 2));
+      return;
+    }
+
+    // Self-serve token minting (public, before auth, rate-limited per IP). Mints
+    // a signed testnet token that grants the shared delegated key, so a brand-new
+    // user can connect without their own Clockchain key. Off if no signing secret.
+    if ((req.method === "POST" || req.method === "GET") && pathOf(req.url) === "/token") {
+      if (!selfServeEnabled) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          error: "self_serve_disabled",
+          message:
+            "Self-serve tokens aren't enabled here. Ask the team for a token, or " +
+            "bring your own Clockchain key via x-clockchain-api-key.",
+          docs: "https://mcp.clockchain.network/llms.txt",
+        }));
+        return;
+      }
+      const ip = req.socket.remoteAddress;
+      if (mintLimiter.enabled && !mintLimiter.allow(`mint:${ip ?? "unknown"}`)) {
+        res.writeHead(429, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          error: "rate_limited",
+          message: "Too many tokens minted from this address. Try again later.",
+        }));
+        return;
+      }
+      const { token, payload } = mintToken(signingSecret, tokenTtlDays * 24 * 60 * 60);
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({
+        token,
+        tier: payload.tier,
+        expires_at: new Date(payload.exp * 1000).toISOString(),
+        endpoint: "https://mcp.clockchain.network/mcp",
+        usage: "Add header  x-api-key: <token>  to your MCP client config (testnet).",
+      }));
       return;
     }
 
@@ -265,7 +320,8 @@ export async function runHttp(): Promise<void> {
             // cause of a 401 here (a Clockchain key sent as x-api-key is rejected).
             mcpToken: {
               header: "x-api-key",
-              note: "per-user MCP token from the team (shared testnet pool)",
+              getToken: "POST https://mcp.clockchain.network/token",
+              note: "instant self-serve testnet token (shared pool) — POST /token to mint one",
             },
             bringYourOwnKey: {
               headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],

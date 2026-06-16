@@ -13,7 +13,8 @@ Hermes, OpenClaw, …) and your terminal. It wraps the live D4 node gateway at
 ## Quick install — hosted endpoint (any MCP client)
 
 Works with **any MCP client** — Claude Code, Cursor, Claude Desktop, Codex, Hermes,
-OpenClaw. Get a testnet **token** (`x-api-key`; ask the team), then add this to your
+OpenClaw. Get a testnet **token** (`x-api-key`) instantly — `curl -X POST
+https://mcp.clockchain.network/token` (no signup) — then add this to your
 client's MCP config:
 
 ```json

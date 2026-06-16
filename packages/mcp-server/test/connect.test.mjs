@@ -25,6 +25,7 @@ before(async () => {
       PORT: String(PORT),
       MCP_AUTH_TOKENS: TOKEN,
       MCP_REQUIRE_AUTH: "1",
+      MCP_TOKEN_SIGNING_SECRET: "connect-test-secret",
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -74,6 +75,17 @@ test("forgiving fallback: a non-token key in x-api-key still connects (treated a
   // The #1 real-world mistake — a Clockchain key pasted into x-api-key. initialize
   // succeeds; a bad key would only fail later at the gateway, with its own error.
   const res = await initialize({ "x-api-key": "not-an-mcp-token-looks-like-a-key" });
+  assert.equal(res.status, 200);
+});
+
+test("self-serve: POST /token mints a token that then authorizes initialize", async () => {
+  const mint = await fetch(`${BASE}/token`, { method: "POST" });
+  assert.equal(mint.status, 200);
+  const { token, expires_at } = await mint.json();
+  assert.ok(token.startsWith("cc_"));
+  assert.ok(Date.parse(expires_at) > 0);
+  // The freshly minted token connects (grants the delegated key).
+  const res = await initialize({ "x-api-key": token });
   assert.equal(res.status, 200);
 });
 
