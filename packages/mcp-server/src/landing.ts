@@ -261,21 +261,11 @@ export const LANDING_HTML = `<!doctype html>
     <li class="step">
       <span class="sn">2</span>
       <div class="sbody">
-        <h4>Add the server</h4>
-        <p class="substep">Pick your client. Both use the token from step 1 as <span class="mono">x-api-key</span>.</p>
-        <div class="tabs">
-          <button class="tabbtn active" onclick="showTab('t-cc',this)">Claude Code</button>
-          <button class="tabbtn" onclick="showTab('t-json',this)">Cursor / JSON config</button>
-        </div>
-        <div id="t-cc" class="tabpane">
-          <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(CMD_CLAUDE)}</code></pre></div>
-          <p class="hint">One line — works in any Claude Code session.</p>
-        </div>
-        <div id="t-json" class="tabpane" hidden>
-          <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(JSON_CONFIG)}</code></pre></div>
-          <p class="hint">Add to your client's MCP config — Cursor, Claude Desktop, or <span class="mono">~/.claude.json</span> under <span class="mono">mcpServers</span>.</p>
-        </div>
-        <p class="hint" style="margin-top:8px">Also works with <b>Codex</b>, <b>Hermes</b>, <b>OpenClaw</b>, Claude Desktop — any MCP client. CLI agents use the same <span class="mono">mcp add … --transport http</span> form; config-file clients use the JSON above.</p>
+        <h4>Add the server — any MCP client</h4>
+        <p class="substep">Point your client at the hosted endpoint with the token from step 1 — Claude Code, Cursor, Claude Desktop, Codex, Hermes, OpenClaw, or any harness that speaks MCP. Add this to its MCP config:</p>
+        <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(JSON_CONFIG)}</code></pre></div>
+        <p class="hint" style="margin-top:8px">Prefer raw settings? Endpoint <span class="mono">https://mcp.clockchain.network/mcp</span> · transport <span class="mono">HTTP</span> · header <span class="mono">x-api-key: &lt;YOUR_TOKEN&gt;</span>.</p>
+        <p class="hint" style="margin-top:4px">CLI shortcut (Claude Code): <span class="mono">${esc(CMD_CLAUDE)}</span></p>
         <details class="byok">
           <summary>Want writes to spend <em>your</em> credits? Bring your own Clockchain key</summary>
           <p class="hint" style="margin:10px 0 0">Swap the per-user token for your own Clockchain credentials as headers — no MCP token needed. Same endpoint, your credits.</p>
