@@ -2,37 +2,42 @@
 
 A **CLI** and an **MCP server** that add Clockchain's tools — **consensus time,
 notarization, smart-contract scheduling, audit trails, and agent identity
-verification** — to your AI agent (Claude Code / Desktop / Cursor) and your
-terminal. It wraps the live D4 node gateway at `node.clockchain.network`; it does
-**not** change the blockchain protocol.
+verification** — to **any MCP client** (Claude Code, Cursor, Claude Desktop, Codex,
+Hermes, OpenClaw, …) and your terminal. It wraps the live D4 node gateway at
+`node.clockchain.network`; it does **not** change the blockchain protocol.
 
-> **Install it in your AI agent:** [`INSTALL.md`](INSTALL.md) — local stdio (recommended) or remote HTTP.
+> **Install it in your MCP client:** [`INSTALL.md`](INSTALL.md) — hosted endpoint (any client, recommended) or self-host (local stdio).
 > **Non-engineer? Try it in ~10 min:** [`TRY-IT.md`](TRY-IT.md) · **Engineers:** [`QUICKSTART.md`](QUICKSTART.md)
 > **Roadmap + current limitations:** [`roadmap.md`](roadmap.md)
 
-## Quick install (local stdio — recommended)
+## Quick install — hosted endpoint (any MCP client)
 
-Not on npm yet, so install from source (private repo — ask the team for access):
+Works with **any MCP client** — Claude Code, Cursor, Claude Desktop, Codex, Hermes,
+OpenClaw. Get a testnet **token** (`x-api-key`; ask the team), then add this to your
+client's MCP config:
 
-```bash
-git clone https://github.com/thetangstr/clockchain-developer-tools.git
-cd clockchain-developer-tools
-npm install && npm run build
+```json
+{
+  "mcpServers": {
+    "clockchain": {
+      "type": "http",
+      "url": "https://mcp.clockchain.network/mcp",
+      "headers": { "x-api-key": "<YOUR_TOKEN>" }
+    }
+  }
+}
 ```
 
-Register it with Claude Code (run from the repo root):
+CLI with an `mcp add` command (Claude Code shown):
 
 ```bash
-claude mcp add clockchain \
-  --env CLOCKCHAIN_API_KEY=<your key> \
-  --env CLOCKCHAIN_CLIENT_ID=<you@example.com> \
-  --env CLOCKCHAIN_WALLET_ID=<you@example.com> \
-  -- node "$(pwd)/packages/mcp-server/dist/stdio.js"
+claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
+  --header "x-api-key: <YOUR_TOKEN>"
 ```
 
-Open a **new** session, run `/mcp` (you should see `clockchain`), and ask:
-*"use clockchain to get the current consensus time."* Claude Desktop / Cursor
-config, the remote-HTTP option, and troubleshooting are in [`INSTALL.md`](INSTALL.md).
+Then run `/mcp` (or your client's equivalent), confirm `clockchain` (31 tools), and
+ask: *"use clockchain to get the current consensus time."* Self-host (local stdio),
+bring-your-own-key, and chat-connector setup are in [`INSTALL.md`](INSTALL.md).
 
 ## Use it in the browser — no install (Claude Code web)
 

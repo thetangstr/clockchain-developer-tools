@@ -36,9 +36,15 @@ export CLOCKCHAIN_WALLET_ID=you@example.com
 
 ## 4. Run it (local stdio)
 
+> **Fastest path:** skip this and use the **hosted endpoint** from any MCP client
+> (Claude Code, Cursor, Codex, Hermes, OpenClaw) — one config block, nothing to
+> build. See [`README.md`](README.md) / [`INSTALL.md`](INSTALL.md). The steps below
+> are for **self-hosting** over local stdio.
+
 The server binary is `packages/mcp-server/dist/stdio.js`. Three ways to use it:
 
-**a) Register with Claude Code** (the real agent path):
+**a) Register with Claude Code** (one example — other clients put the same
+`command`/`args` in their MCP config):
 
 ```bash
 claude mcp add clockchain \
@@ -49,7 +55,7 @@ claude mcp add clockchain \
 ```
 
 Then open a **new** Claude Code session (MCP servers load at startup), run `/mcp`
-(should list `clockchain` with 25 tools), and ask: *"use clockchain to timestamp the
+(should list `clockchain` with 31 tools), and ask: *"use clockchain to timestamp the
 text 'hello' and then verify it."*
 
 **b) Narrated live demo** (spends one log credit):

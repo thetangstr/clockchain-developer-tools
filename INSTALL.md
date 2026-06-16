@@ -2,23 +2,49 @@
 
 Add Clockchain's tools (consensus time, notarization, smart-contract scheduling,
 audit trails, agent identity verification, commitment lifecycle — 31 tools across
-six modules) to your
-AI coding agent. Two ways: **local** (you run it, recommended) or **remote** (you
-connect to a hosted endpoint).
+six modules) to **any MCP client**. Two ways: **hosted** (recommended — connect to
+the live endpoint, nothing to run) or **self-host** (run the server locally over stdio).
 
-## Prerequisites
-- **Node.js 18+**
-- A **Clockchain API key** (from your Clockchain dashboard) + your client/wallet id
+## Quick start — hosted endpoint (any MCP client)
+
+Works with **any MCP client** — Claude Code, Cursor, Claude Desktop, Codex,
+Hermes, OpenClaw, or your own harness. You need a **testnet token** (an
+`x-api-key`; ask the team — self-serve coming). Point your client's MCP config at
+the endpoint:
+
+```json
+{
+  "mcpServers": {
+    "clockchain": {
+      "type": "http",
+      "url": "https://mcp.clockchain.network/mcp",
+      "headers": { "x-api-key": "<YOUR_TOKEN>" }
+    }
+  }
+}
+```
+
+CLI with an `mcp add` command? Claude Code, for example:
+
+```bash
+claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
+  --header "x-api-key: <YOUR_TOKEN>"
+```
+
+**Bring your own key** (spend your own credits): swap the token for your Clockchain
+credentials as headers — `x-clockchain-api-key`, `x-clockchain-client-id`,
+`x-clockchain-wallet-id` (no MCP token needed).
+
+Then run `/mcp` (or your client's equivalent) — you should see `clockchain` with
+all 31 tools — and ask: *"use clockchain to get the current consensus time."*
 
 ---
 
-Your key stays on your machine; the server has **no network listener** (it only
-calls Clockchain outbound).
+## Self-host (advanced — run it locally over stdio)
 
-## Install from source (current method)
-
-The package isn't on npm yet, so install from the repo. You need **GitHub access
-to `thetangstr/clockchain-developer-tools`** (it's private - ask the team).
+Prefer to run the server yourself? Your key never leaves your machine; the server
+has **no network listener** (only outbound calls to the gateway). Needs **Node.js
+18+** and GitHub access to **`thetangstr/clockchain-developer-tools`** (private — ask the team).
 
 ```bash
 git clone https://github.com/thetangstr/clockchain-developer-tools.git
