@@ -213,10 +213,23 @@ export async function runHttp(): Promise<void> {
           error: "unauthorized",
           message:
             "Clockchain MCP — a hosted MCP server (no package to install). " +
-            "Connect an MCP client to the endpoint below with header " +
-            "x-api-key: <YOUR_TOKEN>.",
+            "Authenticate with EITHER an MCP token (header x-api-key) OR your " +
+            "own Clockchain API key (header x-clockchain-api-key + client/wallet " +
+            "id), then point an MCP client at the endpoint below.",
           endpoint: "https://mcp.clockchain.network/mcp",
           transport: "http",
+          auth: {
+            // Two co-equal credential types — using the wrong header is the #1
+            // cause of a 401 here (a Clockchain key sent as x-api-key is rejected).
+            mcpToken: {
+              header: "x-api-key",
+              note: "per-user MCP token from the team (shared testnet pool)",
+            },
+            bringYourOwnKey: {
+              headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
+              note: "your own Clockchain API key (writes spend your credits)",
+            },
+          },
           manifest: "https://mcp.clockchain.network/.well-known/mcp.json",
           install: "https://mcp.clockchain.network/llms.txt",
           docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",

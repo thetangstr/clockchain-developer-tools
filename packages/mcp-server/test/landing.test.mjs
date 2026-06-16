@@ -32,6 +32,9 @@ test("INSTALL_TXT (served at /llms.txt) gives agents a header-agnostic connect g
   // Must steer agents away from hunting for a package to install.
   assert.match(INSTALL_TXT, /NO package to install/i);
   assert.doesNotMatch(INSTALL_TXT, /npm install clockchain/i);
+  // Both credential types must be documented co-equally (BYO is not "advanced").
+  assert.match(INSTALL_TXT, /x-clockchain-api-key/);
+  assert.match(INSTALL_TXT, /pick ONE/i);
 });
 
 test("MCP_MANIFEST (served at /.well-known/mcp.json) is self-configuring + remote-only", () => {
@@ -39,7 +42,12 @@ test("MCP_MANIFEST (served at /.well-known/mcp.json) is self-configuring + remot
   assert.equal(MCP_MANIFEST.type, "http");
   assert.equal(MCP_MANIFEST.remote, true);
   assert.equal(MCP_MANIFEST.package, null); // no package to hunt for
-  assert.equal(MCP_MANIFEST.authentication.name, "x-api-key");
+  // Two co-equal auth methods: MCP token (x-api-key) and BYO Clockchain key.
+  const methodHeaders = MCP_MANIFEST.authentication.methods.flatMap(
+    (m) => m.header ?? m.headers,
+  );
+  assert.ok(methodHeaders.includes("x-api-key"));
+  assert.ok(methodHeaders.includes("x-clockchain-api-key"));
   // The embedded MCP config must be valid JSON pointing at the real endpoint.
   assert.equal(
     MCP_MANIFEST.install.mcpConfig.mcpServers.clockchain.url,

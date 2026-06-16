@@ -38,27 +38,32 @@ HTTP endpoint.
 
 Endpoint:   https://mcp.clockchain.network/mcp
 Transport:  streamable HTTP
-Auth:       header  x-api-key: <YOUR_TOKEN>   (ask the team for a testnet token)
+
+AUTH — pick ONE (using the wrong header is the #1 cause of a 401):
+  (a) MCP token — a per-user token from the team (shared testnet pool):
+        header  x-api-key: <YOUR_TOKEN>
+  (b) Your own Clockchain API key — if you already have one (writes spend YOUR
+      credits). Do NOT put a Clockchain key in x-api-key; use these three headers:
+        x-clockchain-api-key:   <YOUR_CLOCKCHAIN_KEY>
+        x-clockchain-client-id: <you@example.com>
+        x-clockchain-wallet-id: <you@example.com>
 
 Add this to your MCP client config — identical for Claude Code, Cursor, Claude
 Desktop, Codex, Hermes, OpenClaw, and any harness that speaks MCP. If you are an
 agent setting this up yourself, edit the config of the client you are already
-running in; do not ask which client to use:
+running in; do not ask which client to use. (Example shows auth option (a) —
+for (b), swap the headers block for the three x-clockchain-* headers above.)
 
 ${JSON_CONFIG}
 
-CLI with an "mcp add" command (Claude Code, for example):
+NOTE: some clients' "mcp add" CLIs have no flag for custom auth headers. If yours
+doesn't (e.g. it rejects --header), write the config/headers block above directly
+— that is the normal path, not a workaround. CLI example where one works:
   ${CMD_CLAUDE}
 
 Client supports stdio only (command + args, no HTTP transport)? Bridge the
 remote server through mcp-remote — works in any stdio-only client:
   npx -y mcp-remote https://mcp.clockchain.network/mcp --header "x-api-key:<YOUR_TOKEN>"
-
-Bring your own Clockchain key (writes spend YOUR credits) — use these headers
-instead of x-api-key:
-  x-clockchain-api-key:   <YOUR_CLOCKCHAIN_KEY>
-  x-clockchain-client-id: <you@example.com>
-  x-clockchain-wallet-id: <you@example.com>
 
 Then list your MCP servers, confirm "clockchain" is connected (31 tools), and
 call get_time to read the current consensus time.
@@ -87,14 +92,25 @@ export const MCP_MANIFEST = {
   remote: true,
   package: null,
   authentication: {
-    type: "apiKey",
-    in: "header",
-    name: "x-api-key",
+    description:
+      "Pick ONE method. Using the wrong header is the #1 cause of a 401: a " +
+      "Clockchain API key sent as x-api-key is rejected — it must go in " +
+      "x-clockchain-api-key.",
     obtain: "https://clockchain.network",
-    bringYourOwnKey: {
-      description: "Spend your own Clockchain credits — use these headers instead of x-api-key.",
-      headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
-    },
+    methods: [
+      {
+        name: "mcp-token",
+        in: "header",
+        header: "x-api-key",
+        note: "per-user MCP token from the team (shared testnet pool)",
+      },
+      {
+        name: "clockchain-key",
+        in: "header",
+        headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
+        note: "your own Clockchain API key (writes spend your credits)",
+      },
+    ],
   },
   install: {
     // Drop straight into an MCP client config.
@@ -104,6 +120,11 @@ export const MCP_MANIFEST = {
     // CLI shortcut where one exists.
     claudeCodeCli: CMD_CLAUDE,
   },
+  notes: [
+    "No package to install — this is a remote server. Do not search npm/pip/registries.",
+    "Some MCP clients' 'mcp add' CLIs cannot attach custom auth headers; if so, write the headers block into the config directly (normal, not a workaround).",
+    "If you have a Clockchain API key, use the x-clockchain-* headers — NOT x-api-key.",
+  ],
   instructions: "https://mcp.clockchain.network/llms.txt",
   docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
 } as const;
@@ -348,10 +369,11 @@ export const LANDING_HTML = `<!doctype html>
         <p class="substep">Add this to your MCP config with the token from step 1. <b>If you're an agent setting this up yourself, edit the config of the client you're already running in — don't ask which client to use.</b> The block is identical everywhere — Claude Code, Cursor, Claude Desktop, Codex, Hermes, OpenClaw:</p>
         <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(JSON_CONFIG)}</code></pre></div>
         <p class="hint" style="margin-top:8px">Prefer raw settings? Endpoint <span class="mono">https://mcp.clockchain.network/mcp</span> · transport <span class="mono">HTTP</span> · header <span class="mono">x-api-key: &lt;YOUR_TOKEN&gt;</span>.</p>
-        <p class="hint" style="margin-top:4px">CLI shortcut (Claude Code): <span class="mono">${esc(CMD_CLAUDE)}</span></p>
+        <p class="hint" style="margin-top:4px"><b>Already have a Clockchain API key?</b> Don't put it in <span class="mono">x-api-key</span> — that's only for MCP tokens. Use the <span class="mono">x-clockchain-*</span> headers below instead.</p>
+        <p class="hint" style="margin-top:4px">Some clients' <span class="mono">mcp add</span> CLIs can't set custom headers — if so, write the config block above directly. CLI shortcut where one works (Claude Code): <span class="mono">${esc(CMD_CLAUDE)}</span></p>
         <details class="byok">
-          <summary>Want writes to spend <em>your</em> credits? Bring your own Clockchain key</summary>
-          <p class="hint" style="margin:10px 0 0">Swap the per-user token for your own Clockchain credentials as headers — no MCP token needed. Same endpoint, your credits.</p>
+          <summary>Use your own Clockchain API key (writes spend your credits)</summary>
+          <p class="hint" style="margin:10px 0 0">Use your Clockchain credentials as headers instead of <span class="mono">x-api-key</span> — no MCP token needed. Same endpoint, your credits.</p>
           <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(CMD_BYOK)}</code></pre></div>
         </details>
       </div>
