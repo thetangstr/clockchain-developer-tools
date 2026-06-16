@@ -2,7 +2,7 @@
 // MCP host. Keep a light guard on its key content + the install/endpoint facts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LANDING_HTML } from "../dist/landing.js";
+import { LANDING_HTML, INSTALL_TXT } from "../dist/landing.js";
 
 test("landing page is well-formed HTML with the core message", () => {
   assert.match(LANDING_HTML, /^<!doctype html>/i);
@@ -21,4 +21,15 @@ test("landing page points agents at the real endpoint + key headers, not a fake"
 
 test("landing page clearly calls out testnet", () => {
   assert.match(LANDING_HTML, /Testnet/);
+});
+
+test("INSTALL_TXT (served at /llms.txt) gives agents a header-agnostic connect guide", () => {
+  // The exact facts an agent needs to connect, in plain text.
+  assert.match(INSTALL_TXT, /https:\/\/mcp\.clockchain\.network\/mcp/);
+  assert.match(INSTALL_TXT, /x-api-key/);
+  assert.match(INSTALL_TXT, /mcp-remote/); // stdio-only fallback
+  assert.match(INSTALL_TXT, /mcpServers/); // the JSON config block
+  // Must steer agents away from hunting for a package to install.
+  assert.match(INSTALL_TXT, /NO package to install/i);
+  assert.doesNotMatch(INSTALL_TXT, /npm install clockchain/i);
 });
