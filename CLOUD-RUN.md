@@ -40,7 +40,7 @@ gcloud run deploy clockchain-mcp \
   --allow-unauthenticated \
   --min-instances 1 \
   --timeout 300 \
-  --set-env-vars MCP_TRANSPORT=http,MCP_REQUIRE_AUTH=1,MCP_RATE_PER_MIN=30,MCP_LOG_BUDGET=200,MCP_TOKEN_MINT_PER_HOUR=10,MCP_TOKEN_TTL_DAYS=7,CLOCKCHAIN_CLIENT_ID=<you@example.com>,CLOCKCHAIN_WALLET_ID=<you@example.com>,CLOCKCHAIN_ENDPOINT=https://node.clockchain.network \
+  --set-env-vars MCP_TRANSPORT=http,MCP_REQUIRE_AUTH=1,MCP_RATE_PER_MIN=30,MCP_LOG_BUDGET=5000,MCP_TOKEN_MINT_PER_HOUR=10,MCP_TOKEN_TTL_DAYS=7,CLOCKCHAIN_CLIENT_ID=<you@example.com>,CLOCKCHAIN_WALLET_ID=<you@example.com>,CLOCKCHAIN_ENDPOINT=https://node.clockchain.network \
   --set-secrets CLOCKCHAIN_API_KEY=clockchain-api-key:latest,MCP_AUTH_TOKENS=mcp-auth-tokens:latest,MCP_TOKEN_SIGNING_SECRET=mcp-token-signing-secret:latest
 ```
 

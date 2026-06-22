@@ -30,7 +30,7 @@ module.exports = {
         // cap per-token rate + total writes. Your sourced .env overrides these.
         MCP_REQUIRE_AUTH: process.env.MCP_REQUIRE_AUTH || "1",
         MCP_RATE_PER_MIN: process.env.MCP_RATE_PER_MIN || "30",
-        MCP_LOG_BUDGET: process.env.MCP_LOG_BUDGET || "200",
+        MCP_LOG_BUDGET: process.env.MCP_LOG_BUDGET || "5000",
       },
     },
   ],
