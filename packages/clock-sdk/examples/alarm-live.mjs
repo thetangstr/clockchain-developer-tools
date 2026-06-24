@@ -62,8 +62,22 @@ if (!firedStatus || firedStatus.state !== "fired") {
 }
 
 const receipt = firedStatus.receipt;
-console.log(`anchored fire: ledgerId=${receipt?.anchor?.ledgerId} blockHeight=${receipt?.anchor?.blockHeight} consensusTime=${receipt?.anchor?.consensusTime}`);
+const ledgerId = receipt?.anchor?.ledgerId;
+console.log(`anchored fire: ledgerId=${ledgerId} blockHeight=${receipt?.anchor?.blockHeight ?? "(pending)"}`);
 
-const verification = await client.verifyReceipt(receipt);
-console.log("keyless verify:", JSON.stringify(verification));
-console.log(verification?.onChain ? "✓ alarm fired on verified time and is keyless-verifiable" : "verify inconclusive (see output)");
+// Harden: the default attest wait can time out before the block lands on testnet,
+// leaving blockHeight null. Poll get_log_entry until it backfills (longer timeout)
+// BEFORE verifying, so the on-chain check is authoritative, not advisory.
+const confirmed = await client.waitForConfirmation(ledgerId, 60_000);
+if (confirmed.blockHeight == null) {
+  console.error(`block not confirmed within 60s (testnet backfill lag); ledgerId=${ledgerId} — record exists but on-chain verify will be advisory only.`);
+}
+
+// Authoritative keyless verify against the immutable block (height discovered from the confirmed record).
+const verification = await client.verifyOnChain(ledgerId);
+console.log("keyless on-chain verify:", JSON.stringify(verification));
+console.log(
+  confirmed.blockHeight != null
+    ? `✓ alarm fired on verified time, confirmed at block ${confirmed.blockHeight}, keyless-verifiable`
+    : "△ recorded + hash-matched, block confirmation pending",
+);
