@@ -1,0 +1,38 @@
+{
+  "name": "@clockchain/clock-sdk",
+  "version": "0.1.0",
+  "description": "Client-side verified-time primitives (disciplined clock + scheduler/cron + stopwatch + timer) over @clockchain/core",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": ["clockchain", "verified-time", "clock", "scheduler", "cron", "stopwatch", "timer", "agent"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thetangstr/clockchain-developer-tools.git",
+    "directory": "packages/clock-sdk"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@clockchain/core": "*"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
