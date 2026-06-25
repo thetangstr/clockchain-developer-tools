@@ -8,7 +8,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "packages/**"
+      # Only packages baked into the deployed image trigger a redeploy.
+      # Other workspaces (clock-sdk, web-demo, verify) + docs/examples do NOT.
+      - "packages/mcp-server/**"
+      - "packages/core/**"
       - "Dockerfile"
       - ".dockerignore"
       - "package.json"
