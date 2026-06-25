@@ -98,6 +98,29 @@ reads the immutable on-chain block with no API key. That block — not the mutab
 | [`@clockchain/mcp-server`](packages/mcp-server) | The MCP server — `clockchain-mcp` (`dist/stdio.js`), stdio + HTTP transports. |
 | [`@clockchain/core`](packages/core) | Shared client, types, hashing/receipt + ERC-8004 helpers (Node-only, no extra deps). |
 | [`@clockchain/web-demo`](packages/web-demo) | Browser chat demo — an LLM agent driving the tools over MCP. |
+| [`@clockchain/clock-sdk`](packages/clock-sdk) | **Client-side** verified-time primitives — disciplined clock + alarm/timer scheduler + stopwatch. **Required to operate alarms/timers** (see callout below). |
+
+> ### ⏰ Alarms & timers run in a client-side component — by design
+> The MCP server provides the trust primitives — **consensus time**, **tamper-evident
+> notarization**, `attest_action`, and **keyless on-chain verification**. **Stopwatch**
+> (provable elapsed time) works directly through these tools. **Alarm** and **Timer** —
+> anything that *auto-fires at a future time* — additionally require the client-side
+> companion [`@clockchain/clock-sdk`](packages/clock-sdk).
+>
+> This split is **deliberate, and is a trust property rather than a limitation:** your
+> schedule and the actions you fire stay inside **your** environment. Clockchain never
+> holds your schedule, never holds your keys, and never acts on your behalf — it supplies
+> only neutral, verifiable time and an immutable, independently-verifiable record of each
+> fire. A blockchain cannot (and, for neutrality, should not) reach out to wake your
+> systems; the companion disciplines a local clock to Clockchain (NTP-style) and fires
+> within your trust boundary, anchoring a keyless-verifiable receipt.
+>
+> **Install + operate:** [`packages/clock-sdk`](packages/clock-sdk) — quickstart, the
+> trust/security model, and a production daemon recipe (runs under `pm2`).
+>
+> **Managed option (roadmap):** an optional hosted **keeper**, exposed via MCP
+> `schedule_trigger` tools, will fire server-side for teams that prefer not to run the
+> companion — with the same verifiable receipts. See [roadmap.md](./roadmap.md).
 
 A `@clockchain/cli` for the terminal is planned — see [roadmap.md](./roadmap.md).
 
