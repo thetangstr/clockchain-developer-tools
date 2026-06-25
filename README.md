@@ -124,6 +124,52 @@ reads the immutable on-chain block with no API key. That block — not the mutab
 
 A `@clockchain/cli` for the terminal is planned — see [roadmap.md](./roadmap.md).
 
+## Verified-time alarms (clock-sdk)
+
+Fire on Clockchain's neutral, verifiable clock — and prove every fire.
+[`@clockchain/clock-sdk`](packages/clock-sdk) is a client-side **disciplined clock +
+scheduler**: Alarm, Timer, Stopwatch. The chain stays a pure clock + notary; scheduling
+runs in your process, and each fire is anchored to a keyless-verifiable receipt.
+
+**How it works:** sync to Clockchain NTP-style (offset + uncertainty — not polling, not a
+beacon) → fire locally when `clockchain_now ≥ T` → anchor the fire (`attest_action`) →
+keyless-verify against the immutable on-chain block. Works **with or without** a future
+signed time beacon (pluggable time source). Something must be running to fire at T, so it
+lives client-side (e.g. on an always-on host) — a blockchain can't wake your client.
+
+**Status — PoC, verified live.** Built + merged (28 unit tests). Measured end-to-end via a
+Slack bot: the alarm fired **~1 s** past target on consensus time, anchored, and
+`verify_cross_party` → `verifiedAgainst: "on-chain block", keyless: true`. Audit / SLA /
+agent-deadline tier — **not** microsecond / HFT. Single-validator testnet, so "court-grade"
+is a target, not a present claim.
+
+**Try it:**
+
+```bash
+# Full SDK (disciplined-clock loop) — needs testnet gateway creds:
+export CLOCKCHAIN_API_KEY=… CLOCKCHAIN_CLIENT_ID=… CLOCKCHAIN_WALLET_ID=…
+curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm.sh | bash
+
+# Zero creds (MCP flow, self-serve demo token; needs jq):
+curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm-mcp.sh | bash
+```
+
+See [`packages/clock-sdk`](packages/clock-sdk) for the API, the trust/security model, and
+the Clark Slack-bot daemon recipe.
+
+### Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| **0 · Relabel + docs** | Clarify `create_schedule` is a contract **deploy**, not an alarm; ship docs | ✅ done |
+| **1 · Client SDK** | Disciplined clock + scheduler (Alarm / Timer / Stopwatch) + examples | ✅ built + merged; PoC verified live |
+| **2 · Hosted keeper** | Off-chain dispatch behind MCP `schedule_trigger` tools — zero-install, fire-while-offline; reliable delivery (retries / idempotency / DLQ) | ◻ next (on demand) |
+| **3 · Multi-validator** | Unlocks the **court-grade** claim | ◻ gated (protocol roadmap) |
+
+**Reliability gate:** a fire must actually anchor — a degraded validator pool can leave a
+receipt cache-only (`blockHeight` null). Tracked as **P0** (don't report success until
+anchored); multi-validator (Phase 3) addresses pool participation.
+
 ## Status
 
 Working against the live gateway. The MCP server is **verified working** —
