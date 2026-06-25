@@ -82,17 +82,24 @@ Already cloned? From the repo root: `bash packages/clock-sdk/examples/try-alarm.
 Requires Node 18+ and git; the script checks both and explains anything missing.
 
 **Try it with no creds (MCP flow).** The SDK talks to the gateway directly, so it needs
-account creds. If you have none, get a **demo token** (no signup) and run the alarm
-*flow* through the hosted MCP instead — same proof, different path:
+account creds. If you have none, run the alarm *flow* through the hosted MCP with a
+self-serve **demo token** (no signup) — one command, requires `jq`:
 
 ```bash
-curl -X POST https://mcp.clockchain.network/token   # returns { token: "cc_..." }
+curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm-mcp.sh | bash
 ```
 
-Add that as `x-api-key` in any MCP client, then ask it: *read the consensus time, set an
-alarm ~30s out, fire + `attest_action` at T, and `verify_cross_party` the receipt.* (Note:
-the demo tier may rate-limit or block the anchoring write — the disciplined-clock SDK run
-above is the full experience.)
+It mints **one** token (cached), checks pool health, arms an alarm, fires + anchors
+(`wait:true`), **asserts it actually anchored**, then keyless-verifies. Field notes baked in:
+
+- **Mint once + cache.** `POST /token` is IP-rate-limited with **no `Retry-After`** — minting
+  per call gets you `429`'d. Reuse the cached token (`$CC_TOKEN_FILE`, default `/tmp/cc_demo_token`).
+- **Fail fast on `401/403`** — auth isn't transient; don't retry, re-mint.
+- **`wait:true, wait_ms>=30000`** — the reply carries `blockHeight` directly; never chase a `null`.
+- **A `null` blockHeight = failed anchor, not "pending."** A degraded validator pool
+  (`totalNodes:1`, `participation 0%`) silently drops fires — the script refuses to claim success.
+- **"Keyless"** here means the *cryptographic* check (against the immutable on-chain block); the
+  hosted MCP transport still needs the demo token. The disciplined-clock SDK run above is the full experience.
 
 ## Trust & security model
 
