@@ -68,6 +68,32 @@ alarm: sync → arm → fire → anchor → keyless verify) and
 [`examples/clark-slack-alarm.mjs`](examples/clark-slack-alarm.mjs) (production daemon —
 register over HTTP, fire to Slack, durable + re-arm on restart, runs under `pm2`).
 
+## Try it from a fresh terminal (zero-to-alarm)
+
+One command takes a clean machine from nothing → a live, keyless-verifiable alarm —
+it clones, installs, builds, and runs. The only input is testnet gateway creds:
+
+```bash
+export CLOCKCHAIN_API_KEY=...  CLOCKCHAIN_CLIENT_ID=...  CLOCKCHAIN_WALLET_ID=...
+curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm.sh | bash
+```
+
+Already cloned? From the repo root: `bash packages/clock-sdk/examples/try-alarm.sh`.
+Requires Node 18+ and git; the script checks both and explains anything missing.
+
+**Try it with no creds (MCP flow).** The SDK talks to the gateway directly, so it needs
+account creds. If you have none, get a **demo token** (no signup) and run the alarm
+*flow* through the hosted MCP instead — same proof, different path:
+
+```bash
+curl -X POST https://mcp.clockchain.network/token   # returns { token: "cc_..." }
+```
+
+Add that as `x-api-key` in any MCP client, then ask it: *read the consensus time, set an
+alarm ~30s out, fire + `attest_action` at T, and `verify_cross_party` the receipt.* (Note:
+the demo tier may rate-limit or block the anchoring write — the disciplined-clock SDK run
+above is the full experience.)
+
 ## Trust & security model
 
 - **Non-custodial.** The SDK holds and transmits **no private keys**. Credentials come from
