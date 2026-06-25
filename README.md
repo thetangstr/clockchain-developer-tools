@@ -157,6 +157,38 @@ curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-too
 See [`packages/clock-sdk`](packages/clock-sdk) for the API, the trust/security model, and
 the Clark Slack-bot daemon recipe.
 
+### Use it in your app (SDK prompt)
+
+Paste this into a coding agent (Claude Code, Cursor, …) to wire a verified-time alarm into
+your project:
+
+```text
+Add a verified-time alarm to my project using Clockchain's @clockchain/clock-sdk.
+
+1. Install:  npm install @clockchain/clock-sdk @clockchain/core
+2. Env (testnet gateway creds): CLOCKCHAIN_API_KEY, CLOCKCHAIN_CLIENT_ID, CLOCKCHAIN_WALLET_ID
+3. Wire it:
+     import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
+     import { ClockchainClock, ClockScheduler } from "@clockchain/clock-sdk";
+     const cc = new ClockchainClient(readConfigFromEnv());
+     const clock = new ClockchainClock(cc);
+     await clock.sync(); clock.startAutoResync();            // NTP-style discipline
+     const scheduler = new ClockScheduler({ clock, client: cc, confirmSource: cc });
+     scheduler.schedule({
+       fireAt: clock.now().epochMs + 60_000,                 // 60s out, on verified time
+       mode: "confirmed",                                    // re-check consensus at boundary
+       agentId: "my-app",
+       action: (ctx) => { /* run the thing; ctx has epochMs + uncertaintyMs */ },
+     });
+     // each fire is auto-anchored via attest_action -> a keyless-verifiable receipt
+4. Requirements: Node 18+. The process must stay running to fire (client-side cron) -
+   run on an always-on host; persist + re-arm schedules across restarts for production.
+5. Verify a fire keylessly:  await cc.verifyOnChain(ledgerId)
+   -> expect verifiedAgainst "on-chain block", keyless true.
+
+Report what you wired, a test fire's block height, and the keyless verify result.
+```
+
 ### Roadmap
 
 | Phase | Scope | Status |
