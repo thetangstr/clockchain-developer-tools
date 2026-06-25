@@ -76,7 +76,13 @@ register over HTTP, fire to Slack, durable + re-arm on restart, runs under `pm2`
   receipt metadata is anchored — your payloads never leave your environment.
 - **Keyless, third-party verification.** Any counterparty verifies a fire against the
   **immutable on-chain block** (`verify_cross_party` / `/searchAssetFromChain`) with **no
-  API key and no Clockchain account** — authoritative, not the rewritable cache.
+  API key and no Clockchain account** — authoritative, not the rewritable cache. The
+  integrity check is yours: you recompute the SHA-256 and compare it to the anchored hash.
+- **Keyless is not yet fully *trustless*.** Today that block is served by Clockchain's
+  gateway (a single operator), so you self-verify *integrity* but still rely on one source
+  for the block itself. Reading it from an **independent validator set / a node you don't
+  control** is the **multi-validator** roadmap item. Until then, describe verification as
+  *keyless and self-verifying on integrity* — **not** "trustless" — to a compliance buyer.
 - **No false precision.** Every clock reading carries an explicit `uncertaintyMs`
   (round-trip/2 + the network's reported offset). Treat time as an interval, not a point;
   use `mode: "confirmed"` when the boundary matters.
