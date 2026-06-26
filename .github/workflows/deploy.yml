@@ -50,9 +50,9 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          project_id: clockchain-mcp-yarda
-          workload_identity_provider: projects/371358326490/locations/global/workloadIdentityPools/github/providers/github-provider
-          service_account: gh-deploy@clockchain-mcp-yarda.iam.gserviceaccount.com
+          project_id: clockchain-mcp
+          workload_identity_provider: projects/886160542191/locations/global/workloadIdentityPools/github/providers/github-provider
+          service_account: gh-deploy@clockchain-mcp.iam.gserviceaccount.com
 
       - uses: google-github-actions/setup-gcloud@v2
 
