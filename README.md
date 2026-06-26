@@ -157,37 +157,46 @@ curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-too
 See [`packages/clock-sdk`](packages/clock-sdk) for the API, the trust/security model, and
 the Clark Slack-bot daemon recipe.
 
-### Use it in your app (SDK prompt)
+### Use it in your app (no npm needed)
 
-Paste this into a coding agent (Claude Code, Cursor, …) to wire a verified-time alarm into
-your project:
+The `@clockchain/*` packages **are not on npm yet** — so `npm install @clockchain/clock-sdk`
+will *not* work. Use it today one of two ways:
+
+**A — Zero dependencies, hosted MCP** (Node 18+ built-in `fetch`, a self-serve demo token).
+Paste this into a coding agent:
 
 ```text
-Add a verified-time alarm to my project using Clockchain's @clockchain/clock-sdk.
+Add a verified-time alarm to my project — NO npm packages, Node 18+ only (built-in fetch),
+against Clockchain's hosted MCP (https://mcp.clockchain.network/mcp — JSON-RPC over HTTP, SSE replies).
 
-1. Install:  npm install @clockchain/clock-sdk @clockchain/core
-2. Env (testnet gateway creds): CLOCKCHAIN_API_KEY, CLOCKCHAIN_CLIENT_ID, CLOCKCHAIN_WALLET_ID
-3. Wire it:
-     import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
-     import { ClockchainClock, ClockScheduler } from "@clockchain/clock-sdk";
-     const cc = new ClockchainClient(readConfigFromEnv());
-     const clock = new ClockchainClock(cc);
-     await clock.sync(); clock.startAutoResync();            // NTP-style discipline
-     const scheduler = new ClockScheduler({ clock, client: cc, confirmSource: cc });
-     scheduler.schedule({
-       fireAt: clock.now().epochMs + 60_000,                 // 60s out, on verified time
-       mode: "confirmed",                                    // re-check consensus at boundary
-       agentId: "my-app",
-       action: (ctx) => { /* run the thing; ctx has epochMs + uncertaintyMs */ },
-     });
-     // each fire is auto-anchored via attest_action -> a keyless-verifiable receipt
-4. Requirements: Node 18+. The process must stay running to fire (client-side cron) -
-   run on an always-on host; persist + re-arm schedules across restarts for production.
-5. Verify a fire keylessly:  await cc.verifyOnChain(ledgerId)
-   -> expect verifiedAgainst "on-chain block", keyless true.
+1. Key:  curl -X POST https://mcp.clockchain.network/token  -> demo token (no signup); use as
+   header x-api-key. Mint ONCE and cache — it's IP-rate-limited.
+2. call(name,args) helper: POST {jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}}
+   with headers x-api-key + accept "application/json, text/event-stream". Reply is SSE — take the
+   last `data:` line, JSON-parse, read result.content[0].text (itself a JSON string).
+3. Alarm: poll get_timestamp (madMarzulloTime, format DD-MM-YYYY_HH:MM:SS:mmm) until consensus
+   time >= your target T (never fire early), then log_action {action, asset_reference_id, content,
+   wait:true, wait_ms:30000} to fire + anchor. Content is SHA-256-hashed, never stored.
+4. Assert it anchored: if blockHeight is null the validator pool was degraded — treat as FAILURE,
+   don't claim success.
+5. Verify keylessly: verify_cross_party {ledger_id, block_height:<number>} — result nests under
+   .onChain; expect verifiedAgainst "on-chain block", keyless true.
 
-Report what you wired, a test fire's block height, and the keyless verify result.
+Report the fired time, blockHeight, and verify result.
 ```
+
+**B — The SDK classes** (disciplined clock + scheduler) — clone the monorepo and build, then
+import the workspace packages (npm linking, no registry):
+
+```bash
+git clone --depth 1 https://github.com/thetangstr/clockchain-developer-tools.git
+cd clockchain-developer-tools && npm install && npm run build
+# then import @clockchain/clock-sdk / @clockchain/core from within the workspace,
+# or copy packages/clock-sdk/examples/alarm-live.mjs as a starting point.
+```
+
+`npm install @clockchain/clock-sdk @clockchain/core` will work **once the packages are
+published** — see [roadmap.md](./roadmap.md).
 
 ### Roadmap
 

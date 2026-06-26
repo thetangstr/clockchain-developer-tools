@@ -30,9 +30,19 @@ fire. This is the same separation regulated buyers expect from a notary: the not
 
 ## Install
 
-```bash
-npm install @clockchain/clock-sdk @clockchain/core
-```
+> **Not on npm yet.** `@clockchain/core` and `@clockchain/clock-sdk` are workspace packages in
+> the [developer-tools monorepo](https://github.com/thetangstr/clockchain-developer-tools) —
+> publish to npm is pending. To use the SDK today, clone + build the monorepo and import the
+> workspace packages (or copy [`examples/alarm-live.mjs`](examples/alarm-live.mjs)):
+>
+> ```bash
+> git clone --depth 1 https://github.com/thetangstr/clockchain-developer-tools.git
+> cd clockchain-developer-tools && npm install && npm run build
+> ```
+>
+> No build wanted? Use the **zero-dependency hosted-MCP flow** instead —
+> [`examples/try-alarm-mcp.sh`](examples/try-alarm-mcp.sh). Once published,
+> `npm install @clockchain/clock-sdk @clockchain/core` will work directly.
 
 Configure gateway access via environment (read by `readConfigFromEnv()`); **never hard-code
 credentials** — supply them from your secret manager:
