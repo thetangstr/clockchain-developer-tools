@@ -30,9 +30,12 @@ export interface TokenPayload {
    */
   jti?: string;
   /**
-   * Optional subject (AGE-194): the end-user/principal this token represents.
-   * When set, the per-request limiter keys on `sub` so multiple tokens for the
-   * same user share one bucket. MEDIUM-TERM follow-up (not in this change): map
+   * Optional subject (AGE-194): a NON-AUTHORITATIVE label for the principal this
+   * token is intended for. It is supplied on the UNAUTHENTICATED mint endpoint,
+   * so it is NOT trusted and does NOT isolate rate-limit buckets or budgets — the
+   * per-request limiter keys on `jti` (per token), never on `sub`. `sub` becomes
+   * a safe per-user key only once it derives from an authenticated identity.
+   * MEDIUM-TERM follow-up (not in this change): real per-user auth + mapping
    * `sub` to a distinct delegated sub-key / credit bucket at the gateway instead
    * of the single shared delegated key every demo token uses today.
    */
@@ -50,9 +53,10 @@ const sign = (payloadSeg: string, secret: string): string =>
 
 /**
  * Mint a signed self-serve token. `ttlSeconds` defaults to 7 days. Each token
- * gets a unique `jti` so it is independently rate-limitable (AGE-194); pass
- * `sub` to bind the token to a principal so the per-request limiter buckets all
- * of that user's tokens together. `nowSec` and `jti` are injectable for tests.
+ * gets a unique `jti` so it is independently rate-limitable (AGE-194). `sub` is
+ * an optional NON-AUTHORITATIVE label only (see {@link TokenPayload.sub}); it
+ * never affects bucketing. Callers should sanitize `sub` before passing it.
+ * `nowSec` and `jti` are injectable for tests.
  */
 export function mintToken(
   secret: string,

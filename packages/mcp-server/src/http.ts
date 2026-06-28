@@ -3,7 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
-import { mintToken, verifyToken, looksLikeSelfServe } from "./token.js";
+import { mintToken, verifyToken, looksLikeSelfServe, type TokenPayload } from "./token.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -138,11 +138,17 @@ export function isHealthCheck(
  * remote IP. Tokens are already validated by the time this is used, so keying on
  * the token gives a per-tester limit; the IP fallback covers health/edge cases.
  *
- * When `signingSecret` is supplied and the presented token is a valid self-serve
- * token, key on its `sub` (per-principal) or `jti` (per-token) instead of the
- * raw token string (AGE-194). This buckets each minted token independently, so a
- * shared-egress public app that mints many tokens isn't collapsed into one IP
- * bucket, and multiple tokens for one `sub` share a single limit.
+ * `selfServeJti` is the `jti` of an ALREADY-VERIFIED self-serve token (verified
+ * once by the auth step, threaded in to avoid a second HMAC verify per request).
+ * When present we key on `jti:<jti>` so each minted token gets its own bucket —
+ * a shared-egress public app that mints many tokens isn't collapsed into one IP
+ * bucket (AGE-194).
+ *
+ * SECURITY: we deliberately do NOT key on a token's `sub`. `sub` is supplied on
+ * the unauthenticated mint endpoint, so an attacker could mint `sub=<victim>` and
+ * burn the victim's bucket (targeted DoS), or rotate `sub` to escape limits.
+ * `sub` only becomes a safe bucketing key once it derives from an authenticated
+ * principal (medium-term: BYO-key-derived identity / real per-user auth).
  */
 export function callerKey(
   headers: {
@@ -151,25 +157,34 @@ export function callerKey(
     "x-clockchain-api-key"?: string | string[];
   },
   remoteAddr: string | undefined,
-  signingSecret = "",
+  selfServeJti?: string,
 ): string {
+  // jti is unforgeable (it comes from a signature-verified token) and unique per
+  // mint, so it is a safe per-token bucket.
+  if (selfServeJti) return `jti:${selfServeJti}`;
   const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
   const token = bearer ? bearer[1].trim() : firstHeader(headers["x-api-key"]).trim();
-  if (token) {
-    if (signingSecret && looksLikeSelfServe(token)) {
-      const r = verifyToken(signingSecret, token);
-      if (r.valid) {
-        if (r.payload.sub) return `sub:${r.payload.sub}`;
-        if (r.payload.jti) return `jti:${r.payload.jti}`;
-      }
-    }
-    return `tok:${token}`;
-  }
+  if (token) return `tok:${token}`;
   // Bring-your-own-key requests carry no MCP token; key them by their own
-  // Clockchain key so the per-caller rate limit still applies.
+  // Clockchain key so the per-caller rate limit still applies. This IS an
+  // authenticated per-principal bucket (the key proves the identity).
   const cck = firstHeader(headers["x-clockchain-api-key"]).trim();
   if (cck) return `cck:${cck}`;
   return `ip:${remoteAddr ?? "unknown"}`;
+}
+
+/**
+ * Sanitize a caller-supplied `sub` before it is logged or embedded in a token.
+ * Strips control chars, restricts to a conservative identifier charset, and caps
+ * the length — defends against log injection and token/Map bloat (AGE-194). The
+ * value is a non-authoritative LABEL only; it never affects rate-limit bucketing.
+ */
+export function sanitizeSub(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  // Allow letters, digits, and a few email/id-safe punctuation chars; drop the
+  // rest (including all control chars). Cap at 128 chars.
+  const cleaned = raw.replace(/[^A-Za-z0-9._@:+-]/g, "").slice(0, 128);
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 /**
@@ -194,14 +209,38 @@ export interface RateLimitResult {
  *
  * `allow()` returns a {@link RateLimitResult} (not a bare boolean) so callers
  * can emit `X-RateLimit-*` / `Retry-After` headers on both 429 and success.
+ *
+ * Memory is bounded (AGE-194): the per-key `hits` map is pruned of expired
+ * windows opportunistically (the stale entry for a missed key is overwritten)
+ * and via a periodic full sweep, so an attacker rotating keys (e.g. a fresh
+ * `jti`/IP per request) cannot grow the map without bound.
  */
 export function createRateLimiter(perMin: number, windowMs = 60_000) {
   const hits = new Map<string, { count: number; resetAt: number }>();
+  // Full sweep at most once per window; also force a sweep if the map grows past
+  // this many live keys (defends against a burst of distinct keys within one
+  // window before the time-based sweep would fire).
+  const PRUNE_INTERVAL = windowMs;
+  const MAX_KEYS = 50_000;
+  let lastPrune = 0;
+  const prune = (now: number): void => {
+    for (const [k, v] of hits) {
+      if (now >= v.resetAt) hits.delete(k);
+    }
+    lastPrune = now;
+  };
   return {
     enabled: perMin > 0,
+    /** Number of tracked keys (exposed for tests/observability). */
+    size(): number {
+      return hits.size;
+    },
     allow(key: string, now: number = Date.now()): RateLimitResult {
       if (perMin <= 0) {
         return { allowed: true, limit: 0, remaining: 0, resetAt: now };
+      }
+      if (now - lastPrune >= PRUNE_INTERVAL || hits.size > MAX_KEYS) {
+        prune(now);
       }
       let e = hits.get(key);
       if (!e || now >= e.resetAt) {
@@ -267,25 +306,33 @@ export async function runHttp(): Promise<void> {
 
   // Self-serve testnet tokens (instant, signed, no DB). Enabled only when a
   // signing secret is configured; otherwise /token is off and no signed token
-  // validates. Minting is bucketed per subject (`sub`) when supplied, else a
-  // COARSE per-IP abuse ceiling (default 60/hour, raised from 10) so a shared-
-  // egress public app minting per-user tokens from one IP isn't blocked (AGE-194).
+  // validates. Minting is ALWAYS capped by a per-IP abuse ceiling (default
+  // 10/hour) — this is the only guard on the shared delegated-key budget, so it
+  // must never be bypassable. `sub` is NOT used to bucket mints: it is supplied
+  // unauthenticated, so keying on it would let an attacker rotate `sub` to escape
+  // the ceiling and drain the shared budget (AGE-194).
   const signingSecret = process.env.MCP_TOKEN_SIGNING_SECRET ?? "";
   const selfServeEnabled = signingSecret.length > 0;
-  const mintPerHour = Number(process.env.MCP_TOKEN_MINT_PER_HOUR ?? "60");
+  const mintPerHour = Number(process.env.MCP_TOKEN_MINT_PER_HOUR ?? "10");
   const mintLimiter = createRateLimiter(
-    Number.isFinite(mintPerHour) ? mintPerHour : 60,
+    Number.isFinite(mintPerHour) ? mintPerHour : 10,
     60 * 60_000,
   );
   const tokenTtlDays = Number(process.env.MCP_TOKEN_TTL_DAYS ?? "7");
 
   // A request is authorized if it carries a valid static MCP token OR a valid
   // self-serve signed token. Both grant the delegated (shared testnet) key.
-  const checkAuth = (req: IncomingMessage): boolean => {
-    if (isAuthorized(req.headers, tokens)) return true;
-    if (!selfServeEnabled) return false;
+  // Returns the verified self-serve payload (when that is how auth passed) so the
+  // caller can rate-limit on the token's `jti` WITHOUT a second HMAC verify.
+  const checkAuth = (
+    req: IncomingMessage,
+  ): { ok: boolean; payload?: TokenPayload } => {
+    if (isAuthorized(req.headers, tokens)) return { ok: true };
+    if (!selfServeEnabled) return { ok: false };
     const presented = presentedApiKey(req.headers);
-    return looksLikeSelfServe(presented) && verifyToken(signingSecret, presented).valid;
+    if (!looksLikeSelfServe(presented)) return { ok: false };
+    const r = verifyToken(signingSecret, presented);
+    return r.valid ? { ok: true, payload: r.payload } : { ok: false };
   };
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -323,9 +370,9 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
-    // Self-serve token minting (public, before auth, rate-limited per IP). Mints
-    // a signed testnet token that grants the shared delegated key, so a brand-new
-    // user can connect without their own Clockchain key. Off if no signing secret.
+    // Self-serve token minting (public, before auth). Mints a signed testnet
+    // token that grants the shared delegated key, so a brand-new user can connect
+    // without their own Clockchain key. Off if no signing secret.
     if (req.method === "POST" && pathOf(req.url) === "/token") {
       if (!selfServeEnabled) {
         res.writeHead(503, { "content-type": "application/json" });
@@ -339,27 +386,30 @@ export async function runHttp(): Promise<void> {
         return;
       }
       const ip = clientIp(req.headers, req.socket.remoteAddress);
-      // Optional subject so a caller can mint a per-user token that is then
-      // independently rate-limitable on tool calls. From the x-clockchain-sub
-      // header or a ?sub= query param.
-      const sub =
-        firstHeader(req.headers["x-clockchain-sub"]).trim() ||
-        new URL(req.url ?? "/", "http://localhost").searchParams.get("sub")?.trim() ||
-        undefined;
-      // Prefer a per-subject mint bucket (a real per-user limit); else fall back
-      // to the coarse per-IP abuse ceiling so a shared egress IP isn't blocked.
-      const mintKey = sub ? `mint:sub:${sub}` : `mint:ip:${ip}`;
-      const mintCheck = mintLimiter.enabled ? mintLimiter.allow(mintKey) : null;
+      // ALWAYS enforce the per-IP abuse ceiling. This is the only guard on the
+      // shared delegated-key budget, so it must be unconditional and never keyed
+      // on attacker-controlled input. `sub` is NOT used here: rotating `sub` must
+      // not let a caller escape this ceiling and drain the shared budget (AGE-194).
+      const mintCheck = mintLimiter.enabled ? mintLimiter.allow(`mint:ip:${ip}`) : null;
       if (mintCheck && !mintCheck.allowed) {
         const headers = rateLimitHeaders(mintCheck);
         res.writeHead(429, { "content-type": "application/json", ...headers });
         res.end(JSON.stringify({
           error: "rate_limited",
-          message: "Too many tokens minted. Try again later.",
+          message: "Too many tokens minted from this address. Try again later.",
           retry_after_seconds: Number(headers["Retry-After"]),
         }));
         return;
       }
+      // Optional subject from the x-clockchain-sub header or a ?sub= query param.
+      // Sanitized, and embedded as a NON-AUTHORITATIVE LABEL only — it is supplied
+      // unauthenticated, so it does NOT isolate budgets or rate-limit buckets.
+      // Real per-user isolation needs authenticated identity (medium-term TODO).
+      const sub = sanitizeSub(
+        firstHeader(req.headers["x-clockchain-sub"]).trim() ||
+          new URL(req.url ?? "/", "http://localhost").searchParams.get("sub")?.trim() ||
+          undefined,
+      );
       const { token, payload } = mintToken(
         signingSecret,
         tokenTtlDays * 24 * 60 * 60,
@@ -367,6 +417,7 @@ export async function runHttp(): Promise<void> {
         sub,
       );
       // Observability: log mint volume (never the token value) so abuse is visible.
+      // `sub` is sanitized above, so this line is safe from log injection.
       console.error(
         `[clockchain-mcp] minted self-serve token (tier=${payload.tier}, sub=${sub ?? "-"}, ip=${ip})`,
       );
@@ -408,7 +459,10 @@ export async function runHttp(): Promise<void> {
     //      the real gate and rejects a bad key on the first tool call).
     //   4. No credential at all -> self-documenting 401.
     let byo = clockchainOverrides(req.headers);
-    if (!byo && !checkAuth(req)) {
+    // Verify auth ONCE here; reuse the verified self-serve payload below for the
+    // rate-limit key so we don't HMAC-verify the token twice per request.
+    const auth = byo ? { ok: true as const, payload: undefined } : checkAuth(req);
+    if (!byo && !auth.ok) {
       const presented = presentedApiKey(req.headers);
       if (presented) {
         byo = clockchainOverridesFromKey(presented, req.headers);
@@ -457,15 +511,17 @@ export async function runHttp(): Promise<void> {
       }
     }
 
-    // Per-tester rate limit (after auth so the key is the validated token). The
-    // key is the token's jti/sub for self-serve tokens, so distinct tokens get
-    // distinct buckets and a shared-egress public app isn't throttled as one IP.
+    // Per-tester rate limit (after auth so the key is the validated token). For a
+    // self-serve token the key is its (already-verified) jti, so distinct tokens
+    // get distinct buckets and a shared-egress public app isn't throttled as one
+    // IP. We pass the jti only for a NON-byo request, so a BYO key is bucketed by
+    // its own (authenticated) key, not by a co-presented token's jti.
     const rl = limiter.enabled
       ? limiter.allow(
           callerKey(
             req.headers,
             clientIp(req.headers, req.socket.remoteAddress),
-            signingSecret,
+            byo ? undefined : auth.payload?.jti,
           ),
         )
       : null;
@@ -512,7 +568,7 @@ export async function runHttp(): Promise<void> {
     console.error(
       `[clockchain-mcp] self-serve tokens: ${
         selfServeEnabled
-          ? `ENABLED (POST /token, ${mintPerHour}/hour per sub-or-IP, ${tokenTtlDays}d TTL)`
+          ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
           : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
       }`,
     );

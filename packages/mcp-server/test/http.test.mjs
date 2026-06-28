@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, rateLimitHeaders, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, rateLimitHeaders, sanitizeSub, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
 import { mintToken } from "../dist/token.js";
 
 const tokens = ["tester-a", "tester-b"];
@@ -135,18 +135,54 @@ test("rateLimitHeaders sets X-RateLimit-* always and Retry-After only on 429", (
   assert.equal(blocked["X-RateLimit-Remaining"], "0");
 });
 
-test("callerKey buckets self-serve tokens by sub, else jti (AGE-194)", () => {
+test("callerKey buckets a self-serve request on its (verified) jti, never sub", () => {
+  // The handler threads in the ALREADY-VERIFIED jti; callerKey keys on it.
+  assert.equal(callerKey({ "x-api-key": "cc_whatever.sig" }, "9.9.9.9", "jti-1"), "jti:jti-1");
+  // No jti threaded → key on the raw token value.
+  assert.equal(callerKey({ "x-api-key": "team-token" }, "9.9.9.9"), "tok:team-token");
+  // Bearer token, no jti → raw token value.
+  assert.equal(callerKey({ authorization: "Bearer tok-b" }, "9.9.9.9"), "tok:tok-b");
+  // BYO key (no MCP token) → keyed by the authenticated Clockchain key.
+  assert.equal(callerKey({ "x-clockchain-api-key": "ck" }, "9.9.9.9"), "cck:ck");
+  // Nothing → IP fallback.
+  assert.equal(callerKey({}, "9.9.9.9"), "ip:9.9.9.9");
+});
+
+test("SECURITY: callerKey never buckets on an attacker-chosen sub (AGE-194)", () => {
   const SECRET = "rk-secret";
-  // Mint against the real clock (nowSec omitted) so the tokens are unexpired
-  // when callerKey re-verifies them with verifyToken's default (real) now.
-  // sub-scoped token → keyed on sub (many tokens for one user share a bucket)
-  const { token: subTok } = mintToken(SECRET, 3600, undefined, "user@x.com", "jti-1");
-  assert.equal(callerKey({ "x-api-key": subTok }, "9.9.9.9", SECRET), "sub:user@x.com");
-  // no sub → keyed on the unique jti (each token its own bucket)
-  const { token: anonTok } = mintToken(SECRET, 3600, undefined, undefined, "jti-2");
-  assert.equal(callerKey({ "x-api-key": anonTok }, "9.9.9.9", SECRET), "jti:jti-2");
-  // without the signing secret we cannot decode → fall back to raw token key
-  assert.equal(callerKey({ "x-api-key": anonTok }, "9.9.9.9"), `tok:${anonTok}`);
-  // a static (non-self-serve) token is still keyed by its raw value
-  assert.equal(callerKey({ "x-api-key": "team-token" }, "9.9.9.9", SECRET), "tok:team-token");
+  // Two tokens minted with the SAME sub but distinct jti must land in DISTINCT
+  // buckets — otherwise an attacker minting sub=victim could burn a victim's
+  // bucket. We pass the verified jti (what the handler does); sub is ignored.
+  const { payload: a } = mintToken(SECRET, 3600, undefined, "victim@x.com", "jti-A");
+  const { payload: b } = mintToken(SECRET, 3600, undefined, "victim@x.com", "jti-B");
+  const keyA = callerKey({ "x-api-key": "cc_a.sig" }, "1.1.1.1", a.jti);
+  const keyB = callerKey({ "x-api-key": "cc_b.sig" }, "1.1.1.1", b.jti);
+  assert.notEqual(keyA, keyB);
+  assert.equal(keyA, "jti:jti-A");
+  assert.equal(keyB, "jti:jti-B");
+});
+
+test("sanitizeSub strips unsafe chars, caps length, drops empties (AGE-194)", () => {
+  assert.equal(sanitizeSub("user@example.com"), "user@example.com");
+  assert.equal(sanitizeSub("ok.name_123:tag+x-y"), "ok.name_123:tag+x-y");
+  // control chars / newlines (log injection) removed
+  assert.equal(sanitizeSub("a\nb\r\tc\x00d"), "abcd");
+  // disallowed punctuation/spaces removed
+  assert.equal(sanitizeSub("a b/c<script>"), "abcscript");
+  // capped at 128 chars
+  assert.equal(sanitizeSub("x".repeat(500)).length, 128);
+  // empty / nothing-left → undefined
+  assert.equal(sanitizeSub(""), undefined);
+  assert.equal(sanitizeSub("   "), undefined); // spaces all stripped
+  assert.equal(sanitizeSub(undefined), undefined);
+});
+
+test("rate limiter evicts expired entries to bound memory (AGE-194)", () => {
+  const rl = createRateLimiter(5, 1000); // window + prune-interval = 1000ms
+  // Fill window 1 with many distinct keys (e.g. attacker rotating jti/IP).
+  for (let i = 0; i < 20; i++) rl.allow(`k${i}`, 0);
+  assert.equal(rl.size(), 20);
+  // A call past the prune interval triggers a full sweep of expired windows.
+  rl.allow("fresh", 1001); // now >= resetAt(1000) for all k* → all evicted
+  assert.equal(rl.size(), 1); // only "fresh" remains
 });
