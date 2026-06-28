@@ -6,6 +6,28 @@
  * returns to callers (the envelope handling lives in the client).
  */
 
+/**
+ * Anchor status for a write (AGE-193 — "never report success on an un-anchored
+ * fire"):
+ *   - "anchored": the entry has a blockHeight (confirmed on-chain).
+ *   - "pending":  submitted, no blockHeight yet (poll to confirm).
+ *   - "degraded": not anchored AND the node pool is degraded (0% participation),
+ *                 so anchoring is at risk — a stronger warning than plain pending.
+ */
+export type AnchorStatus = "anchored" | "pending" | "degraded";
+
+/**
+ * A snapshot of node-pool health, derived from {@link TimestampResponse}. Used
+ * to guard writes (refuse at 0% participation) and to enrich receipts so a
+ * caller can see WHY a write is degraded.
+ */
+export interface PoolHealth {
+  totalNodes: number;
+  /** The gateway's `nodeParticipation%`. 0 means the pool is degraded. */
+  nodeParticipationPct: number;
+  degraded: boolean;
+}
+
 /** GET /api/time/time -> data */
 export interface TimeResponse {
   latestBlockTime: string;
@@ -81,6 +103,12 @@ export interface LogResponse extends LogEntry {
   updatedTimestamp: string | null;
   assetName: string | null;
   type: string | null;
+  /**
+   * Anchor status derived from blockHeight by the client (AGE-193). Optional
+   * because the raw gateway payload does not carry it — the client stamps it on
+   * the way out so a caller never mistakes a pending write for success.
+   */
+  status?: AnchorStatus;
 }
 
 /** Result of an ERC-8004 agent resolution (read-only). */
@@ -119,6 +147,13 @@ export interface AttestActionInput {
 export interface AgentReceipt {
   schema: "clockchain.receipt/v1";
   network: string;
+  /**
+   * Top-level anchor status (AGE-193). "anchored" only once the event has a
+   * blockHeight; otherwise "pending" (or "degraded" when the pool is degraded
+   * and the event is not yet anchored). A receipt is NOT a success claim until
+   * this is "anchored".
+   */
+  status: AnchorStatus;
   agentId: string;
   action: string;
   /** SHA-256 of the canonical {agentId, action, inputs, outputs}. */
@@ -146,6 +181,8 @@ export interface AgentReceipt {
     note: string;
   };
   verify: { how: string };
+  /** Node-pool health at attest time (AGE-193). Present when it could be read. */
+  poolHealth?: PoolHealth;
   disclaimer: string;
 }
 
@@ -306,7 +343,14 @@ export interface IdentityWrite {
   docHash: string;
   ledgerId: string;
   blockHeight: string | null;
+  /** The identity lifecycle state this write records. */
   status: "active" | "revoked" | "delegated";
+  /**
+   * Anchor status derived from blockHeight (AGE-193) — distinct from the
+   * lifecycle `status`. "anchored" only once the write has a blockHeight, so a
+   * caller never treats an un-anchored mint/revoke/delegate as confirmed.
+   */
+  anchorStatus: AnchorStatus;
 }
 
 /** One entry in a DID's attested activity history. */

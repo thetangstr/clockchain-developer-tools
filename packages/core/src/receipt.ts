@@ -1,9 +1,11 @@
 import { computeHash } from "./hash.js";
 import type {
   AgentReceipt,
+  AnchorStatus,
   AttestActionInput,
   BlockResponse,
   LogResponse,
+  PoolHealth,
   ValidationBlock,
 } from "./types.js";
 
@@ -61,9 +63,19 @@ export function buildReceipt(args: {
   block?: BlockResponse | null;
   validation?: ValidationBlock | null;
   identity?: { resolved: boolean; status: string } | null;
+  poolHealth?: PoolHealth | null;
 }): AgentReceipt {
-  const { input, eventHash, network, log, block, validation, identity } = args;
+  const { input, eventHash, network, log, block, validation, identity, poolHealth } =
+    args;
   const confirmed = log.blockHeight != null;
+  // AGE-193: never report an un-anchored fire as success. "anchored" only when
+  // confirmed; otherwise "degraded" if the pool is degraded (0% participation),
+  // else plain "pending".
+  const status: AnchorStatus = confirmed
+    ? "anchored"
+    : poolHealth?.degraded
+      ? "degraded"
+      : "pending";
   const validators = validation
     ? (validation.positiveVotes ?? 0) + (validation.negativeVotes ?? 0)
     : 0;
@@ -74,6 +86,7 @@ export function buildReceipt(args: {
   return {
     schema: "clockchain.receipt/v1",
     network,
+    status,
     agentId: input.agentId,
     action: input.action,
     eventHash,
@@ -107,6 +120,7 @@ export function buildReceipt(args: {
         "Recompute SHA-256 of the canonical {agentId, action, inputs, outputs} " +
         "and compare to the hash anchored at this ledgerId on the Clockchain ledger.",
     },
+    ...(poolHealth ? { poolHealth } : {}),
     disclaimer: DISCLAIMER,
   };
 }

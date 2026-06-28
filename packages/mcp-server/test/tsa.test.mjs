@@ -21,7 +21,14 @@ function collectTools() {
 
 const textOf = (res) => (res.content || []).map((c) => c.text).join("\n");
 
-// Route the stubbed fetch by URL substring -> { status?, body }.
+// A healthy /getTime so the AGE-193 pool-health guard passes by default.
+const HEALTHY_GETTIME = {
+  success: true,
+  data: { "nodeParticipation%": 100, totalNodes: 1, blockHeight: "1", madMarzulloTime: "t" },
+};
+
+// Route the stubbed fetch by URL substring -> { status?, body }. Unmatched
+// /getTime falls back to a healthy pool so the write guard is a no-op.
 function routeFetch(routes) {
   globalThis.fetch = async (url) => {
     for (const [match, resp] of routes) {
@@ -30,6 +37,9 @@ function routeFetch(routes) {
         const status = resp.status ?? 200;
         return { status, ok: status >= 200 && status < 300, statusText: "stub", text: async () => raw };
       }
+    }
+    if (String(url).includes("/getTime")) {
+      return { status: 200, ok: true, statusText: "stub", text: async () => JSON.stringify(HEALTHY_GETTIME) };
     }
     throw new Error("no stubbed route for " + url);
   };

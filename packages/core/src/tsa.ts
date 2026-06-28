@@ -19,9 +19,9 @@
  */
 import { canonicalize } from "./receipt.js";
 import { computeHash } from "./hash.js";
-import { parseClockTime } from "./client.js";
+import { parseClockTime, deriveAnchorStatus } from "./client.js";
 import type { ClockchainClient } from "./client.js";
-import type { LogResponse } from "./types.js";
+import type { AnchorStatus, LogResponse } from "./types.js";
 
 /** The on-chain anchor a TSA receipt carries (what the caller holds). */
 export interface TsaAnchor {
@@ -29,6 +29,12 @@ export interface TsaAnchor {
   blockHeight: string | null;
   /** Clockchain consensus/record time for this anchor (createdTimestamp). */
   time: string | null;
+  /**
+   * Anchor status derived from blockHeight (AGE-193): "anchored" once a block
+   * height is present, else "pending" — so a TSA write is never read as success
+   * before it is on-chain.
+   */
+  status: AnchorStatus;
 }
 
 /** Input to {@link tsaIssue}. */
@@ -139,12 +145,14 @@ async function anchorEvent(
   return { log, eventHash };
 }
 
-/** Build the {@link TsaAnchor} a caller holds from a confirmed log record. */
+/** Build the {@link TsaAnchor} a caller holds from a log record. */
 function anchorOf(log: LogResponse): TsaAnchor {
   return {
     ledgerId: log.ledgerId,
     blockHeight: log.blockHeight,
     time: log.createdTimestamp ?? null,
+    // AGE-193: carry the honest anchor status through the whole TSA lifecycle.
+    status: log.status ?? deriveAnchorStatus(log.blockHeight),
   };
 }
 
