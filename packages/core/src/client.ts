@@ -8,6 +8,7 @@ import {
 } from "./errors.js";
 import type {
   AgentReceipt,
+  AnchorStatus,
   AttestActionInput,
   AuditEvent,
   AuditTrail,
@@ -27,6 +28,7 @@ import type {
   LogResponse,
   OnChainVerification,
   PackageVerification,
+  PoolHealth,
   ReceiptVerification,
   ScheduleApproval,
   ScheduledContract,
@@ -170,6 +172,20 @@ export function parseClockTime(value: unknown): number {
 }
 
 /**
+ * Derive the {@link AnchorStatus} of a write from its blockHeight (AGE-193).
+ * "anchored" once a block height is present; otherwise "degraded" when the pool
+ * is degraded (0% participation) or plain "pending". Centralized so every write
+ * path stamps status the same way.
+ */
+export function deriveAnchorStatus(
+  blockHeight: string | null | undefined,
+  degraded = false,
+): AnchorStatus {
+  if (blockHeight != null) return "anchored";
+  return degraded ? "degraded" : "pending";
+}
+
+/**
  * Typed client for the Clockchain gateway.
  *
  * The gateway's response envelopes are inconsistent, so each public method
@@ -209,6 +225,22 @@ export class ClockchainClient {
   async getTimestamp(): Promise<TimestampResponse> {
     const env = await this.request<SuccessEnvelope<TimestampResponse>>("/getTime");
     return env.data;
+  }
+
+  /**
+   * Node-pool health, derived from {@link getTimestamp} (AGE-193). The gateway's
+   * `nodeParticipation%` is the load-bearing signal: 0 means the pool is
+   * degraded and a write may not anchor. Callers (and the MCP pool-health guard)
+   * use this to refuse or warn before reporting a write as success.
+   */
+  async getPoolHealth(): Promise<PoolHealth> {
+    const ts = await this.getTimestamp();
+    const nodeParticipationPct = ts["nodeParticipation%"] ?? 0;
+    return {
+      totalNodes: ts.totalNodes ?? 0,
+      nodeParticipationPct,
+      degraded: nodeParticipationPct === 0,
+    };
   }
 
   /**
@@ -259,7 +291,11 @@ export class ClockchainClient {
       // Plain text only — the gateway strips punctuation/JSON server-side.
       additionalInfo: entry.additionalInfo ?? "",
     };
-    return this.request<LogResponse>("/log", { method: "POST", body });
+    const res = await this.request<LogResponse>("/log", { method: "POST", body });
+    // AGE-193: stamp anchor status from blockHeight so a pending write is never
+    // mistaken for an anchored one. blockHeight is null on create (pending).
+    res.status = deriveAnchorStatus(res.blockHeight);
+    return res;
   }
 
   /**
@@ -289,6 +325,8 @@ export class ClockchainClient {
         res,
       );
     }
+    // AGE-193: stamp anchor status so reads carry the same honest signal writes do.
+    res.status = deriveAnchorStatus(res.blockHeight);
     return res;
   }
 
@@ -305,12 +343,36 @@ export class ClockchainClient {
     while (Date.now() < deadline) {
       last = await this.getLedgerEntry(ledgerId);
       if (last.blockHeight != null) {
+        // getLedgerEntry already stamped status="anchored".
         return last;
       }
       await this.delay(500);
     }
-    if (last) return last;
-    return this.getLedgerEntry(ledgerId);
+    if (!last) last = await this.getLedgerEntry(ledgerId);
+    // AGE-193: on timeout do NOT return this as unqualified success — it is still
+    // pending. Stamp the honest status (getLedgerEntry sets it, but be explicit).
+    last.status = deriveAnchorStatus(last.blockHeight);
+    return last;
+  }
+
+  /**
+   * Re-poll a batch of pending writes until each anchors (AGE-193). For every
+   * ledgerId, {@link waitForConfirmation} runs up to `timeoutMs`; a lookup that
+   * never resolves is skipped (best-effort), so the result holds whatever
+   * records were readable, each with its anchor status stamped.
+   */
+  async backfillPending(
+    ledgerIds: string[],
+    timeoutMs = 15000,
+  ): Promise<LedgerRecord[]> {
+    const out: LedgerRecord[] = [];
+    for (const ledgerId of ledgerIds) {
+      const rec = await this.waitForConfirmation(ledgerId, timeoutMs).catch(
+        () => null,
+      );
+      if (rec) out.push(rec);
+    }
+    return out;
   }
 
   /**
@@ -347,10 +409,22 @@ export class ClockchainClient {
       const id = await resolveAgent(this.config, input.agentId).catch(() => null);
       if (id) identity = { resolved: id.status !== "unknown", status: id.status };
     }
+    // Best-effort pool health (AGE-193): drives the receipt's top-level status
+    // (degraded vs pending when not yet anchored) and is attached for the caller.
+    const poolHealth = await this.getPoolHealth().catch(() => null);
 
     // Single-validator today; this stays "testnet" until the network is mainnet.
     const network = "testnet";
-    return buildReceipt({ input, eventHash, network, log, block, validation, identity });
+    return buildReceipt({
+      input,
+      eventHash,
+      network,
+      log,
+      block,
+      validation,
+      identity,
+      poolHealth,
+    });
   }
 
   /**
@@ -696,6 +770,8 @@ export class ClockchainClient {
       ledgerId: log.ledgerId,
       blockHeight: log.blockHeight,
       status: "active",
+      // AGE-193: anchor status derived from blockHeight, not hardcoded success.
+      anchorStatus: deriveAnchorStatus(log.blockHeight),
     };
   }
 
@@ -718,6 +794,7 @@ export class ClockchainClient {
       ledgerId: log.ledgerId,
       blockHeight: log.blockHeight,
       status: "revoked",
+      anchorStatus: deriveAnchorStatus(log.blockHeight),
     };
   }
 
@@ -749,6 +826,7 @@ export class ClockchainClient {
       ledgerId: log.ledgerId,
       blockHeight: log.blockHeight,
       status: "delegated",
+      anchorStatus: deriveAnchorStatus(log.blockHeight),
     };
   }
 

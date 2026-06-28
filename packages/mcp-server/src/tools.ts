@@ -4,6 +4,7 @@ import {
   ClockchainClient,
   computeHash,
   InsufficientCreditsError,
+  PoolDegradedError,
   RateLimitError,
   resolveAgent,
   tsaAttest,
@@ -12,6 +13,7 @@ import {
   tsaSettle,
   tsaStatus,
   type AgentReceipt,
+  type AnchorStatus,
   type ClockchainConfig,
   type ComplianceFormat,
   type ContractParams,
@@ -40,6 +42,83 @@ function ok(result: unknown) {
   };
 }
 
+/** Shared schema fragment: opt in to writing while the node pool is degraded. */
+const allowDegradedSchema = z
+  .boolean()
+  .optional()
+  .describe(
+    "Optional: proceed even if the node pool is degraded (0% participation). " +
+      "Default false — a degraded pool refuses the write so it is never reported " +
+      "as anchored when it may not be.",
+  );
+
+/**
+ * Success payload for a WRITE that is honest about anchoring (AGE-193). Derives
+ * the anchor status (from an explicit `status`, else from blockHeight) and, when
+ * the write is NOT anchored, attaches an explicit PENDING note instead of an
+ * unqualified success — so a caller never treats a pending write as confirmed.
+ */
+const ANCHOR_STATUSES = new Set<AnchorStatus>([
+  "anchored",
+  "pending",
+  "degraded",
+]);
+
+function okWrite(result: object): Record<string, unknown> {
+  const r = result as {
+    status?: string;
+    anchorStatus?: AnchorStatus;
+    blockHeight?: string | null;
+  };
+  // Prefer an explicit anchorStatus (identity writes carry it alongside a
+  // lifecycle `status`); else a `status` that is itself an AnchorStatus (log
+  // writes); else derive from blockHeight.
+  const status: AnchorStatus =
+    r.anchorStatus ??
+    (r.status && ANCHOR_STATUSES.has(r.status as AnchorStatus)
+      ? (r.status as AnchorStatus)
+      : r.blockHeight != null
+        ? "anchored"
+        : "pending");
+  const payload: Record<string, unknown> = {
+    ...(result as Record<string, unknown>),
+    status,
+  };
+  if (status !== "anchored") {
+    payload.warning =
+      "PENDING — not yet anchored; poll get_log_entry/complete_attestation " +
+      "until blockHeight is populated before treating this as confirmed.";
+  }
+  return payload;
+}
+
+/**
+ * Pool-health guard (AGE-193): refuse a write when the node pool is degraded
+ * (0% participation), since the write may report success without anchoring.
+ * `allowDegraded` is the explicit caller opt-in to proceed anyway. Best-effort:
+ * if pool health cannot be read, we fail OPEN (allow the write) rather than
+ * block on a transient time-endpoint hiccup.
+ */
+async function ensurePoolHealthy(
+  client: ClockchainClient,
+  allowDegraded: boolean | undefined,
+): Promise<void> {
+  if (allowDegraded) return;
+  let degraded = false;
+  try {
+    degraded = (await client.getPoolHealth()).nodeParticipationPct === 0;
+  } catch {
+    return; // can't determine health -> don't block the write
+  }
+  if (degraded) {
+    throw new PoolDegradedError(
+      "Node pool is degraded (0% participation): this write may not anchor, so " +
+        "it is refused rather than reported as success. Retry when participation " +
+        "recovers, or pass allow_degraded: true to proceed anyway.",
+    );
+  }
+}
+
 /** Map a thrown error to an actionable MCP error payload. */
 function fail(err: unknown) {
   let message: string;
@@ -54,6 +133,8 @@ function fail(err: unknown) {
     message =
       "Authentication failed. Check CLOCKCHAIN_API_KEY (x-api-key) is set and valid.";
   } else if (err instanceof BudgetExceededError) {
+    message = err.message;
+  } else if (err instanceof PoolDegradedError) {
     message = err.message;
   } else if (err instanceof ApiError) {
     message = `Clockchain API error (${err.status}): ${err.message}`;
@@ -232,6 +313,7 @@ export function registerTools(
           .optional()
           .describe("Max time to wait for confirmation, in ms. Default 15000. Only used when wait=true."),
         idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
       },
     },
     async ({
@@ -245,8 +327,11 @@ export function registerTools(
       wait,
       wait_ms,
       idempotency_key,
+      allow_degraded,
     }) =>
       run("log_action", () => idempotent(idempotency_key, async () => {
+        // AGE-193: refuse the write up front if the pool is degraded (unless opted in).
+        await ensurePoolHealthy(client, allow_degraded);
         // Enforce the optional per-process write cap before spending a credit.
         budget.check();
         // Derive the asset hash: prefer hashing `content` server-side (agent-friendly —
@@ -289,9 +374,13 @@ export function registerTools(
           // Poll the ledger until blockHeight populates (confirmed) or timeout.
           // On timeout this returns the last (still-pending) record rather than
           // throwing, so the caller always gets the ledgerId back.
-          return client.waitForConfirmation(result.ledgerId, wait_ms ?? 15000);
+          const confirmed = await client.waitForConfirmation(
+            result.ledgerId,
+            wait_ms ?? 15000,
+          );
+          return okWrite(confirmed);
         }
-        return result;
+        return okWrite(result);
       })),
   );
 
@@ -395,10 +484,12 @@ export function registerTools(
           ),
         wait_ms: z.number().int().positive().optional().describe("Max wait, ms. Default 15000."),
         idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ agent_id, action, inputs, outputs, wait, wait_ms, idempotency_key }) =>
+    async ({ agent_id, action, inputs, outputs, wait, wait_ms, idempotency_key, allow_degraded }) =>
       run("attest_action", () => idempotent(idempotency_key, async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const receipt = await client.attestAction({
           agentId: agent_id,
@@ -409,6 +500,17 @@ export function registerTools(
           waitMs: wait_ms,
         });
         budget.record();
+        // AGE-193: the receipt's top-level status already reflects anchoring
+        // (confirmed:false -> "pending"/"degraded"); echo a PENDING warning so an
+        // un-anchored attestation is never read as an unqualified success.
+        if (receipt.status !== "anchored") {
+          return {
+            ...receipt,
+            warning:
+              "PENDING — not yet anchored; poll complete_attestation until " +
+              "anchor.confirmed is true before treating this receipt as confirmed.",
+          };
+        }
         return receipt;
       })),
   );
@@ -689,14 +791,16 @@ export function registerTools(
         document: z
           .record(z.string(), z.unknown())
           .describe("The identity document (kept client-side; only hashed)."),
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ did, document }) =>
+    async ({ did, document, allow_degraded }) =>
       run("mint_identity", async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const result = await client.mintIdentity(did, document);
         budget.record();
-        return result;
+        return okWrite(result);
       }),
   );
 
@@ -711,14 +815,16 @@ export function registerTools(
         "backend-gated. Write.",
       inputSchema: {
         did: z.string().describe("The DID to revoke."),
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ did }) =>
+    async ({ did, allow_degraded }) =>
       run("revoke_identity", async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const result = await client.revokeIdentity(did);
         budget.record();
-        return result;
+        return okWrite(result);
       }),
   );
 
@@ -741,10 +847,12 @@ export function registerTools(
         until: z
           .string()
           .describe("Delegation expiry (RFC 3339). Time-boxed; expiry is a valid-at-T fact."),
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ parent_did, child_did, scope, until }) =>
+    async ({ parent_did, child_did, scope, until, allow_degraded }) =>
       run("delegate_authority", async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const result = await client.delegateAuthority({
           parentDid: parent_did,
@@ -753,7 +861,7 @@ export function registerTools(
           until,
         });
         budget.record();
-        return result;
+        return okWrite(result);
       }),
   );
 
@@ -891,10 +999,12 @@ export function registerTools(
           .optional()
           .describe("Optional recorded (NOT enforced) consequence of breaking the commitment."),
         idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ agent_id, commitment, deadline, consequence, idempotency_key }) =>
+    async ({ agent_id, commitment, deadline, consequence, idempotency_key, allow_degraded }) =>
       run("tsa_issue", () => idempotent(idempotency_key, async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const receipt = await tsaIssue(client, {
           agentId: agent_id,
@@ -923,10 +1033,12 @@ export function registerTools(
           .optional()
           .describe("Optional hash of supporting evidence to anchor alongside the note."),
         idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ commitment_id, note, evidence_hash, idempotency_key }) =>
+    async ({ commitment_id, note, evidence_hash, idempotency_key, allow_degraded }) =>
       run("tsa_checkpoint", () => idempotent(idempotency_key, async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const receipt = await tsaCheckpoint(client, {
           commitmentId: commitment_id,
@@ -962,10 +1074,12 @@ export function registerTools(
           .optional()
           .describe("Optional evidence reference (plain text; kept client-side, only hashed)."),
         idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ commitment_id, outcome, deadline, evidence, idempotency_key }) =>
+    async ({ commitment_id, outcome, deadline, evidence, idempotency_key, allow_degraded }) =>
       run("tsa_attest", () => idempotent(idempotency_key, async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const receipt = await tsaAttest(client, {
           commitmentId: commitment_id,
@@ -995,10 +1109,12 @@ export function registerTools(
           .string()
           .describe("The recorded (NOT enforced) consequence of this outcome."),
         idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
       },
     },
-    async ({ commitment_id, outcome, consequence, idempotency_key }) =>
+    async ({ commitment_id, outcome, consequence, idempotency_key, allow_degraded }) =>
       run("tsa_settle", () => idempotent(idempotency_key, async () => {
+        await ensurePoolHealthy(client, allow_degraded);
         budget.check();
         const receipt = await tsaSettle(client, {
           commitmentId: commitment_id,

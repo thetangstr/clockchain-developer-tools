@@ -45,3 +45,35 @@ export class AuthError extends ApiError {
     this.name = "AuthError";
   }
 }
+
+/**
+ * Node pool degraded (AGE-193): 0% node participation, so a write may not
+ * anchor. Raised by the pool-health guard to refuse a write that would likely
+ * report success without anchoring, unless the caller explicitly opts in.
+ */
+export class PoolDegradedError extends ApiError {
+  constructor(
+    message = "Node pool degraded (0% participation): a write may not anchor.",
+    status = 503,
+    body?: unknown,
+  ) {
+    super(message, status, body);
+    this.name = "PoolDegradedError";
+  }
+}
+
+/**
+ * A write was submitted but is not yet anchored on-chain (AGE-193). Surfaced so
+ * a pending write is never silently reported as confirmed success; the caller
+ * should poll (get_log_entry / complete_attestation) until it anchors.
+ */
+export class NotAnchoredError extends ApiError {
+  constructor(
+    message = "Not anchored yet: submitted but no blockHeight — poll to confirm.",
+    status = 202,
+    body?: unknown,
+  ) {
+    super(message, status, body);
+    this.name = "NotAnchoredError";
+  }
+}

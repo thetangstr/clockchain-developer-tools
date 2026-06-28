@@ -27,7 +27,16 @@ function collectTools() {
 
 const textOf = (res) => (res.content || []).map((c) => c.text).join("\n");
 
-// Route the stubbed fetch by URL substring -> { status?, body }.
+// A healthy /getTime response so the AGE-193 pool-health guard (getPoolHealth)
+// passes by default in write tests that don't care about pool health.
+const HEALTHY_GETTIME = {
+  success: true,
+  data: { "nodeParticipation%": 100, totalNodes: 1, blockHeight: "1", madMarzulloTime: "t" },
+};
+
+// Route the stubbed fetch by URL substring -> { status?, body }. Unmatched
+// /getTime falls back to a healthy pool so the write guard is a no-op unless a
+// test explicitly stubs /getTime as degraded.
 function routeFetch(routes) {
   globalThis.fetch = async (url) => {
     for (const [match, resp] of routes) {
@@ -36,6 +45,9 @@ function routeFetch(routes) {
         const status = resp.status ?? 200;
         return { status, ok: status >= 200 && status < 300, statusText: "stub", text: async () => raw };
       }
+    }
+    if (String(url).includes("/getTime")) {
+      return { status: 200, ok: true, statusText: "stub", text: async () => JSON.stringify(HEALTHY_GETTIME) };
     }
     throw new Error("no stubbed route for " + url);
   };
@@ -141,6 +153,7 @@ test("attest_action returns a receipt; verify_receipt confirms it", async () => 
   globalThis.fetch = async (url, opts) => {
     const u = String(url);
     const json = (body, status = 200) => ({ status, ok: status < 400, statusText: "stub", text: async () => JSON.stringify(body) });
+    if (u.includes("/getTime")) return json({ success: true, data: { "nodeParticipation%": 100, totalNodes: 1, blockHeight: "1" } });
     if (u.includes("/log")) {
       anchored = JSON.parse(opts.body).assetHash;
       return json({ ledgerId: "LR", assetReferenceId: JSON.parse(opts.body).assetReferenceId, assetHash: anchored, blockHeight: "500", createdTimestamp: "t" });
@@ -206,6 +219,9 @@ test("log_action with the same idempotency_key hits /log once and replays the re
   let logHits = 0;
   globalThis.fetch = async (url) => {
     const u = String(url);
+    if (u.includes("/getTime")) {
+      return { status: 200, ok: true, statusText: "stub", text: async () => JSON.stringify({ success: true, data: { "nodeParticipation%": 100, totalNodes: 1, blockHeight: "1" } }) };
+    }
     if (u.includes("/log")) {
       logHits++;
       return { status: 200, ok: true, statusText: "stub", text: async () => JSON.stringify({ ledgerId: "L" + logHits, blockHeight: null }) };
