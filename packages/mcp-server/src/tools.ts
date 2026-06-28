@@ -18,6 +18,7 @@ import {
   type ComplianceFormat,
   type ContractParams,
   type EvidencePackage,
+  type PoolHealth,
   type ScheduleApproval,
 } from "@clockchain/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -69,22 +70,32 @@ function okWrite(result: object): Record<string, unknown> {
     status?: string;
     anchorStatus?: AnchorStatus;
     blockHeight?: string | null;
+    anchor?: { status?: AnchorStatus; blockHeight?: string | null };
   };
-  // Prefer an explicit anchorStatus (identity writes carry it alongside a
-  // lifecycle `status`); else a `status` that is itself an AnchorStatus (log
-  // writes); else derive from blockHeight.
-  const status: AnchorStatus =
+  const existingStatusIsAnchor =
+    typeof r.status === "string" && ANCHOR_STATUSES.has(r.status as AnchorStatus);
+  const blockHeight = r.blockHeight ?? r.anchor?.blockHeight ?? null;
+  // Resolve the anchor status from, in order: an explicit anchorStatus (identity
+  // writes), a nested anchor.status (TSA receipts), a top-level `status` that is
+  // itself an AnchorStatus (log writes), else derive from blockHeight.
+  const anchorStatus: AnchorStatus =
     r.anchorStatus ??
-    (r.status && ANCHOR_STATUSES.has(r.status as AnchorStatus)
-      ? (r.status as AnchorStatus)
-      : r.blockHeight != null
-        ? "anchored"
-        : "pending");
-  const payload: Record<string, unknown> = {
-    ...(result as Record<string, unknown>),
-    status,
-  };
-  if (status !== "anchored") {
+    r.anchor?.status ??
+    (existingStatusIsAnchor ? (r.status as AnchorStatus) : undefined) ??
+    (blockHeight != null ? "anchored" : "pending");
+
+  const payload: Record<string, unknown> = { ...(result as Record<string, unknown>) };
+  // Surface the anchor status at the top level WITHOUT clobbering a meaningful
+  // lifecycle `status` (identity writes use "active"/"revoked"/"delegated"): set
+  // top-level `status` only when it is absent or already an AnchorStatus;
+  // otherwise keep the lifecycle value and surface anchor honesty via
+  // `anchorStatus`.
+  if (r.status === undefined || existingStatusIsAnchor) {
+    payload.status = anchorStatus;
+  } else {
+    payload.anchorStatus = anchorStatus;
+  }
+  if (anchorStatus !== "anchored") {
     payload.warning =
       "PENDING — not yet anchored; poll get_log_entry/complete_attestation " +
       "until blockHeight is populated before treating this as confirmed.";
@@ -102,21 +113,23 @@ function okWrite(result: object): Record<string, unknown> {
 async function ensurePoolHealthy(
   client: ClockchainClient,
   allowDegraded: boolean | undefined,
-): Promise<void> {
-  if (allowDegraded) return;
-  let degraded = false;
+): Promise<PoolHealth | null> {
+  let health: PoolHealth | null = null;
   try {
-    degraded = (await client.getPoolHealth()).nodeParticipationPct === 0;
+    health = await client.getPoolHealth();
   } catch {
-    return; // can't determine health -> don't block the write
+    return null; // can't determine health -> don't block the write (fail open)
   }
-  if (degraded) {
+  if (!allowDegraded && health.degraded) {
     throw new PoolDegradedError(
       "Node pool is degraded (0% participation): this write may not anchor, so " +
         "it is refused rather than reported as success. Retry when participation " +
         "recovers, or pass allow_degraded: true to proceed anyway.",
     );
   }
+  // Returned so a caller (e.g. attest_action) can thread it through and avoid a
+  // second getPoolHealth round-trip.
+  return health;
 }
 
 /** Map a thrown error to an actionable MCP error payload. */
@@ -489,16 +502,21 @@ export function registerTools(
     },
     async ({ agent_id, action, inputs, outputs, wait, wait_ms, idempotency_key, allow_degraded }) =>
       run("attest_action", () => idempotent(idempotency_key, async () => {
-        await ensurePoolHealthy(client, allow_degraded);
+        // Guard + reuse: thread the health the guard already fetched into
+        // attestAction so it doesn't fetch /getTime twice.
+        const poolHealth = await ensurePoolHealthy(client, allow_degraded);
         budget.check();
-        const receipt = await client.attestAction({
-          agentId: agent_id,
-          action,
-          inputs,
-          outputs,
-          wait,
-          waitMs: wait_ms,
-        });
+        const receipt = await client.attestAction(
+          {
+            agentId: agent_id,
+            action,
+            inputs,
+            outputs,
+            wait,
+            waitMs: wait_ms,
+          },
+          poolHealth,
+        );
         budget.record();
         // AGE-193: the receipt's top-level status already reflects anchoring
         // (confirmed:false -> "pending"/"degraded"); echo a PENDING warning so an
@@ -555,8 +573,22 @@ export function registerTools(
       },
     },
     async ({ receipt }) =>
-      run("complete_attestation", () =>
-        client.completeReceipt(receipt as unknown as AgentReceipt)),
+      run("complete_attestation", async () => {
+        const completed = await client.completeReceipt(
+          receipt as unknown as AgentReceipt,
+        );
+        // AGE-193: a still-pending re-poll must keep saying so — never let the
+        // poll path quietly look like success.
+        if (completed.status !== "anchored") {
+          return {
+            ...completed,
+            warning:
+              "PENDING — not yet anchored; call complete_attestation again until " +
+              "anchor.confirmed is true before treating this receipt as confirmed.",
+          };
+        }
+        return completed;
+      }),
   );
 
   // ===== SCHEDULER MCP =====
@@ -1013,7 +1045,9 @@ export function registerTools(
           consequence,
         });
         budget.record();
-        return receipt;
+        // AGE-193: lift anchor.status to a top-level status + PENDING warning so
+        // a still-pending commitment is never read as confirmed.
+        return okWrite(receipt);
       })),
   );
 
@@ -1046,7 +1080,7 @@ export function registerTools(
           evidenceHash: evidence_hash,
         });
         budget.record();
-        return receipt;
+        return okWrite(receipt);
       })),
   );
 
@@ -1088,7 +1122,9 @@ export function registerTools(
           evidence,
         });
         budget.record();
-        return receipt;
+        // AGE-193 critical case: a "kept"/onTime verdict on a still-pending anchor
+        // must NOT read as a silent greenlight — surface top-level pending + warning.
+        return okWrite(receipt);
       })),
   );
 
@@ -1122,7 +1158,7 @@ export function registerTools(
           consequence,
         });
         budget.record();
-        return receipt;
+        return okWrite(receipt);
       })),
   );
 

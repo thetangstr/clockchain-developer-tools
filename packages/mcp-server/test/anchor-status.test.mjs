@@ -80,12 +80,72 @@ test("attest_action is refused on a degraded pool unless allow_degraded", async 
   assert.match(textOf(refused), /degraded|participation/i);
 });
 
-test("identity write surfaces anchorStatus + PENDING warning when not yet anchored", async () => {
+test("identity write keeps lifecycle status, surfaces anchorStatus + PENDING warning", async () => {
   routeFetch([gettime(100), ["/log", { body: { ledgerId: "LM", blockHeight: null } }]]);
   const res = await collectTools().mint_identity({ did: "did:x:1", document: { id: "did:x:1" } });
   assert.ok(!res.isError);
   const out = JSON.parse(textOf(res));
-  assert.equal(out.status, "pending"); // anchor status drives the top-level status
+  // Lifecycle status is NOT clobbered; anchor honesty is surfaced separately.
+  assert.equal(out.status, "active");
   assert.equal(out.anchorStatus, "pending");
   assert.match(out.warning, /PENDING/);
+});
+
+test("TSA write verbs surface top-level pending status + warning (not just anchor.status)", async () => {
+  // /log returns a createdTimestamp but blockHeight null -> pending anchor.
+  routeFetch([
+    gettime(100),
+    ["/log", { body: { ledgerId: "L_TSA", blockHeight: null, assetHash: "h", assetReferenceId: "tsa:x", createdTimestamp: "2026-06-01T00:00:00Z" } }],
+  ]);
+  const tools = collectTools();
+
+  const issue = JSON.parse(textOf(await tools.tsa_issue({ agent_id: "a", commitment: "ship", deadline: "2026-06-30T00:00:00Z" })));
+  assert.equal(issue.status, "pending", "top-level status lifted from anchor.status");
+  assert.equal(issue.anchor.status, "pending");
+  assert.match(issue.warning, /PENDING/);
+
+  // Critical case: a "kept"/onTime verdict on a still-pending anchor must NOT
+  // read as a silent greenlight.
+  const attest = JSON.parse(textOf(await tools.tsa_attest({ commitment_id: "abc123", outcome: "kept", deadline: "2026-06-30T00:00:00Z" })));
+  assert.equal(attest.verdict, "kept");
+  assert.equal(attest.onTime, true);
+  assert.equal(attest.status, "pending", "pending anchor surfaced despite kept verdict");
+  assert.match(attest.warning, /PENDING/);
+});
+
+test("TSA write verbs report anchored (no warning) once the block is present", async () => {
+  routeFetch([
+    gettime(100),
+    ["/log", { body: { ledgerId: "L_TSA", blockHeight: "1000", assetHash: "h", assetReferenceId: "tsa:x", createdTimestamp: "2026-06-01T00:00:00Z" } }],
+  ]);
+  const out = JSON.parse(textOf(await collectTools().tsa_settle({ commitment_id: "abc123", outcome: "kept", consequence: "none" })));
+  assert.equal(out.status, "anchored");
+  assert.equal(out.warning, undefined);
+});
+
+test("guard fails OPEN: getPoolHealth error does not block; status still derived honestly", async () => {
+  // /getTime errors (400) -> getPoolHealth throws -> guard fails open -> write proceeds.
+  routeFetch([
+    ["/getTime", { status: 400, body: { message: "time endpoint down" } }],
+    ["/log", { body: { ledgerId: "LF", blockHeight: null } }],
+  ]);
+  const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r" });
+  assert.ok(!res.isError, "write proceeds when pool health is unknown");
+  const out = JSON.parse(textOf(res));
+  assert.equal(out.status, "pending");
+  assert.match(out.warning, /PENDING/);
+});
+
+test("allow_degraded bypasses the guard on an identity verb (mint)", async () => {
+  routeFetch([gettime(0), ["/log", { body: { ledgerId: "LMD", blockHeight: null } }]]);
+  const res = await collectTools().mint_identity({ did: "did:x:1", document: { id: 1 }, allow_degraded: true });
+  assert.ok(!res.isError, "degraded mint proceeds when explicitly allowed");
+  assert.equal(JSON.parse(textOf(res)).ledgerId, "LMD");
+});
+
+test("allow_degraded bypasses the guard on a TSA verb (tsa_issue)", async () => {
+  routeFetch([gettime(0), ["/log", { body: { ledgerId: "L_TSA", blockHeight: null, assetReferenceId: "tsa:x", createdTimestamp: "t" } }]]);
+  const res = await collectTools().tsa_issue({ agent_id: "a", commitment: "ship", deadline: "2026-06-30T00:00:00Z", allow_degraded: true });
+  assert.ok(!res.isError, "degraded tsa_issue proceeds when explicitly allowed");
+  assert.equal(JSON.parse(textOf(res)).anchor.ledgerId, "L_TSA");
 });

@@ -235,9 +235,13 @@ export class ClockchainClient {
    */
   async getPoolHealth(): Promise<PoolHealth> {
     const ts = await this.getTimestamp();
-    const nodeParticipationPct = ts["nodeParticipation%"] ?? 0;
+    // Coerce: the gateway may return participation as a string ("0"), which must
+    // still count as degraded. NaN (unparseable) is treated as 0 -> degraded.
+    const rawPct = ts["nodeParticipation%"];
+    const parsed = Number(rawPct ?? 0);
+    const nodeParticipationPct = Number.isNaN(parsed) ? 0 : parsed;
     return {
-      totalNodes: ts.totalNodes ?? 0,
+      totalNodes: Number(ts.totalNodes ?? 0) || 0,
       nodeParticipationPct,
       degraded: nodeParticipationPct === 0,
     };
@@ -383,7 +387,10 @@ export class ClockchainClient {
    * confirmation, and gather the consensus time + validation + (optional)
    * ERC-8004 identity into a self-verifying receipt. Crypto/RPC/Web3 stay hidden.
    */
-  async attestAction(input: AttestActionInput): Promise<AgentReceipt> {
+  async attestAction(
+    input: AttestActionInput,
+    providedPoolHealth?: PoolHealth | null,
+  ): Promise<AgentReceipt> {
     const eventHash = eventHashOf(input);
     const assetReferenceId = `${input.agentId}:${input.action}:${Date.now()}`;
     const wait = input.wait ?? true;
@@ -411,7 +418,13 @@ export class ClockchainClient {
     }
     // Best-effort pool health (AGE-193): drives the receipt's top-level status
     // (degraded vs pending when not yet anchored) and is attached for the caller.
-    const poolHealth = await this.getPoolHealth().catch(() => null);
+    // A caller (e.g. the MCP pool-health guard) may thread in the health it
+    // already fetched to avoid a second /getTime round-trip; pass undefined to
+    // fetch here.
+    const poolHealth =
+      providedPoolHealth !== undefined
+        ? providedPoolHealth
+        : await this.getPoolHealth().catch(() => null);
 
     // Single-validator today; this stays "testnet" until the network is mainnet.
     const network = "testnet";
@@ -458,6 +471,9 @@ export class ClockchainClient {
     const identity = receipt.identity?.resolved
       ? { resolved: true, status: receipt.identity.status }
       : null;
+    // Best-effort pool health so a still-pending re-poll can report "degraded"
+    // (AGE-193) rather than a bare "pending" when the pool is down.
+    const poolHealth = await this.getPoolHealth().catch(() => null);
 
     return buildReceipt({
       input,
@@ -467,6 +483,7 @@ export class ClockchainClient {
       block,
       validation,
       identity,
+      poolHealth,
     });
   }
 
