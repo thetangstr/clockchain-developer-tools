@@ -1,0 +1,44 @@
+{
+  "name": "@clockchain/chatgpt-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Clockchain ChatGPT app (OpenAI Apps SDK = MCP): curated tool subset + read-only verify-a-receipt widget. Dev-mode connector scaffold.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "clockchain-chatgpt-app": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": ["clockchain", "chatgpt", "openai-apps-sdk", "mcp", "agent", "widget"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thetangstr/clockchain-developer-tools.git",
+    "directory": "packages/chatgpt-app"
+  },
+  "scripts": {
+    "build:widget": "node scripts/build-widget.mjs",
+    "build": "npm run build:widget && tsc -b",
+    "start": "node dist/index.js",
+    "dev": "MCP_TRANSPORT=http node dist/index.js",
+    "test": "npm run build && node --test"
+  },
+  "dependencies": {
+    "@clockchain/core": "0.1.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.24"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
