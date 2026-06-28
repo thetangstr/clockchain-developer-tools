@@ -1,7 +1,8 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, rateLimitHeaders, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
+import { mintToken } from "../dist/token.js";
 
 const tokens = ["tester-a", "tester-b"];
 
@@ -79,7 +80,7 @@ test("callerKey keys on token when present, else IP", () => {
 test("rate limiter disabled when perMin <= 0 (always allows)", () => {
   const rl = createRateLimiter(0);
   assert.equal(rl.enabled, false);
-  for (let i = 0; i < 1000; i++) assert.equal(rl.allow("k", 1000), true);
+  for (let i = 0; i < 1000; i++) assert.equal(rl.allow("k", 1000).allowed, true);
 });
 
 test("clientIp prefers X-Forwarded-For (real client behind the LB), else socket addr", () => {
@@ -93,18 +94,59 @@ test("clientIp prefers X-Forwarded-For (real client behind the LB), else socket 
 
 test("rate limiter honors a custom window (e.g. hourly mint limit)", () => {
   const rl = createRateLimiter(2, 60 * 60_000); // 2 per hour
-  assert.equal(rl.allow("ip", 0), true);
-  assert.equal(rl.allow("ip", 1000), true);
-  assert.equal(rl.allow("ip", 2000), false);       // over limit within the hour
-  assert.equal(rl.allow("ip", 59 * 60_000), false); // still within the hour window
-  assert.equal(rl.allow("ip", 60 * 60_000 + 1), true); // window rolled over
+  assert.equal(rl.allow("ip", 0).allowed, true);
+  assert.equal(rl.allow("ip", 1000).allowed, true);
+  assert.equal(rl.allow("ip", 2000).allowed, false);       // over limit within the hour
+  assert.equal(rl.allow("ip", 59 * 60_000).allowed, false); // still within the hour window
+  assert.equal(rl.allow("ip", 60 * 60_000 + 1).allowed, true); // window rolled over
 });
 
 test("rate limiter enforces per-key fixed window", () => {
   const rl = createRateLimiter(2);
-  assert.equal(rl.allow("a", 0), true);   // 1
-  assert.equal(rl.allow("a", 10), true);  // 2
-  assert.equal(rl.allow("a", 20), false); // over limit in window
-  assert.equal(rl.allow("b", 20), true);  // different key unaffected
-  assert.equal(rl.allow("a", 60_001), true); // window rolled over
+  assert.equal(rl.allow("a", 0).allowed, true);   // 1
+  assert.equal(rl.allow("a", 10).allowed, true);  // 2
+  assert.equal(rl.allow("a", 20).allowed, false); // over limit in window
+  assert.equal(rl.allow("b", 20).allowed, true);  // different key unaffected
+  assert.equal(rl.allow("a", 60_001).allowed, true); // window rolled over
+});
+
+// --- AGE-194: rate-limit metadata + headers --------------------------------
+
+test("allow() returns {allowed,limit,remaining,resetAt} metadata", () => {
+  const rl = createRateLimiter(3, 60_000);
+  assert.deepEqual(rl.allow("k", 0), { allowed: true, limit: 3, remaining: 2, resetAt: 60_000 });
+  assert.deepEqual(rl.allow("k", 10), { allowed: true, limit: 3, remaining: 1, resetAt: 60_000 });
+  assert.deepEqual(rl.allow("k", 20), { allowed: true, limit: 3, remaining: 0, resetAt: 60_000 });
+  // over limit: blocked, no remaining, resetAt unchanged
+  assert.deepEqual(rl.allow("k", 30), { allowed: false, limit: 3, remaining: 0, resetAt: 60_000 });
+});
+
+test("rateLimitHeaders sets X-RateLimit-* always and Retry-After only on 429", () => {
+  // allowed → no Retry-After
+  const ok = rateLimitHeaders({ allowed: true, limit: 10, remaining: 4, resetAt: 120_000 }, 60_000);
+  assert.equal(ok["X-RateLimit-Limit"], "10");
+  assert.equal(ok["X-RateLimit-Remaining"], "4");
+  assert.equal(ok["X-RateLimit-Reset"], "120"); // unix seconds
+  assert.equal("Retry-After" in ok, false);
+
+  // blocked → Retry-After = ceil((resetAt-now)/1000)
+  const blocked = rateLimitHeaders({ allowed: false, limit: 10, remaining: 0, resetAt: 120_500 }, 60_000);
+  assert.equal(blocked["Retry-After"], "61"); // ceil(60.5s)
+  assert.equal(blocked["X-RateLimit-Remaining"], "0");
+});
+
+test("callerKey buckets self-serve tokens by sub, else jti (AGE-194)", () => {
+  const SECRET = "rk-secret";
+  // Mint against the real clock (nowSec omitted) so the tokens are unexpired
+  // when callerKey re-verifies them with verifyToken's default (real) now.
+  // sub-scoped token → keyed on sub (many tokens for one user share a bucket)
+  const { token: subTok } = mintToken(SECRET, 3600, undefined, "user@x.com", "jti-1");
+  assert.equal(callerKey({ "x-api-key": subTok }, "9.9.9.9", SECRET), "sub:user@x.com");
+  // no sub → keyed on the unique jti (each token its own bucket)
+  const { token: anonTok } = mintToken(SECRET, 3600, undefined, undefined, "jti-2");
+  assert.equal(callerKey({ "x-api-key": anonTok }, "9.9.9.9", SECRET), "jti:jti-2");
+  // without the signing secret we cannot decode → fall back to raw token key
+  assert.equal(callerKey({ "x-api-key": anonTok }, "9.9.9.9"), `tok:${anonTok}`);
+  // a static (non-self-serve) token is still keyed by its raw value
+  assert.equal(callerKey({ "x-api-key": "team-token" }, "9.9.9.9", SECRET), "tok:team-token");
 });

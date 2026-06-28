@@ -4,6 +4,7 @@ import {
   ApiError,
   AuthError,
   InsufficientCreditsError,
+  parseRetryAfter,
   RateLimitError,
 } from "./errors.js";
 import type {
@@ -1168,7 +1169,11 @@ export class ClockchainClient {
     }
     const textForMatch = typeof parsed === "string" ? parsed : JSON.stringify(parsed ?? "");
     if (res.status === 429 || /rate limit exceeded/i.test(textForMatch)) {
-      throw new RateLimitError("Rate limit exceeded", res.status, parsed);
+      // Thread the gateway's own Retry-After (when it sends one) so callers get
+      // a real back-off hint instead of a bare 429 (AGE-194). Defensive access:
+      // a non-spec Response (or test stub) may not carry a Headers object.
+      const retryAfter = parseRetryAfter(res.headers?.get?.("retry-after"));
+      throw new RateLimitError("Rate limit exceeded", res.status, parsed, retryAfter);
     }
     if (res.status === 401) {
       throw new AuthError("Authentication failed (check x-api-key)", 401, parsed);
@@ -1259,7 +1264,11 @@ export class ClockchainClient {
       typeof parsed === "string" ? parsed : JSON.stringify(parsed ?? "");
 
     if (res.status === 429 || /rate limit exceeded/i.test(textForMatch)) {
-      throw new RateLimitError("Rate limit exceeded", res.status, parsed);
+      // Thread the gateway's own Retry-After (when it sends one) so callers get
+      // a real back-off hint instead of a bare 429 (AGE-194). Defensive access:
+      // a non-spec Response (or test stub) may not carry a Headers object.
+      const retryAfter = parseRetryAfter(res.headers?.get?.("retry-after"));
+      throw new RateLimitError("Rate limit exceeded", res.status, parsed, retryAfter);
     }
     if (/no enough tokens to facilitate this logging/i.test(textForMatch)) {
       throw new InsufficientCreditsError(

@@ -20,10 +20,42 @@ export class ApiError extends Error {
 
 /** Gateway rate limiting: HTTP 429 or body containing "Rate limit exceeded". */
 export class RateLimitError extends ApiError {
-  constructor(message = "Rate limit exceeded", status = 429, body?: unknown) {
+  /**
+   * Seconds to wait before retrying, parsed from the upstream gateway's
+   * `Retry-After` header when present (AGE-194). `undefined` when the gateway
+   * gave no hint. Surfaced to MCP callers so an agent can back off correctly.
+   */
+  readonly retryAfter?: number;
+
+  constructor(
+    message = "Rate limit exceeded",
+    status = 429,
+    body?: unknown,
+    retryAfter?: number,
+  ) {
     super(message, status, body);
     this.name = "RateLimitError";
+    this.retryAfter = retryAfter;
   }
+}
+
+/**
+ * Parse an HTTP `Retry-After` header into seconds. The header is either a
+ * non-negative integer count of seconds or an HTTP-date; both are supported.
+ * Returns `undefined` for a missing / empty / unparseable value. `nowMs` is
+ * injectable for tests.
+ */
+export function parseRetryAfter(
+  value: string | null | undefined,
+  nowMs: number = Date.now(),
+): number | undefined {
+  if (value == null) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "") return undefined;
+  if (/^\d+$/.test(trimmed)) return Number(trimmed); // delta-seconds form
+  const when = Date.parse(trimmed); // HTTP-date form
+  if (Number.isNaN(when)) return undefined;
+  return Math.max(0, Math.ceil((when - nowMs) / 1000));
 }
 
 /** Logging credit exhaustion: "No enough tokens to facilitate this logging". */
