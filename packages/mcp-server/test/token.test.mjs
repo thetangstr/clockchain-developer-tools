@@ -48,3 +48,32 @@ test("looksLikeSelfServe is a cheap structural pre-check", () => {
   assert.equal(looksLikeSelfServe("cc_no-dot"), false);
   assert.equal(looksLikeSelfServe("team-token"), false);
 });
+
+// --- AGE-194: distinct jti + optional sub ----------------------------------
+
+test("each minted token carries a unique jti, so two mints are distinct", () => {
+  const a = mintToken(SECRET, 3600, 1000);
+  const b = mintToken(SECRET, 3600, 1000); // same secret, same second
+  assert.equal(typeof a.payload.jti, "string");
+  assert.ok(a.payload.jti.length > 0);
+  assert.notEqual(a.payload.jti, b.payload.jti); // distinct identities
+  assert.notEqual(a.token, b.token);             // therefore distinct tokens
+  // jti survives a round-trip through verify
+  const r = verifyToken(SECRET, a.token, 1000);
+  assert.equal(r.valid, true);
+  assert.equal(r.payload.jti, a.payload.jti);
+});
+
+test("an injected jti is honored (deterministic for tests)", () => {
+  const { payload } = mintToken(SECRET, 3600, 1000, undefined, "fixed-jti");
+  assert.equal(payload.jti, "fixed-jti");
+});
+
+test("sub is optional: absent by default, embedded and verifiable when set", () => {
+  assert.equal(mintToken(SECRET, 3600, 1000).payload.sub, undefined);
+  const { token, payload } = mintToken(SECRET, 3600, 1000, "user@example.com");
+  assert.equal(payload.sub, "user@example.com");
+  const r = verifyToken(SECRET, token, 1000);
+  assert.equal(r.valid, true);
+  assert.equal(r.payload.sub, "user@example.com");
+});

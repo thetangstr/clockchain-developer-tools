@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 /**
  * Self-serve testnet tokens — stateless, HMAC-signed, no database.
@@ -21,6 +21,25 @@ export interface TokenPayload {
   tier: "demo";
   iat: number; // issued-at, unix seconds
   exp: number; // expiry, unix seconds
+  /**
+   * Unique token id (AGE-194). Makes every minted token distinct — even two
+   * minted in the same second — so the per-request rate limiter can bucket each
+   * token independently instead of collapsing a shared-egress public app's
+   * traffic into one IP bucket. Optional in the type for backward-compatible
+   * verification of pre-AGE-194 tokens; always set by `mintToken`.
+   */
+  jti?: string;
+  /**
+   * Optional subject (AGE-194): a NON-AUTHORITATIVE label for the principal this
+   * token is intended for. It is supplied on the UNAUTHENTICATED mint endpoint,
+   * so it is NOT trusted and does NOT isolate rate-limit buckets or budgets — the
+   * per-request limiter keys on `jti` (per token), never on `sub`. `sub` becomes
+   * a safe per-user key only once it derives from an authenticated identity.
+   * MEDIUM-TERM follow-up (not in this change): real per-user auth + mapping
+   * `sub` to a distinct delegated sub-key / credit bucket at the gateway instead
+   * of the single shared delegated key every demo token uses today.
+   */
+  sub?: string;
 }
 
 const b64url = (buf: Buffer): string =>
@@ -33,15 +52,21 @@ const sign = (payloadSeg: string, secret: string): string =>
   b64url(createHmac("sha256", secret).update(payloadSeg).digest());
 
 /**
- * Mint a signed self-serve token. `ttlSeconds` defaults to 7 days. `nowSec` is
- * injectable for tests.
+ * Mint a signed self-serve token. `ttlSeconds` defaults to 7 days. Each token
+ * gets a unique `jti` so it is independently rate-limitable (AGE-194). `sub` is
+ * an optional NON-AUTHORITATIVE label only (see {@link TokenPayload.sub}); it
+ * never affects bucketing. Callers should sanitize `sub` before passing it.
+ * `nowSec` and `jti` are injectable for tests.
  */
 export function mintToken(
   secret: string,
   ttlSeconds = 7 * 24 * 60 * 60,
   nowSec: number = Math.floor(Date.now() / 1000),
+  sub?: string,
+  jti: string = randomUUID(),
 ): { token: string; payload: TokenPayload } {
-  const payload: TokenPayload = { v: 1, tier: "demo", iat: nowSec, exp: nowSec + ttlSeconds };
+  const payload: TokenPayload = { v: 1, tier: "demo", iat: nowSec, exp: nowSec + ttlSeconds, jti };
+  if (sub) payload.sub = sub;
   const seg = b64url(Buffer.from(JSON.stringify(payload), "utf8"));
   return { token: `${PREFIX}${seg}.${sign(seg, secret)}`, payload };
 }

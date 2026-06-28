@@ -8,6 +8,7 @@ import {
   ClockchainClient,
   ApiError,
   RateLimitError,
+  parseRetryAfter,
   InsufficientCreditsError,
   AuthError,
 } from "../dist/index.js";
@@ -78,6 +79,45 @@ test("HTTP 429 maps to RateLimitError", async () => {
 test("body 'Rate limit exceeded' maps to RateLimitError even on 200", async () => {
   stubFetch(200, "Rate limit exceeded");
   await assert.rejects(() => new ClockchainClient(cfg).getTime(), RateLimitError);
+});
+
+// --- AGE-194: thread the gateway's Retry-After -----------------------------
+
+test("parseRetryAfter handles delta-seconds, HTTP-date, and junk", () => {
+  assert.equal(parseRetryAfter("120"), 120);          // delta-seconds
+  assert.equal(parseRetryAfter("0"), 0);
+  assert.equal(parseRetryAfter(undefined), undefined); // missing
+  assert.equal(parseRetryAfter(null), undefined);
+  assert.equal(parseRetryAfter("  "), undefined);     // empty
+  assert.equal(parseRetryAfter("not-a-date"), undefined);
+  // HTTP-date form, computed relative to an injected "now"
+  const now = Date.parse("2026-06-28T00:00:00Z");
+  assert.equal(parseRetryAfter("Sun, 28 Jun 2026 00:00:30 GMT", now), 30);
+  assert.equal(parseRetryAfter("Sun, 28 Jun 2026 00:00:00 GMT", now), 0); // not negative
+});
+
+test("RateLimitError carries an optional retryAfter", () => {
+  assert.equal(new RateLimitError().retryAfter, undefined);
+  assert.equal(new RateLimitError("rl", 429, undefined, 42).retryAfter, 42);
+});
+
+test("a gateway 429 with Retry-After threads retryAfter onto RateLimitError", async () => {
+  // Stub fetch with a real Headers object carrying Retry-After.
+  globalThis.fetch = async () => ({
+    status: 429,
+    ok: false,
+    statusText: "Too Many Requests",
+    headers: new Headers({ "retry-after": "90" }),
+    text: async () => JSON.stringify({ message: "slow down" }),
+  });
+  await assert.rejects(
+    () => new ClockchainClient(cfg).getTime(),
+    (err) => {
+      assert.ok(err instanceof RateLimitError);
+      assert.equal(err.retryAfter, 90);
+      return true;
+    },
+  );
 });
 
 test("'No enough tokens...' maps to InsufficientCreditsError", async () => {

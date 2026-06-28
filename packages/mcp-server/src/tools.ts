@@ -136,8 +136,13 @@ async function ensurePoolHealthy(
 function fail(err: unknown) {
   let message: string;
   if (err instanceof RateLimitError) {
+    // Surface the upstream gateway's Retry-After hint when it gave one (AGE-194)
+    // so the agent backs off for the right duration instead of guessing.
     message =
-      "Rate limit exceeded. Wait and retry; the server does not retry automatically.";
+      "Rate limit exceeded. Wait and retry; the server does not retry automatically." +
+      (typeof err.retryAfter === "number"
+        ? ` Retry after ~${err.retryAfter}s (gateway Retry-After).`
+        : "");
   } else if (err instanceof InsufficientCreditsError) {
     message =
       "Insufficient logging credits (No enough tokens to facilitate this logging). " +
