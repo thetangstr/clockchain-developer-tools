@@ -9,6 +9,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "check:skill": "node skills/check-skill-drift.mjs",
     "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo"
   },
   "devDependencies": {
