@@ -106,6 +106,12 @@ interface Job {
   action: (ctx: FireContext) => unknown | Promise<unknown>;
   agentId: string;
   handle: unknown;
+  /**
+   * Consecutive fail-closed confirmed-holds since the last successful confirm
+   * or fire. Drives the exponential backoff of the hold re-arm. Reset to 0 as
+   * soon as consensus is readable again or the job fires.
+   */
+  holdCount: number;
 }
 
 const defaultTimer: Timer = {
@@ -155,6 +161,14 @@ export interface SchedulerOptions {
    */
   pollMs?: number;
   /**
+   * Cap (ms) for the exponential backoff applied to the fail-closed
+   * confirmed-hold retry. When a "confirmed" job holds because consensus is
+   * unreadable at the boundary, the hold re-arm grows as
+   * `min(pollMs * 2^holdCount, maxConfirmHoldMs)` so a gateway outage is not
+   * hammered at the tight poll cadence. Default 30_000.
+   */
+  maxConfirmHoldMs?: number;
+  /**
    * Behaviour when a "confirmed" job cannot read consensus at the boundary
    * (the boundary `getTimestamp()` throws or returns an unparseable time).
    *
@@ -175,6 +189,7 @@ export class ClockScheduler {
   private readonly confirmSource?: ConfirmSource;
   private readonly client?: AttestSource;
   private readonly pollMs: number;
+  private readonly maxConfirmHoldMs: number;
   private readonly confirmFailOpen: boolean;
   private readonly jobs = new Map<string, Job>();
   private seq = 0;
@@ -185,6 +200,7 @@ export class ClockScheduler {
     this.confirmSource = options.confirmSource;
     this.client = options.client;
     this.pollMs = options.pollMs ?? 250;
+    this.maxConfirmHoldMs = options.maxConfirmHoldMs ?? 30_000;
     this.confirmFailOpen = options.confirmFailOpen ?? false;
   }
 
@@ -195,6 +211,11 @@ export class ClockScheduler {
     }
     if (input.fireAt != null && input.everyMs != null) {
       throw new Error("schedule: provide only one of fireAt or everyMs");
+    }
+    if (input.everyMs != null && !(input.everyMs > 0)) {
+      // A non-positive interval makes nextIntervalSlot(.., 0, ..) produce NaN
+      // and tight-loop. Reject it up front.
+      throw new Error("schedule: everyMs must be > 0");
     }
     const id = input.id ?? `job_${Date.now()}_${++this.seq}`;
     if (this.jobs.has(id)) {
@@ -220,6 +241,7 @@ export class ClockScheduler {
       action: input.action,
       agentId: input.agentId ?? "clock-scheduler",
       handle: null,
+      holdCount: 0,
     };
     this.jobs.set(id, job);
     this.arm(job);
@@ -290,6 +312,22 @@ export class ClockScheduler {
     }, delay);
   }
 
+  /**
+   * Re-arm a fail-closed confirmed-hold with exponential backoff:
+   * `min(pollMs * 2^holdCount, maxConfirmHoldMs)`, incrementing the per-job
+   * hold count each time. Used only when consensus is unreadable at the
+   * boundary; the normal poll cadence (see {@link arm}) is unchanged.
+   */
+  private armHold(job: Job): void {
+    if (job.status.state === "cancelled") return;
+    const base = this.pollMs > 0 ? this.pollMs : 0;
+    const delay = Math.min(base * 2 ** job.holdCount, this.maxConfirmHoldMs);
+    job.holdCount += 1;
+    job.handle = this.timer.set(() => {
+      void this.onTick(job);
+    }, delay);
+  }
+
   private async onTick(job: Job): Promise<void> {
     job.handle = null;
     if (job.status.state === "cancelled" || job.status.state === "firing") return;
@@ -304,23 +342,31 @@ export class ClockScheduler {
       if (!Number.isFinite(consensusMs)) {
         // Could not read consensus at the boundary (getTimestamp threw or
         // returned an unparseable time). Fail-closed by default: do NOT fire —
-        // hold and retry on the next tick — so "confirmed" is never silently
-        // downgraded to "soft". Opt into fail-open with `confirmFailOpen`.
+        // hold and retry on a backoff so a gateway outage isn't hammered at the
+        // tight poll cadence — so "confirmed" is never silently downgraded to
+        // "soft". Opt into fail-open with `confirmFailOpen`.
         if (!this.confirmFailOpen) {
-          this.arm(job);
+          this.armHold(job);
           return;
         }
         // fail-open: fall through and fire on the disciplined clock alone.
-      } else if (consensusMs < job.status.fireAt) {
-        // Consensus hasn't crossed the boundary yet: wait and re-check.
-        this.arm(job);
-        return;
+      } else {
+        // Consensus was readable: the confirm succeeded, so reset the
+        // fail-closed hold backoff.
+        job.holdCount = 0;
+        if (consensusMs < job.status.fireAt) {
+          // Consensus hasn't crossed the boundary yet: wait and re-check.
+          this.arm(job);
+          return;
+        }
       }
     }
     await this.fire(job);
   }
 
   private async fire(job: Job): Promise<void> {
+    // The job is firing: clear any fail-closed hold backoff.
+    job.holdCount = 0;
     job.status.state = "firing";
     const reading = this.clock.now();
     const firedAt = reading.epochMs;

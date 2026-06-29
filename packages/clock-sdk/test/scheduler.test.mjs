@@ -380,6 +380,101 @@ test("CLO-76: confirmFailOpen makes confirmed mode fire when boundary getTimesta
   sch.clearAll();
 });
 
+// --- review Low #1: fail-closed confirmed-hold backs off exponentially ---
+test("Low#1: fail-closed confirmed-hold backs off (pollMs, 2x, 4x, ... capped) and resets after a successful confirm", async () => {
+  // fireAt at a real 2026 boundary so a readable consensus BEFORE it holds
+  // (rather than fires) — lets us prove the reset path without firing.
+  const fireAt = Date.UTC(2026, 5, 24, 23, 0, 0, 0);
+  const clock = fakeClock(fireAt + 1000); // disciplined clock already past -> reach confirm path
+
+  // Recording timer: capture the delay passed to each set().
+  let nextHandle = 1;
+  const pending = new Map();
+  const delays = [];
+  const recTimer = {
+    set(handler, delayMs) {
+      const h = nextHandle++;
+      pending.set(h, handler);
+      delays.push(delayMs);
+      return h;
+    },
+    clear(h) {
+      pending.delete(h);
+    },
+    async flush() {
+      const batch = [...pending.entries()];
+      for (const [h, cb] of batch) {
+        pending.delete(h);
+        cb();
+        await new Promise((r) => setImmediate(r));
+      }
+    },
+    size() {
+      return pending.size;
+    },
+  };
+
+  let throwIt = true;
+  let fired = false;
+  const confirmSource = {
+    async getTimestamp() {
+      if (throwIt) throw new Error("gateway down");
+      // readable, but BEFORE the boundary -> a normal hold (confirm succeeded).
+      return { madMarzulloTime: "24-06-2026_22:00:00:000", AbsTimeDifference: 0, blockHeight: 1 };
+    },
+  };
+  const sch = new ClockScheduler({
+    clock,
+    timer: recTimer,
+    confirmSource,
+    pollMs: 100,
+    maxConfirmHoldMs: 500,
+  });
+  sch.schedule({ id: "c1", fireAt, action: () => (fired = true), mode: "confirmed" });
+
+  // delays[0] is the initial poll arm (pollMs); delays[1..] are the hold re-arms.
+  assert.equal(delays[0], 100);
+
+  await recTimer.flush(); // hold #1 -> pollMs
+  await recTimer.flush(); // hold #2 -> 2x
+  await recTimer.flush(); // hold #3 -> 4x
+  await recTimer.flush(); // hold #4 -> 8x capped to maxConfirmHoldMs
+  await recTimer.flush(); // hold #5 -> capped
+  assert.equal(fired, false, "fail-closed: never fires while consensus is unreadable");
+  assert.deepEqual(
+    delays.slice(1, 6),
+    [100, 200, 400, 500, 500],
+    "hold re-arm grows exponentially, capped at maxConfirmHoldMs",
+  );
+
+  // A successful confirm (readable consensus, still before the boundary) resets the backoff.
+  throwIt = false;
+  await recTimer.flush(); // confirm succeeds -> normal arm (pollMs), holdCount reset to 0
+  // Back to unreadable: the next hold delay must restart at pollMs.
+  throwIt = true;
+  await recTimer.flush(); // hold -> pollMs again (reset proven)
+  assert.equal(
+    delays[delays.length - 1],
+    100,
+    "hold delay resets to pollMs after a successful confirm",
+  );
+  assert.equal(fired, false);
+  assert.equal(sch.getStatus("c1").state, "scheduled");
+  sch.clearAll();
+});
+
+// --- review Low #3: schedule rejects a non-positive everyMs ---
+test("Low#3: schedule rejects everyMs <= 0 and still accepts a valid interval", () => {
+  const clock = fakeClock(1000);
+  const sch = new ClockScheduler({ clock, timer: fakeTimer(), pollMs: 1 });
+  assert.throws(() => sch.schedule({ everyMs: 0, action: () => {} }), /everyMs must be > 0/);
+  assert.throws(() => sch.schedule({ everyMs: -5, action: () => {} }), /everyMs must be > 0/);
+  // a valid everyMs still works: first fireAt = now()+everyMs = 1000+1000 = 2000.
+  const id = sch.schedule({ everyMs: 1000, action: () => {} });
+  assert.equal(sch.getStatus(id).fireAt, 2000);
+  sch.clearAll();
+});
+
 test("schedule validates fireAt/everyMs exclusivity and duplicate ids", () => {
   const clock = fakeClock(0);
   const sch = new ClockScheduler({ clock, timer: fakeTimer(), pollMs: 1 });
