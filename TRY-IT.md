@@ -47,6 +47,11 @@ npm run build
 This downloads the tool and gets it ready. The `npm install` step may take a
 minute the first time.
 
+> **No Clockchain account yet?** Skip the key steps — run
+> `bash packages/clock-sdk/examples/try-alarm-mcp.sh`; it mints a free demo token (no
+> signup; requires `jq`) and runs the alarm through the hosted MCP. Come back when you have
+> your own account.
+
 ## Step 2 - add your key
 
 Replace the placeholders with your own values:

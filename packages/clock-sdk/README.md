@@ -111,6 +111,14 @@ It mints **one** token (cached), checks pool health, arms an alarm, fires + anch
 - **"Keyless"** here means the *cryptographic* check (against the immutable on-chain block); the
   hosted MCP transport still needs the demo token. The disciplined-clock SDK run above is the full experience.
 
+**`try-alarm-mcp.sh` env vars** (all optional):
+
+| Var | Default | What it does |
+|---|---|---|
+| `CC_WAIT_S` | `30` | Alarm delay in seconds (time from arm → fire). |
+| `CC_ALLOW_DEGRADED` | unset (auto) | `1` = always fire on a degraded pool, `0` = refuse, unset = auto-allow only when the pool is degraded. |
+| `CC_TOKEN_FILE` | `/tmp/cc_demo_token` | Path the minted demo token is cached at (mint once, reuse). |
+
 ## Trust & security model
 
 - **Non-custodial.** The SDK holds and transmits **no private keys**. Credentials come from

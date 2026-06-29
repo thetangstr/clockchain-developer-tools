@@ -27,6 +27,11 @@ npm test
 # `npm test -w @clockchain/clock-sdk` to confirm clock-sdk's 35 on its own)
 ```
 
+> **No key yet?** Run the zero-creds alarm flow now:
+> `bash packages/clock-sdk/examples/try-alarm-mcp.sh` (mints a free demo token, no account;
+> requires `jq`). It anchors a fire and keyless-verifies it through the hosted MCP. Come
+> back to Step 3 once you have gateway credentials.
+
 ## 3. Configure (env, never committed)
 
 ```bash

@@ -6,6 +6,12 @@ verification** — to **any MCP client** (Claude Code, Cursor, Claude Desktop, C
 Hermes, OpenClaw, …) and your terminal. It wraps the live D4 node gateway at
 `node.clockchain.network`; it does **not** change the blockchain protocol.
 
+> **Fastest path — verified-time alarm, no account, one command (for agents & humans):**
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm-mcp.sh | bash
+> ```
+> (requires `jq`; mints a free demo token, no signup — anchors a fire and keyless-verifies it through the hosted MCP.)
+
 > **Install it in your MCP client:** [`INSTALL.md`](INSTALL.md) — hosted endpoint (any client, recommended) or self-host (local stdio).
 > **Non-engineer? Try it in ~10 min:** [`TRY-IT.md`](TRY-IT.md) · **Engineers:** [`QUICKSTART.md`](QUICKSTART.md)
 > **Roadmap + current limitations:** [`roadmap.md`](roadmap.md)
@@ -28,6 +34,8 @@ client's MCP config:
   }
 }
 ```
+
+Zero-creds alarm demo (no account, no build — requires `jq`): `curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm-mcp.sh | bash`
 
 CLI with an `mcp add` command (Claude Code shown):
 
@@ -114,6 +122,15 @@ reads the immutable on-chain block with no API key. That block — not the mutab
 > fire. A blockchain cannot (and, for neutrality, should not) reach out to wake your
 > systems; the companion disciplines a local clock to Clockchain (NTP-style) and fires
 > within your trust boundary, anchoring a keyless-verifiable receipt.
+>
+> **No SDK, no creds — just want to SEE it work?** Run the alarm **flow** demo:
+> `bash packages/clock-sdk/examples/try-alarm-mcp.sh` (or the curl one-liner at the top).
+> It mints a free demo token and runs the full anchor + keyless-verify cycle (`log_action`
+> polling on the hosted MCP — no SDK build). That shows the trust primitives firing; it is
+> **not** the client-side scheduler. To actually **run** a real client-side alarm, the SDK
+> path below adds the disciplined-clock sync + the `ClockScheduler` class — the true
+> auto-firing Alarm inside your trust boundary. In short: the MCP flow is the no-creds way
+> to *see* an anchored fire; the SDK is the way to *operate* a real alarm.
 >
 > **Install + operate:** [`packages/clock-sdk`](packages/clock-sdk) — quickstart, the
 > trust/security model, and a production daemon recipe (runs under `pm2`).
@@ -209,7 +226,8 @@ published** — see [roadmap.md](./roadmap.md).
 
 **Reliability gate:** a fire must actually anchor — a degraded validator pool can leave a
 receipt cache-only (`blockHeight` null). Tracked as **P0** (don't report success until
-anchored); multi-validator (Phase 3) addresses pool participation.
+anchored); multi-validator (Phase 3) addresses pool participation. The
+`try-alarm-mcp.sh` script auto-detects this and handles it — no manual step needed.
 
 ## Status
 
