@@ -63,6 +63,14 @@ export interface FireContext {
   id: string;
   /** Disciplined epoch (ms) at which the job fired. */
   firedAt: number;
+  /**
+   * The fired consensus epoch (ms) from the disciplined clock at fire time.
+   * Same reading as {@link FireContext.firedAt}; named `epochMs` to mirror
+   * {@link ClockReading} so callers can format `new Date(ctx.epochMs)`.
+   */
+  epochMs: number;
+  /** The clock's uncertainty half-width (ms) at fire time (the `±` band). */
+  uncertaintyMs: number;
   /** The scheduled fire time, epoch ms. */
   fireAt: number;
 }
@@ -98,12 +106,45 @@ interface Job {
   action: (ctx: FireContext) => unknown | Promise<unknown>;
   agentId: string;
   handle: unknown;
+  /**
+   * Consecutive fail-closed confirmed-holds since the last successful confirm
+   * or fire. Drives the exponential backoff of the hold re-arm. Reset to 0 as
+   * soon as consensus is readable again or the job fires.
+   */
+  holdCount: number;
 }
 
 const defaultTimer: Timer = {
   set: (handler, delayMs) => setTimeout(handler, delayMs),
   clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
+
+/**
+ * Node's setTimeout stores the delay as a signed 32-bit int; anything larger
+ * (~24.8 days) overflows and fires almost immediately. We hop forward in chunks
+ * no larger than this for far-future alarms.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647; // 2^31 - 1
+
+/**
+ * The next interval slot strictly after `now`. Normally `fireAt + intervalMs`;
+ * but if that slot is already in the past (downtime / a long-blocked fire), jump
+ * straight to the upcoming slot instead of replaying every missed slot in a
+ * burst (the catch-up storm). Mirrors the keeper's `nextIntervalSlot`.
+ */
+export function nextIntervalSlot(
+  fireAtMs: number,
+  intervalMs: number,
+  now: number,
+): number {
+  let next = fireAtMs + intervalMs;
+  if (next <= now) {
+    const missed = Math.ceil((now - fireAtMs) / intervalMs);
+    next = fireAtMs + missed * intervalMs;
+    if (next <= now) next += intervalMs;
+  }
+  return next;
+}
 
 export interface SchedulerOptions {
   /** Disciplined clock that drives fire decisions. Required. */
@@ -119,6 +160,27 @@ export interface SchedulerOptions {
    * crossed. A small value keeps the poll tight; tests inject 0. Default 250.
    */
   pollMs?: number;
+  /**
+   * Cap (ms) for the exponential backoff applied to the fail-closed
+   * confirmed-hold retry. When a "confirmed" job holds because consensus is
+   * unreadable at the boundary, the hold re-arm grows as
+   * `min(pollMs * 2^holdCount, maxConfirmHoldMs)` so a gateway outage is not
+   * hammered at the tight poll cadence. Default 30_000.
+   */
+  maxConfirmHoldMs?: number;
+  /**
+   * Behaviour when a "confirmed" job cannot read consensus at the boundary
+   * (the boundary `getTimestamp()` throws or returns an unparseable time).
+   *
+   * - `false` (default, fail-closed): do NOT fire; hold and retry on the next
+   *   tick. This keeps "confirmed" honest — a gateway outage never silently
+   *   downgrades the guarantee to a "soft" disciplined-clock-only fire.
+   * - `true` (fail-open): fire on the disciplined clock alone when consensus is
+   *   unavailable (availability over confirmation).
+   *
+   * Ignored for "soft" jobs (they never do a boundary read).
+   */
+  confirmFailOpen?: boolean;
 }
 
 export class ClockScheduler {
@@ -127,6 +189,8 @@ export class ClockScheduler {
   private readonly confirmSource?: ConfirmSource;
   private readonly client?: AttestSource;
   private readonly pollMs: number;
+  private readonly maxConfirmHoldMs: number;
+  private readonly confirmFailOpen: boolean;
   private readonly jobs = new Map<string, Job>();
   private seq = 0;
 
@@ -136,6 +200,8 @@ export class ClockScheduler {
     this.confirmSource = options.confirmSource;
     this.client = options.client;
     this.pollMs = options.pollMs ?? 250;
+    this.maxConfirmHoldMs = options.maxConfirmHoldMs ?? 30_000;
+    this.confirmFailOpen = options.confirmFailOpen ?? false;
   }
 
   /** Register a job and arm its timer. Returns the job id. */
@@ -145,6 +211,11 @@ export class ClockScheduler {
     }
     if (input.fireAt != null && input.everyMs != null) {
       throw new Error("schedule: provide only one of fireAt or everyMs");
+    }
+    if (input.everyMs != null && !(input.everyMs > 0)) {
+      // A non-positive interval makes nextIntervalSlot(.., 0, ..) produce NaN
+      // and tight-loop. Reject it up front.
+      throw new Error("schedule: everyMs must be > 0");
     }
     const id = input.id ?? `job_${Date.now()}_${++this.seq}`;
     if (this.jobs.has(id)) {
@@ -170,6 +241,7 @@ export class ClockScheduler {
       action: input.action,
       agentId: input.agentId ?? "clock-scheduler",
       handle: null,
+      holdCount: 0,
     };
     this.jobs.set(id, job);
     this.arm(job);
@@ -223,7 +295,34 @@ export class ClockScheduler {
   private arm(job: Job): void {
     if (job.status.state === "cancelled") return;
     const remaining = job.status.fireAt - this.clock.now().epochMs;
+    if (remaining > MAX_TIMER_DELAY_MS) {
+      // Far-future alarm: a delay beyond Node's 32-bit setTimeout cap (~24.8
+      // days) overflows and fires after ~1ms (then busy-polls). Hop forward in
+      // <=cap chunks, re-arming each time, and only do the real fire-check once
+      // the boundary is within range.
+      job.handle = this.timer.set(() => {
+        job.handle = null;
+        this.arm(job);
+      }, MAX_TIMER_DELAY_MS);
+      return;
+    }
     const delay = remaining > 0 ? remaining : this.pollMs > 0 ? this.pollMs : 0;
+    job.handle = this.timer.set(() => {
+      void this.onTick(job);
+    }, delay);
+  }
+
+  /**
+   * Re-arm a fail-closed confirmed-hold with exponential backoff:
+   * `min(pollMs * 2^holdCount, maxConfirmHoldMs)`, incrementing the per-job
+   * hold count each time. Used only when consensus is unreadable at the
+   * boundary; the normal poll cadence (see {@link arm}) is unchanged.
+   */
+  private armHold(job: Job): void {
+    if (job.status.state === "cancelled") return;
+    const base = this.pollMs > 0 ? this.pollMs : 0;
+    const delay = Math.min(base * 2 ** job.holdCount, this.maxConfirmHoldMs);
+    job.holdCount += 1;
     job.handle = this.timer.set(() => {
       void this.onTick(job);
     }, delay);
@@ -240,19 +339,44 @@ export class ClockScheduler {
     if (job.status.mode === "confirmed" && this.confirmSource) {
       const ts = await this.confirmSource.getTimestamp().catch(() => null);
       const consensusMs = ts ? parseGatewayTime(ts.madMarzulloTime) : NaN;
-      if (Number.isFinite(consensusMs) && consensusMs < job.status.fireAt) {
-        // Consensus hasn't crossed the boundary yet: wait and re-check.
-        this.arm(job);
-        return;
+      if (!Number.isFinite(consensusMs)) {
+        // Could not read consensus at the boundary (getTimestamp threw or
+        // returned an unparseable time). Fail-closed by default: do NOT fire —
+        // hold and retry on a backoff so a gateway outage isn't hammered at the
+        // tight poll cadence — so "confirmed" is never silently downgraded to
+        // "soft". Opt into fail-open with `confirmFailOpen`.
+        if (!this.confirmFailOpen) {
+          this.armHold(job);
+          return;
+        }
+        // fail-open: fall through and fire on the disciplined clock alone.
+      } else {
+        // Consensus was readable: the confirm succeeded, so reset the
+        // fail-closed hold backoff.
+        job.holdCount = 0;
+        if (consensusMs < job.status.fireAt) {
+          // Consensus hasn't crossed the boundary yet: wait and re-check.
+          this.arm(job);
+          return;
+        }
       }
     }
     await this.fire(job);
   }
 
   private async fire(job: Job): Promise<void> {
+    // The job is firing: clear any fail-closed hold backoff.
+    job.holdCount = 0;
     job.status.state = "firing";
-    const firedAt = this.clock.now().epochMs;
-    const ctx: FireContext = { id: job.status.id, firedAt, fireAt: job.status.fireAt };
+    const reading = this.clock.now();
+    const firedAt = reading.epochMs;
+    const ctx: FireContext = {
+      id: job.status.id,
+      firedAt,
+      epochMs: reading.epochMs,
+      uncertaintyMs: reading.uncertaintyMs,
+      fireAt: job.status.fireAt,
+    };
     try {
       const result = await job.action(ctx);
       job.status.result = result;
@@ -275,10 +399,19 @@ export class ClockScheduler {
       job.status.error = err instanceof Error ? err.message : String(err);
     }
 
-    // Recurring jobs re-schedule from the prior fireAt to avoid drift. (State
-    // is "fired" | "error" here; a synchronous cancel mid-fire is not possible.)
+    // Recurring jobs re-schedule on the interval grid. Normally that is just the
+    // next slot (prior fireAt + everyMs) which avoids drift; but after downtime
+    // or a long-blocked fire the next slot may already be in the past, which
+    // would replay EVERY missed slot in a burst. Fast-forward to the next slot
+    // strictly in the future so a missed window resumes on the next real
+    // boundary, firing at most once on catch-up. (State is "fired" | "error"
+    // here; a synchronous cancel mid-fire is not possible.)
     if (job.status.everyMs != null) {
-      job.status.fireAt = job.status.fireAt + job.status.everyMs;
+      job.status.fireAt = nextIntervalSlot(
+        job.status.fireAt,
+        job.status.everyMs,
+        this.clock.now().epochMs,
+      );
       if (job.status.state === "fired") job.status.state = "scheduled";
       this.arm(job);
     }
