@@ -36,13 +36,21 @@ const fireAt = clock.now().epochMs + 6000;
 console.log(`alarm armed for ${new Date(fireAt).toISOString()} (disciplined clock)`);
 
 let firedStatus = null;
+let fireWallClock = null; // wall-clock at fire, to measure fire→confirmed-block latency below
 const scheduler = new ClockScheduler({ clock, client, confirmSource: client });
 const id = scheduler.schedule({
   fireAt,
   mode: "confirmed",
   agentId: "clock-sdk-demo",
+  // NOTE: on a degraded testnet pool (participation 0% / single validator) the gateway's
+  // pool-health guard can refuse the anchor; the SDK client/log path accepts allow_degraded
+  // to proceed anyway (anchors, single-validator testnet — not court-grade).
   action: (ctx) => {
+    fireWallClock = Date.now();
+    // Surface fire latency: how far past the scheduled target the fire actually landed.
+    const lateMs = Math.round(ctx.epochMs - fireAt);
     console.log(`FIRED at disciplined ${new Date(ctx.epochMs).toISOString()} (±${Math.round(ctx.uncertaintyMs)}ms)`);
+    console.log(`fire latency: ${lateMs >= 0 ? "+" : ""}${lateMs}ms past target`);
     return { firedAt: ctx.epochMs };
   },
 });
@@ -71,6 +79,9 @@ console.log(`anchored fire: ledgerId=${ledgerId} blockHeight=${receipt?.anchor?.
 const confirmed = await client.waitForConfirmation(ledgerId, 60_000);
 if (confirmed.blockHeight == null) {
   console.error(`block not confirmed within 60s (testnet backfill lag); ledgerId=${ledgerId} — record exists but on-chain verify will be advisory only.`);
+} else if (fireWallClock != null) {
+  // Wall-clock latency from the fire to the confirmed on-chain block (dominated by block cadence).
+  console.log(`fire→confirmed block: ${((Date.now() - fireWallClock) / 1000).toFixed(2)}s (block ${confirmed.blockHeight})`);
 }
 
 // Authoritative keyless verify against the immutable block (height discovered from the confirmed record).

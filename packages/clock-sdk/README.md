@@ -147,13 +147,23 @@ It mints **one** token (cached), checks pool health, arms an alarm, fires + anch
 
 ## Latency & current limits (state honestly)
 
-- **Fire latency** ≈ sub-second to ~1s (poll interval + clock uncertainty); **proof latency**
-  ≈ 1–2s (block cadence), occasionally longer on testnet backfill.
+Measured on testnet (2026-06-29 dogfood):
+
+- **Clock read** ≈ **0.12s** (`get_timestamp` round-trip; min observed 122ms).
+- **Fire → anchored** ≈ **1.4s** observed — a real block landed in that window — i.e.
+  **well under a 3-second end-to-end budget** once the clock is synced. **Proof latency** is
+  dominated by block cadence (the wait for the next block), not by the SDK.
 - **Not microsecond / not HFT.** This serves the audit / SLA / agent-deadline tier; precision
   trading-grade timing is out of scope (use PTP).
 - **Maturity:** the current network is **single-validator testnet**, so "court-grade" is a
   **target, not a present claim** — multi-validator consensus gates that. Receipts are real
   and independently verifiable today; the validator-signature attestation is mainnet-gated.
+
+**Pool health (testnet).** The gateway may report `participation 0%` (`totalNodes:1`). If
+blocks are still advancing, **anchoring works** — but the default pool-health guard refuses to
+fire. Pass `allow_degraded:true` (or let [`examples/try-alarm-mcp.sh`](examples/try-alarm-mcp.sh)
+take its automatic fallback) to proceed, understanding the resulting receipts are
+**single-validator testnet** (anchored, not court-grade).
 
 ## Roadmap
 

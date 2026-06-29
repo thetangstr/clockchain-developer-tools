@@ -1,9 +1,9 @@
 # Quickstart - Clockchain MCP Server
 
-Run and verify the Clockchain MCP server locally. The server exposes **25 tools
-across five modules** (time, notarization, scheduler, audit, agent identity) over
-stdio; this quickstart drives the verified core — the 8 time + notarization tools.
-Everything below is copy-paste tested.
+Run and verify the Clockchain MCP server locally. The server exposes **31 tools
+across six modules** (time, notarization, scheduler, audit, agent identity, TSA) over
+stdio; this quickstart drives the verified core — **8 of the 31**, the time +
+notarization tools. Everything below is copy-paste tested.
 
 > The identity module is **verification (valid-at-T), not authentication**.
 > `resolve_agent` returns `status: "unknown"` until the EVM env vars are set - see
@@ -23,7 +23,8 @@ npm run build
 
 ```bash
 npm test
-# core: tests 19 pass 19   |   mcp-server: tests 25 pass 25
+# all workspaces pass — e.g. core 53, clock-sdk 35, mcp-server 96 (run
+# `npm test -w @clockchain/clock-sdk` to confirm clock-sdk's 35 on its own)
 ```
 
 ## 3. Configure (env, never committed)
@@ -69,7 +70,7 @@ cd packages/mcp-server && npm run demo
 
 ## 5. Verify (four levels)
 
-1. **Build + tests** - `npm run build && npm test` -> 44 pass.
+1. **Build + tests** - `npm run build && npm test` -> all workspaces pass.
 2. **Server speaks MCP** (no API key needed):
    ```bash
    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"verify","version":"1.0"}}}' \
@@ -90,8 +91,9 @@ The full server also ships the **scheduler** (`get_contract_types`,
 (`generate_audit_trail`, `generate_compliance_report`, `build_evidence_package`,
 `verify_package`), and **agent identity** (`resolve_agent`, `attest_action`,
 `verify_receipt`, `mint_identity`, `revoke_identity`, `delegate_authority`,
-`get_identity_history`, `verify_identity_at`, `verify_cross_party`) modules — 25
-tools total. Cross-party verification is keyless: it reads the immutable on-chain
+`get_identity_history`, `verify_identity_at`, `verify_cross_party`) modules, plus
+**TSA** (`tsa_issue`, `tsa_checkpoint`, `tsa_attest`, `tsa_settle`, `tsa_status`) —
+**31 tools total**. Cross-party verification is keyless: it reads the immutable on-chain
 block (`/searchAssetFromChain?blockHeight={h}`), not the mutable ledger cache.
 
 ## Optional: ERC-8004 identity read
