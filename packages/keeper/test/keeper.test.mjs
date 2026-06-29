@@ -1,5 +1,5 @@
 // End-to-end keeper data-plane behaviour, fully offline:
-//   schedule -> fire -> deliver (mock webhook) -> anchor; AGE-193 "not done until
+//   schedule -> fire -> deliver (mock webhook) -> anchor; truthful anchoring "not done until
 //   anchored"; anchor-once-then-poll (no credit re-charge); due-trigger-never-
 //   dropped; re-arm on restart; dead-letter across ticks; cancel scoping; interval
 //   re-arm + fast-forward; no double-delivery across an anchor retry.
@@ -149,7 +149,7 @@ test("not-due triggers are not fired", async () => {
   assert.equal(fetch.calls.length, 0);
 });
 
-test("AGE-193 + credit-safety: anchored ONCE, then polled read-only (no re-charge)", async () => {
+test("truthful anchoring + credit-safety: anchored ONCE, then polled read-only (no re-charge)", async () => {
   const anchorer = anchorPendingThenAnchored();
   const { keeper, store } = makeKeeper({ anchorer, idGen: () => "trgP" });
   await keeper.schedule({ sub: "u1", fireAtMs: 0, target: "https://127.0.0.1/h" });

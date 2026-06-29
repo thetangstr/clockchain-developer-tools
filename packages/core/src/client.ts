@@ -173,7 +173,7 @@ export function parseClockTime(value: unknown): number {
 }
 
 /**
- * Derive the {@link AnchorStatus} of a write from its blockHeight (AGE-193).
+ * Derive the {@link AnchorStatus} of a write from its blockHeight (truthful anchoring).
  * "anchored" once a block height is present; otherwise "degraded" when the pool
  * is degraded (0% participation) or plain "pending". Centralized so every write
  * path stamps status the same way.
@@ -229,7 +229,7 @@ export class ClockchainClient {
   }
 
   /**
-   * Node-pool health, derived from {@link getTimestamp} (AGE-193). The gateway's
+   * Node-pool health, derived from {@link getTimestamp} (truthful anchoring). The gateway's
    * `nodeParticipation%` is the load-bearing signal: 0 means the pool is
    * degraded and a write may not anchor. Callers (and the MCP pool-health guard)
    * use this to refuse or warn before reporting a write as success.
@@ -297,7 +297,7 @@ export class ClockchainClient {
       additionalInfo: entry.additionalInfo ?? "",
     };
     const res = await this.request<LogResponse>("/log", { method: "POST", body });
-    // AGE-193: stamp anchor status from blockHeight so a pending write is never
+    // Truthful anchoring: stamp anchor status from blockHeight so a pending write is never
     // mistaken for an anchored one. blockHeight is null on create (pending).
     res.status = deriveAnchorStatus(res.blockHeight);
     return res;
@@ -330,7 +330,7 @@ export class ClockchainClient {
         res,
       );
     }
-    // AGE-193: stamp anchor status so reads carry the same honest signal writes do.
+    // Truthful anchoring: stamp anchor status so reads carry the same honest signal writes do.
     res.status = deriveAnchorStatus(res.blockHeight);
     return res;
   }
@@ -354,14 +354,14 @@ export class ClockchainClient {
       await this.delay(500);
     }
     if (!last) last = await this.getLedgerEntry(ledgerId);
-    // AGE-193: on timeout do NOT return this as unqualified success — it is still
+    // Truthful anchoring: on timeout do NOT return this as unqualified success — it is still
     // pending. Stamp the honest status (getLedgerEntry sets it, but be explicit).
     last.status = deriveAnchorStatus(last.blockHeight);
     return last;
   }
 
   /**
-   * Re-poll a batch of pending writes until each anchors (AGE-193). For every
+   * Re-poll a batch of pending writes until each anchors (truthful anchoring). For every
    * ledgerId, {@link waitForConfirmation} runs up to `timeoutMs`; a lookup that
    * never resolves is skipped (best-effort), so the result holds whatever
    * records were readable, each with its anchor status stamped.
@@ -417,7 +417,7 @@ export class ClockchainClient {
       const id = await resolveAgent(this.config, input.agentId).catch(() => null);
       if (id) identity = { resolved: id.status !== "unknown", status: id.status };
     }
-    // Best-effort pool health (AGE-193): drives the receipt's top-level status
+    // Best-effort pool health (truthful anchoring): drives the receipt's top-level status
     // (degraded vs pending when not yet anchored) and is attached for the caller.
     // A caller (e.g. the MCP pool-health guard) may thread in the health it
     // already fetched to avoid a second /getTime round-trip; pass undefined to
@@ -473,7 +473,7 @@ export class ClockchainClient {
       ? { resolved: true, status: receipt.identity.status }
       : null;
     // Best-effort pool health so a still-pending re-poll can report "degraded"
-    // (AGE-193) rather than a bare "pending" when the pool is down.
+    // (truthful anchoring) rather than a bare "pending" when the pool is down.
     const poolHealth = await this.getPoolHealth().catch(() => null);
 
     return buildReceipt({
@@ -788,7 +788,7 @@ export class ClockchainClient {
       ledgerId: log.ledgerId,
       blockHeight: log.blockHeight,
       status: "active",
-      // AGE-193: anchor status derived from blockHeight, not hardcoded success.
+      // Truthful anchoring: anchor status derived from blockHeight, not hardcoded success.
       anchorStatus: deriveAnchorStatus(log.blockHeight),
     };
   }
@@ -1170,7 +1170,7 @@ export class ClockchainClient {
     const textForMatch = typeof parsed === "string" ? parsed : JSON.stringify(parsed ?? "");
     if (res.status === 429 || /rate limit exceeded/i.test(textForMatch)) {
       // Thread the gateway's own Retry-After (when it sends one) so callers get
-      // a real back-off hint instead of a bare 429 (AGE-194). Defensive access:
+      // a real back-off hint instead of a bare 429 (per-user auth). Defensive access:
       // a non-spec Response (or test stub) may not carry a Headers object.
       const retryAfter = parseRetryAfter(res.headers?.get?.("retry-after"));
       throw new RateLimitError("Rate limit exceeded", res.status, parsed, retryAfter);
@@ -1265,7 +1265,7 @@ export class ClockchainClient {
 
     if (res.status === 429 || /rate limit exceeded/i.test(textForMatch)) {
       // Thread the gateway's own Retry-After (when it sends one) so callers get
-      // a real back-off hint instead of a bare 429 (AGE-194). Defensive access:
+      // a real back-off hint instead of a bare 429 (per-user auth). Defensive access:
       // a non-spec Response (or test stub) may not carry a Headers object.
       const retryAfter = parseRetryAfter(res.headers?.get?.("retry-after"));
       throw new RateLimitError("Rate limit exceeded", res.status, parsed, retryAfter);

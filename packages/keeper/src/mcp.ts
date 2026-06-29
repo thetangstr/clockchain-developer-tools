@@ -7,7 +7,7 @@
  * does not touch the deployed mcp-server's surface or its conformance/coverage
  * gates.
  *
- * Tenant isolation (HIGH-3, AGE-194): with `requireIdentity` (HTTP/prod mode) the
+ * Tenant isolation (HIGH-3, per-user auth): with `requireIdentity` (HTTP/prod mode) the
  * owner is taken ONLY from the transport-resolved identity (the caller's BYO-key
  * fingerprint). The client-supplied `sub` argument is IGNORED for list/cancel, and
  * a request with no resolved identity is REFUSED — so a caller cannot pass `sub`
@@ -175,7 +175,7 @@ export function registerKeeperTools(
       title: "List your scheduled triggers",
       description:
         "List the triggers you registered with the keeper, including each one's status, " +
-        "next fire time, and per-fire delivery + anchor status (AGE-193: a fire is not " +
+        "next fire time, and per-fire delivery + anchor status (truthful anchoring: a fire is not " +
         "done until anchored).",
       inputSchema: {
         sub: z

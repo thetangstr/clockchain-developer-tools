@@ -7,7 +7,7 @@
  */
 
 /**
- * Anchor status for a write (AGE-193 — "never report success on an un-anchored
+ * Anchor status for a write (truthful anchoring — "never report success on an un-anchored
  * fire"):
  *   - "anchored": the entry has a blockHeight (confirmed on-chain).
  *   - "pending":  submitted, no blockHeight yet (poll to confirm).
@@ -104,7 +104,7 @@ export interface LogResponse extends LogEntry {
   assetName: string | null;
   type: string | null;
   /**
-   * Anchor status derived from blockHeight by the client (AGE-193). Optional
+   * Anchor status derived from blockHeight by the client (truthful anchoring). Optional
    * because the raw gateway payload does not carry it — the client stamps it on
    * the way out so a caller never mistakes a pending write for success.
    */
@@ -148,7 +148,7 @@ export interface AgentReceipt {
   schema: "clockchain.receipt/v1";
   network: string;
   /**
-   * Top-level anchor status (AGE-193). "anchored" only once the event has a
+   * Top-level anchor status (truthful anchoring). "anchored" only once the event has a
    * blockHeight; otherwise "pending" (or "degraded" when the pool is degraded
    * and the event is not yet anchored). A receipt is NOT a success claim until
    * this is "anchored".
@@ -181,7 +181,7 @@ export interface AgentReceipt {
     note: string;
   };
   verify: { how: string };
-  /** Node-pool health at attest time (AGE-193). Present when it could be read. */
+  /** Node-pool health at attest time (truthful anchoring). Present when it could be read. */
   poolHealth?: PoolHealth;
   disclaimer: string;
 }
@@ -346,7 +346,7 @@ export interface IdentityWrite {
   /** The identity lifecycle state this write records. */
   status: "active" | "revoked" | "delegated";
   /**
-   * Anchor status derived from blockHeight (AGE-193) — distinct from the
+   * Anchor status derived from blockHeight (truthful anchoring) — distinct from the
    * lifecycle `status`. "anchored" only once the write has a blockHeight, so a
    * caller never treats an un-anchored mint/revoke/delegate as confirmed.
    */

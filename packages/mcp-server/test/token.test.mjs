@@ -49,7 +49,7 @@ test("looksLikeSelfServe is a cheap structural pre-check", () => {
   assert.equal(looksLikeSelfServe("team-token"), false);
 });
 
-// --- AGE-194: distinct jti + optional sub ----------------------------------
+// --- per-user auth: distinct jti + optional sub ----------------------------------
 
 test("each minted token carries a unique jti, so two mints are distinct", () => {
   const a = mintToken(SECRET, 3600, 1000);

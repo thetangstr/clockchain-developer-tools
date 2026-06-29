@@ -6,7 +6,7 @@
  *   - control plane: the keeper MCP server, over HTTP (MCP_TRANSPORT=http, for the
  *     hosted deployment) or stdio (default, for a local agent).
  *
- * Per-user auth (AGE-194): in HTTP mode a caller brings their own Clockchain key
+ * Per-user auth: in HTTP mode a caller brings their own Clockchain key
  * via `x-clockchain-api-key`; its fingerprint becomes the request `sub` that
  * scopes keeper_list / keeper_cancel. The keeper's OWN delegated key (from env) is
  * what anchors fires. A bearer-token gate (KEEPER_AUTH_TOKENS) guards the endpoint.
@@ -70,7 +70,7 @@ function parseTokens(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((t) => t.trim()).filter((t) => t.length > 0);
 }
 
-/** Stable, non-reversible owner id from a caller's API key (AGE-194 tenant scope). */
+/** Stable, non-reversible owner id from a caller's API key (per-user auth tenant scope). */
 function fingerprint(apiKey: string): string {
   return "byok:" + createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
 }
@@ -129,7 +129,7 @@ async function runHttp(keeper: Keeper, env: NodeJS.ProcessEnv): Promise<void> {
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    // BYO-key (AGE-194): the caller's own key fingerprint scopes their triggers.
+    // BYO-key (per-user auth): the caller's own key fingerprint scopes their triggers.
     const apiKey = firstHeader(req.headers["x-clockchain-api-key"]).trim();
     const requestSub = apiKey ? fingerprint(apiKey) : undefined;
     try {

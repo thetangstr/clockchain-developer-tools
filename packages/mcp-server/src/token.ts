@@ -22,15 +22,15 @@ export interface TokenPayload {
   iat: number; // issued-at, unix seconds
   exp: number; // expiry, unix seconds
   /**
-   * Unique token id (AGE-194). Makes every minted token distinct — even two
+   * Unique token id (per-user auth). Makes every minted token distinct — even two
    * minted in the same second — so the per-request rate limiter can bucket each
    * token independently instead of collapsing a shared-egress public app's
    * traffic into one IP bucket. Optional in the type for backward-compatible
-   * verification of pre-AGE-194 tokens; always set by `mintToken`.
+   * verification of older tokens; always set by `mintToken`.
    */
   jti?: string;
   /**
-   * Optional subject (AGE-194): a NON-AUTHORITATIVE label for the principal this
+   * Optional subject (per-user auth): a NON-AUTHORITATIVE label for the principal this
    * token is intended for. It is supplied on the UNAUTHENTICATED mint endpoint,
    * so it is NOT trusted and does NOT isolate rate-limit buckets or budgets — the
    * per-request limiter keys on `jti` (per token), never on `sub`. `sub` becomes
@@ -53,7 +53,7 @@ const sign = (payloadSeg: string, secret: string): string =>
 
 /**
  * Mint a signed self-serve token. `ttlSeconds` defaults to 7 days. Each token
- * gets a unique `jti` so it is independently rate-limitable (AGE-194). `sub` is
+ * gets a unique `jti` so it is independently rate-limitable (per-user auth). `sub` is
  * an optional NON-AUTHORITATIVE label only (see {@link TokenPayload.sub}); it
  * never affects bucketing. Callers should sanitize `sub` before passing it.
  * `nowSec` and `jti` are injectable for tests.

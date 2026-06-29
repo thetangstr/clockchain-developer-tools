@@ -17,7 +17,7 @@ import { buildServer } from "./server.js";
  * Stateless StreamableHTTP: one transport + server per request (matches the main
  * MCP server's wiring and ChatGPT's connector expectations).
  *
- * Public listing later requires OAuth 2.1 (AGE-194) — see the README + launch plan.
+ * Public listing later requires OAuth 2.1 (per-user auth) — see the README + launch plan.
  */
 
 const firstHeader = (h: string | string[] | undefined): string =>

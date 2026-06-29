@@ -30,7 +30,7 @@ export interface TsaAnchor {
   /** Clockchain consensus/record time for this anchor (createdTimestamp). */
   time: string | null;
   /**
-   * Anchor status derived from blockHeight (AGE-193): "anchored" once a block
+   * Anchor status derived from blockHeight (truthful anchoring): "anchored" once a block
    * height is present, else "pending" — so a TSA write is never read as success
    * before it is on-chain.
    */
@@ -151,7 +151,7 @@ function anchorOf(log: LogResponse): TsaAnchor {
     ledgerId: log.ledgerId,
     blockHeight: log.blockHeight,
     time: log.createdTimestamp ?? null,
-    // AGE-193: carry the honest anchor status through the whole TSA lifecycle.
+    // Truthful anchoring: carry the honest anchor status through the whole TSA lifecycle.
     status: log.status ?? deriveAnchorStatus(log.blockHeight),
   };
 }

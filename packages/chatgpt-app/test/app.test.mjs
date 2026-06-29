@@ -2,7 +2,7 @@
 //
 // Offline. Verifies the curated tool surface, the Apps SDK annotations/hints,
 // the widget output-template linkage, the widget resource registration, the
-// dev-mode x-api-key auth resolution, and — load-bearing — the AGE-193 truthful
+// dev-mode x-api-key auth resolution, and — load-bearing — the truthful anchoring
 // status: a verify result that is not anchored on-chain is reported as PENDING
 // (confirmed:false), never as confirmed.
 import { test } from "node:test";
@@ -81,7 +81,7 @@ test("buildServer constructs without throwing (registers tools + widget resource
   assert.ok(server, "buildServer returns a server");
 });
 
-test("AGE-193: an un-anchored verify result is PENDING, never confirmed", async () => {
+test("truthful anchoring: an un-anchored verify result is PENDING, never confirmed", async () => {
   // Fail all upstream calls so nothing resolves to an on-chain block.
   globalThis.fetch = async () => ({
     status: 400,

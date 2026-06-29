@@ -53,7 +53,7 @@ export function clientIp(
  * is present, in which case the server uses the delegated (env) key. The endpoint
  * is fixed server-side (callers cannot redirect it).
  *
- * RECOMMENDED per-user production path (AGE-194): BYO key gives each user their
+ * RECOMMENDED per-user production path (per-user auth): BYO key gives each user their
  * own identity, credit budget, and rate-limit bucket. The self-serve `/token`
  * mint is a SHARED testnet pool for quick trials only. MEDIUM-TERM TODO: map a
  * token's `sub` to a distinct delegated sub-key / credit bucket so `/token` can
@@ -142,7 +142,7 @@ export function isHealthCheck(
  * once by the auth step, threaded in to avoid a second HMAC verify per request).
  * When present we key on `jti:<jti>` so each minted token gets its own bucket —
  * a shared-egress public app that mints many tokens isn't collapsed into one IP
- * bucket (AGE-194).
+ * bucket (per-user auth).
  *
  * SECURITY: we deliberately do NOT key on a token's `sub`. `sub` is supplied on
  * the unauthenticated mint endpoint, so an attacker could mint `sub=<victim>` and
@@ -176,7 +176,7 @@ export function callerKey(
 /**
  * Sanitize a caller-supplied `sub` before it is logged or embedded in a token.
  * Strips control chars, restricts to a conservative identifier charset, and caps
- * the length — defends against log injection and token/Map bloat (AGE-194). The
+ * the length — defends against log injection and token/Map bloat (per-user auth). The
  * value is a non-authoritative LABEL only; it never affects rate-limit bucketing.
  */
 export function sanitizeSub(raw: string | undefined): string | undefined {
@@ -189,7 +189,7 @@ export function sanitizeSub(raw: string | undefined): string | undefined {
 
 /**
  * Outcome of a rate-limit check. Carries the data needed to set standard
- * `X-RateLimit-*` (and, when blocked, `Retry-After`) response headers — AGE-194.
+ * `X-RateLimit-*` (and, when blocked, `Retry-After`) response headers — per-user auth.
  */
 export interface RateLimitResult {
   /** True if the request is allowed; false if the key is over its limit. */
@@ -210,7 +210,7 @@ export interface RateLimitResult {
  * `allow()` returns a {@link RateLimitResult} (not a bare boolean) so callers
  * can emit `X-RateLimit-*` / `Retry-After` headers on both 429 and success.
  *
- * Memory is bounded (AGE-194): the per-key `hits` map is pruned of expired
+ * Memory is bounded (per-user auth): the per-key `hits` map is pruned of expired
  * windows opportunistically (the stale entry for a missed key is overwritten)
  * and via a periodic full sweep, so an attacker rotating keys (e.g. a fresh
  * `jti`/IP per request) cannot grow the map without bound.
@@ -310,7 +310,7 @@ export async function runHttp(): Promise<void> {
   // 10/hour) — this is the only guard on the shared delegated-key budget, so it
   // must never be bypassable. `sub` is NOT used to bucket mints: it is supplied
   // unauthenticated, so keying on it would let an attacker rotate `sub` to escape
-  // the ceiling and drain the shared budget (AGE-194).
+  // the ceiling and drain the shared budget (per-user auth).
   const signingSecret = process.env.MCP_TOKEN_SIGNING_SECRET ?? "";
   const selfServeEnabled = signingSecret.length > 0;
   const mintPerHour = Number(process.env.MCP_TOKEN_MINT_PER_HOUR ?? "10");
@@ -389,7 +389,7 @@ export async function runHttp(): Promise<void> {
       // ALWAYS enforce the per-IP abuse ceiling. This is the only guard on the
       // shared delegated-key budget, so it must be unconditional and never keyed
       // on attacker-controlled input. `sub` is NOT used here: rotating `sub` must
-      // not let a caller escape this ceiling and drain the shared budget (AGE-194).
+      // not let a caller escape this ceiling and drain the shared budget (per-user auth).
       const mintCheck = mintLimiter.enabled ? mintLimiter.allow(`mint:ip:${ip}`) : null;
       if (mintCheck && !mintCheck.allowed) {
         const headers = rateLimitHeaders(mintCheck);
@@ -497,7 +497,7 @@ export async function runHttp(): Promise<void> {
           },
           // For production or per-user usage, bring your own Clockchain key so
           // each user is isolated. The self-serve MCP token is a shared testnet
-          // pool for quick trials. (AGE-194 medium-term: a `sub`-scoped delegated
+          // pool for quick trials. (per-user auth medium-term: a `sub`-scoped delegated
           // sub-key/credit bucket will give /token per-user isolation too.)
           recommendation:
             "For production or per-user usage, bring your own Clockchain key " +
@@ -537,7 +537,7 @@ export async function runHttp(): Promise<void> {
 
     try {
       // Surface the standard rate-limit headers on success too, so clients can
-      // see their remaining budget before they hit the limit (AGE-194).
+      // see their remaining budget before they hit the limit (per-user auth).
       if (rl) {
         for (const [k, v] of Object.entries(rateLimitHeaders(rl))) {
           res.setHeader(k, v);

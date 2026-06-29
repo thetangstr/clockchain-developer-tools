@@ -28,7 +28,7 @@ For each due trigger (`fireAtMs <= disciplinedNow`):
    exponential backoff; exhaustion **dead-letters** the delivery.
 2. **Anchor** the fire via `attest_action` (`@clockchain/core`) → an Agent
    Attested Receipt (event hash + on-chain anchor + consensus time).
-3. **Finalize** — **AGE-193**: a fire is *not done until anchored*. A pending or
+3. **Finalize** — **truthful anchoring**: a fire is *not done until anchored*. A pending or
    failed anchor leaves the trigger armed, so it is retried next tick and re-armed
    after a restart. A due trigger is **never silently dropped**.
 
@@ -114,7 +114,7 @@ confirms via `completeReceipt` — a READ-ONLY re-fetch that spends no credit. T
 dispatch loop never blocks on `wait:true` and never re-anchors, so a slow block or
 a long retry backlog cannot drain credits or stall other due triggers.
 
-## Per-user auth model (AGE-194)
+## Per-user auth model
 
 Reuses the mcp-server's **bring-your-own-key** model. In HTTP mode a caller sends
 their own Clockchain key as `x-clockchain-api-key`; a non-reversible fingerprint of

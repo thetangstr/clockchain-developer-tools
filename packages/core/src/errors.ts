@@ -22,7 +22,7 @@ export class ApiError extends Error {
 export class RateLimitError extends ApiError {
   /**
    * Seconds to wait before retrying, parsed from the upstream gateway's
-   * `Retry-After` header when present (AGE-194). `undefined` when the gateway
+   * `Retry-After` header when present (per-user auth). `undefined` when the gateway
    * gave no hint. Surfaced to MCP callers so an agent can back off correctly.
    */
   readonly retryAfter?: number;
@@ -79,7 +79,7 @@ export class AuthError extends ApiError {
 }
 
 /**
- * Node pool degraded (AGE-193): 0% node participation, so a write may not
+ * Node pool degraded (truthful anchoring): 0% node participation, so a write may not
  * anchor. Raised by the pool-health guard to refuse a write that would likely
  * report success without anchoring, unless the caller explicitly opts in.
  */
@@ -95,7 +95,7 @@ export class PoolDegradedError extends ApiError {
 }
 
 /**
- * A write was submitted but is not yet anchored on-chain (AGE-193). Surfaced so
+ * A write was submitted but is not yet anchored on-chain (truthful anchoring). Surfaced so
  * a pending write is never silently reported as confirmed success; the caller
  * should poll (get_log_entry / complete_attestation) until it anchors.
  */
