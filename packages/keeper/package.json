@@ -1,0 +1,54 @@
+{
+  "name": "@clockchain/keeper",
+  "version": "0.1.0",
+  "description": "Hosted keeper: an off-chain dispatch worker that fires verified-time triggers while the client is offline, delivers Standard-Webhooks-style signed POSTs, and anchors each fire as a keyless-verifiable receipt. Control plane via MCP tools; data plane via an always-on loop.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "clockchain-keeper": "dist/worker.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "clockchain",
+    "keeper",
+    "scheduler",
+    "webhook",
+    "standard-webhooks",
+    "verified-time",
+    "mcp",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thetangstr/clockchain-developer-tools.git",
+    "directory": "packages/keeper"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test",
+    "start": "node dist/worker.js",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@clockchain/clock-sdk": "*",
+    "@clockchain/core": "*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.24"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
