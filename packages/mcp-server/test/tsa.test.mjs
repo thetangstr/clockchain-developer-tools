@@ -21,7 +21,7 @@ function collectTools() {
 
 const textOf = (res) => (res.content || []).map((c) => c.text).join("\n");
 
-// A healthy /getTime so the AGE-193 pool-health guard passes by default.
+// A healthy /getTime so the truthful anchoring pool-health guard passes by default.
 const HEALTHY_GETTIME = {
   success: true,
   data: { "nodeParticipation%": 100, totalNodes: 1, blockHeight: "1", madMarzulloTime: "t" },

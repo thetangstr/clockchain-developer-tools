@@ -15,7 +15,7 @@
  * Due triggers are processed by a bounded concurrency pool and capped per tick, so
  * one slow/large batch cannot starve the rest.
  *
- * AGE-193 invariant: a due trigger leaves the due set ONLY after its fire is
+ * Truthful anchoring invariant: a due trigger leaves the due set ONLY after its fire is
  * anchored. A pending/failed anchor leaves it armed, so a fire is never silently
  * dropped — it is retried next tick and re-armed after a restart. Credit-safety:
  * the chargeable anchor write happens once; later ticks poll read-only.
@@ -143,7 +143,7 @@ export class Keeper {
     return trigger;
   }
 
-  /** List triggers, optionally scoped to one owner (AGE-194 tenant isolation). */
+  /** List triggers, optionally scoped to one owner (per-user auth tenant isolation). */
   async list(sub?: string): Promise<Trigger[]> {
     const all = await this.d.store.all();
     const scoped = sub ? all.filter((t) => t.sub === sub) : all;

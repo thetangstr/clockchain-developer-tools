@@ -68,7 +68,7 @@ export function buildReceipt(args: {
   const { input, eventHash, network, log, block, validation, identity, poolHealth } =
     args;
   const confirmed = log.blockHeight != null;
-  // AGE-193: never report an un-anchored fire as success. "anchored" only when
+  // Truthful anchoring: never report an un-anchored fire as success. "anchored" only when
   // confirmed; otherwise "degraded" if the pool is degraded (0% participation),
   // else plain "pending".
   const status: AnchorStatus = confirmed

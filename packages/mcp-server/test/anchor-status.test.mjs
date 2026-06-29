@@ -1,4 +1,4 @@
-// AGE-193 — "never report success on an un-anchored fire" (MCP tool layer).
+// Truthful anchoring — "never report success on an un-anchored fire" (MCP tool layer).
 // Drives the real handlers from registerTools() via a fake server; global fetch
 // is stubbed (no network).
 import { test } from "node:test";

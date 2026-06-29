@@ -1,4 +1,4 @@
-// AGE-193 — "never report success on an un-anchored fire" (core layer).
+// Truthful anchoring — "never report success on an un-anchored fire" (core layer).
 // Offline: global fetch is stubbed (no network).
 import { test } from "node:test";
 import assert from "node:assert/strict";

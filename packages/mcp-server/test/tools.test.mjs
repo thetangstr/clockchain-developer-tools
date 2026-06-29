@@ -27,7 +27,7 @@ function collectTools() {
 
 const textOf = (res) => (res.content || []).map((c) => c.text).join("\n");
 
-// A healthy /getTime response so the AGE-193 pool-health guard (getPoolHealth)
+// A healthy /getTime response so the truthful anchoring pool-health guard (getPoolHealth)
 // passes by default in write tests that don't care about pool health.
 const HEALTHY_GETTIME = {
   success: true,

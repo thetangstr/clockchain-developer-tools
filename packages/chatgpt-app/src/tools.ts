@@ -17,7 +17,7 @@
  * _meta["openai/outputTemplate"] = "ui://widget/receipt.html" and return
  * `structuredContent` (read by the widget as window.openai.toolOutput).
  *
- * AGE-193: the widget output's `status` is "anchored" ONLY when a blockHeight is
+ * Truthful anchoring: the widget output's `status` is "anchored" ONLY when a blockHeight is
  * present — a pending write is never presented as confirmed.
  */
 import {
@@ -112,7 +112,7 @@ type WidgetOutput = {
   raw: unknown;
 };
 
-/** AGE-193: anchored ONLY when a blockHeight is present. */
+/** Truthful anchoring: anchored ONLY when a blockHeight is present. */
 function anchorStatus(blockHeight: unknown): "anchored" | "pending" {
   return blockHeight != null && blockHeight !== "" ? "anchored" : "pending";
 }

@@ -32,11 +32,11 @@ Launch focus = **time services only** (verified timestamping + verification).
 The two verify tools link the widget via `_meta["openai/outputTemplate"]` and
 return `structuredContent`, which the widget reads as `window.openai.toolOutput`.
 
-### Truthful confirmation (AGE-193)
+### Truthful anchoring
 
 The widget shows **"pending / unconfirmed" until a `blockHeight` is present**. A
 recorded-but-not-yet-anchored entry is **never** rendered as confirmed — matching
-the AGE-193 semantics in `@clockchain/core` (`status: "anchored"` only once the
+the truthful-anchoring semantics in `@clockchain/core` (`status: "anchored"` only once the
 event has a block height).
 
 ## Build
@@ -119,12 +119,12 @@ No OAuth and no submission needed for this — it is a **private** connector.
 - **Any other key** → treated as the caller's own Clockchain key (BYO).
 - **No key** → `401` with guidance.
 
-## Going public (OAuth + AGE-193/AGE-194)
+## Going public (OAuth + truthful anchoring / per-user auth)
 
 Public listing in ChatGPT does **not** allow user-supplied API keys. It requires
 **OAuth 2.1** (MCP-conformant discovery, DCR/CIMD, PKCE S256, `resource`→`aud`)
 mapping each ChatGPT user to a per-user Clockchain key, plus the launch gates
-**AGE-193** (truthful confirmation) and **AGE-194** (per-user auth / token model).
+**truthful anchoring** and **per-user auth**.
 Details and sequencing: [`../../mcp-launch-plan.md`](../../mcp-launch-plan.md).
 
 This scaffold deliberately stops short of OAuth, deployment, and submission.

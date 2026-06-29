@@ -2,7 +2,7 @@
 
 *Goal: GitHub Actions deploys land on the dedicated `clockchain-mcp` project. `deploy.yml` is **already** updated (project_id, WIF provider `…/886160542191/…`, SA `gh-deploy@clockchain-mcp`). What remains is creating the GCP-side WIF infra + secrets in `clockchain-mcp` — all **human gcloud/IAM steps** (Claude cannot run gcloud or change IAM).*
 
-**Until these run, merging the AGE-193 PR will make the deploy job fail at the WIF auth step.** So: run this → verify a deploy → then merge PR #78.
+**Until these run, merging the truthful-anchoring PR will make the deploy job fail at the WIF auth step.** So: run this → verify a deploy → then merge PR #78.
 
 ## 0. Verify the project number matches deploy.yml
 ```bash
@@ -101,4 +101,4 @@ curl -s -o /dev/null -w '%{http_code}' "$URL/mcp"       # 401 (auth guard)
 gcloud auth + all IAM bindings · org-policy override · secret values (copy/rotate from yarda) · the CLIENT/WALLET env values · the GitHub Actions re-run.
 
 ## Then
-Once a deploy succeeds on `clockchain-mcp`, **merge PR #78** → AGE-193 deploys to the live account.
+Once a deploy succeeds on `clockchain-mcp`, **merge PR #78** → the truthful-anchoring changes deploy to the live account.

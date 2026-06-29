@@ -81,7 +81,7 @@ test("body 'Rate limit exceeded' maps to RateLimitError even on 200", async () =
   await assert.rejects(() => new ClockchainClient(cfg).getTime(), RateLimitError);
 });
 
-// --- AGE-194: thread the gateway's Retry-After -----------------------------
+// --- per-user auth: thread the gateway's Retry-After -----------------------------
 
 test("parseRetryAfter handles delta-seconds, HTTP-date, and junk", () => {
   assert.equal(parseRetryAfter("120"), 120);          // delta-seconds

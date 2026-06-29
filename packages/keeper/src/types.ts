@@ -5,7 +5,7 @@
  * fires a trigger when Clockchain-disciplined time passes `fireAtMs`, even if the
  * agent that registered it is offline. Each fire produces a {@link FireRecord}.
  *
- * AGE-193 honesty: a fire is NOT "done" until it is anchored on-chain. The fire's
+ * Truthful anchoring: a fire is NOT "done" until it is anchored on-chain. The fire's
  * `anchor.status` is "pending" until a blockHeight lands, then "anchored". The
  * trigger is only retired (status "done") once its terminal fire is anchored, so
  * a crash between deliver and anchor re-arms the fire on reboot instead of losing
@@ -35,7 +35,7 @@ export type TriggerStatus =
 /** Delivery outcome of a single fire's webhook POST chain. */
 export type DeliveryStatus = "pending" | "delivered" | "dead";
 
-/** On-chain anchor status of a single fire (AGE-193). */
+/** On-chain anchor status of a single fire (truthful anchoring). */
 export type FireAnchorStatus = "pending" | "anchored";
 
 /** One fire of a trigger: the verified-time instant + its delivery + its anchor. */
@@ -76,7 +76,7 @@ export interface FireRecord {
 export interface Trigger {
   id: string;
   /**
-   * Owner identity (AGE-194). With bring-your-own-key, this is the caller's
+   * Owner identity (per-user auth). With bring-your-own-key, this is the caller's
    * Clockchain identity / key fingerprint; it scopes list/cancel so one tenant
    * cannot see or cancel another's triggers.
    */

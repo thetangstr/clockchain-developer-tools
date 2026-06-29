@@ -110,7 +110,7 @@ test("rate limiter enforces per-key fixed window", () => {
   assert.equal(rl.allow("a", 60_001).allowed, true); // window rolled over
 });
 
-// --- AGE-194: rate-limit metadata + headers --------------------------------
+// --- per-user auth: rate-limit metadata + headers --------------------------------
 
 test("allow() returns {allowed,limit,remaining,resetAt} metadata", () => {
   const rl = createRateLimiter(3, 60_000);
@@ -148,7 +148,7 @@ test("callerKey buckets a self-serve request on its (verified) jti, never sub", 
   assert.equal(callerKey({}, "9.9.9.9"), "ip:9.9.9.9");
 });
 
-test("SECURITY: callerKey never buckets on an attacker-chosen sub (AGE-194)", () => {
+test("SECURITY: callerKey never buckets on an attacker-chosen sub (per-user auth)", () => {
   const SECRET = "rk-secret";
   // Two tokens minted with the SAME sub but distinct jti must land in DISTINCT
   // buckets — otherwise an attacker minting sub=victim could burn a victim's
@@ -162,7 +162,7 @@ test("SECURITY: callerKey never buckets on an attacker-chosen sub (AGE-194)", ()
   assert.equal(keyB, "jti:jti-B");
 });
 
-test("sanitizeSub strips unsafe chars, caps length, drops empties (AGE-194)", () => {
+test("sanitizeSub strips unsafe chars, caps length, drops empties (per-user auth)", () => {
   assert.equal(sanitizeSub("user@example.com"), "user@example.com");
   assert.equal(sanitizeSub("ok.name_123:tag+x-y"), "ok.name_123:tag+x-y");
   // control chars / newlines (log injection) removed
@@ -177,7 +177,7 @@ test("sanitizeSub strips unsafe chars, caps length, drops empties (AGE-194)", ()
   assert.equal(sanitizeSub(undefined), undefined);
 });
 
-test("rate limiter evicts expired entries to bound memory (AGE-194)", () => {
+test("rate limiter evicts expired entries to bound memory (per-user auth)", () => {
   const rl = createRateLimiter(5, 1000); // window + prune-interval = 1000ms
   // Fill window 1 with many distinct keys (e.g. attacker rotating jti/IP).
   for (let i = 0; i < 20; i++) rl.allow(`k${i}`, 0);

@@ -54,7 +54,7 @@ const allowDegradedSchema = z
   );
 
 /**
- * Success payload for a WRITE that is honest about anchoring (AGE-193). Derives
+ * Success payload for a WRITE that is honest about anchoring (truthful anchoring). Derives
  * the anchor status (from an explicit `status`, else from blockHeight) and, when
  * the write is NOT anchored, attaches an explicit PENDING note instead of an
  * unqualified success — so a caller never treats a pending write as confirmed.
@@ -104,7 +104,7 @@ function okWrite(result: object): Record<string, unknown> {
 }
 
 /**
- * Pool-health guard (AGE-193): refuse a write when the node pool is degraded
+ * Pool-health guard (truthful anchoring): refuse a write when the node pool is degraded
  * (0% participation), since the write may report success without anchoring.
  * `allowDegraded` is the explicit caller opt-in to proceed anyway. Best-effort:
  * if pool health cannot be read, we fail OPEN (allow the write) rather than
@@ -136,7 +136,7 @@ async function ensurePoolHealthy(
 function fail(err: unknown) {
   let message: string;
   if (err instanceof RateLimitError) {
-    // Surface the upstream gateway's Retry-After hint when it gave one (AGE-194)
+    // Surface the upstream gateway's Retry-After hint when it gave one (per-user auth)
     // so the agent backs off for the right duration instead of guessing.
     message =
       "Rate limit exceeded. Wait and retry; the server does not retry automatically." +
@@ -348,7 +348,7 @@ export function registerTools(
       allow_degraded,
     }) =>
       run("log_action", () => idempotent(idempotency_key, async () => {
-        // AGE-193: refuse the write up front if the pool is degraded (unless opted in).
+        // Truthful anchoring: refuse the write up front if the pool is degraded (unless opted in).
         await ensurePoolHealthy(client, allow_degraded);
         // Enforce the optional per-process write cap before spending a credit.
         budget.check();
@@ -523,7 +523,7 @@ export function registerTools(
           poolHealth,
         );
         budget.record();
-        // AGE-193: the receipt's top-level status already reflects anchoring
+        // Truthful anchoring: the receipt's top-level status already reflects anchoring
         // (confirmed:false -> "pending"/"degraded"); echo a PENDING warning so an
         // un-anchored attestation is never read as an unqualified success.
         if (receipt.status !== "anchored") {
@@ -582,7 +582,7 @@ export function registerTools(
         const completed = await client.completeReceipt(
           receipt as unknown as AgentReceipt,
         );
-        // AGE-193: a still-pending re-poll must keep saying so — never let the
+        // Truthful anchoring: a still-pending re-poll must keep saying so — never let the
         // poll path quietly look like success.
         if (completed.status !== "anchored") {
           return {
@@ -1050,7 +1050,7 @@ export function registerTools(
           consequence,
         });
         budget.record();
-        // AGE-193: lift anchor.status to a top-level status + PENDING warning so
+        // Truthful anchoring: lift anchor.status to a top-level status + PENDING warning so
         // a still-pending commitment is never read as confirmed.
         return okWrite(receipt);
       })),
@@ -1127,7 +1127,7 @@ export function registerTools(
           evidence,
         });
         budget.record();
-        // AGE-193 critical case: a "kept"/onTime verdict on a still-pending anchor
+        // Truthful anchoring critical case: a "kept"/onTime verdict on a still-pending anchor
         // must NOT read as a silent greenlight — surface top-level pending + warning.
         return okWrite(receipt);
       })),
