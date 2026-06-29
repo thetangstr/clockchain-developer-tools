@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import { Keeper, MemoryStore, registerKeeperTools } from "../dist/index.js";
 
 const okAnchorer = {
-  anchorFire: async () => ({ status: "anchored", eventHash: "h", ledgerId: "L1", blockHeight: "1", receiptSchema: "clockchain.receipt/v1" }),
+  anchorFire: async () => ({ status: "anchored", eventHash: "h", ledgerId: "L1", blockHeight: "1", receiptSchema: "clockchain.receipt/v1", receipt: {} }),
+  pollAnchor: async () => ({ status: "anchored", eventHash: "h", ledgerId: "L1", blockHeight: "1", receiptSchema: "clockchain.receipt/v1", receipt: {} }),
 };
 
 function makeKeeper() {
@@ -89,4 +90,45 @@ test("requestSub (BYO-key identity) overrides the sub argument and scopes tenanc
 
   const listA = payload(await toolsA.keeper_list({}));
   assert.equal(listA.count, 1);
+});
+
+test("requireIdentity (HTTP/prod): identity-less list/cancel/schedule are REFUSED (no IDOR)", async () => {
+  const keeper = makeKeeper();
+  // A real tenant seeds a trigger.
+  const owner = collect(keeper, { requestSub: () => "byok:owner", requireIdentity: true });
+  await owner.keeper_schedule({ fire_at: 1000, target_url: "https://127.0.0.1/h" });
+
+  // A caller with the shared bearer but NO x-clockchain-api-key -> no identity.
+  const anon = collect(keeper, { requestSub: () => undefined, requireIdentity: true });
+
+  // list must NOT fall through to "see everything".
+  const listRes = await anon.keeper_list({ sub: "byok:owner" });
+  assert.equal(listRes.isError, true);
+  assert.match(listRes.content[0].text, /No caller identity/);
+
+  // cancel must NOT skip ownership.
+  const cancelRes = await anon.keeper_cancel({ id: "x", sub: "byok:owner" });
+  assert.equal(cancelRes.isError, true);
+  assert.match(cancelRes.content[0].text, /No caller identity/);
+
+  // schedule must NOT accept a client-supplied owner.
+  const schedRes = await anon.keeper_schedule({ fire_at: 1, target_url: "https://127.0.0.1/h", sub: "byok:owner" });
+  assert.equal(schedRes.isError, true);
+  assert.match(schedRes.content[0].text, /No caller identity/);
+
+  // The owner's data is untouched and still visible only to them.
+  const ownerList = payload(await owner.keeper_list({}));
+  assert.equal(ownerList.count, 1);
+});
+
+test("requireIdentity ignores a client-supplied sub even when an identity IS present", async () => {
+  const keeper = makeKeeper();
+  const a = collect(keeper, { requestSub: () => "byok:a", requireIdentity: true });
+  // Try to plant a trigger under another owner via the sub arg — must be ignored.
+  const sched = payload(await a.keeper_schedule({ fire_at: 1000, target_url: "https://127.0.0.1/h", sub: "byok:victim" }));
+  assert.ok(sched.id);
+  // It belongs to byok:a, not byok:victim.
+  const victim = collect(keeper, { requestSub: () => "byok:victim", requireIdentity: true });
+  assert.equal(payload(await victim.keeper_list({})).count, 0);
+  assert.equal(payload(await a.keeper_list({})).count, 1);
 });

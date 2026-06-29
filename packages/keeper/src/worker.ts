@@ -14,7 +14,7 @@
  * TODO (deferred): per-`sub` gateway sub-key + credit budget so each tenant's
  * anchors bill to them; full OAuth; multi-worker leasing for horizontal scale.
  */
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readConfigFromEnv, ClockchainClient } from "@clockchain/core";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -44,12 +44,15 @@ export function buildKeeperFromEnv(env: NodeJS.ProcessEnv = process.env): {
     agentId: env.KEEPER_AGENT_ID ?? "agent:clockchain-keeper",
     webhookSecret: env.KEEPER_WEBHOOK_SECRET ?? "",
     ssrf: ssrfOptionsFromEnv(env),
-    retry: {
-      maxAttempts: Number(env.KEEPER_MAX_ATTEMPTS ?? 5),
-      baseDelayMs: Number(env.KEEPER_BASE_DELAY_MS ?? 500),
-      maxDelayMs: Number(env.KEEPER_MAX_DELAY_MS ?? 30_000),
-    },
+    maxAttempts: Number(env.KEEPER_MAX_ATTEMPTS ?? 5),
+    baseDelayMs: Number(env.KEEPER_BASE_DELAY_MS ?? 500),
+    maxDelayMs: Number(env.KEEPER_MAX_DELAY_MS ?? 30_000),
     anchorRetryDelayMs: Number(env.KEEPER_ANCHOR_RETRY_MS ?? 1000),
+    maxPerTick: Number(env.KEEPER_MAX_PER_TICK ?? 100),
+    concurrency: Number(env.KEEPER_CONCURRENCY ?? 10),
+    maxRetainedFires: Number(env.KEEPER_MAX_RETAINED_FIRES ?? 50),
+    maxPayloadBytes: Number(env.KEEPER_MAX_PAYLOAD_BYTES ?? 65536),
+    maxTriggersPerSub: Number(env.KEEPER_MAX_TRIGGERS_PER_SUB ?? 1000),
   };
 
   const keeper = new Keeper({
@@ -75,17 +78,38 @@ function fingerprint(apiKey: string): string {
 const firstHeader = (h: string | string[] | undefined): string =>
   (Array.isArray(h) ? h[0] : h) ?? "";
 
+/** Constant-time membership test for a bearer token (avoids timing oracles). */
+function tokenAccepted(candidate: string, tokens: string[]): boolean {
+  const cand = Buffer.from(candidate);
+  let ok = false;
+  for (const t of tokens) {
+    const tb = Buffer.from(t);
+    // Always compare against an equal-length buffer so length isn't a side channel.
+    const padded = tb.length === cand.length ? tb : Buffer.alloc(cand.length);
+    if (timingSafeEqual(cand, padded) && tb.length === cand.length) ok = true;
+  }
+  return ok;
+}
+
 /** Run the keeper MCP control plane over HTTP, alongside the dispatch loop. */
 async function runHttp(keeper: Keeper, env: NodeJS.ProcessEnv): Promise<void> {
   const port = Number(env.PORT ?? 8080);
   const tokens = parseTokens(env.KEEPER_AUTH_TOKENS);
   const ACCEPT = "application/json, text/event-stream";
 
+  // Auth fail-CLOSED (MEDIUM): refuse to start an unauthenticated public endpoint.
+  // An operator must either set KEEPER_AUTH_TOKENS or explicitly opt into anon.
+  if (tokens.length === 0 && env.KEEPER_ALLOW_ANON !== "1") {
+    throw new Error(
+      "Refusing to start HTTP control plane with no KEEPER_AUTH_TOKENS. Set a " +
+        "comma-separated token list, or set KEEPER_ALLOW_ANON=1 for trusted local use.",
+    );
+  }
+
   const isAuthorized = (req: IncomingMessage): boolean => {
-    if (tokens.length === 0) return true; // open: local/trusted use only
+    if (tokens.length === 0) return true; // only reached when KEEPER_ALLOW_ANON=1
     const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
-    if (bearer && tokens.includes(bearer[1].trim())) return true;
-    return false;
+    return bearer ? tokenAccepted(bearer[1].trim(), tokens) : false;
   };
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -109,7 +133,12 @@ async function runHttp(keeper: Keeper, env: NodeJS.ProcessEnv): Promise<void> {
     const apiKey = firstHeader(req.headers["x-clockchain-api-key"]).trim();
     const requestSub = apiKey ? fingerprint(apiKey) : undefined;
     try {
-      const mcp = buildKeeperServer(keeper, { requestSub: () => requestSub });
+      // requireIdentity: in hosted mode the keeper tools must use the resolved
+      // identity (not a client-supplied `sub`) and reject identity-less calls.
+      const mcp = buildKeeperServer(keeper, {
+        requestSub: () => requestSub,
+        requireIdentity: true,
+      });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         void transport.close();

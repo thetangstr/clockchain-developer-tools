@@ -61,6 +61,14 @@ export interface FireRecord {
     blockHeight: string | null;
     /** The full receipt schema id, for traceability. */
     receiptSchema: string | null;
+    /**
+     * The persisted Agent Attested Receipt from the ONE-TIME anchor write
+     * (attest_action, wait:false). Stored so later ticks poll it read-only via
+     * core's completeReceipt() — which spends NO credit — instead of re-anchoring
+     * (which would mint a NEW ledger entry + burn a NEW credit every tick).
+     * Null until the first anchor write succeeds.
+     */
+    receipt: unknown;
   };
 }
 

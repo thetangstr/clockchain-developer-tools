@@ -1,7 +1,7 @@
 // Durable store: persistence across "restart" + clean first-run behaviour.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileStore, MemoryStore } from "../dist/index.js";
@@ -68,6 +68,31 @@ test("FileStore: data survives a fresh instance (simulated restart)", async () =
     const c = new FileStore(path);
     assert.equal((await c.all()).length, 1);
     assert.equal(await c.get("t2"), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("FileStore: many concurrent writes serialize without corrupting the file", async () => {
+  // The tick loop and the HTTP control plane share the process; both put->flush.
+  // With a write queue + unique tmp per write, interleaved writes must not corrupt
+  // the file or lose entries.
+  const dir = await mkdtemp(join(tmpdir(), "keeper-"));
+  const path = join(dir, "store.json");
+  try {
+    const s = new FileStore(path);
+    await Promise.all(
+      Array.from({ length: 50 }, (_, i) => s.put(trigger("t" + i, { fireAtMs: i }))),
+    );
+    // A fresh instance must parse the file (valid JSON) and see ALL 50 triggers.
+    const reread = new FileStore(path);
+    const all = await reread.all();
+    assert.equal(all.length, 50);
+    const ids = new Set(all.map((t) => t.id));
+    for (let i = 0; i < 50; i++) assert.ok(ids.has("t" + i), `missing t${i}`);
+    // No leftover temp files from the unique-tmp writes.
+    const leftovers = (await readdir(dir)).filter((f) => f.endsWith(".tmp"));
+    assert.deepEqual(leftovers, []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

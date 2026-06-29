@@ -7,6 +7,14 @@
  * does not touch the deployed mcp-server's surface or its conformance/coverage
  * gates.
  *
+ * Tenant isolation (HIGH-3, AGE-194): with `requireIdentity` (HTTP/prod mode) the
+ * owner is taken ONLY from the transport-resolved identity (the caller's BYO-key
+ * fingerprint). The client-supplied `sub` argument is IGNORED for list/cancel, and
+ * a request with no resolved identity is REFUSED — so a caller cannot pass `sub`
+ * (or omit it) to read or cancel another tenant's triggers. Without
+ * `requireIdentity` (local stdio, single user) the `sub` argument is honored for
+ * convenience.
+ *
  * The data plane (firing) runs in the always-on worker loop, not in these tools.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -33,13 +41,16 @@ async function run(work: () => Promise<unknown>) {
   }
 }
 
-/**
- * Resolve the acting owner identity (AGE-194). Prefer the per-request `sub`
- * threaded in by the transport (the caller's bring-your-own-key identity);
- * fall back to the tool argument, then to a shared default for local trials.
- */
-function resolveSub(argSub: string | undefined, requestSub: string | undefined): string {
-  return requestSub ?? argSub ?? "anonymous";
+/** Thrown when an identity-required tool is called without a resolved identity. */
+class NoIdentityError extends Error {
+  constructor() {
+    super(
+      "No caller identity. In hosted mode you must authenticate with your own " +
+        "Clockchain key (x-clockchain-api-key); list/cancel/schedule are scoped to " +
+        "your identity and the client-supplied `sub` is ignored.",
+    );
+    this.name = "NoIdentityError";
+  }
 }
 
 /**
@@ -58,6 +69,13 @@ export interface RegisterKeeperToolsOptions {
    * or BYO-key fingerprint). When omitted, tools fall back to the `sub` argument.
    */
   requestSub?: () => string | undefined;
+  /**
+   * Require a resolved request identity (HTTP/prod). When true, the client `sub`
+   * argument is ignored and identity-less requests are refused — prevents the
+   * tenant-IDOR where a missing identity falls through to "see/cancel everything".
+   * Default false (local stdio convenience).
+   */
+  requireIdentity?: boolean;
 }
 
 /** Register keeper_schedule / keeper_list / keeper_cancel on an MCP server. */
@@ -67,6 +85,31 @@ export function registerKeeperTools(
   opts: RegisterKeeperToolsOptions = {},
 ): void {
   const reqSub = () => opts.requestSub?.();
+  const requireIdentity = opts.requireIdentity === true;
+
+  /**
+   * The authoritative owner for a request. With requireIdentity, ONLY the
+   * transport identity counts (throws if absent); otherwise fall back to the
+   * client `sub` then a shared local default.
+   */
+  const ownerOf = (argSub: string | undefined): string => {
+    const id = reqSub();
+    if (requireIdentity) {
+      if (!id) throw new NoIdentityError();
+      return id; // client `sub` is intentionally ignored
+    }
+    return id ?? argSub ?? "anonymous";
+  };
+
+  /** Owner used to SCOPE a read/cancel; undefined means "no filter" (local only). */
+  const scopeOf = (argSub: string | undefined): string | undefined => {
+    const id = reqSub();
+    if (requireIdentity) {
+      if (!id) throw new NoIdentityError();
+      return id; // never fall back to the client-supplied sub
+    }
+    return id ?? argSub;
+  };
 
   server.registerTool(
     "keeper_schedule",
@@ -76,7 +119,9 @@ export function registerKeeperTools(
         "Register an off-chain trigger that fires at a Clockchain-verified time even " +
         "while your client is offline. At fire time the hosted keeper delivers a " +
         "Standard-Webhooks-signed POST to your target URL and anchors the fire on-chain " +
-        "(keyless-verifiable receipt). Returns the trigger id and status.",
+        "(keyless-verifiable receipt). Returns the trigger id and status. For mode " +
+        '"interval", the schedule re-arms after each anchored fire EVEN IF a delivery ' +
+        "dead-letters (a broken endpoint does not stop the schedule — cancel it to stop).",
       inputSchema: {
         fire_at: z
           .union([z.string(), z.number()])
@@ -99,13 +144,13 @@ export function registerKeeperTools(
         sub: z
           .string()
           .optional()
-          .describe("Owner identity for this trigger (scopes list/cancel). Defaults to the request identity."),
+          .describe("Owner identity (local stdio only; IGNORED in hosted mode, which uses your authenticated identity)."),
       },
     },
     async ({ fire_at, target_url, payload, mode, interval_ms, sub }) =>
       run(async () => {
         const input: ScheduleInput = {
-          sub: resolveSub(sub, reqSub()),
+          sub: ownerOf(sub),
           fireAtMs: parseFireAtMs(fire_at),
           target: target_url,
           payload,
@@ -136,13 +181,12 @@ export function registerKeeperTools(
         sub: z
           .string()
           .optional()
-          .describe("Owner identity to list. Defaults to the request identity."),
+          .describe("Owner identity (local stdio only; IGNORED in hosted mode)."),
       },
     },
     async ({ sub }) =>
       run(async () => {
-        const owner = reqSub() ?? sub;
-        const triggers = await keeper.list(owner);
+        const triggers = await keeper.list(scopeOf(sub));
         return {
           count: triggers.length,
           triggers: triggers.map((t) => ({
@@ -178,13 +222,15 @@ export function registerKeeperTools(
         sub: z
           .string()
           .optional()
-          .describe("Owner identity. Defaults to the request identity."),
+          .describe("Owner identity (local stdio only; IGNORED in hosted mode)."),
       },
     },
     async ({ id, sub }) =>
       run(async () => {
-        const owner = reqSub() ?? sub;
-        const t = await keeper.cancel(id, owner);
+        const scope = scopeOf(sub);
+        // In hosted mode `scope` is the caller's identity (never undefined here),
+        // so cancel always enforces ownership.
+        const t = await keeper.cancel(id, scope);
         if (!t) return { id, cancelled: false, reason: "not found or not owned" };
         return { id: t.id, cancelled: true, status: t.status };
       }),

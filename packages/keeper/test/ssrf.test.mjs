@@ -44,3 +44,31 @@ test("ssrfOptionsFromEnv parses allowlist + loopback flag", () => {
   assert.deepEqual(o.allowlist, ["a.com", "b.com"]);
   assert.equal(o.allowLoopback, true);
 });
+
+test("blocks IPv4-mapped IPv6 metadata/loopback/private and the unspecified address", () => {
+  // Both dotted and hex IPv4-mapped forms, plus :: / ::0 — the bypass HIGH-4 closes.
+  for (const h of ["::ffff:169.254.169.254", "::ffff:a9fe:a9fe", "::ffff:7f00:1", "::ffff:0a00:0001", "::", "::0"]) {
+    assert.ok(isBlockedHost(h), `isBlockedHost(${h})`);
+  }
+  for (const h of ["[::ffff:169.254.169.254]", "[::ffff:7f00:1]", "[::]"]) {
+    assert.throws(() => assertSafeWebhookUrl(`http://${h}/x`), SsrfError, `assertSafeWebhookUrl ${h}`);
+  }
+  // A genuinely public IPv4-mapped address is still allowed.
+  assert.ok(!isBlockedHost("::ffff:8.8.8.8"));
+});
+
+test("requireAllowlist enforces deny-by-default egress (even when empty)", () => {
+  // Empty allowlist + requireAllowlist -> everything refused (forces operator config).
+  assert.throws(() => assertSafeWebhookUrl("https://example.com/x", { requireAllowlist: true }), /deny-by-default/);
+  // With a list, only members pass.
+  const opts = { requireAllowlist: true, allowlist: ["example.com"] };
+  assert.doesNotThrow(() => assertSafeWebhookUrl("https://api.example.com/x", opts));
+  assert.throws(() => assertSafeWebhookUrl("https://evil.test/x", opts), SsrfError);
+});
+
+test("ssrfOptionsFromEnv turns on requireAllowlist in http mode unless opted out", () => {
+  assert.equal(ssrfOptionsFromEnv({ MCP_TRANSPORT: "http" }).requireAllowlist, true);
+  assert.equal(ssrfOptionsFromEnv({ MCP_TRANSPORT: "http", KEEPER_ALLOW_ANY_HOST: "1" }).requireAllowlist, false);
+  assert.equal(ssrfOptionsFromEnv({ KEEPER_REQUIRE_ALLOWLIST: "1" }).requireAllowlist, true);
+  assert.equal(ssrfOptionsFromEnv({}).requireAllowlist, false);
+});
