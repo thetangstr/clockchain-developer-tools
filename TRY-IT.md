@@ -16,6 +16,16 @@ private key in sight. Specifically:
 
 That last step is the point: verifiable proof of an agent's action.
 
+> **No Clockchain account yet? Start here — zero setup, no key.** One command runs the
+> whole alarm flow (anchor + keyless verify) through the hosted network with a free,
+> self-serve demo token (requires [`jq`](https://jqlang.github.io/jq/)):
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm-mcp.sh | bash
+> ```
+>
+> Come back to the steps below when you want to run it under your own account (Option B).
+
 ## Before you start (one-time, ~5 min)
 
 You need three things:

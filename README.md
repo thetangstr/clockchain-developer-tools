@@ -163,12 +163,12 @@ is a target, not a present claim.
 **Try it:**
 
 ```bash
-# Full SDK (disciplined-clock loop) — needs testnet gateway creds:
+# Zero creds (MCP flow, self-serve demo token; needs jq) — start here, no account:
+curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm-mcp.sh | bash
+
+# Full SDK (disciplined-clock loop) — once you have testnet gateway creds:
 export CLOCKCHAIN_API_KEY=… CLOCKCHAIN_CLIENT_ID=… CLOCKCHAIN_WALLET_ID=…
 curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm.sh | bash
-
-# Zero creds (MCP flow, self-serve demo token; needs jq):
-curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-alarm-mcp.sh | bash
 ```
 
 See [`packages/clock-sdk`](packages/clock-sdk) for the API, the trust/security model, and
