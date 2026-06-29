@@ -4,7 +4,7 @@
  * A single esbuild-bundled ESM module. It renders the structured output of the
  * `verify_receipt` / `verify_cross_party` tools, read from `window.openai.toolOutput`.
  *
- * AGE-193 truthfulness rule (load-bearing): NEVER imply "confirmed" while the
+ * Truthful-anchoring rule (load-bearing): NEVER imply "confirmed" while the
  * anchor is pending. The status pill is driven only by the server-derived
  * `status` field ("anchored" requires a blockHeight); anything else renders as
  * pending / unconfirmed.
@@ -15,7 +15,7 @@ import { useEffect, useState } from "react";
 /** The stable shape produced by the verify tools' `structuredContent`. */
 interface WidgetOutput {
   kind: "receipt" | "cross_party";
-  /** Truthful anchor status (AGE-193): only "anchored" once a blockHeight exists. */
+  /** Truthful anchor status: only "anchored" once a blockHeight exists. */
   status: "anchored" | "pending" | "degraded" | "unverified";
   confirmed: boolean;
   match: boolean | null;
