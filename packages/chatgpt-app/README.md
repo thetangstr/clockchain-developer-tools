@@ -18,13 +18,16 @@ does **not** change the main server's tool set.
 Reviewers test every advertised tool, so the surface is intentionally small.
 Annotations/hints follow the Apps SDK guidance:
 
+Launch focus = **time services only** (verified timestamping + verification).
+
 | Tool | Hints | Widget |
 | --- | --- | --- |
+| `get_time` | `readOnly` | — |
 | `get_timestamp` | `readOnly` | — |
+| `get_log_entry` | `readOnly` | — |
 | `verify_receipt` | `readOnly` | ✅ `ui://widget/receipt.html` |
 | `verify_cross_party` | `readOnly` | ✅ `ui://widget/receipt.html` |
 | `log_action` | `destructive`, `openWorld` | — |
-| `attest_action` | `destructive`, `openWorld` | — |
 
 The two verify tools link the widget via `_meta["openai/outputTemplate"]` and
 return `structuredContent`, which the widget reads as `window.openai.toolOutput`.
@@ -75,16 +78,16 @@ npx @modelcontextprotocol/inspector node packages/chatgpt-app/dist/index.js
 
 In the Inspector:
 
-1. **List tools** — confirm the five curated tools and their hints.
+1. **List tools** — confirm the six curated time-service tools and their hints.
 2. Call **`get_timestamp`** (no args) — read-only.
 3. Call **`verify_cross_party`** with a known `ledger_id` (and `block_height` if
    you have it) — read-only; returns `structuredContent`.
 4. **List resources** — confirm `ui://widget/receipt.html`
    (`text/html+skybridge`).
 
-> Stick to the read-only tools (`get_timestamp`, `verify_receipt`,
-> `verify_cross_party`) for smoke tests — `log_action` / `attest_action` are
-> writes that spend log credits.
+> Stick to the read-only tools (`get_time`, `get_timestamp`, `get_log_entry`,
+> `verify_receipt`, `verify_cross_party`) for smoke tests — `log_action` is the
+> one write and it spends a log credit.
 
 ## ChatGPT developer-mode connector
 

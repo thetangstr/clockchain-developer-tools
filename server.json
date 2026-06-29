@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "network.clockchain/clockchain",
-  "description": "Hosted MCP server for Clockchain — consensus time, notarization, agent-attested receipts, audit trails, and agent identity. 31 tools, no install: connect any MCP client to the hosted HTTP endpoint.",
+  "description": "Verified timestamping & time verification for AI agents — read neutral consensus time, anchor a tamper-evident timestamp for any content (only its SHA-256 hash, never your data), and verify it keylessly against the on-chain block. Hosted; no install — connect any MCP client to the HTTP endpoint.",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/thetangstr/clockchain-developer-tools",

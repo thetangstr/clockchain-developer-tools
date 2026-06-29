@@ -2,14 +2,16 @@
  * Curated Apps SDK tool subset for the Clockchain ChatGPT app.
  *
  * Reuses @clockchain/core (the same client the main MCP server uses) and exposes
- * ONLY the five tools the launch plan curates for ChatGPT — reviewers test every
- * advertised tool, so the surface is intentionally small:
+ * ONLY the six TIME-SERVICE tools the launch curates for ChatGPT — verified
+ * timestamping + verification. Reviewers test every advertised tool, so the surface
+ * is intentionally small and on-message:
  *
- *   get_timestamp       (readOnly)            — consensus time detail
- *   verify_receipt      (readOnly) + widget   — re-verify an Agent Attested Receipt
- *   verify_cross_party  (readOnly) + widget   — keyless cross-party verification
- *   log_action          (destructive, openWorld) — anchor content to the ledger
- *   attest_action       (destructive, openWorld) — attest an agent action
+ *   get_time            (readOnly)            — current consensus block time + height
+ *   get_timestamp       (readOnly)            — detailed consensus timestamp
+ *   get_log_entry       (readOnly)            — fetch an anchored record by ledgerId
+ *   verify_receipt      (readOnly) + widget   — re-verify a timestamp receipt
+ *   verify_cross_party  (readOnly) + widget   — keyless on-chain verification
+ *   log_action          (destructive, openWorld) — timestamp content (anchor a hash)
  *
  * The two verify tools link the read-only React widget via
  * _meta["openai/outputTemplate"] = "ui://widget/receipt.html" and return
@@ -195,6 +197,18 @@ export function registerAppTools(
 
   // ----- READ-ONLY: time -----
   server.registerTool(
+    "get_time",
+    {
+      title: "Get consensus time",
+      description:
+        "Get the latest consented block time and height from the Clockchain network. Read-only.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => run("get_time", () => client.getTime()),
+  );
+
+  server.registerTool(
     "get_timestamp",
     {
       title: "Get consensus timestamp detail",
@@ -205,6 +219,22 @@ export function registerAppTools(
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async () => run("get_timestamp", () => client.getTimestamp()),
+  );
+
+  // ----- READ-ONLY: fetch an anchored record -----
+  server.registerTool(
+    "get_log_entry",
+    {
+      title: "Get an anchored ledger record",
+      description:
+        "Fetch a single anchored ledger record by its ledgerId — its timestamp, block height, " +
+        "and anchored hash. Read-only.",
+      inputSchema: {
+        ledger_id: z.string().describe("The ledgerId returned by log_action."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ ledger_id }) => run("get_log_entry", () => client.getLedgerEntry(ledger_id)),
   );
 
   // ----- READ-ONLY: verify a receipt (widget) -----
@@ -310,30 +340,4 @@ export function registerAppTools(
       }),
   );
 
-  // ----- WRITE: attest an agent action -----
-  server.registerTool(
-    "attest_action",
-    {
-      title: "Attest an autonomous agent action (Agent Attested Receipt)",
-      description:
-        "Fingerprint an agent action (SHA-256 of agent_id + action + inputs + outputs), anchor it " +
-        "on-chain, and return a verifiable Agent Attested Receipt. This is a write; it spends a log " +
-        "credit. The receipt's top-level `status` is 'pending' until anchored ('anchored').",
-      inputSchema: {
-        agent_id: z.string().describe("Who acted (ERC-8004 agentId or an agent label)."),
-        action: z.string().describe('What they did, e.g. "execute_trade".'),
-        inputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision inputs."),
-        outputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision outputs."),
-        wait: z
-          .boolean()
-          .optional()
-          .describe("Wait for on-chain confirmation. Default true. Set false to submit without blocking."),
-      },
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-    },
-    async ({ agent_id, action, inputs, outputs, wait }) =>
-      run("attest_action", () =>
-        client.attestAction({ agentId: agent_id, action, inputs, outputs, wait }),
-      ),
-  );
 }

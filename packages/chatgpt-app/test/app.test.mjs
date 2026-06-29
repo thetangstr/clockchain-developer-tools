@@ -33,7 +33,7 @@ function collect() {
   return { tools, server, resources };
 }
 
-const CURATED = ["get_timestamp", "verify_receipt", "verify_cross_party", "log_action", "attest_action"];
+const CURATED = ["get_time", "get_timestamp", "get_log_entry", "verify_receipt", "verify_cross_party", "log_action"];
 
 test("exposes exactly the curated tool subset", () => {
   const { tools } = collect();
@@ -42,12 +42,12 @@ test("exposes exactly the curated tool subset", () => {
 
 test("read-only tools carry readOnlyHint; writes are destructive + openWorld", () => {
   const { tools } = collect();
-  for (const name of ["get_timestamp", "verify_receipt", "verify_cross_party"]) {
+  for (const name of ["get_time", "get_timestamp", "get_log_entry", "verify_receipt", "verify_cross_party"]) {
     const a = tools[name].config.annotations;
     assert.equal(a.readOnlyHint, true, `${name} readOnlyHint`);
     assert.equal(a.destructiveHint, false, `${name} destructiveHint`);
   }
-  for (const name of ["log_action", "attest_action"]) {
+  for (const name of ["log_action"]) {
     const a = tools[name].config.annotations;
     assert.equal(a.readOnlyHint, false, `${name} readOnlyHint`);
     assert.equal(a.destructiveHint, true, `${name} destructiveHint`);
