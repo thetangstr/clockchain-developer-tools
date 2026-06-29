@@ -28,6 +28,7 @@ No account, no API key, no secrets — it spends one log credit on a **shared de
 
 ## Measured (2026-06)
 Clock read ≈0.12s; **fire→anchored ≈1.4s (< 3s)**; 35 unit tests. Single-validator testnet.
+Note: `arm→fire` is the delay you schedule (`fireAt` / `CC_WAIT_S`), not SDK overhead — the 1.4s is **fire→anchored** only. Total wall-clock = your scheduled wait + ~1.4s.
 
 ## Env knobs (try-alarm-mcp.sh)
 `CC_WAIT_S` (alarm delay, default 30s) · `CC_ALLOW_DEGRADED` (1=allow / 0=refuse / unset=auto) · `CC_TOKEN_FILE` (token cache, default `/tmp/cc_demo_token`).

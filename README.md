@@ -15,6 +15,7 @@ Hermes, OpenClaw, …) and your terminal. It wraps the live D4 node gateway at
 
 > **Install it in your MCP client:** [`INSTALL.md`](INSTALL.md) — hosted endpoint (any client, recommended) or self-host (local stdio).
 > **Non-engineer? Try it in ~10 min:** [`TRY-IT.md`](TRY-IT.md) · **Engineers:** [`QUICKSTART.md`](QUICKSTART.md)
+> **Agent? Load the playbook:** [`skills/clockchain-verified-alarm/SKILL.md`](skills/clockchain-verified-alarm/SKILL.md) — the verified-time invariants, so you use the tools right the first time.
 > **Roadmap + current limitations:** [`roadmap.md`](roadmap.md)
 
 ## Quick install — hosted endpoint (any MCP client)
@@ -157,7 +158,7 @@ lives client-side (e.g. on an always-on host) — a blockchain can't wake your c
 
 **Status — PoC, verified live.** Built + merged (35 unit tests; four scheduler bugs fixed
 2026-06). Measured end-to-end: clock read ≈0.12 s, **fire → anchored on-chain ≈1.4 s** (well
-under a 3 s budget), then `verify_cross_party` → `verifiedAgainst: "on-chain block", keyless: true`. Audit / SLA /
+under a 3 s budget), then `verify_cross_party` → `verifiedAgainst: "on-chain block", keyless: true`. (That 1.4 s is **fire→anchored**; the wait *until* the fire is the delay you schedule — your `fireAt` / `CC_WAIT_S` — not SDK overhead, so total wall-clock = your wait + ~1.4 s.) Audit / SLA /
 agent-deadline tier — **not** microsecond / HFT. Single-validator testnet, so "court-grade"
 is a target, not a present claim.
 

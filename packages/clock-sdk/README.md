@@ -163,6 +163,10 @@ Measured on testnet (2026-06-29 dogfood):
 - **Fire → anchored** ≈ **1.4s** observed — a real block landed in that window — i.e.
   **well under a 3-second end-to-end budget** once the clock is synced. **Proof latency** is
   dominated by block cadence (the wait for the next block), not by the SDK.
+- **Don't confuse this with total wall-clock.** `arm → fire` is the delay *you* schedule
+  (`fireAt` / `CC_WAIT_S`) — not SDK overhead. The 1.4s figure is **fire → anchored** only;
+  total = your scheduled wait + ~1.4s (+ token mint / verify). A `CC_WAIT_S=30` run takes
+  ~31s wall-clock and is still a ~1.4s fire→anchor.
 - **Not microsecond / not HFT.** This serves the audit / SLA / agent-deadline tier; precision
   trading-grade timing is out of scope (use PTP).
 - **Maturity:** the current network is **single-validator testnet**, so "court-grade" is a
