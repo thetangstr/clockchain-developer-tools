@@ -231,6 +231,155 @@ test("timer() convenience schedules a one-shot at now()+duration", async () => {
   assert.equal(fired, true);
 });
 
+// --- CLO-73: FireContext exposes epochMs + uncertaintyMs (Invalid Date / NaN fix) ---
+test("CLO-73: FireContext exposes epochMs + uncertaintyMs populated from the clock", async () => {
+  const clock = fakeClock(5000);
+  clock.uncertaintyMs = 42; // distinct from the scheduled time so we know it's the clock's
+  const timerImpl = fakeTimer();
+  let ctx = null;
+  const sch = new ClockScheduler({ clock, timer: timerImpl, pollMs: 1 });
+  sch.schedule({ id: "j1", fireAt: 5000, action: (c) => (ctx = c) });
+
+  await timerImpl.flush();
+  assert.ok(ctx, "action received a FireContext");
+  // The examples format `new Date(ctx.epochMs)` and `Math.round(ctx.uncertaintyMs)`.
+  assert.equal(ctx.epochMs, 5000);
+  assert.equal(ctx.uncertaintyMs, 42);
+  assert.equal(ctx.firedAt, 5000);
+  assert.equal(ctx.fireAt, 5000);
+  // Proves the example output is a real date + a real ± number (not Invalid Date / NaN).
+  assert.equal(new Date(ctx.epochMs).toString() !== "Invalid Date", true);
+  assert.equal(Number.isNaN(Math.round(ctx.uncertaintyMs)), false);
+});
+
+// --- CLO-74: recurring everyMs catch-up storm -> fast-forward to next future slot ---
+test("CLO-74: a missed recurring window fires once and resumes on the next future slot", async () => {
+  const clock = fakeClock(1000);
+  const timerImpl = fakeTimer();
+  let count = 0;
+  const sch = new ClockScheduler({ clock, timer: timerImpl, pollMs: 1 });
+  // first fireAt = now()+everyMs = 1000+1000 = 2000.
+  sch.schedule({ id: "r1", everyMs: 1000, action: () => count++ });
+
+  // Simulate downtime/blocking: the disciplined clock jumps far past many slots
+  // (2000, 3000, ... 10000 are all "due"). Old code replayed all of them.
+  clock.epochMs = 10_000;
+  await timerImpl.flush();
+
+  assert.equal(count, 1, "fires at most once on catch-up, not once per missed slot");
+  assert.equal(sch.getStatus("r1").fireCount, 1);
+  // Resumes strictly in the future (next slot after now = 11000), not 3000.
+  assert.equal(sch.getStatus("r1").fireAt, 11_000);
+
+  // No storm: flushing again at the same clock does not fire again.
+  await timerImpl.flush();
+  assert.equal(count, 1);
+  sch.clearAll();
+});
+
+// --- CLO-75: long setTimeout overflow -> chunked re-arm hops ---
+test("CLO-75: a >24.8-day delay does not overflow/fire early (chunked re-arm)", async () => {
+  const MAX = 2_147_483_647; // 2^31 - 1
+  const clock = fakeClock(0);
+  // A timer that records the delay passed to each set() so we can assert chunking.
+  let nextHandle = 1;
+  const pending = new Map();
+  const delays = [];
+  const recTimer = {
+    set(handler, delayMs) {
+      const h = nextHandle++;
+      pending.set(h, handler);
+      delays.push(delayMs);
+      return h;
+    },
+    clear(h) {
+      pending.delete(h);
+    },
+    async flush() {
+      const batch = [...pending.entries()];
+      for (const [h, cb] of batch) {
+        pending.delete(h);
+        cb();
+        await new Promise((r) => setImmediate(r));
+      }
+    },
+    size() {
+      return pending.size;
+    },
+  };
+  let fired = false;
+  const sch = new ClockScheduler({ clock, timer: recTimer, pollMs: 1 });
+  const fireAt = MAX + 1_000_000; // ~24.8 days + a bit
+  sch.schedule({ id: "far", fireAt, action: () => (fired = true) });
+
+  // Initial arm must cap at MAX (never pass the full overflowing remaining).
+  assert.equal(delays[0], MAX);
+  assert.equal(fired, false);
+
+  // The hop fires: it must re-arm (not fire the job). Clock unchanged -> still
+  // far away -> still capped at MAX.
+  await recTimer.flush();
+  assert.equal(fired, false, "far-future hop must not fire early");
+  assert.equal(delays[1], MAX);
+
+  // Advance the clock to the boundary; now it re-arms within range, then fires.
+  clock.epochMs = fireAt;
+  await recTimer.flush(); // hop -> re-arm to a normal onTick poll
+  assert.equal(fired, false);
+  await recTimer.flush(); // onTick -> fire
+  assert.equal(fired, true);
+  sch.clearAll();
+});
+
+// --- CLO-76: confirmed mode must FAIL CLOSED on a boundary-confirm error ---
+test("CLO-76: confirmed mode does NOT fire when boundary getTimestamp throws (fail-closed default)", async () => {
+  const fireAt = 5000;
+  const clock = fakeClock(fireAt + 1000); // disciplined clock already past the boundary
+  const timerImpl = fakeTimer();
+  let fired = false;
+  const confirmSource = {
+    calls: 0,
+    async getTimestamp() {
+      this.calls++;
+      throw new Error("gateway down");
+    },
+  };
+  const sch = new ClockScheduler({ clock, timer: timerImpl, confirmSource, pollMs: 1 });
+  sch.schedule({ id: "c1", fireAt, action: () => (fired = true), mode: "confirmed" });
+
+  await timerImpl.flush();
+  assert.equal(fired, false, "must not silently downgrade confirmed -> soft");
+  assert.equal(sch.getStatus("c1").state, "scheduled"); // held, not fired/error
+  assert.ok(confirmSource.calls >= 1);
+  assert.equal(timerImpl.size(), 1, "re-armed to retry on the next tick");
+  sch.clearAll();
+});
+
+test("CLO-76: confirmFailOpen makes confirmed mode fire when boundary getTimestamp throws", async () => {
+  const fireAt = 5000;
+  const clock = fakeClock(fireAt + 1000);
+  const timerImpl = fakeTimer();
+  let fired = false;
+  const confirmSource = {
+    async getTimestamp() {
+      throw new Error("gateway down");
+    },
+  };
+  const sch = new ClockScheduler({
+    clock,
+    timer: timerImpl,
+    confirmSource,
+    confirmFailOpen: true,
+    pollMs: 1,
+  });
+  sch.schedule({ id: "c1", fireAt, action: () => (fired = true), mode: "confirmed" });
+
+  await timerImpl.flush();
+  assert.equal(fired, true, "explicit fail-open fires on the disciplined clock");
+  assert.equal(sch.getStatus("c1").state, "fired");
+  sch.clearAll();
+});
+
 test("schedule validates fireAt/everyMs exclusivity and duplicate ids", () => {
   const clock = fakeClock(0);
   const sch = new ClockScheduler({ clock, timer: fakeTimer(), pollMs: 1 });
