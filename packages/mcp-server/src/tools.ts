@@ -25,6 +25,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BudgetExceededError, getSharedLogBudget, unlimitedLogBudget } from "./budget.js";
 import { idempotent } from "./idempotency.js";
+import type { KeeperGate } from "./entitlement.js";
+import { assertToolClassified } from "./entitlement.js";
 
 /** Shared schema fragment: optional idempotency key for write tools. */
 const idempotencyKeySchema = z
@@ -212,8 +214,41 @@ async function run(name: string, work: () => Promise<unknown>) {
 export function registerTools(
   server: McpServer,
   config: ClockchainConfig,
-  opts: { delegated?: boolean; surface?: "full" | "product" } = {},
+  opts: { delegated?: boolean; surface?: "full" | "product"; gate?: KeeperGate } = {},
 ): void {
+  // Fail-closed classification guard (CLO-48 review FIX 2). We intercept
+  // registerTool ONCE so that EVERY tool registered below is asserted to appear
+  // in the known classification map (free ∪ keeper). If a future tool is added
+  // without classifying it, this throws at startup/boot — a hard failure rather
+  // than a silent paywall bypass (an unclassified keeper tool would otherwise
+  // default to non-keeper and run free). Runs regardless of surface/gate.
+  //
+  // Keeper gate (LLD §6.2). We ALSO wrap each handler with the gate check —
+  // zero churn at the ~31 registration call sites below. When the caller is
+  // authenticated (no gate), this is a no-op pass-through. A blocked keeper tool
+  // returns the gate's structured `402 account_required` tool error and never
+  // invokes the real handler.
+  const gate = opts.gate;
+  {
+    const orig = server.registerTool.bind(server) as (
+      name: string,
+      meta: unknown,
+      handler: (...args: unknown[]) => unknown,
+    ) => unknown;
+    (server as unknown as { registerTool: typeof orig }).registerTool = (
+      name,
+      meta,
+      handler,
+    ) => {
+      assertToolClassified(name);
+      if (!gate) return orig(name, meta, handler);
+      return orig(name, meta, (...args: unknown[]) => {
+        const blocked = gate.check(name);
+        return blocked ?? handler(...args);
+      });
+    };
+  }
+
   const client = new ClockchainClient(config);
   // Budget (MCP_LOG_BUDGET) caps writes that spend OUR delegated key's credits.
   // Delegated requests share the process-wide cap; bring-your-own-key requests
