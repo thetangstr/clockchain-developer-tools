@@ -1,11 +1,4 @@
 /**
- * TODO(CLO-83): this receipt verify widget is ORPHANED — the ChatGPT surface is
- * now time-only (get_time + get_timestamp) and the verify_* tools that linked it
- * have been removed (CLO-57). Pending a product decision on whether to delete this
- * file + scripts/build-widget.mjs + widget/receipt.tsx + the
- * server.registerResource("receipt-widget", ...) call, or to repurpose it. Left in
- * place intentionally: the resource registration is harmless when no tool links it.
- *
  * The read-only "verify-a-receipt" widget, exposed as an MCP resource.
  *
  * Apps SDK convention:
