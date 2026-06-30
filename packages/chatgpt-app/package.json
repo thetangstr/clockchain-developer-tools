@@ -2,7 +2,7 @@
   "name": "@clockchain/chatgpt-app",
   "version": "0.1.0",
   "private": true,
-  "description": "Clockchain ChatGPT app (OpenAI Apps SDK = MCP): time-only read tools (get_time, get_timestamp). Dev-mode connector scaffold.",
+  "description": "Clockchain ChatGPT app (OpenAI Apps SDK = MCP): the in-chat timestamp -> anchor -> verify-keylessly loop (get_time, log_action, verify_cross_party) + receipt widget. Dev-mode connector scaffold.",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",

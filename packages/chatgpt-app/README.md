@@ -1,8 +1,10 @@
 # @clockchain/chatgpt-app
 
 Clockchain **ChatGPT app** built on the **OpenAI Apps SDK** — which *is* MCP (an
-MCP server + tools). This package is a **dev-mode-ready scaffold** exposing a
-**time-only** surface: two read-only consensus-time tools and nothing else.
+MCP server + tools + an optional iframe widget). This package is a
+**dev-mode-ready scaffold** that delivers the in-chat
+**timestamp → pending → anchored → verify-keylessly** loop on testnet: a curated
+tool subset plus a read-only "verify-a-receipt" widget.
 
 It reuses [`@clockchain/core`](../core) (the same typed gateway client the main
 [`@clockchain/mcp-server`](../mcp-server) uses) — this is a *separate* package and
@@ -18,16 +20,38 @@ does **not** change the main server's tool set.
 Reviewers test every advertised tool, so the surface is intentionally small.
 Annotations/hints follow the Apps SDK guidance:
 
-Launch focus = **time only** — read consensus time/timestamp detail.
+Launch focus = the **anchor → verify** loop: read consensus time, timestamp
+content (anchor a hash), then verify it keylessly against the immutable on-chain
+block.
 
 | Tool | Hints | Widget |
 | --- | --- | --- |
 | `get_time` | `readOnly` | — |
-| `get_timestamp` | `readOnly` | — |
+| `log_action` | `destructive`, `openWorld` | — |
+| `verify_cross_party` | `readOnly` | ✅ `ui://widget/receipt.html` |
 
-The chatbot timestamp surface does not expose a `ledgerId` or `blockHeight`, so
-there is nothing for the chatbot to verify: the app makes **no anchoring or
-on-chain receipt claim**.
+`verify_cross_party` links the widget via `_meta["openai/outputTemplate"]` and
+returns `structuredContent`, which the widget reads as `window.openai.toolOutput`.
+
+The loop: **`log_action`** timestamps content (the server SHA-256-hashes it; with
+`wait:true`, the default, the reply carries the real `blockHeight`), returning a
+`ledgerId` + `blockHeight` + `status`. Pass those to **`verify_cross_party`** —
+what an outside counterparty runs with **no Clockchain account** — to confirm the
+hash against the immutable on-chain block.
+
+### Truthful anchoring
+
+Pending vs anchored is reported **truthfully** end to end. A **null `blockHeight`
+means NOT anchored**: `log_action` never reports such a write as confirmed (it
+attaches an explicit PENDING warning), and the widget shows
+**"pending / unconfirmed" until a `blockHeight` is present** — a
+recorded-but-not-yet-anchored entry is **never** rendered as confirmed. On a
+degraded testnet pool (participation may read 0% while blocks still advance),
+`log_action` refuses by default; pass `allow_degraded: true` to proceed when
+blocks are advancing. This is a single-validator **testnet**: independently
+verifiable, but **not** a court-of-law evidentiary claim. Matches the
+truthful-anchoring semantics in `@clockchain/core` (`status: "anchored"` only once
+the event has a block height).
 
 ## Build
 
@@ -43,10 +67,6 @@ npm run build -w @clockchain/chatgpt-app
 `build` runs two steps: `build:widget` (esbuild bundles `widget/receipt.tsx` →
 `dist/widget/receipt.js`, a single ESM module) then `tsc -b` (the server). The
 widget bundle is inlined into the `ui://widget/receipt.html` resource at runtime.
-
-> Note: the receipt widget is currently **orphaned** — no tool links it now that
-> the surface is time-only. It is kept behind `TODO(CLO-83)` pending a decision to
-> delete or repurpose it. The build still produces it; it is harmless.
 
 ## Run locally
 
@@ -72,12 +92,16 @@ npx @modelcontextprotocol/inspector node packages/chatgpt-app/dist/index.js
 
 In the Inspector:
 
-1. **List tools** — confirm exactly the two time tools (`get_time`,
-   `get_timestamp`) and their read-only hints.
+1. **List tools** — confirm exactly the three curated tools (`get_time`,
+   `log_action`, `verify_cross_party`) and their hints.
 2. Call **`get_time`** (no args) — read-only.
-3. Call **`get_timestamp`** (no args) — read-only.
+3. Call **`verify_cross_party`** with a known `ledger_id` (and `block_height` if
+   you have it) — read-only; returns `structuredContent`.
+4. **List resources** — confirm `ui://widget/receipt.html`
+   (`text/html+skybridge`).
 
-> Both tools are read-only and spend no credits, so smoke-testing them is free.
+> `get_time` and `verify_cross_party` are read-only and spend no credits.
+> `log_action` is the one write and it spends a log credit.
 
 ## ChatGPT developer-mode connector
 
@@ -97,8 +121,9 @@ No OAuth and no submission needed for this — it is a **private** connector.
    in `CHATGPT_APP_TESTER_KEYS`). Alternatively, a tester may pass their **own**
    Clockchain API key as `x-api-key` (BYO — writes spend their credits), optionally
    with `x-clockchain-client-id` / `x-clockchain-wallet-id`.
-5. Save, then in a chat invoke a tool (e.g. "what is the current Clockchain
-   consensus time?"). Both tools are read-only and return JSON.
+5. Save, then in a chat run the loop (e.g. "timestamp this text on Clockchain,
+   then verify it"). `log_action` anchors the hash; `verify_cross_party` renders
+   the read-only widget card.
 
 ### Auth model (dev mode)
 
