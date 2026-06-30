@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "___DRAFT_WARNING": "DO NOT feed this file to mcp-publisher. It is a DRAFT pending resolution of CLO-99, CLO-64, CLO-22, and CLO-59. See PRODUCT-VS-TEST.md.",
+  "name": "TODO: namespace — e.g. network.clockchain/time or network.clockchain/product (CLO-22, CLO-99)",
+  "description": "Verified consensus time from the Clockchain network. Returns the latest consented block time and height — a neutral, tamper-evident clock backed by multi-node Marzullo consensus. No logging, no credentials required beyond a transport token.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/thetangstr/clockchain-developer-tools",
+    "source": "github"
+  },
+  "websiteUrl": "https://mcp.clockchain.network",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "TODO: product endpoint URL — separate Cloud Run service or same service with MCP_SURFACE=product (CLO-22, CLO-59)",
+      "___network_note": "UNRESOLVED: testnet vs mainnet pending CLO-99 and CLO-64. Do not assume mainnet until CLO-64 closes.",
+      "headers": [
+        {
+          "name": "x-api-key",
+          "description": "Clockchain transport token. Free token, no signup: curl -X POST https://mcp.clockchain.network/token",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "___tools_note": "This server exposes only the 'get_time' tool (MCP_SURFACE=product). Tool promotion rule: a tool moves to the product surface only when production-ready and explicitly approved via a CLO issue. See PRODUCT-VS-TEST.md."
+}

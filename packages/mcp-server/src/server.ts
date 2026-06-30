@@ -16,6 +16,11 @@ export function buildServer(overrides?: Partial<ClockchainConfig>): McpServer {
     name: "clockchain-mcp",
     version: "0.1.0",
   });
-  registerTools(server, config, { delegated: !overrides?.apiKey });
+  // MCP_SURFACE controls which tools are exposed (CLO-99):
+  //   "full" (default) — all 31 tools, the full testnet surface (behavior-identical to v1).
+  //   "product"        — only get_time, the production-safe slice.
+  // The default path ("full" or unset) is byte-for-byte behavior-identical to pre-CLO-99.
+  const surface = (process.env.MCP_SURFACE ?? "full") as "full" | "product";
+  registerTools(server, config, { delegated: !overrides?.apiKey, surface });
   return server;
 }
