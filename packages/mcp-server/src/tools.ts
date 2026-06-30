@@ -201,11 +201,18 @@ async function run(name: string, work: () => Promise<unknown>) {
  * Scheduling wraps the live /api/contract/* surface (NOT the 404'd /schedule)
  * and stays non-custodial: create_schedule forwards a caller-supplied signature
  * + nonce; the server never holds a key.
+ *
+ * `opts.surface` controls which tools are registered:
+ *   - "full" (default): all 31 tools — the full testnet surface.
+ *   - "product": only `get_time` — the production-safe slice (CLO-99).
+ *
+ * `get_time` is always registered regardless of surface. Full behavior is
+ * byte-for-byte identical when surface is absent or "full".
  */
 export function registerTools(
   server: McpServer,
   config: ClockchainConfig,
-  opts: { delegated?: boolean } = {},
+  opts: { delegated?: boolean; surface?: "full" | "product" } = {},
 ): void {
   const client = new ClockchainClient(config);
   // Budget (MCP_LOG_BUDGET) caps writes that spend OUR delegated key's credits.
@@ -215,6 +222,7 @@ export function registerTools(
   const budget = opts.delegated === false ? unlimitedLogBudget() : getSharedLogBudget();
 
   // ===== TIME MCP =====
+  // get_time is registered on every surface (product and full).
 
   server.registerTool(
     "get_time",
@@ -226,6 +234,11 @@ export function registerTools(
     },
     async () => run("get_time", () => client.getTime()),
   );
+
+  // Product surface: only get_time is production-ready (CLO-99). Return here so
+  // the remaining 30 testnet/beta tools are never exposed on the product slice.
+  // Full surface (default): fall through and register all tools as before.
+  if ((opts.surface ?? "full") === "product") return;
 
   server.registerTool(
     "get_timestamp",
