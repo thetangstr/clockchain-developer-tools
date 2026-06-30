@@ -1,8 +1,8 @@
 # @clockchain/chatgpt-app
 
 Clockchain **ChatGPT app** built on the **OpenAI Apps SDK** — which *is* MCP (an
-MCP server + tools + an optional iframe widget). This package is a **dev-mode-ready
-scaffold**: a curated tool subset plus a read-only "verify-a-receipt" widget.
+MCP server + tools). This package is a **dev-mode-ready scaffold** exposing a
+**time-only** surface: two read-only consensus-time tools and nothing else.
 
 It reuses [`@clockchain/core`](../core) (the same typed gateway client the main
 [`@clockchain/mcp-server`](../mcp-server) uses) — this is a *separate* package and
@@ -18,26 +18,16 @@ does **not** change the main server's tool set.
 Reviewers test every advertised tool, so the surface is intentionally small.
 Annotations/hints follow the Apps SDK guidance:
 
-Launch focus = **time services only** (verified timestamping + verification).
+Launch focus = **time only** — read consensus time/timestamp detail.
 
 | Tool | Hints | Widget |
 | --- | --- | --- |
 | `get_time` | `readOnly` | — |
 | `get_timestamp` | `readOnly` | — |
-| `get_log_entry` | `readOnly` | — |
-| `verify_receipt` | `readOnly` | ✅ `ui://widget/receipt.html` |
-| `verify_cross_party` | `readOnly` | ✅ `ui://widget/receipt.html` |
-| `log_action` | `destructive`, `openWorld` | — |
 
-The two verify tools link the widget via `_meta["openai/outputTemplate"]` and
-return `structuredContent`, which the widget reads as `window.openai.toolOutput`.
-
-### Truthful anchoring
-
-The widget shows **"pending / unconfirmed" until a `blockHeight` is present**. A
-recorded-but-not-yet-anchored entry is **never** rendered as confirmed — matching
-the truthful-anchoring semantics in `@clockchain/core` (`status: "anchored"` only once the
-event has a block height).
+The chatbot timestamp surface does not expose a `ledgerId` or `blockHeight`, so
+there is nothing for the chatbot to verify: the app makes **no anchoring or
+on-chain receipt claim**.
 
 ## Build
 
@@ -53,6 +43,10 @@ npm run build -w @clockchain/chatgpt-app
 `build` runs two steps: `build:widget` (esbuild bundles `widget/receipt.tsx` →
 `dist/widget/receipt.js`, a single ESM module) then `tsc -b` (the server). The
 widget bundle is inlined into the `ui://widget/receipt.html` resource at runtime.
+
+> Note: the receipt widget is currently **orphaned** — no tool links it now that
+> the surface is time-only. It is kept behind `TODO(CLO-83)` pending a decision to
+> delete or repurpose it. The build still produces it; it is harmless.
 
 ## Run locally
 
@@ -78,16 +72,12 @@ npx @modelcontextprotocol/inspector node packages/chatgpt-app/dist/index.js
 
 In the Inspector:
 
-1. **List tools** — confirm the six curated time-service tools and their hints.
-2. Call **`get_timestamp`** (no args) — read-only.
-3. Call **`verify_cross_party`** with a known `ledger_id` (and `block_height` if
-   you have it) — read-only; returns `structuredContent`.
-4. **List resources** — confirm `ui://widget/receipt.html`
-   (`text/html+skybridge`).
+1. **List tools** — confirm exactly the two time tools (`get_time`,
+   `get_timestamp`) and their read-only hints.
+2. Call **`get_time`** (no args) — read-only.
+3. Call **`get_timestamp`** (no args) — read-only.
 
-> Stick to the read-only tools (`get_time`, `get_timestamp`, `get_log_entry`,
-> `verify_receipt`, `verify_cross_party`) for smoke tests — `log_action` is the
-> one write and it spends a log credit.
+> Both tools are read-only and spend no credits, so smoke-testing them is free.
 
 ## ChatGPT developer-mode connector
 
@@ -107,8 +97,8 @@ No OAuth and no submission needed for this — it is a **private** connector.
    in `CHATGPT_APP_TESTER_KEYS`). Alternatively, a tester may pass their **own**
    Clockchain API key as `x-api-key` (BYO — writes spend their credits), optionally
    with `x-clockchain-client-id` / `x-clockchain-wallet-id`.
-5. Save, then in a chat invoke a tool (e.g. "verify this Clockchain receipt …").
-   The verify tools render the read-only widget card.
+5. Save, then in a chat invoke a tool (e.g. "what is the current Clockchain
+   consensus time?"). Both tools are read-only and return JSON.
 
 ### Auth model (dev mode)
 

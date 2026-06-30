@@ -1,10 +1,8 @@
 // Scaffold smoke tests for the Clockchain ChatGPT app (Apps SDK = MCP).
 //
-// Offline. Verifies the curated tool surface, the Apps SDK annotations/hints,
-// the widget output-template linkage, the widget resource registration, the
-// dev-mode x-api-key auth resolution, and — load-bearing — the truthful anchoring
-// status: a verify result that is not anchored on-chain is reported as PENDING
-// (confirmed:false), never as confirmed.
+// Offline. Verifies the time-only curated tool surface (get_time, get_timestamp),
+// the Apps SDK read-only annotations/hints, the (orphaned but still-registered)
+// widget resource, and the dev-mode x-api-key auth resolution.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerAppTools } from "../dist/tools.js";
@@ -33,37 +31,19 @@ function collect() {
   return { tools, server, resources };
 }
 
-const CURATED = ["get_time", "get_timestamp", "get_log_entry", "verify_receipt", "verify_cross_party", "log_action"];
+const CURATED = ["get_time", "get_timestamp"];
 
 test("exposes exactly the curated tool subset", () => {
   const { tools } = collect();
   assert.deepEqual(Object.keys(tools).sort(), [...CURATED].sort());
 });
 
-test("read-only tools carry readOnlyHint; writes are destructive + openWorld", () => {
+test("read-only tools carry readOnlyHint", () => {
   const { tools } = collect();
-  for (const name of ["get_time", "get_timestamp", "get_log_entry", "verify_receipt", "verify_cross_party"]) {
+  for (const name of ["get_time", "get_timestamp"]) {
     const a = tools[name].config.annotations;
     assert.equal(a.readOnlyHint, true, `${name} readOnlyHint`);
     assert.equal(a.destructiveHint, false, `${name} destructiveHint`);
-  }
-  for (const name of ["log_action"]) {
-    const a = tools[name].config.annotations;
-    assert.equal(a.readOnlyHint, false, `${name} readOnlyHint`);
-    assert.equal(a.destructiveHint, true, `${name} destructiveHint`);
-    assert.equal(a.openWorldHint, true, `${name} openWorldHint`);
-  }
-});
-
-test("verify tools link the widget via openai/outputTemplate", () => {
-  const { tools } = collect();
-  for (const name of ["verify_receipt", "verify_cross_party"]) {
-    assert.equal(
-      tools[name].config._meta["openai/outputTemplate"],
-      "ui://widget/receipt.html",
-      `${name} outputTemplate`,
-    );
-    assert.ok(tools[name].config.outputSchema, `${name} has an outputSchema`);
   }
 });
 
@@ -79,21 +59,6 @@ test("widget resource: skybridge mime + self-contained HTML with the bundle inli
 test("buildServer constructs without throwing (registers tools + widget resource)", () => {
   const server = buildServer({ apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://test.local" });
   assert.ok(server, "buildServer returns a server");
-});
-
-test("truthful anchoring: an un-anchored verify result is PENDING, never confirmed", async () => {
-  // Fail all upstream calls so nothing resolves to an on-chain block.
-  globalThis.fetch = async () => ({
-    status: 400,
-    ok: false,
-    statusText: "bad request",
-    text: async () => JSON.stringify({ message: "upstream rejected" }),
-  });
-  const { tools } = collect();
-  const res = await tools.verify_cross_party.handler({ ledger_id: "L1" });
-  assert.ok(res.structuredContent, "returns structuredContent for the widget");
-  assert.equal(res.structuredContent.confirmed, false, "not confirmed");
-  assert.notEqual(res.structuredContent.status, "anchored", "status is not anchored");
 });
 
 test("dev-mode auth: allowlisted tester key vs BYO key vs none", () => {

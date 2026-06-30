@@ -11,9 +11,10 @@ import {
 /**
  * Build the Clockchain ChatGPT app MCP server.
  *
- * The Apps SDK *is* MCP: this is a normal MCP server that (a) exposes the curated
- * tool subset and (b) registers the read-only widget as an MCP resource. The two
- * verify tools point at the resource via _meta["openai/outputTemplate"].
+ * The Apps SDK *is* MCP: this is a normal MCP server that exposes the time-only
+ * curated tool subset (get_time + get_timestamp). It still registers the receipt
+ * widget as an MCP resource, but that resource is currently orphaned — see the
+ * TODO(CLO-83) at the registration below.
  *
  * `overrides` lets an HTTP request supply the caller's own Clockchain credentials
  * (bring-your-own-key / per-tester key) per request.
@@ -27,8 +28,11 @@ export function buildServer(overrides?: Partial<ClockchainConfig>): McpServer {
 
   registerAppTools(server, config, { delegated: !overrides?.apiKey });
 
-  // Register the read-only verify widget as an MCP resource. ChatGPT loads this
-  // when a verify tool returns, using the openai/outputTemplate link on the tool.
+  // TODO(CLO-83): this receipt-widget resource is ORPHANED now that the surface is
+  // time-only (CLO-57) — no tool links it via openai/outputTemplate anymore. Left
+  // registered intentionally (harmless with no linking tool) pending a product
+  // decision to delete widget.ts + scripts/build-widget.mjs + widget/receipt.tsx +
+  // this registration, or to repurpose the widget.
   server.registerResource(
     "receipt-widget",
     RECEIPT_WIDGET_URI,
