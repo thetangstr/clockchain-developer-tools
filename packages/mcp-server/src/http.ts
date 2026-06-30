@@ -710,7 +710,7 @@ export async function runHttp(): Promise<void> {
           channel,
           plan: "trial",
         };
-        gate = buildKeeperGate(entitlement, () => {
+        gate = buildKeeperGate(entitlement, async () => {
           // Forwardable claim for the 402 (LLD §6.2). Minted with the promote
           // secret; only its hash is persisted on the session (LLD §5.3).
           const { token } = mintClaim(
@@ -718,11 +718,22 @@ export async function runHttp(): Promise<void> {
             { eph, ch: channel },
             claimTtlSeconds(),
           );
-          void store.putSession({
-            ...session,
-            claimTokenHash: hashClaim(token),
-            status: "keeper_blocked",
-          });
+          // FIX 5a: AWAIT the session write before returning the claim — do not
+          // hand out a claim whose session row (claim hash + keeper_blocked
+          // status) never persisted. A write failure is logged, not thrown, so
+          // the caller still receives a usable claim.
+          await store
+            .putSession({
+              ...session,
+              claimTokenHash: hashClaim(token),
+              status: "keeper_blocked",
+            })
+            .catch((e) => {
+              console.error(
+                "[clockchain-mcp] failed to persist keeper_blocked session:",
+                e,
+              );
+            });
           return token;
         });
       }

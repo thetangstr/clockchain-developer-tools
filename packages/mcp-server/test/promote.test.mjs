@@ -72,6 +72,48 @@ test("promote is idempotent on claim (LLD §6.5)", async () => {
   assert.equal(replay.body.accountId, "acct#7");
 });
 
+test("FIX 3: a caller-supplied plan is IGNORED (no self-assigned enterprise)", async () => {
+  const store = new InMemoryStore();
+  const eph = "did:clockchain:eph:plan1";
+  await seedSession(store, eph, 1);
+  const { token } = mintClaim(SECRET, { eph, ch: "mcp" }, 3600, 1000);
+
+  // Attacker tries to self-assign the top tier via the request body.
+  const out = await runPromote(
+    store,
+    SECRET,
+    { claim: token, accountId: "acct#evil", plan: "enterprise" },
+    1500,
+  );
+  assert.equal(out.status, 200);
+  const acct = await store.getAccount("acct#evil");
+  assert.equal(acct.plan, "pro", "tier is derived server-side, not from the body");
+});
+
+test("FIX 4: a claim with NO session row cannot be replayed to flip a 2nd account", async () => {
+  const store = new InMemoryStore();
+  // NOTE: no seedSession — this is the 'expired trial, claim still valid, no
+  // session row' case (LLD §8). Idempotency cannot key on the session here.
+  const eph = "did:clockchain:eph:nosession";
+  const { token } = mintClaim(SECRET, { eph, ch: "mcp" }, 3600, 1000);
+
+  const first = await runPromote(store, SECRET, { claim: token, accountId: "acct#A" }, 1500);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.accountId, "acct#A");
+  assert.ok(await store.getAccount("acct#A"), "first promote creates the account");
+
+  // Replay the SAME claim aiming at a different, attacker-chosen account.
+  const replay = await runPromote(store, SECRET, { claim: token, accountId: "acct#B" }, 1600);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.idempotent, true, "replay is a no-op idempotent return");
+  assert.equal(replay.body.accountId, "acct#A", "still bound to the first account");
+  assert.equal(
+    await store.getAccount("acct#B"),
+    null,
+    "the replayed claim must NOT write a second account",
+  );
+});
+
 test("a claim signed with a different secret is rejected (409)", async () => {
   const store = new InMemoryStore();
   const eph = "did:clockchain:eph:p3";

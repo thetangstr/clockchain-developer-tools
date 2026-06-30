@@ -242,8 +242,8 @@ export function registerTools(
     ) => {
       assertToolClassified(name);
       if (!gate) return orig(name, meta, handler);
-      return orig(name, meta, (...args: unknown[]) => {
-        const blocked = gate.check(name);
+      return orig(name, meta, async (...args: unknown[]) => {
+        const blocked = await gate.check(name);
         return blocked ?? handler(...args);
       });
     };

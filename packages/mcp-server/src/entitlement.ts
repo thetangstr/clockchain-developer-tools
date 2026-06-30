@@ -208,7 +208,13 @@ export function keeperToolError(body: AccountRequiredBody): ToolErrorResult {
  * this module stays free of crypto/secret concerns.
  */
 export interface KeeperGate {
-  check(tool: string): ToolErrorResult | undefined;
+  /**
+   * Async (FIX 5a): minting a claim persists a session row (the claim hash +
+   * keeper_blocked status) and we must AWAIT that write before returning the
+   * claim — never hand out a claim whose session never persisted. Non-keeper
+   * tools resolve `undefined` without any await.
+   */
+  check(tool: string): Promise<ToolErrorResult | undefined>;
 }
 
 /**
@@ -225,15 +231,17 @@ export interface KeeperGate {
  */
 export function buildKeeperGate(
   entitlement: Entitlement,
-  mintClaimFor: () => string,
+  mintClaimFor: () => string | Promise<string>,
 ): KeeperGate {
   if (entitlement.kind === "authenticated") {
-    return { check: () => undefined };
+    return { check: async () => undefined };
   }
   return {
-    check(tool: string): ToolErrorResult | undefined {
+    async check(tool: string): Promise<ToolErrorResult | undefined> {
       if (!classifyTool(tool).keeper) return undefined;
-      const body = buildAccountRequired(tool, mintClaimFor(), "keeper_action");
+      // FIX 5a: await the mint (it persists the session) before returning.
+      const claim = await mintClaimFor();
+      const body = buildAccountRequired(tool, claim, "keeper_action");
       return keeperToolError(body);
     },
   };

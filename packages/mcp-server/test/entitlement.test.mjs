@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import {
   classifyTool,
   KEEPER_TOOLS,
+  FREE_TOOLS,
+  isClassified,
+  assertToolClassified,
   buildAccountRequired,
   buildKeeperGate,
   keeperToolError,
@@ -50,13 +53,28 @@ test("generation/read tools are NOT keeper (value lands before the wall)", () =>
   }
 });
 
-test("unknown tools default to non-keeper (free generation)", () => {
-  assert.equal(classifyTool("some_future_tool").keeper, false);
+test("FIX 2: unclassified tools FAIL CLOSED — classifyTool treats them as keeper", () => {
+  // A future tool added without classifying it must NOT silently run free.
+  assert.equal(classifyTool("some_future_tool").keeper, true);
+  assert.equal(classifyTool("some_future_tool").tier, "paid");
+  assert.equal(isClassified("some_future_tool"), false);
 });
 
-test("anonymous keeper action -> structured 402 account_required (NOT a 500)", () => {
+test("FIX 2: assertToolClassified throws for an unclassified tool (boot guard)", () => {
+  assert.throws(
+    () => assertToolClassified("totally_unknown_tool"),
+    /unclassified/,
+    "registering an unclassified tool must throw at boot",
+  );
+  // every explicitly classified tool passes the assertion
+  for (const t of [...KEEPER_TOOLS, ...FREE_TOOLS]) {
+    assert.doesNotThrow(() => assertToolClassified(t), `${t} should be classified`);
+  }
+});
+
+test("anonymous keeper action -> structured 402 account_required (NOT a 500)", async () => {
   const gate = buildKeeperGate(ANON, () => "cc_claim.sig");
-  const blocked = gate.check("generate_compliance_report");
+  const blocked = await gate.check("generate_compliance_report");
   assert.ok(blocked, "keeper tool must be blocked for an anonymous trial");
   assert.equal(blocked.isError, true);
   // model-readable structured error
@@ -70,31 +88,31 @@ test("anonymous keeper action -> structured 402 account_required (NOT a 500)", (
   assert.equal(parsed.error, "account_required");
 });
 
-test("generation tool below ceiling does NOT 402 for an anonymous trial", () => {
+test("generation tool below ceiling does NOT 402 for an anonymous trial", async () => {
   const gate = buildKeeperGate(ANON, () => "cc_claim.sig");
-  assert.equal(gate.check("log_action"), undefined);
-  assert.equal(gate.check("mint_identity"), undefined);
-  assert.equal(gate.check("build_evidence_package"), undefined);
-  assert.equal(gate.check("attest_action"), undefined);
+  assert.equal(await gate.check("log_action"), undefined);
+  assert.equal(await gate.check("mint_identity"), undefined);
+  assert.equal(await gate.check("build_evidence_package"), undefined);
+  assert.equal(await gate.check("attest_action"), undefined);
 });
 
-test("authenticated callers bypass the keeper layer entirely (LLD §13)", () => {
+test("authenticated callers bypass the keeper layer entirely (LLD §13)", async () => {
   const gate = buildKeeperGate(AUTHED, () => "cc_claim.sig");
   // even a keeper tool is allowed for an authenticated principal
-  assert.equal(gate.check("generate_compliance_report"), undefined);
-  assert.equal(gate.check("delegate_authority"), undefined);
-  assert.equal(gate.check("log_action"), undefined);
+  assert.equal(await gate.check("generate_compliance_report"), undefined);
+  assert.equal(await gate.check("delegate_authority"), undefined);
+  assert.equal(await gate.check("log_action"), undefined);
 });
 
-test("claim is minted lazily — only when a keeper tool is actually hit", () => {
+test("claim is minted lazily — only when a keeper tool is actually hit", async () => {
   let mints = 0;
   const gate = buildKeeperGate(ANON, () => {
     mints += 1;
     return "cc_claim.sig";
   });
-  gate.check("log_action"); // non-keeper -> no mint
+  await gate.check("log_action"); // non-keeper -> no mint
   assert.equal(mints, 0);
-  gate.check("generate_compliance_report"); // keeper -> one mint
+  await gate.check("generate_compliance_report"); // keeper -> one mint
   assert.equal(mints, 1);
 });
 
