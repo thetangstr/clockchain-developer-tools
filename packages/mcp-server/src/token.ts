@@ -112,3 +112,139 @@ export function verifyToken(
 /** True iff the token is a structurally-self-serve token (cheap pre-check). */
 export const looksLikeSelfServe = (token: string): boolean =>
   typeof token === "string" && token.startsWith(PREFIX) && token.includes(".");
+
+// ===========================================================================
+// v:2 tokens — trial (transport) + claim (forwardable promotion artifact).
+// LLD §5.3 / §6.4. v:1 demo tokens above are untouched (backward compat, §13).
+// ===========================================================================
+
+/**
+ * v:2 trial token (LLD §6.4). A transport credential (presented in `x-api-key`,
+ * like a demo token) that ALSO marks the request as an anonymous trial and
+ * carries the ephemeral DID + channel so the server can lazily open the session.
+ * Signed with the same MCP_TOKEN_SIGNING_SECRET as v:1 demo tokens.
+ */
+export interface TrialTokenPayload {
+  v: 2;
+  kind: "trial";
+  tier: "trial";
+  eph: string;
+  ch: string;
+  iat: number;
+  exp: number;
+  jti?: string;
+}
+
+/**
+ * v:2 claim token (LLD §5.3). The forwardable promotion artifact returned in the
+ * keeper 402 and consumed at /promote. Signed with a DISTINCT secret
+ * (MCP_PROMOTE_SECRET, LLD §16) so a transport token cannot be replayed as a
+ * claim or vice-versa. Only its hash is stored on the session.
+ */
+export interface ClaimTokenPayload {
+  v: 2;
+  kind: "claim";
+  eph: string;
+  ch: string;
+  iat: number;
+  exp: number;
+}
+
+/** Sign a v:2 payload object into a `cc_<seg>.<sig>` token. */
+function mintV2<T extends object>(secret: string, payload: T): string {
+  const seg = b64url(Buffer.from(JSON.stringify(payload), "utf8"));
+  return `${PREFIX}${seg}.${sign(seg, secret)}`;
+}
+
+/** Verify a v:2 token of a specific `kind`. Never throws. */
+function verifyV2<T extends { v: 2; kind: string; exp: number }>(
+  secret: string,
+  token: string,
+  kind: T["kind"],
+  nowSec: number,
+): { valid: true; payload: T } | { valid: false; reason: string } {
+  if (!secret) return { valid: false, reason: "signing disabled" };
+  if (typeof token !== "string" || !token.startsWith(PREFIX)) {
+    return { valid: false, reason: "bad prefix" };
+  }
+  const body = token.slice(PREFIX.length);
+  const dot = body.indexOf(".");
+  if (dot < 0) return { valid: false, reason: "malformed" };
+  const seg = body.slice(0, dot);
+  const sig = body.slice(dot + 1);
+  const a = Buffer.from(sig);
+  const b = Buffer.from(sign(seg, secret));
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return { valid: false, reason: "bad signature" };
+  }
+  let payload: T;
+  try {
+    payload = JSON.parse(b64urlDecode(seg).toString("utf8")) as T;
+  } catch {
+    return { valid: false, reason: "bad payload" };
+  }
+  if (payload.v !== 2 || payload.kind !== kind) {
+    return { valid: false, reason: "bad version" };
+  }
+  if (typeof payload.exp !== "number" || nowSec >= payload.exp) {
+    return { valid: false, reason: "expired" };
+  }
+  return { valid: true, payload };
+}
+
+/** Mint a v:2 trial token (transport credential for an anonymous trial). */
+export function mintTrialToken(
+  secret: string,
+  args: { eph: string; ch: string },
+  ttlSeconds = 7 * 24 * 60 * 60,
+  nowSec: number = Math.floor(Date.now() / 1000),
+  jti: string = randomUUID(),
+): { token: string; payload: TrialTokenPayload } {
+  const payload: TrialTokenPayload = {
+    v: 2,
+    kind: "trial",
+    tier: "trial",
+    eph: args.eph,
+    ch: args.ch,
+    iat: nowSec,
+    exp: nowSec + ttlSeconds,
+    jti,
+  };
+  return { token: mintV2(secret, payload), payload };
+}
+
+/** Verify a v:2 trial token (signed with the transport signing secret). */
+export function verifyTrialToken(
+  secret: string,
+  token: string,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): { valid: true; payload: TrialTokenPayload } | { valid: false; reason: string } {
+  return verifyV2<TrialTokenPayload>(secret, token, "trial", nowSec);
+}
+
+/** Mint a v:2 claim token (forwardable; signed with MCP_PROMOTE_SECRET). */
+export function mintClaim(
+  promoteSecret: string,
+  args: { eph: string; ch: string },
+  ttlSeconds = 7 * 24 * 60 * 60,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): { token: string; payload: ClaimTokenPayload } {
+  const payload: ClaimTokenPayload = {
+    v: 2,
+    kind: "claim",
+    eph: args.eph,
+    ch: args.ch,
+    iat: nowSec,
+    exp: nowSec + ttlSeconds,
+  };
+  return { token: mintV2(promoteSecret, payload), payload };
+}
+
+/** Verify a v:2 claim token (signed with MCP_PROMOTE_SECRET). */
+export function verifyClaim(
+  promoteSecret: string,
+  token: string,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): { valid: true; payload: ClaimTokenPayload } | { valid: false; reason: string } {
+  return verifyV2<ClaimTokenPayload>(promoteSecret, token, "claim", nowSec);
+}

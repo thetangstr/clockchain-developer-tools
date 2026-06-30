@@ -1,0 +1,279 @@
+/**
+ * State store abstraction (LLD §4.1 A8, §5).
+ *
+ * The session + entitlement layer needs durable-ish state: ephemeral trial
+ * sessions, post-conversion accounts, and per-session run counters. This module
+ * defines a thin {@link Store} interface plus two implementations that need no
+ * external services:
+ *
+ *   - {@link InMemoryStore} — process-local Map storage (tests, dev, demo mode).
+ *   - {@link FileStore}     — a single JSON file on disk (survives a restart;
+ *     good enough for a single-instance demo deploy).
+ *
+ * DROP-IN TODO (CLO-102 / A8): the production target is the existing DynamoDB
+ * state store (single table, item types keyed by `pk` per LLD §5). Payments
+ * (CLO-102) REQUIRE this to be durable + multi-instance: a self-serve token can
+ * land on any Cloud Run instance, so an in-memory session is invisible to the
+ * next request. Implement `DynamoStore implements Store` and select it in
+ * {@link createStore} when `MCP_SESSION_TABLE` is set. The interface is kept
+ * deliberately small and async so that swap is mechanical — no caller changes.
+ *
+ * Every method is async (returns a Promise) precisely so the DynamoDB drop-in
+ * does not change a single call site.
+ */
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
+/** Channel a trial originated on; drives the run ceiling (LLD §9.1). */
+export type Channel = "mcp" | "chatbot" | "web";
+
+/** Lifecycle of an ephemeral trial session (LLD §8 state machine). */
+export type SessionStatus =
+  | "active"
+  | "keeper_blocked"
+  | "promoted"
+  | "expired";
+
+/** Plan tier of a converted account (LLD §5.4). */
+export type Plan = "trial" | "pro" | "enterprise";
+
+/**
+ * EphemeralSession item (LLD §5.1). Keyed by `sessionId` (we use the ephemeral
+ * DID as the stable key so a claim token — which carries only `eph` — maps
+ * directly back to its session at /promote time).
+ */
+export interface SessionRecord {
+  sessionId: string;
+  ephemeralDid: string;
+  channel: Channel;
+  runsUsed: number;
+  /** null = unlimited (authenticated accounts never carry a SessionRecord). */
+  runsCeiling: number | null;
+  createdAt: number;
+  expiresAt: number;
+  /** sha256 of the claim token issued for this session (LLD §5.3). */
+  claimTokenHash: string | null;
+  /** accountId once promoted, else null (LLD §5.1). */
+  promotedTo: string | null;
+  status: SessionStatus;
+}
+
+/** Account / entitlement item (LLD §5.4). */
+export interface AccountRecord {
+  accountId: string;
+  plan: Plan;
+  erc8004Id: string | null;
+  channelCeilings: Record<Channel, number | null>;
+  billingRef: string | null;
+  /** ephemeral DIDs that were promoted into this account (LLD §5.4). */
+  promotedFrom: string[];
+}
+
+/**
+ * Run item (LLD §5.2) — one completed workflow, NOT one tool call. Persisted so
+ * `runsUsed` can increment only when a run closes `complete=true`.
+ *
+ * NOTE: run open/close + count-on-complete (A3) is CLO-101's job; this record
+ * type + the counter methods below are the seam so that work needs no schema
+ * change here.
+ */
+export interface RunRecord {
+  sessionId: string;
+  runId: string;
+  actions: string[];
+  openedAt: number;
+  closedAt: number | null;
+  complete: boolean;
+}
+
+/**
+ * Consumed-claim marker (CLO-48 review FIX 4). A claim token can be consumed by
+ * /promote AT MOST ONCE — even when there is no session row (an expired trial
+ * whose claim is still valid, LLD §8). Keyed by `hashClaim(claim)`, it makes
+ * /promote replay-safe on the CLAIM itself, so the same claim can never flip a
+ * second (attacker-chosen) accountId.
+ */
+export interface ConsumedClaimRecord {
+  /** sha256 of the consumed claim token (the replay key). */
+  claimHash: string;
+  /** accountId this claim was first bound to (returned on idempotent replay). */
+  accountId: string;
+  /** receipts bound on first consumption (echoed back on replay). */
+  boundReceipts: number;
+  consumedAt: number;
+}
+
+/**
+ * The minimal persistence surface the session/entitlement layer needs. Kept
+ * small on purpose so a DynamoDB implementation is a mechanical drop-in.
+ */
+export interface Store {
+  // --- sessions (A1/A8) ---
+  getSession(sessionId: string): Promise<SessionRecord | null>;
+  putSession(session: SessionRecord): Promise<void>;
+
+  // --- accounts / entitlement (A8 <-> B3) ---
+  getAccount(accountId: string): Promise<AccountRecord | null>;
+  putAccount(account: AccountRecord): Promise<void>;
+
+  // --- run counters (A3 seam for CLO-101) ---
+  getRun(sessionId: string, runId: string): Promise<RunRecord | null>;
+  putRun(run: RunRecord): Promise<void>;
+
+  // --- consumed claims (FIX 4: replay-safe /promote, claim-keyed) ---
+  getConsumedClaim(claimHash: string): Promise<ConsumedClaimRecord | null>;
+  putConsumedClaim(record: ConsumedClaimRecord): Promise<void>;
+}
+
+/** Process-local store. Loses all state on restart — fine for tests/dev/demo. */
+export class InMemoryStore implements Store {
+  protected sessions = new Map<string, SessionRecord>();
+  protected accounts = new Map<string, AccountRecord>();
+  protected runs = new Map<string, RunRecord>();
+  protected consumedClaims = new Map<string, ConsumedClaimRecord>();
+
+  // FIX 6: separate the composite run key with the ASCII Unit Separator written
+  // as the `` escape so the source file stays pure ASCII text — a literal
+  // NUL byte made git treat this file as binary. US never appears in a DID/runId.
+  private runKey(sessionId: string, runId: string): string {
+    return `${sessionId}\u001f${runId}`;
+  }
+
+  // FIX 5c: reads return a COPY, never the live Map ref, so a caller mutating a
+  // returned record cannot silently corrupt stored state (writes go via put*).
+  async getSession(sessionId: string): Promise<SessionRecord | null> {
+    const s = this.sessions.get(sessionId);
+    return s ? { ...s } : null;
+  }
+  async putSession(session: SessionRecord): Promise<void> {
+    this.sessions.set(session.sessionId, { ...session });
+  }
+  async getAccount(accountId: string): Promise<AccountRecord | null> {
+    const a = this.accounts.get(accountId);
+    return a ? { ...a, promotedFrom: [...a.promotedFrom] } : null;
+  }
+  async putAccount(account: AccountRecord): Promise<void> {
+    this.accounts.set(account.accountId, { ...account });
+  }
+  async getRun(sessionId: string, runId: string): Promise<RunRecord | null> {
+    const r = this.runs.get(this.runKey(sessionId, runId));
+    return r ? { ...r, actions: [...r.actions] } : null;
+  }
+  async putRun(run: RunRecord): Promise<void> {
+    this.runs.set(this.runKey(run.sessionId, run.runId), { ...run });
+  }
+  async getConsumedClaim(claimHash: string): Promise<ConsumedClaimRecord | null> {
+    const c = this.consumedClaims.get(claimHash);
+    return c ? { ...c } : null;
+  }
+  async putConsumedClaim(record: ConsumedClaimRecord): Promise<void> {
+    this.consumedClaims.set(record.claimHash, { ...record });
+  }
+}
+
+interface FileShape {
+  sessions: Record<string, SessionRecord>;
+  accounts: Record<string, AccountRecord>;
+  runs: Record<string, RunRecord>;
+  consumedClaims: Record<string, ConsumedClaimRecord>;
+}
+
+/**
+ * Single-JSON-file store. Survives a process restart (so a demo deploy keeps
+ * sessions across a redeploy) but is single-instance only — concurrent writers /
+ * multiple Cloud Run instances would race. Promote to DynamoStore before any
+ * multi-instance or billing (CLO-102) use. Writes are synchronous + whole-file
+ * (small data, low volume) to keep the implementation dependency-free.
+ */
+export class FileStore extends InMemoryStore {
+  constructor(private readonly path: string) {
+    super();
+    this.load();
+  }
+
+  private load(): void {
+    try {
+      const raw = readFileSync(this.path, "utf8");
+      const data = JSON.parse(raw) as Partial<FileShape>;
+      for (const s of Object.values(data.sessions ?? {})) this.sessions.set(s.sessionId, s);
+      for (const a of Object.values(data.accounts ?? {})) this.accounts.set(a.accountId, a);
+      for (const [k, r] of Object.entries(data.runs ?? {})) this.runs.set(k, r);
+      for (const [k, c] of Object.entries(data.consumedClaims ?? {})) this.consumedClaims.set(k, c);
+    } catch (err) {
+      // ENOENT (no file yet) is the normal first-boot path — start empty silently.
+      // FIX 5b: any OTHER error (corrupt JSON, permission, partial write) would
+      // otherwise be SWALLOWED and silently lose all prior state; log it loudly.
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.error(
+          `[clockchain-mcp] FileStore.load failed for ${this.path}; starting ` +
+            `with EMPTY state (prior sessions/accounts not loaded):`,
+          err,
+        );
+      }
+    }
+  }
+
+  private flush(): void {
+    const data: FileShape = {
+      sessions: Object.fromEntries(this.sessions),
+      accounts: Object.fromEntries(this.accounts),
+      runs: Object.fromEntries(this.runs),
+      consumedClaims: Object.fromEntries(this.consumedClaims),
+    };
+    mkdirSync(dirname(this.path), { recursive: true });
+    // FIX 5b: write to a temp file then atomically rename over the target so a
+    // crash mid-write can never leave a truncated/corrupt store on disk (the
+    // reader sees either the old file or the fully-written new one).
+    const tmp = `${this.path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+    renameSync(tmp, this.path);
+  }
+
+  override async putSession(session: SessionRecord): Promise<void> {
+    await super.putSession(session);
+    this.flush();
+  }
+  override async putAccount(account: AccountRecord): Promise<void> {
+    await super.putAccount(account);
+    this.flush();
+  }
+  override async putRun(run: RunRecord): Promise<void> {
+    await super.putRun(run);
+    this.flush();
+  }
+  override async putConsumedClaim(record: ConsumedClaimRecord): Promise<void> {
+    await super.putConsumedClaim(record);
+    this.flush();
+  }
+}
+
+/**
+ * Select the store implementation from env.
+ *
+ *   MCP_SESSION_FILE=<path>   -> FileStore (single-instance demo persistence)
+ *   (default)                 -> InMemoryStore
+ *   MCP_SESSION_TABLE=<table> -> DynamoStore  (TODO: CLO-102, not yet implemented)
+ *
+ * A process-wide singleton: each HTTP request builds a fresh MCP server, so a
+ * per-request store would never accumulate state (mirrors getSharedLogBudget).
+ */
+let shared: Store | null = null;
+export function createStore(env: NodeJS.ProcessEnv = process.env): Store {
+  if (shared) return shared;
+  if (env.MCP_SESSION_TABLE) {
+    // TODO(CLO-102): return new DynamoStore(env.MCP_SESSION_TABLE). Until that
+    // exists, fall through to the file/memory store so the layer still runs.
+    console.error(
+      "[clockchain-mcp] MCP_SESSION_TABLE is set but DynamoStore is not yet " +
+        "implemented (CLO-102); using the file/in-memory store instead.",
+    );
+  }
+  const file = env.MCP_SESSION_FILE;
+  shared = file ? new FileStore(file) : new InMemoryStore();
+  return shared;
+}
+
+/** Test-only: drop the process-wide store so the next call re-reads env. */
+export function __resetStore(): void {
+  shared = null;
+}

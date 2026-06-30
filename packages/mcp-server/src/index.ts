@@ -4,6 +4,11 @@ import { buildServer } from "./server.js";
 export { buildServer } from "./server.js";
 export { registerTools } from "./tools.js";
 export { runHttp } from "./http.js";
+// Session + entitlement layer (CLO-48).
+export * from "./store.js";
+export * from "./session.js";
+export * from "./entitlement.js";
+export * from "./promote.js";
 
 /** Dispatch on MCP_TRANSPORT: "http" runs the HTTP server, else stdio. */
 async function main(): Promise<void> {

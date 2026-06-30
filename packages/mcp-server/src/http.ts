@@ -3,7 +3,30 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
-import { mintToken, verifyToken, looksLikeSelfServe, type TokenPayload } from "./token.js";
+import {
+  mintToken,
+  verifyToken,
+  verifyTrialToken,
+  mintTrialToken,
+  mintClaim,
+  looksLikeSelfServe,
+  type TokenPayload,
+  type TrialTokenPayload,
+} from "./token.js";
+import { createStore, type Store } from "./store.js";
+import {
+  getOrCreateSession,
+  newEphemeralDid,
+  normalizeChannel,
+  claimTtlSeconds,
+  hashClaim,
+} from "./session.js";
+import {
+  buildKeeperGate,
+  type Entitlement,
+  type KeeperGate,
+} from "./entitlement.js";
+import { runPromote } from "./promote.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -278,6 +301,35 @@ export function rateLimitHeaders(
   return headers;
 }
 
+/**
+ * Read and JSON-parse a request body, capped at 1 MB (the MCP transport reads its
+ * own body; this is only for our small JSON control endpoints like /promote).
+ * Rejects on invalid JSON or an over-size body.
+ */
+export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      data += chunk.toString("utf8");
+    });
+    req.on("end", () => {
+      try {
+        resolve(data.trim() ? JSON.parse(data) : {});
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
 export async function runHttp(): Promise<void> {
   // PORT is injected by Cloud Run / most PaaS hosts (8080); MCP_PORT is our own
   // override; 3000 is the local default. Honor them in that order.
@@ -320,19 +372,34 @@ export async function runHttp(): Promise<void> {
   );
   const tokenTtlDays = Number(process.env.MCP_TOKEN_TTL_DAYS ?? "7");
 
+  // Session + entitlement layer (LLD §4.1 A1/A8). The store is process-wide (each
+  // request builds a fresh MCP server, so a per-request store would never
+  // accumulate). Claim tokens use a DISTINCT secret (LLD §16); fall back to the
+  // signing secret in demo mode so the layer still runs without extra config.
+  const store: Store = createStore();
+  const promoteSecret = process.env.MCP_PROMOTE_SECRET || signingSecret;
+
   // A request is authorized if it carries a valid static MCP token OR a valid
-  // self-serve signed token. Both grant the delegated (shared testnet) key.
-  // Returns the verified self-serve payload (when that is how auth passed) so the
-  // caller can rate-limit on the token's `jti` WITHOUT a second HMAC verify.
-  const checkAuth = (
-    req: IncomingMessage,
-  ): { ok: boolean; payload?: TokenPayload } => {
-    if (isAuthorized(req.headers, tokens)) return { ok: true };
+  // self-serve signed token (v:1 demo or v:2 trial). Static tokens and v:1 demo
+  // tokens resolve to AUTHENTICATED and bypass the trial/keeper layer (LLD §13);
+  // a v:2 trial token marks the request as an ANONYMOUS TRIAL and carries the
+  // ephemeral DID + channel. Returns the verified payload (when that is how auth
+  // passed) so the caller can rate-limit on the token's `jti` WITHOUT re-verifying.
+  type AuthOutcome =
+    | { ok: false }
+    | { ok: true; reason: "static_token" }
+    | { ok: true; reason: "demo_token_v1"; payload: TokenPayload }
+    | { ok: true; trial: TrialTokenPayload };
+  const checkAuth = (req: IncomingMessage): AuthOutcome => {
+    if (isAuthorized(req.headers, tokens)) return { ok: true, reason: "static_token" };
     if (!selfServeEnabled) return { ok: false };
     const presented = presentedApiKey(req.headers);
     if (!looksLikeSelfServe(presented)) return { ok: false };
-    const r = verifyToken(signingSecret, presented);
-    return r.valid ? { ok: true, payload: r.payload } : { ok: false };
+    const v1 = verifyToken(signingSecret, presented);
+    if (v1.valid) return { ok: true, reason: "demo_token_v1", payload: v1.payload };
+    const v2 = verifyTrialToken(signingSecret, presented);
+    if (v2.valid) return { ok: true, trial: v2.payload };
+    return { ok: false };
   };
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -405,11 +472,50 @@ export async function runHttp(): Promise<void> {
       // Sanitized, and embedded as a NON-AUTHORITATIVE LABEL only — it is supplied
       // unauthenticated, so it does NOT isolate budgets or rate-limit buckets.
       // Real per-user isolation needs authenticated identity (medium-term TODO).
+      const reqUrl = new URL(req.url ?? "/", "http://localhost");
       const sub = sanitizeSub(
         firstHeader(req.headers["x-clockchain-sub"]).trim() ||
-          new URL(req.url ?? "/", "http://localhost").searchParams.get("sub")?.trim() ||
+          reqUrl.searchParams.get("sub")?.trim() ||
           undefined,
       );
+
+      // Trial mode (LLD §6.4): `POST /token?mode=trial` mints a v:2 TRIAL token
+      // carrying a fresh ephemeral DID + channel. Used as a transport credential
+      // (x-api-key) like a demo token, but it marks the request as an anonymous
+      // trial so the keeper gate engages. Default mode is unchanged (v:1 demo) so
+      // existing callers are byte-for-byte unaffected (backward compat).
+      if (reqUrl.searchParams.get("mode") === "trial") {
+        const channel = normalizeChannel(
+          firstHeader(req.headers["x-clockchain-channel"]).trim() ||
+            reqUrl.searchParams.get("channel")?.trim() ||
+            undefined,
+        );
+        const eph = newEphemeralDid();
+        const { token: trialToken, payload: trialPayload } = mintTrialToken(
+          signingSecret,
+          { eph, ch: channel },
+          tokenTtlDays * 24 * 60 * 60,
+        );
+        console.error(
+          `[clockchain-mcp] minted self-serve TRIAL token (channel=${channel}, ip=${ip})`,
+        );
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+          ...(mintCheck ? rateLimitHeaders(mintCheck) : {}),
+        });
+        res.end(JSON.stringify({
+          token: trialToken,
+          tier: trialPayload.tier,
+          channel,
+          ephemeral_did: eph,
+          expires_at: new Date(trialPayload.exp * 1000).toISOString(),
+          endpoint: "https://mcp.clockchain.network/mcp",
+          usage: "Add header  x-api-key: <token>  to your MCP client config (anonymous testnet trial).",
+        }));
+        return;
+      }
+
       const { token, payload } = mintToken(
         signingSecret,
         tokenTtlDays * 24 * 60 * 60,
@@ -437,6 +543,41 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
+    // Promote-in-place (LLD §4.1 A6, §6.5). Web-origin: the billing callback POSTs
+    // { claim, accountId } after checkout to bind the ephemeral session to the
+    // account. Idempotent on `claim`. STUB binding (manual entitlement flip) until
+    // Network B2 lands (LLD §12).
+    //
+    // SECURITY TODO (A7/B6): restrict this to the web/billing origin (shared
+    // secret or allowlist) before production — anyone with a valid claim can flip
+    // an account in demo mode. Off entirely when self-serve is disabled.
+    if (req.method === "POST" && pathOf(req.url) === "/promote") {
+      if (!selfServeEnabled) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          error: "self_serve_disabled",
+          message: "Promote is unavailable: no signing secret configured.",
+        }));
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_request", message: "Invalid JSON body." }));
+        return;
+      }
+      const b = (body ?? {}) as { claim?: unknown; accountId?: unknown; plan?: unknown };
+      const outcome = await runPromote(store, promoteSecret, b);
+      res.writeHead(outcome.status, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      });
+      res.end(JSON.stringify(outcome.body));
+      return;
+    }
+
     // A human browsing to the endpoint (GET with an HTML Accept) gets the
     // marketing landing page — at "/" and "/mcp" alike. Agents POST JSON-RPC and
     // MCP's own SSE GETs send Accept: text/event-stream, so the agent endpoint is
@@ -461,7 +602,7 @@ export async function runHttp(): Promise<void> {
     let byo = clockchainOverrides(req.headers);
     // Verify auth ONCE here; reuse the verified self-serve payload below for the
     // rate-limit key so we don't HMAC-verify the token twice per request.
-    const auth = byo ? { ok: true as const, payload: undefined } : checkAuth(req);
+    const auth: AuthOutcome = byo ? { ok: true, reason: "static_token" } : checkAuth(req);
     if (!byo && !auth.ok) {
       const presented = presentedApiKey(req.headers);
       if (presented) {
@@ -516,12 +657,21 @@ export async function runHttp(): Promise<void> {
     // get distinct buckets and a shared-egress public app isn't throttled as one
     // IP. We pass the jti only for a NON-byo request, so a BYO key is bucketed by
     // its own (authenticated) key, not by a co-presented token's jti.
+    // jti for rate-limit bucketing: present on a v:1 demo token (auth.payload) or
+    // a v:2 trial token (auth.trial); absent for static-token / BYO callers.
+    const selfServeJti = byo || !auth.ok
+      ? undefined
+      : "payload" in auth
+        ? auth.payload.jti
+        : "trial" in auth
+          ? auth.trial.jti
+          : undefined;
     const rl = limiter.enabled
       ? limiter.allow(
           callerKey(
             req.headers,
             clientIp(req.headers, req.socket.remoteAddress),
-            byo ? undefined : auth.payload?.jti,
+            selfServeJti,
           ),
         )
       : null;
@@ -543,7 +693,51 @@ export async function runHttp(): Promise<void> {
           res.setHeader(k, v);
         }
       }
-      const server = buildServer(byo);
+
+      // Resolve entitlement -> keeper gate (LLD §4.1 A1/A4). Only an anonymous
+      // TRIAL (v:2 trial token) gets a gate; BYO / static-token / v:1-demo
+      // callers are AUTHENTICATED and bypass the trial/keeper layer (LLD §13).
+      let gate: KeeperGate | undefined;
+      if (!byo && auth.ok && "trial" in auth) {
+        const eph = auth.trial.eph;
+        const channel = normalizeChannel(auth.trial.ch);
+        // Lazily open the ephemeral session on first trial call (LLD §6.4).
+        const session = await getOrCreateSession(store, eph, channel);
+        const entitlement: Entitlement = {
+          kind: "anonymous_trial",
+          sessionId: session.sessionId,
+          ephemeralDid: eph,
+          channel,
+          plan: "trial",
+        };
+        gate = buildKeeperGate(entitlement, async () => {
+          // Forwardable claim for the 402 (LLD §6.2). Minted with the promote
+          // secret; only its hash is persisted on the session (LLD §5.3).
+          const { token } = mintClaim(
+            promoteSecret,
+            { eph, ch: channel },
+            claimTtlSeconds(),
+          );
+          // FIX 5a: AWAIT the session write before returning the claim — do not
+          // hand out a claim whose session row (claim hash + keeper_blocked
+          // status) never persisted. A write failure is logged, not thrown, so
+          // the caller still receives a usable claim.
+          await store
+            .putSession({
+              ...session,
+              claimTokenHash: hashClaim(token),
+              status: "keeper_blocked",
+            })
+            .catch((e) => {
+              console.error(
+                "[clockchain-mcp] failed to persist keeper_blocked session:",
+                e,
+              );
+            });
+          return token;
+        });
+      }
+      const server = buildServer(byo, gate);
       const transport = new StreamableHTTPServerTransport({
         // Stateless: no session id generation.
         sessionIdGenerator: undefined,
