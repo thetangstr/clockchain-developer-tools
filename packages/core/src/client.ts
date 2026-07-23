@@ -56,11 +56,40 @@ interface ErrorEnvelope {
   error?: { message?: string; [key: string]: unknown };
 }
 
+interface PublicBlockPayload {
+  blockHeight?: unknown;
+  proposerAddress?: unknown;
+  blockTime?: unknown;
+}
+
 type RequestMethod = "GET" | "POST";
 
 interface RequestOptions {
   method?: RequestMethod;
   body?: unknown;
+}
+
+function canonicalBlockHeight(value: unknown): string | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+  }
+  return typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value)
+    ? value
+    : null;
+}
+
+function isRfc3339Timestamp(value: string): boolean {
+  const match = value.match(
+    /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/,
+  );
+  if (!match) return false;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1] && !Number.isNaN(Date.parse(value));
 }
 
 /** Shared honesty note shipped with every audit trail / report / pack. */
@@ -250,7 +279,10 @@ export class ClockchainClient {
 
   /**
    * GET /api/time/block?height=N -> {success, data, meta}; returns data.
-   * `"latest"` resolves the latest height via {@link getTime} first.
+   * `"latest"` resolves the latest height via {@link getTime} first. A scoped
+   * key may be valid for logging but receive 401 from this time route; in that
+   * case, fall back to the same immutable block's public, keyless
+   * /searchAssetFromChain response and validate its exact time fields.
    */
   async getBlock(height: string | number | "latest"): Promise<BlockResponse> {
     let h = height;
@@ -258,10 +290,87 @@ export class ClockchainClient {
       const time = await this.getTime();
       h = time.latestBlockHeight;
     }
-    const env = await this.request<SuccessEnvelope<BlockResponse>>(
-      `/api/time/block?height=${encodeURIComponent(String(h))}`,
+    try {
+      const env = await this.request<SuccessEnvelope<BlockResponse>>(
+        `/api/time/block?height=${encodeURIComponent(String(h))}`,
+      );
+      return env.data;
+    } catch (error) {
+      if (!(error instanceof AuthError)) throw error;
+      return this.getPublicBlock(h);
+    }
+  }
+
+  /**
+   * Read block metadata from the immutable public chain endpoint with NO
+   * x-api-key. The gateway returns blockHeight as a decimal string here, so map
+   * it to the existing {@link BlockResponse} shape only after validating the
+   * height, proposer, and consensus timestamp.
+   */
+  private async getPublicBlock(
+    expectedHeight: string | number,
+  ): Promise<BlockResponse> {
+    const payload = await this.keylessRequest<unknown>(
+      `/searchAssetFromChain?blockHeight=${encodeURIComponent(String(expectedHeight))}`,
     );
-    return env.data;
+    return this.mapPublicBlock(payload, expectedHeight);
+  }
+
+  private mapPublicBlock(
+    payload: unknown,
+    expectedHeight: string | number,
+  ): BlockResponse {
+    const invalid = (field: string): never => {
+      throw new ApiError(
+        `Invalid public block response: ${field}`,
+        502,
+        payload,
+      );
+    };
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      Array.isArray(payload)
+    ) {
+      return invalid("expected an object");
+    }
+
+    const block = payload as PublicBlockPayload;
+    const actualHeight = canonicalBlockHeight(block.blockHeight);
+    const requestedHeight = canonicalBlockHeight(expectedHeight);
+    if (actualHeight === null || requestedHeight === null) {
+      return invalid("blockHeight must be a non-negative decimal integer");
+    }
+    if (actualHeight !== requestedHeight) {
+      return invalid("blockHeight did not match the requested immutable block");
+    }
+    const numericHeight = Number(actualHeight);
+    if (!Number.isSafeInteger(numericHeight)) {
+      return invalid("blockHeight exceeded the supported safe-integer range");
+    }
+
+    if (
+      typeof block.proposerAddress !== "string" ||
+      block.proposerAddress.trim() === "" ||
+      block.proposerAddress !== block.proposerAddress.trim() ||
+      /[\u0000-\u001f\u007f]/.test(block.proposerAddress)
+    ) {
+      return invalid("proposerAddress must be a non-empty printable string");
+    }
+    if (
+      typeof block.blockTime !== "string" ||
+      block.blockTime.trim() === "" ||
+      block.blockTime !== block.blockTime.trim() ||
+      !isRfc3339Timestamp(block.blockTime)
+    ) {
+      return invalid("blockTime must be a valid timestamp");
+    }
+
+    return {
+      blockHeight: numericHeight,
+      proposerAddress: block.proposerAddress,
+      blockTime: block.blockTime,
+    };
   }
 
   /**
