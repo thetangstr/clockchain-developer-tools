@@ -26,15 +26,15 @@ This builds both workspaces with plain `tsc` (no bundler). Output lands in
 
 The server reads configuration from environment variables:
 
-| Env var                    | Required | Default                          |
-| -------------------------- | -------- | -------------------------------- |
-| `CLOCKCHAIN_API_KEY`       | yes      | —                                |
-| `CLOCKCHAIN_CLIENT_ID`     | yes      | —                                |
-| `CLOCKCHAIN_WALLET_ID`     | yes      | —                                |
-| `CLOCKCHAIN_ENDPOINT`      | no       | `https://node.clockchain.network`|
-| `EVM_RPC_URL`              | no       | — (ERC-8004 resolution)          |
-| `ERC8004_CHAIN`            | no       | —                                |
-| `ERC8004_REGISTRY_ADDRESS` | no       | —                                |
+| Env var                    | Required | Default                                            |
+| -------------------------- | -------- | -------------------------------------------------- |
+| `CLOCKCHAIN_API_KEY`       | yes      | —                                                  |
+| `CLOCKCHAIN_CLIENT_ID`     | yes      | —                                                  |
+| `CLOCKCHAIN_WALLET_ID`     | yes      | —                                                  |
+| `CLOCKCHAIN_ENDPOINT`      | no       | `https://node.clockchain.network`                  |
+| `EVM_RPC_URL`              | no       | `https://ethereum-sepolia-rpc.publicnode.com`      |
+| `ERC8004_CHAIN`            | no       | `ethereum-sepolia`                                 |
+| `ERC8004_REGISTRY_ADDRESS` | no       | `0x8004A818BFB912233c491871b3d84c89A494BD9e`       |
 
 ```bash
 CLOCKCHAIN_API_KEY=... \
