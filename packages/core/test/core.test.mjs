@@ -19,6 +19,7 @@ import { join } from "node:path";
 const cfg = { apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://test.local" };
 
 let lastRequest = null;
+let requestLog = [];
 function stubFetch(status, body) {
   const raw = typeof body === "string" ? body : JSON.stringify(body);
   globalThis.fetch = async (url, opts) => {
@@ -161,23 +162,124 @@ test("hashFile matches computeHash of the same bytes", async () => {
 
 // Route the stubbed fetch by URL substring -> { status?, body }.
 function routeFetch(routes) {
+  requestLog = [];
   globalThis.fetch = async (url, opts) => {
     lastRequest = { url, opts };
+    requestLog.push(lastRequest);
     for (const [match, resp] of routes) {
       if (String(url).includes(match)) {
         const raw = typeof resp.body === "string" ? resp.body : JSON.stringify(resp.body);
         const status = resp.status ?? 200;
-        return { status, ok: status >= 200 && status < 300, statusText: "stub", text: async () => raw };
+        return {
+          status,
+          ok: status >= 200 && status < 300,
+          statusText: "stub",
+          text: async () => raw,
+          json: async () => (
+            typeof resp.body === "string" ? JSON.parse(resp.body) : resp.body
+          ),
+        };
       }
     }
     throw new Error("no route for " + url);
   };
 }
 
-test("getBlock(number) hits the block endpoint with the height", async () => {
-  routeFetch([["/api/time/block", { body: { success: true, data: { height: "5", proposer: "p" } } }]]);
-  assert.deepEqual(await new ClockchainClient(cfg).getBlock(5), { height: "5", proposer: "p" });
+test("getBlock(number) preserves a successful scoped block response", async () => {
+  routeFetch([[
+    "/api/time/block",
+    {
+      body: {
+        success: true,
+        data: {
+          blockHeight: 5,
+          proposerAddress: "ABCD",
+          blockTime: "2026-07-23T08:08:56.672021941Z",
+        },
+      },
+    },
+  ]]);
+  assert.deepEqual(await new ClockchainClient(cfg).getBlock(5), {
+    blockHeight: 5,
+    proposerAddress: "ABCD",
+    blockTime: "2026-07-23T08:08:56.672021941Z",
+  });
   assert.match(String(lastRequest.url), /height=5/);
+});
+
+test("getBlock falls back keylessly to the immutable block when the scoped route returns 401", async () => {
+  routeFetch([
+    ["/api/time/block", { status: 401, body: { message: "Invalid or expired API key" } }],
+    ["/searchAssetFromChain", {
+      body: {
+        blockHeight: "1742929",
+        proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+        blockTime: "2026-07-23T08:08:56.672021941Z",
+        transactions: [],
+      },
+    }],
+  ]);
+
+  assert.deepEqual(await new ClockchainClient(cfg).getBlock(1742929), {
+    blockHeight: 1742929,
+    proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+    blockTime: "2026-07-23T08:08:56.672021941Z",
+  });
+  assert.equal(requestLog.length, 2);
+  assert.equal(requestLog[0].opts.headers["x-api-key"], "k");
+  assert.equal("x-api-key" in requestLog[1].opts.headers, false);
+});
+
+async function assertInvalidPublicBlock(publicBlock, invalidField) {
+  routeFetch([
+    ["/api/time/block", { status: 401, body: { message: "Invalid or expired API key" } }],
+    ["/searchAssetFromChain", { body: publicBlock }],
+  ]);
+  await assert.rejects(
+    () => new ClockchainClient(cfg).getBlock(1742929),
+    (error) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.status, 502);
+      assert.match(error.message, /invalid public block response/i);
+      assert.match(error.message, new RegExp(invalidField, "i"));
+      return true;
+    },
+  );
+  assert.equal(requestLog.length, 2);
+}
+
+test("getBlock rejects a 401 fallback response with a missing blockTime", async () => {
+  await assertInvalidPublicBlock({
+    blockHeight: "1742929",
+    proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+    transactions: [],
+  }, "blockTime");
+});
+
+test("getBlock rejects a 401 fallback response with a non-RFC3339 blockTime", async () => {
+  await assertInvalidPublicBlock({
+    blockHeight: "1742929",
+    proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+    blockTime: "1",
+    transactions: [],
+  }, "blockTime");
+});
+
+test("getBlock rejects fallback metadata from a different immutable block", async () => {
+  await assertInvalidPublicBlock({
+    blockHeight: "1742930",
+    proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+    blockTime: "2026-07-23T08:08:56.672021941Z",
+    transactions: [],
+  }, "blockHeight");
+});
+
+test("getBlock rejects fallback metadata without a proposer", async () => {
+  await assertInvalidPublicBlock({
+    blockHeight: "1742929",
+    blockTime: "2026-07-23T08:08:56.672021941Z",
+    transactions: [],
+  }, "proposerAddress");
 });
 
 test("getBlock('latest') resolves height via getTime first", async () => {
@@ -259,4 +361,53 @@ test("completeReceipt POLLS: returns the COMPLETED receipt once the block lands"
   assert.equal(done.anchor.consensusTime, "2026-06-14T00:00:00Z");
   // Event hash is preserved across completion -> same receipt identity.
   assert.equal(done.eventHash, eventHash);
+});
+
+test("completeReceipt obtains consensusTime from the immutable public block after a scoped 401", async () => {
+  routeFetch([["/log", { body: { ledgerId: "LD", assetReferenceId: "ref", blockHeight: null, createdTimestamp: "t" } }]]);
+  const c = new ClockchainClient(cfg);
+  const pending = await c.attestAction({
+    agentId: "a",
+    action: "x",
+    inputs: { n: 1 },
+    wait: false,
+  }, null);
+
+  routeFetch([
+    ["/ledger/", { body: { ledgerId: "LD", assetReferenceId: "ref", blockHeight: "1742929", createdTimestamp: "t" } }],
+    ["/api/time/block", { status: 401, body: { message: "Invalid or expired API key" } }],
+    ["/searchAssetFromChain", {
+      body: {
+        blockHeight: "1742929",
+        proposerAddress: "FE0A68F799E7D16B719B8AA82126D4C5D5352A21",
+        blockTime: "2026-07-23T08:08:56.672021941Z",
+        transactions: [],
+      },
+    }],
+    ["/getValidationBlock", {
+      body: {
+        validationBlockData: {
+          blockHeight: 1742929,
+          positiveVotes: 1,
+          negativeVotes: 0,
+          "Trust value percentage": 0,
+        },
+      },
+    }],
+    ["/getTime", {
+      body: {
+        success: true,
+        data: {
+          blockHeight: "1742929",
+          "nodeParticipation%": 0,
+          totalNodes: 1,
+        },
+      },
+    }],
+  ]);
+
+  const done = await c.completeReceipt(pending);
+  assert.equal(done.anchor.confirmed, true);
+  assert.equal(done.anchor.blockHeight, "1742929");
+  assert.equal(done.anchor.consensusTime, "2026-07-23T08:08:56.672021941Z");
 });
