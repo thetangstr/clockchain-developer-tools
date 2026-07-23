@@ -15,14 +15,12 @@ export interface ClockchainConfig {
 
 export const DEFAULT_ENDPOINT = "https://node.clockchain.network";
 
-// ASSUMPTION (confirm with infoObject): for the POC, resolve_agent reads the
-// ERC-8004 reference deployment on Ethereum Sepolia. The registry address is the
-// canonical reference deployment (same address across testnets, per the 8004
-// team's contracts). Override via EVM_RPC_URL / ERC8004_CHAIN /
-// ERC8004_REGISTRY_ADDRESS once the production registry is confirmed.
+// resolve_agent reads the official ERC-8004 Identity Registry by default.
+// Override the RPC, chain, or registry for a different deployment via
+// EVM_RPC_URL / ERC8004_CHAIN / ERC8004_REGISTRY_ADDRESS.
 export const DEFAULT_EVM_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
 export const DEFAULT_ERC8004_CHAIN = "ethereum-sepolia";
-export const DEFAULT_ERC8004_REGISTRY = "0x7177a6867296406881E20d6647232314736Dd09A";
+export const DEFAULT_ERC8004_REGISTRY = "0x8004A818BFB912233c491871b3d84c89A494BD9e";
 
 /**
  * Build a {@link ClockchainConfig} from environment variables.

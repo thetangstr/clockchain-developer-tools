@@ -6,9 +6,10 @@ stdio; this quickstart drives the verified core — **8 of the 31**, the time +
 notarization tools. Everything below is copy-paste tested.
 
 > The identity module is **verification (valid-at-T), not authentication**.
-> `resolve_agent` returns `status: "unknown"` until the EVM env vars are set - see
-> the bottom. Smart-contract scheduling is live for contract types / estimate /
-> list; `create_schedule` is a preview, blocked on the backend signing-message spec.
+> `resolve_agent` defaults to the official ERC-8004 Identity Registry on Ethereum
+> Sepolia; see the bottom to override the EVM target. Smart-contract scheduling is
+> live for contract types / estimate / list; `create_schedule` is a preview,
+> blocked on the backend signing-message spec.
 
 ## 1. Get + build
 
@@ -101,13 +102,15 @@ The full server also ships the **scheduler** (`get_contract_types`,
 **31 tools total**. Cross-party verification is keyless: it reads the immutable on-chain
 block (`/searchAssetFromChain?blockHeight={h}`), not the mutable ledger cache.
 
-## Optional: ERC-8004 identity read
+## Optional: override the ERC-8004 identity target
 
-`resolve_agent` stays `unknown` until you provide:
+By default, `resolve_agent` uses the official ERC-8004 Identity Registry at
+`0x8004A818BFB912233c491871b3d84c89A494BD9e` on Ethereum Sepolia. To use a
+different RPC, chain, or registry:
 
 ```bash
 export EVM_RPC_URL=<rpc url>
-export ERC8004_CHAIN=base-sepolia
+export ERC8004_CHAIN=<chain>
 export ERC8004_REGISTRY_ADDRESS=<registry contract address>
 ```
 

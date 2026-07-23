@@ -115,7 +115,8 @@ Manual config (npm):
 ```
 
 ### Optional: ERC-8004 identity reads (`resolve_agent`)
-Defaults point at the ERC-8004 reference deployment on Ethereum Sepolia. Override:
+Defaults use the public Ethereum Sepolia RPC and the official ERC-8004 Identity
+Registry at `0x8004A818BFB912233c491871b3d84c89A494BD9e`. Override any target:
 ```
 EVM_RPC_URL=<rpc url>  ERC8004_CHAIN=<chain>  ERC8004_REGISTRY_ADDRESS=<0x...>
 ```
