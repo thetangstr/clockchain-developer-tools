@@ -1,0 +1,16 @@
+[Unit]
+Description=Clockchain MCP Docker Compose stack
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/clockchain-mcp/app/infra/clockchain-mcp
+ExecStart=/opt/clockchain-mcp/compose-up.sh
+ExecStop=/usr/bin/docker compose -f /opt/clockchain-mcp/app/infra/clockchain-mcp/docker-compose.yml down
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

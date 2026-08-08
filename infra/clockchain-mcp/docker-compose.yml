@@ -1,0 +1,55 @@
+services:
+  mcp:
+    build:
+      context: ../..
+      target: runtime
+    environment:
+      PORT: "${PORT}"
+      MCP_TRANSPORT: "${MCP_TRANSPORT}"
+      MCP_REQUIRE_AUTH: "${MCP_REQUIRE_AUTH}"
+      MCP_RATE_PER_MIN: "${MCP_RATE_PER_MIN}"
+      MCP_LOG_BUDGET: "${MCP_LOG_BUDGET}"
+      MCP_TOKEN_MINT_PER_HOUR: "${MCP_TOKEN_MINT_PER_HOUR}"
+      CLOCKCHAIN_CLIENT_ID: "${CLOCKCHAIN_CLIENT_ID}"
+      CLOCKCHAIN_WALLET_ID: "${CLOCKCHAIN_WALLET_ID}"
+      CLOCKCHAIN_ENDPOINT: "${CLOCKCHAIN_ENDPOINT}"
+      ERC8004_REGISTRY_ADDRESS: "${ERC8004_REGISTRY_ADDRESS}"
+      CLOCKCHAIN_API_KEY: "${CLOCKCHAIN_API_KEY}"
+      MCP_AUTH_TOKENS: "${MCP_AUTH_TOKENS}"
+      MCP_TOKEN_SIGNING_SECRET: "${MCP_TOKEN_SIGNING_SECRET}"
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          fetch("http://127.0.0.1:" + (process.env.PORT ?? "8080") + "/health")
+            .then((response) => {
+              if (!response.ok) process.exit(1);
+            })
+            .catch(() => process.exit(1));
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    depends_on:
+      mcp:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
