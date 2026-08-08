@@ -194,6 +194,8 @@ fi
     path.join(binDir, "git"),
     `#!/usr/bin/env bash
 set -euo pipefail
+[[ "$1" == "-c" && "$2" == "safe.directory=$HANDSHAKE_APP_ROOT" ]]
+shift 2
 [[ "$1" == "-C" && "$2" == "$HANDSHAKE_APP_ROOT" ]]
 shift 2
 case "$*" in

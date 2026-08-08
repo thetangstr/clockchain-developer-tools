@@ -82,17 +82,21 @@ require_nonempty() {
   fi
 }
 
+handshake_git() {
+  git -c "safe.directory=${HANDSHAKE_APP_ROOT}" -C "$HANDSHAKE_APP_ROOT" "$@"
+}
+
 validate_handshake_checkout() {
   require_nonempty HANDSHAKE_APP_ROOT "$HANDSHAKE_APP_ROOT"
   require_nonempty HANDSHAKE_RELAY "$HANDSHAKE_RELAY"
   require_nonempty HANDSHAKE_KIT_REPO "$HANDSHAKE_KIT_REPO"
 
   local actual_sha status
-  if ! git -C "$HANDSHAKE_APP_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! handshake_git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     printf 'handshake app root is not a git checkout: %s\n' "$HANDSHAKE_APP_ROOT" >&2
     return 1
   fi
-  actual_sha="$(git -C "$HANDSHAKE_APP_ROOT" rev-parse HEAD)"
+  actual_sha="$(handshake_git rev-parse HEAD)"
   HANDSHAKE_SHA="${HANDSHAKE_SHA:-$actual_sha}"
   if [[ ! "$actual_sha" =~ ^[0-9a-f]{40}$ || ! "$HANDSHAKE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
     printf 'handshake checkout SHA is not a 40-character lowercase hex value\n' >&2
@@ -102,7 +106,7 @@ validate_handshake_checkout() {
     printf 'handshake checkout SHA mismatch: expected %s, got %s\n' "$HANDSHAKE_SHA" "$actual_sha" >&2
     return 1
   fi
-  status="$(git -C "$HANDSHAKE_APP_ROOT" status --porcelain)"
+  status="$(handshake_git status --porcelain)"
   if [[ -n "$status" ]]; then
     printf 'handshake checkout has uncommitted changes: %s\n' "$HANDSHAKE_APP_ROOT" >&2
     return 1
