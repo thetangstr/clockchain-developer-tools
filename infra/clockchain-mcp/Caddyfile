@@ -1,0 +1,10 @@
+mcp-aws.clockchain.network {
+	reverse_proxy mcp:8080
+}
+
+mcp.clockchain.network {
+	tls {
+		on_demand
+	}
+	reverse_proxy mcp:8080
+}

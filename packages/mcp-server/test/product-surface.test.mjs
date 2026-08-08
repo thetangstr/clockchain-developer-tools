@@ -1,7 +1,7 @@
 // CLO-99: product surface ("safe slice") tests.
 //
 // Asserts that MCP_SURFACE=product → only get_time is registered, and that the
-// full surface (default / MCP_SURFACE=full) still exposes all 31 tools.
+// full surface (default / MCP_SURFACE=full) still exposes all 36 tools.
 //
 // Two harnesses are used, mirroring the existing test suite:
 //   1. Fake-server (offline) — same pattern as tools.test.mjs — fast, no ports.
@@ -37,17 +37,18 @@ test('surface="product" registers exactly ["get_time"] (offline fake-server)', (
   assert.deepEqual(names, ["get_time"], `Expected only ["get_time"], got: ${JSON.stringify(names)}`);
 });
 
-test('surface="full" (explicit) registers all 31 tools including get_time (offline fake-server)', () => {
+test('surface="full" (explicit) registers all 36 tools including get_time (offline fake-server)', () => {
   const names = collectToolNames({ surface: "full" });
   assert.ok(names.includes("get_time"), "full surface must include get_time");
   assert.ok(names.includes("attest_action"), "full surface must include attest_action");
   assert.ok(names.includes("tsa_status"), "full surface must include tsa_status");
-  assert.equal(names.length, 31, `Expected 31 tools, got ${names.length}: ${JSON.stringify(names)}`);
+  assert.ok(names.includes("handshake_submit"), "full surface must include handshake_submit");
+  assert.equal(names.length, 36, `Expected 36 tools, got ${names.length}: ${JSON.stringify(names)}`);
 });
 
-test("surface omitted (default) is identical to full — 31 tools (offline fake-server)", () => {
+test("surface omitted (default) is identical to full — 36 tools (offline fake-server)", () => {
   const names = collectToolNames({});
-  assert.equal(names.length, 31, `Expected 31 tools (default), got ${names.length}`);
+  assert.equal(names.length, 36, `Expected 36 tools (default), got ${names.length}`);
   assert.ok(names.includes("get_time"));
 });
 
@@ -126,7 +127,7 @@ test('MCP_SURFACE=product → tools/list is exactly ["get_time"] (HTTP server)',
   );
 });
 
-test("MCP_SURFACE unset (default full) → tools/list has 31 tools (HTTP server)", async () => {
+test("MCP_SURFACE unset (default full) → tools/list has 36 tools (HTTP server)", async () => {
   // Build a separate ephemeral server without setting MCP_SURFACE (default=full).
   const fullServer = createServer(async (req, res) => {
     const prev = process.env.MCP_SURFACE;
@@ -160,7 +161,7 @@ test("MCP_SURFACE unset (default full) → tools/list has 31 tools (HTTP server)
     assert.equal(status, 200);
     const names = (body.result.tools ?? []).map((t) => t.name);
     assert.ok(names.includes("get_time"), "full surface must include get_time");
-    assert.ok(names.length >= 31, `Expected >= 31 tools on full surface, got ${names.length}`);
+    assert.equal(names.length, 36, `Expected 36 tools on full surface, got ${names.length}`);
   } finally {
     await new Promise((resolve) => fullServer.close(resolve));
   }

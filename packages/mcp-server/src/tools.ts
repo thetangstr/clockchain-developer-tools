@@ -24,6 +24,7 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BudgetExceededError, getSharedLogBudget, unlimitedLogBudget } from "./budget.js";
+import { createRuntimeHandshakeCoordinator } from "./handshake/coordinator.js";
 import { idempotent } from "./idempotency.js";
 import type { KeeperGate } from "./entitlement.js";
 import { assertToolClassified } from "./entitlement.js";
@@ -54,6 +55,20 @@ const allowDegradedSchema = z
       "Default false — a degraded pool refuses the write so it is never reported " +
       "as anchored when it may not be.",
   );
+
+const handshakeRoleSchema = z
+  .enum(["payer", "requestor"])
+  .describe("Public handshake role. Must be exactly payer or requestor.");
+
+type HandshakeRole = z.infer<typeof handshakeRoleSchema>;
+
+export interface HandshakeCoordinator {
+  status(sessionId?: string): Promise<unknown>;
+  join(role: HandshakeRole): Promise<unknown>;
+  next(sessionId: string, role: HandshakeRole): Promise<unknown>;
+  submit(sessionId: string, role: HandshakeRole, signatureHex: string): Promise<unknown>;
+  getCertificate(sessionId: string): Promise<unknown>;
+}
 
 /**
  * Success payload for a WRITE that is honest about anchoring (truthful anchoring). Derives
@@ -214,7 +229,13 @@ async function run(name: string, work: () => Promise<unknown>) {
 export function registerTools(
   server: McpServer,
   config: ClockchainConfig,
-  opts: { delegated?: boolean; surface?: "full" | "product"; gate?: KeeperGate } = {},
+  opts: {
+    delegated?: boolean;
+    surface?: "full" | "product";
+    gate?: KeeperGate;
+    principalId?: string;
+    handshakeCoordinator?: HandshakeCoordinator;
+  } = {},
 ): void {
   // Fail-closed classification guard (CLO-48 review FIX 2). We intercept
   // registerTool ONCE so that EVERY tool registered below is asserted to appear
@@ -255,6 +276,16 @@ export function registerTools(
   // (opts.delegated === false) spend the caller's own credits, so we don't cap
   // them. Disabled when MCP_LOG_BUDGET is unset -> identical to v1.
   const budget = opts.delegated === false ? unlimitedLogBudget() : getSharedLogBudget();
+  let runtimeHandshakeCoordinator: HandshakeCoordinator | undefined;
+  const handshakeCoordinator = (): HandshakeCoordinator => {
+    if (opts.handshakeCoordinator) return opts.handshakeCoordinator;
+    runtimeHandshakeCoordinator ??= createRuntimeHandshakeCoordinator({
+      budget,
+      clockchain: client,
+      principal: opts.principalId ?? "stdio",
+    });
+    return runtimeHandshakeCoordinator;
+  };
 
   // ===== TIME MCP =====
   // get_time is registered on every surface (product and full).
@@ -1230,5 +1261,94 @@ export function registerTools(
     },
     async ({ commitment_id }) =>
       run("tsa_status", () => tsaStatus(client, commitment_id)),
+  );
+
+  // ===== BILATERAL HANDSHAKE MCP =====
+  // Non-custodial orchestration only: these tools return signing work to the
+  // caller and accept public signatures, never private material.
+
+  server.registerTool(
+    "handshake_status",
+    {
+      title: "Read bilateral handshake status",
+      description:
+        "List handshake progress for the current principal, optionally filtered by sessionId.",
+      inputSchema: {
+        sessionId: z.string().optional().describe("Optional handshake session id to filter."),
+      },
+    },
+    async ({ sessionId }) =>
+      run("handshake_status", () => handshakeCoordinator().status(sessionId)),
+  );
+
+  server.registerTool(
+    "handshake_join",
+    {
+      title: "Join a bilateral handshake",
+      description:
+        "Join the current relay discovery session as payer or requestor.",
+      inputSchema: {
+        role: handshakeRoleSchema,
+      },
+    },
+    async ({ role }) =>
+      run("handshake_join", () =>
+        handshakeCoordinator().join(handshakeRoleSchema.parse(role)),
+      ),
+  );
+
+  server.registerTool(
+    "handshake_next",
+    {
+      title: "Get next handshake action",
+      description:
+        "Advance local handshake state and return the next public action or signature request.",
+      inputSchema: {
+        sessionId: z.string().describe("Handshake session id."),
+        role: handshakeRoleSchema,
+      },
+    },
+    async ({ sessionId, role }) =>
+      run("handshake_next", () =>
+        handshakeCoordinator().next(sessionId, handshakeRoleSchema.parse(role)),
+      ),
+  );
+
+  server.registerTool(
+    "handshake_submit",
+    {
+      title: "Submit a handshake signature",
+      description:
+        "Submit a caller-produced public signature for the pending handshake signing request.",
+      inputSchema: {
+        sessionId: z.string().describe("Handshake session id."),
+        role: handshakeRoleSchema,
+        signatureHex: z.string().describe("Caller-produced EIP-191 signature hex."),
+      },
+    },
+    async ({ sessionId, role, signatureHex }) =>
+      run("handshake_submit", () =>
+        handshakeCoordinator().submit(
+          sessionId,
+          handshakeRoleSchema.parse(role),
+          signatureHex,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "handshake_get_certificate",
+    {
+      title: "Get verified handshake certificate",
+      description:
+        "Fetch the verified handshake certificate after evidence upload completes.",
+      inputSchema: {
+        sessionId: z.string().describe("Handshake session id."),
+      },
+    },
+    async ({ sessionId }) =>
+      run("handshake_get_certificate", () =>
+        handshakeCoordinator().getCertificate(sessionId),
+      ),
   );
 }

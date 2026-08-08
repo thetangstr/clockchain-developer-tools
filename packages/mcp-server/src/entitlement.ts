@@ -89,6 +89,12 @@ export const FREE_TOOLS: ReadonlySet<string> = new Set([
   "tsa_attest",
   "tsa_settle",
   "tsa_status",
+  // Bilateral handshake
+  "handshake_status",
+  "handshake_join",
+  "handshake_next",
+  "handshake_submit",
+  "handshake_get_certificate",
 ]);
 
 /**

@@ -1,0 +1,76 @@
+services:
+  mcp:
+    build:
+      context: ../..
+      target: runtime
+    environment:
+      PORT: "${PORT}"
+      MCP_TRANSPORT: "${MCP_TRANSPORT}"
+      MCP_REQUIRE_AUTH: "${MCP_REQUIRE_AUTH}"
+      MCP_RATE_PER_MIN: "${MCP_RATE_PER_MIN}"
+      MCP_LOG_BUDGET: "${MCP_LOG_BUDGET}"
+      MCP_TOKEN_MINT_PER_HOUR: "${MCP_TOKEN_MINT_PER_HOUR}"
+      CLOCKCHAIN_CLIENT_ID: "${CLOCKCHAIN_CLIENT_ID}"
+      CLOCKCHAIN_WALLET_ID: "${CLOCKCHAIN_WALLET_ID}"
+      CLOCKCHAIN_ENDPOINT: "${CLOCKCHAIN_ENDPOINT}"
+      ERC8004_REGISTRY_ADDRESS: "${ERC8004_REGISTRY_ADDRESS}"
+      HANDSHAKE_RELAY: "${HANDSHAKE_RELAY}"
+      MCP_HANDSHAKE_FILE: /app/state/handshake.json
+      HANDSHAKE_ALLOW_DEGRADED: "${HANDSHAKE_ALLOW_DEGRADED}"
+      EVM_RPC_URL: "${EVM_RPC_URL}"
+      CLOCKCHAIN_API_KEY: "${CLOCKCHAIN_API_KEY}"
+      MCP_AUTH_TOKENS: "${MCP_AUTH_TOKENS}"
+      MCP_TOKEN_SIGNING_SECRET: "${MCP_TOKEN_SIGNING_SECRET}"
+    volumes:
+      - mcp_state:/app/state
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          fetch("http://127.0.0.1:" + (process.env.PORT ?? "8080") + "/health")
+            .then((response) => {
+              if (!response.ok) process.exit(1);
+            })
+            .catch(() => process.exit(1));
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  host:
+    build:
+      context: ${HANDSHAKE_APP_ROOT:-/opt/clockchain-host/app}
+    environment:
+      HANDSHAKE_RELAY: "${HANDSHAKE_RELAY}"
+      HANDSHAKE_SHA: "${HANDSHAKE_SHA}"
+      HANDSHAKE_KIT_REPO: "${HANDSHAKE_KIT_REPO}"
+      CLOCKCHAIN_FUNDING_PASSWORD_FILE: /app/keys/funding.password
+    volumes:
+      - ${CLOCKCHAIN_HOST_SECRET_DIR:-/run/clockchain-host-secrets}:/app/keys:ro
+      - host_runs:/app/runs
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    depends_on:
+      mcp:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  host_runs:
+  mcp_state:
