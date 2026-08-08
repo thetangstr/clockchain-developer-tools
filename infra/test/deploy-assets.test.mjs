@@ -294,6 +294,37 @@ async function resolvedComposeConfig() {
   return JSON.parse(result.stdout);
 }
 
+function assertHostSecretBindMount(mount) {
+  const { bind = {}, ...stableMountFields } = mount;
+  assert.deepEqual(stableMountFields, {
+    type: "bind",
+    source: "/run/clockchain-host-secrets",
+    target: "/app/keys",
+    read_only: true,
+  });
+  assert.deepEqual(
+    Object.keys(bind)
+      .filter((key) => key !== "create_host_path")
+      .sort(),
+    [],
+  );
+  if ("create_host_path" in bind) {
+    assert.equal(bind.create_host_path, true);
+  }
+}
+
+test("host secret mount assertion accepts compose bind metadata variants", () => {
+  for (const bind of [{}, { create_host_path: true }]) {
+    assertHostSecretBindMount({
+      type: "bind",
+      source: "/run/clockchain-host-secrets",
+      target: "/app/keys",
+      read_only: true,
+      bind,
+    });
+  }
+});
+
 test("deployment assets define the locked EC2 compose target", async () => {
   for (const file of [wrapper, composeFile, caddyFile, systemdUnit]) {
     assert.equal(await pathExists(file), true, `${path.relative(repoRoot, file)} exists`);
@@ -374,21 +405,14 @@ test("resolved compose config adds the external host without network ingress", a
     HANDSHAKE_RELAY: "http://44.249.47.220:8080",
     HANDSHAKE_SHA: expectedHandshakeSha,
   });
-  assert.deepEqual(host.volumes, [
-    {
-      type: "bind",
-      source: "/run/clockchain-host-secrets",
-      target: "/app/keys",
-      read_only: true,
-      bind: {},
-    },
-    {
-      type: "volume",
-      source: "host_runs",
-      target: "/app/runs",
-      volume: {},
-    },
-  ]);
+  assert.equal(host.volumes.length, 2);
+  assertHostSecretBindMount(host.volumes[0]);
+  assert.deepEqual(host.volumes[1], {
+    type: "volume",
+    source: "host_runs",
+    target: "/app/runs",
+    volume: {},
+  });
   assert.ok(cfg.volumes.host_runs);
 });
 
