@@ -32,6 +32,38 @@ apt-get install -y --no-install-recommends \
 curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
 unzip -q /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install
+mv /usr/local/bin/aws /usr/local/bin/aws-real
+cat >/usr/local/bin/aws <<'AWS_WRAPPER'
+#!/usr/bin/env bash
+set -uo pipefail
+
+real_aws=/usr/local/bin/aws-real
+if ! tmp_home=$(mktemp -d "${TMPDIR:-/tmp}/aws-home.XXXXXX"); then
+  exit 1
+fi
+cleanup_status=0
+
+cleanup() {
+  rm -rf "$tmp_home" || cleanup_status=$?
+}
+
+trap cleanup EXIT
+
+HOME=$tmp_home "$real_aws" "$@"
+aws_status=$?
+cleanup
+trap - EXIT
+
+if (( cleanup_status != 0 )); then
+  exit "$cleanup_status"
+fi
+
+exit "$aws_status"
+AWS_WRAPPER
+chmod 0755 /usr/local/bin/aws
+test ! -e /home/ubuntu/.aws
+sudo -H -u ubuntu aws --region us-west-2 ssm get-parameter --name /clockchain/mcp/PING >/dev/null
+test ! -e /home/ubuntu/.aws
 
 usermod -aG docker ubuntu
 systemctl enable --now docker
