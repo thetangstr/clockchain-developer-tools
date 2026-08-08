@@ -52,7 +52,9 @@ async function startParityServer(name, opts = {}) {
       }
       if (req.method === "POST" && req.url === "/token") {
         mintCount++;
-        const remaining = (opts.quotaStart ?? 10) - mintCount * (opts.quotaStep ?? 1);
+        const remaining = opts.remainingForMint
+          ? opts.remainingForMint(mintCount)
+          : (opts.quotaStart ?? 10) - mintCount * (opts.quotaStep ?? 1);
         const headers = {
           "content-type": "application/json",
           ...(!opts.omitRateLimitLimit ? { "x-ratelimit-limit": opts.rateLimitLimit ?? "10" } : {}),
@@ -185,6 +187,7 @@ async function runAgainst(gcp, aws, opts = {}) {
     reference: REFERENCE,
     action: ACTION,
     allowDegraded: opts.allowDegraded,
+    sharedBackend: opts.sharedBackend,
     timeoutMs: opts.timeoutMs ?? 1000,
     maxBytes: opts.maxBytes ?? 100_000,
     stdout: { write: (s) => lines.push(s) },
@@ -225,6 +228,44 @@ test("forwards an explicit degraded-write override without changing the default"
       assert.equal(call.arguments.allow_degraded, true);
     }
   });
+});
+
+test("validates combined token movement when both hostnames share one backend", async () => {
+  const shared = await startParityServer("aws");
+  try {
+    const { result, output } = await runAgainst(shared, shared, { sharedBackend: "true" });
+    assert.equal(result.ok, true);
+    assert.match(output, /token mint 1\s+PASS/);
+    assert.match(output, /token mint 2\s+PASS/);
+  } finally {
+    await shared.close();
+  }
+});
+
+test("shared-backend mode rejects token pairs that are not consecutive", async () => {
+  const shared = await startParityServer("aws", { quotaStep: 2 });
+  try {
+    const { result, output } = await runAgainst(shared, shared, { sharedBackend: "true" });
+    assert.equal(result.ok, false);
+    assert.match(output, /token mint 1\s+FAIL\s+token mint 1 shared quota did not consume consecutive slots/);
+  } finally {
+    await shared.close();
+  }
+});
+
+test("shared-backend mode rejects a second pair that does not move the bucket by two", async () => {
+  const remaining = [9, 8, 6, 5];
+  const shared = await startParityServer("aws", {
+    remainingForMint: (mintCount) => remaining[mintCount - 1],
+  });
+  try {
+    const { result, output } = await runAgainst(shared, shared, { sharedBackend: "true" });
+    assert.equal(result.ok, false);
+    assert.match(output, /token mint 1\s+PASS/);
+    assert.match(output, /token mint 2\s+FAIL\s+token mint 2 shared quota did not decrement by two/);
+  } finally {
+    await shared.close();
+  }
 });
 
 test("SSE parsing handles CRLF notification frames before the matching JSON-RPC response", async () => {
@@ -468,6 +509,18 @@ test("validates timeout and max response size as positive bounded numbers", asyn
       stdout: { write() {} },
     }),
     /allowDegraded must be true or false/,
+  );
+  await assert.rejects(
+    runParity({
+      gcpBaseUrl: "http://127.0.0.1",
+      awsBaseUrl: "http://127.0.0.1",
+      blockHeight: KNOWN_HEIGHT,
+      reference: REFERENCE,
+      action: ACTION,
+      sharedBackend: "yes",
+      stdout: { write() {} },
+    }),
+    /sharedBackend must be true or false/,
   );
 });
 

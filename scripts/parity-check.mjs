@@ -247,7 +247,7 @@ function compareShape(row, gcp, aws) {
   return { ok: true };
 }
 
-function compareToken(row, gcp, aws, previous) {
+function compareToken(row, gcp, aws, previous, sharedBackend = false) {
   const shapeGcp = { ...gcp.body, token: "<redacted>" };
   const shapeAws = { ...aws.body, token: "<redacted>" };
   const shape = compareShape(row, shapeGcp, shapeAws);
@@ -278,6 +278,29 @@ function compareToken(row, gcp, aws, previous) {
   }
   if (gcpLimit !== awsLimit) {
     return { ok: false, detail: `${row} quota limit mismatch` };
+  }
+  if (sharedBackend) {
+    if (Math.abs(gcpRemaining - awsRemaining) !== 1) {
+      return { ok: false, detail: `${row} shared quota did not consume consecutive slots` };
+    }
+    if (previous) {
+      const previousRemaining = [
+        requiredNumericHeader(previous.gcp.headers, "x-ratelimit-remaining"),
+        requiredNumericHeader(previous.aws.headers, "x-ratelimit-remaining"),
+      ];
+      if (previousRemaining.some((value) => value === undefined)) {
+        return { ok: false, detail: `${row} missing previous quota headers` };
+      }
+      const previousSorted = previousRemaining.sort((a, b) => b - a);
+      const currentSorted = [gcpRemaining, awsRemaining].sort((a, b) => b - a);
+      if (
+        previousSorted[0] - currentSorted[0] !== 2 ||
+        previousSorted[1] - currentSorted[1] !== 2
+      ) {
+        return { ok: false, detail: `${row} shared quota did not decrement by two` };
+      }
+    }
+    return { ok: true };
   }
   if (previous) {
     const prevGcpRemaining = requiredNumericHeader(previous.gcp.headers, "x-ratelimit-remaining");
@@ -485,6 +508,7 @@ export async function runParity(options = {}) {
   const reference = requireOption(options.reference, "reference");
   const action = requireOption(options.action, "action");
   const allowDegraded = booleanOption(options.allowDegraded, "allowDegraded");
+  const sharedBackend = booleanOption(options.sharedBackend, "sharedBackend");
   const actionHash = sha256(action);
   const results = [];
 
@@ -508,7 +532,7 @@ export async function runParity(options = {}) {
     ]);
     gcpToken = firstMint[0].body.token;
     awsToken = firstMint[1].body.token;
-    return compareToken("token mint 1", firstMint[0], firstMint[1]);
+    return compareToken("token mint 1", firstMint[0], firstMint[1], undefined, sharedBackend);
   }));
 
   results.push(await row("token mint 2", stdout, async () => {
@@ -522,6 +546,7 @@ export async function runParity(options = {}) {
       secondMint[0],
       secondMint[1],
       { gcp: firstMint[0], aws: firstMint[1] },
+      sharedBackend,
     );
   }));
 
@@ -607,6 +632,7 @@ function parseArgs(argv, env) {
     reference: args.reference ?? env.PARITY_REFERENCE,
     action: args.action ?? env.PARITY_ACTION,
     allowDegraded: args.allowDegraded ?? env.PARITY_ALLOW_DEGRADED,
+    sharedBackend: args.sharedBackend ?? env.PARITY_SHARED_BACKEND,
     timeoutMs: args.timeoutMs ?? env.PARITY_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS,
     maxBytes: args.maxBytes ?? env.PARITY_MAX_BYTES ?? DEFAULT_MAX_BYTES,
   };
@@ -621,6 +647,7 @@ async function main() {
     process.stderr.write(
       "usage: node scripts/parity-check.mjs --block-height <height> --reference <unique-ref> --action <harmless-action> " +
         "[--gcp-url <url>] [--aws-url <url>] [--allow-degraded <true|false>] " +
+        "[--shared-backend <true|false>] " +
         "[--timeout-ms <ms>] [--max-bytes <bytes>]\n",
     );
     process.exitCode = 2;
