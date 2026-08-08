@@ -36,6 +36,19 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  host:
+    build:
+      context: ${HANDSHAKE_APP_ROOT:-/opt/clockchain-host/app}
+    environment:
+      HANDSHAKE_RELAY: "${HANDSHAKE_RELAY}"
+      HANDSHAKE_SHA: "${HANDSHAKE_SHA}"
+      HANDSHAKE_KIT_REPO: "${HANDSHAKE_KIT_REPO}"
+      CLOCKCHAIN_FUNDING_PASSWORD_FILE: /app/keys/funding.password
+    volumes:
+      - ${CLOCKCHAIN_HOST_SECRET_DIR:-/run/clockchain-host-secrets}:/app/keys:ro
+      - host_runs:/app/runs
+    restart: unless-stopped
+
   caddy:
     image: caddy:2.8-alpine
     depends_on:
@@ -53,3 +66,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  host_runs:

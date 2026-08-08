@@ -161,7 +161,10 @@ JSON
     {
       "Effect": "Allow",
       "Action": "ssm:GetParameter",
-      "Resource": "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:parameter/clockchain/mcp/*"
+      "Resource": [
+        "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:parameter/clockchain/mcp/*",
+        "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:parameter/clockchain/host/*"
+      ]
     }
   ]
 }

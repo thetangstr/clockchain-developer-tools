@@ -22,10 +22,32 @@ const expectedSecretNames = [
   "/clockchain/mcp/MCP_TOKEN_SIGNING_SECRET",
 ];
 
+const expectedHostSecretNames = [
+  "/clockchain/host/FUNDING_WALLET_JSON",
+  "/clockchain/host/FUNDING_WALLET_PUBLIC_JSON",
+  "/clockchain/host/FUNDING_PASSWORD",
+  "/clockchain/host/CLOCKCHAIN_TOKEN",
+];
+const expectedHandshakeSha = "0123456789abcdef0123456789abcdef01234567";
+
 const expectedEnv = {
   CLOCKCHAIN_API_KEY: "api-key-line-1\napi-key-line-2\n",
   MCP_AUTH_TOKENS: "token-a,token-b\n",
   MCP_TOKEN_SIGNING_SECRET: "signing-secret\nwith-newline\n",
+};
+
+const expectedHostSecrets = {
+  "funding-wallet.json": '{"wallet":"line-1\\nline-2"}\n',
+  "funding-wallet.public.json": '{"public":"wallet"}\n',
+  "funding.password": "pass line 1\npass line 2\n",
+  "clockchain.token": "clockchain-token\n",
+};
+
+const oldHostSecrets = {
+  "funding-wallet.json": '{"wallet":"old"}\n',
+  "funding-wallet.public.json": '{"public":"old"}\n',
+  "funding.password": "old password\n",
+  "clockchain.token": "old token\n",
 };
 
 async function pathExists(file) {
@@ -76,22 +98,41 @@ async function createWrapperFixture(options = {}) {
   const temp = await mkdtemp(path.join(tmpdir(), "clockchain-mcp-deploy-test."));
   const binDir = path.join(temp, "bin");
   const fakeDeployDir = path.join(temp, "infra", "clockchain-mcp");
+  const fakeHandshakeDir = path.join(temp, "handshake");
+  const hostSecretDir = path.join(temp, "host-secrets");
   const callsFile = path.join(temp, "aws-calls.txt");
   const dockerOkFile = path.join(temp, "docker-ok.txt");
   const envJson = JSON.stringify(expectedEnv);
+  const hostSecretsJson = JSON.stringify(expectedHostSecrets);
 
   await mkdir(fakeDeployDir, { recursive: true });
+  await mkdir(fakeHandshakeDir, { recursive: true });
   await writeFile(path.join(temp, "expected-env.json"), envJson, "utf8");
+  await writeFile(path.join(temp, "expected-host-secrets.json"), hostSecretsJson, "utf8");
+  await writeFile(path.join(fakeHandshakeDir, ".git"), "gitdir: fake\n", "utf8");
   await writeFile(path.join(fakeDeployDir, "docker-compose.yml"), "services:\n  mcp:\n    image: fake\n", "utf8");
   await writeFile(path.join(fakeDeployDir, "Caddyfile"), "mcp-aws.clockchain.network { respond ok }\n", "utf8");
   await writeFile(
     path.join(temp, "env-check.mjs"),
     `
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 const expected = JSON.parse(await readFile(process.env.EXPECTED_ENV_FILE, "utf8"));
 for (const [name, value] of Object.entries(expected)) {
   assert.equal(process.env[name], value, name);
+}
+const expectedHostSecrets = JSON.parse(await readFile(process.env.EXPECTED_HOST_SECRETS_FILE, "utf8"));
+assert.equal(process.env.HANDSHAKE_RELAY, "http://44.249.47.220:8080");
+assert.equal(process.env.HANDSHAKE_KIT_REPO, "https://github.com/thetangstr/clockchain-handshake-v2.git");
+assert.equal(process.env.HANDSHAKE_SHA, "${expectedHandshakeSha}");
+assert.equal(process.env.CLOCKCHAIN_FUNDING_PASSWORD_FILE, "/app/keys/funding.password");
+assert.equal(process.env.CLOCKCHAIN_HOST_SECRET_DIR, process.env.EXPECTED_HOST_SECRET_DIR);
+assert.deepEqual((await readdir(process.env.CLOCKCHAIN_HOST_SECRET_DIR)).sort(), Object.keys(expectedHostSecrets).sort());
+for (const [file, value] of Object.entries(expectedHostSecrets)) {
+  const secretPath = path.join(process.env.CLOCKCHAIN_HOST_SECRET_DIR, file);
+  assert.equal(await readFile(secretPath, "utf8"), value, file);
+  assert.equal((await stat(secretPath)).mode & 0o777, 0o600, file);
 }
 assert.equal(process.env.PORT, "8080");
 assert.equal(process.env.MCP_TRANSPORT, "http");
@@ -132,12 +173,35 @@ case "$name" in
   /clockchain/mcp/CLOCKCHAIN_API_KEY) value=$'api-key-line-1\\napi-key-line-2\\n' ;;
   /clockchain/mcp/MCP_AUTH_TOKENS) value=$'token-a,token-b\\n' ;;
   /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET) value=$'signing-secret\\nwith-newline\\n' ;;
+  /clockchain/host/FUNDING_WALLET_JSON) value=$'{"wallet":"line-1\\\\nline-2"}\\n' ;;
+  /clockchain/host/FUNDING_WALLET_PUBLIC_JSON) value=$'{"public":"wallet"}\\n' ;;
+  /clockchain/host/FUNDING_PASSWORD) value=$'pass line 1\\npass line 2\\n' ;;
+  /clockchain/host/CLOCKCHAIN_TOKEN) value=$'clockchain-token\\n' ;;
+  /clockchain/host/MISSING_SECRET) value='' ;;
   *) echo "unexpected parameter: $name" >&2; exit 65 ;;
 esac
 jq -n --arg name "$name" --arg value "$value" '{Parameter:{Name:$name,Value:$value}}'
+if [[ "\${AWS_FAIL_PARAMETER:-}" == "$name" ]]; then
+  exit 66
+fi
 if [[ "\${AWS_FAIL_AFTER_VALUE:-0}" == "1" ]]; then
   exit 66
 fi
+`,
+    { mode: 0o755 },
+  );
+  await writeFile(
+    path.join(binDir, "git"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "-C" && "$2" == "$HANDSHAKE_APP_ROOT" ]]
+shift 2
+case "$*" in
+  "rev-parse --is-inside-work-tree") printf 'true\\n' ;;
+  "rev-parse HEAD") printf '%s\\n' "\${FAKE_HANDSHAKE_SHA:-${expectedHandshakeSha}}" ;;
+  "status --porcelain") printf '%s' "\${FAKE_HANDSHAKE_STATUS:-}" ;;
+  *) echo "unexpected git command: $*" >&2; exit 67 ;;
+esac
 `,
     { mode: 0o755 },
   );
@@ -168,6 +232,7 @@ printf 'docker compose invoked\\n'
   );
   await Promise.all([
     chmod(path.join(binDir, "aws"), 0o755),
+    chmod(path.join(binDir, "git"), 0o755),
     chmod(path.join(binDir, "docker"), 0o755),
   ]);
 
@@ -177,7 +242,14 @@ printf 'docker compose invoked\\n'
     DOCKER_OK_FILE: dockerOkFile,
     ENV_CHECK_FILE: path.join(temp, "env-check.mjs"),
     EXPECTED_ENV_FILE: path.join(temp, "expected-env.json"),
+    EXPECTED_HOST_SECRETS_FILE: path.join(temp, "expected-host-secrets.json"),
+    EXPECTED_HOST_SECRET_DIR: hostSecretDir,
     CLOCKCHAIN_MCP_APP_ROOT: temp,
+    CLOCKCHAIN_HOST_SECRET_DIR: hostSecretDir,
+    HANDSHAKE_APP_ROOT: fakeHandshakeDir,
+    HANDSHAKE_RELAY: "http://44.249.47.220:8080",
+    HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
+    HANDSHAKE_SHA: expectedHandshakeSha,
     ...options.env,
   };
 
@@ -202,6 +274,11 @@ async function resolvedComposeConfig() {
       CLOCKCHAIN_API_KEY: "dummy-api",
       MCP_AUTH_TOKENS: "dummy-token",
       MCP_TOKEN_SIGNING_SECRET: "dummy-signing",
+      HANDSHAKE_APP_ROOT: "/tmp/handshake-app",
+      HANDSHAKE_RELAY: "http://44.249.47.220:8080",
+      HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
+      HANDSHAKE_SHA: expectedHandshakeSha,
+      CLOCKCHAIN_HOST_SECRET_DIR: "/run/clockchain-host-secrets",
     },
   });
   assert.equal(result.code, 0, result.stderr);
@@ -215,6 +292,7 @@ test("deployment assets define the locked EC2 compose target", async () => {
 
   const compose = await readFile(composeFile, "utf8");
   assert.match(compose, /mcp:/);
+  assert.match(compose, /host:/);
   assert.match(compose, /caddy:/);
   assert.match(compose, /build:\s*\n\s*context:\s*\.\.\/\.\./);
   assert.match(compose, /target:\s*runtime/);
@@ -226,6 +304,13 @@ test("deployment assets define the locked EC2 compose target", async () => {
   assert.match(compose, /-\s+node\s+-\s+-e/s);
   assert.match(compose, /fetch\("http:\/\/127\.0\.0\.1:" \+ \(process\.env\.PORT \?\? "8080"\) \+ "\/health"\)/);
   assert.match(compose, /condition:\s*service_healthy/);
+  assert.match(compose, /context:\s*\$\{HANDSHAKE_APP_ROOT:-\/opt\/clockchain-host\/app\}/);
+  assert.match(compose, /HANDSHAKE_RELAY:\s*"\$\{HANDSHAKE_RELAY\}"/);
+  assert.match(compose, /HANDSHAKE_SHA:\s*"\$\{HANDSHAKE_SHA\}"/);
+  assert.match(compose, /HANDSHAKE_KIT_REPO:\s*"\$\{HANDSHAKE_KIT_REPO\}"/);
+  assert.match(compose, /CLOCKCHAIN_FUNDING_PASSWORD_FILE:\s*\/app\/keys\/funding\.password/);
+  assert.match(compose, /\$\{CLOCKCHAIN_HOST_SECRET_DIR:-\/run\/clockchain-host-secrets\}:\/app\/keys:ro/);
+  assert.match(compose, /host_runs:\/app\/runs/);
 
   const caddy = await readFile(caddyFile, "utf8");
   assert.match(caddy, /^mcp-aws\.clockchain\.network\s*\{/m);
@@ -236,6 +321,38 @@ test("deployment assets define the locked EC2 compose target", async () => {
   const unit = await readFile(systemdUnit, "utf8");
   assert.match(unit, /ExecStart=\/opt\/clockchain-mcp\/compose-up\.sh/);
   assert.match(unit, /WantedBy=multi-user\.target/);
+});
+
+test("resolved compose config adds the external host without network ingress", async () => {
+  const cfg = await resolvedComposeConfig();
+  const host = cfg.services.host;
+
+  assert.equal(host.build.context, "/tmp/handshake-app");
+  assert.equal(host.restart, "unless-stopped");
+  assert.equal(host.ports, undefined);
+  assert.equal(host.expose, undefined);
+  assert.deepEqual(host.environment, {
+    HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
+    CLOCKCHAIN_FUNDING_PASSWORD_FILE: "/app/keys/funding.password",
+    HANDSHAKE_RELAY: "http://44.249.47.220:8080",
+    HANDSHAKE_SHA: expectedHandshakeSha,
+  });
+  assert.deepEqual(host.volumes, [
+    {
+      type: "bind",
+      source: "/run/clockchain-host-secrets",
+      target: "/app/keys",
+      read_only: true,
+      bind: {},
+    },
+    {
+      type: "volume",
+      source: "host_runs",
+      target: "/app/runs",
+      volume: {},
+    },
+  ]);
+  assert.ok(cfg.volumes.host_runs);
 });
 
 test("resolved compose healthcheck builds the correct URL and fails closed", async () => {
@@ -284,7 +401,7 @@ test("compose wrapper fails closed when docker wait reports unhealthy services",
   }
 });
 
-test("compose wrapper fetches only locked SSM secrets and preserves bytes into docker env", async () => {
+test("compose wrapper fetches only locked SSM secrets and preserves bytes into docker env and host files", async () => {
   assert.equal(await pathExists(wrapper), true, "compose wrapper exists");
 
   const { temp, callsFile, dockerOkFile, env } = await createWrapperFixture();
@@ -296,27 +413,128 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      expectedSecretNames,
+      [...expectedSecretNames, ...expectedHostSecretNames],
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
-    for (const secret of Object.values(expectedEnv)) {
+    for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
       assert.equal(result.stdout.includes(secret), false, "wrapper stdout does not contain secret bytes");
       assert.equal(result.stderr.includes(secret), false, "wrapper stderr does not contain secret bytes");
     }
 
     const files = await listFiles(temp);
     for (const file of files) {
-      if (file.endsWith("expected-env.json") || file.endsWith("env-check.mjs") || file.endsWith("aws")) {
+      if (
+        file.endsWith("expected-env.json") ||
+        file.endsWith("expected-host-secrets.json") ||
+        file.endsWith("env-check.mjs") ||
+        file.endsWith("aws") ||
+        file.startsWith(`${env.EXPECTED_HOST_SECRET_DIR}${path.sep}`)
+      ) {
         continue;
       }
       const body = await readFile(file, "utf8").catch(() => "");
-      for (const secret of Object.values(expectedEnv)) {
+      for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
         assert.equal(body.includes(secret), false, `${path.basename(file)} is not wrapper/file persistence`);
       }
     }
 
     const mode = (await stat(wrapper)).mode & 0o777;
     assert.equal(mode & 0o111, 0o111, "wrapper is executable");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper refuses docker when a host SecureString is missing", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: { CLOCKCHAIN_HOST_CLOCKCHAIN_TOKEN_PARAM: "/clockchain/host/MISSING_SECRET" },
+  });
+
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.notEqual(result.code, 0);
+    assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper preserves the prior host secret set when a late host fetch fails", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: { AWS_FAIL_PARAMETER: "/clockchain/host/CLOCKCHAIN_TOKEN" },
+  });
+
+  try {
+    await mkdir(env.EXPECTED_HOST_SECRET_DIR, { recursive: true });
+    for (const [file, value] of Object.entries(oldHostSecrets)) {
+      const secretPath = path.join(env.EXPECTED_HOST_SECRET_DIR, file);
+      await writeFile(secretPath, value, { mode: 0o600 });
+      await chmod(secretPath, 0o600);
+    }
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.notEqual(result.code, 0);
+    assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+    assert.deepEqual((await readdir(env.EXPECTED_HOST_SECRET_DIR)).sort(), Object.keys(oldHostSecrets).sort());
+    for (const [file, value] of Object.entries(oldHostSecrets)) {
+      const secretPath = path.join(env.EXPECTED_HOST_SECRET_DIR, file);
+      assert.equal(await readFile(secretPath, "utf8"), value, file);
+      assert.equal((await stat(secretPath)).mode & 0o777, 0o600, file);
+    }
+    for (const secret of [...Object.values(expectedHostSecrets), ...Object.values(oldHostSecrets)]) {
+      assert.equal(result.stdout.includes(secret), false, "wrapper stdout does not contain secret bytes");
+      assert.equal(result.stderr.includes(secret), false, "wrapper stderr does not contain secret bytes");
+    }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper refuses docker when the handshake checkout SHA differs", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: { FAKE_HANDSHAKE_SHA: "1111111111111111111111111111111111111111" },
+  });
+
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /handshake checkout SHA mismatch/);
+    assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper refuses docker when the handshake SHA is malformed", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: { FAKE_HANDSHAKE_SHA: "not-a-sha", HANDSHAKE_SHA: "not-a-sha" },
+  });
+
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /handshake checkout SHA is not a 40-character lowercase hex value/);
+    assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper refuses docker when the handshake checkout is dirty", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: { FAKE_HANDSHAKE_STATUS: " M bin/clockchain-host.mjs\n" },
+  });
+
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /handshake checkout has uncommitted changes/);
+    assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -342,6 +560,13 @@ test("installer enables and restarts the systemd unit", async () => {
   assert.match(install, /systemctl daemon-reload/);
   assert.match(install, /systemctl enable clockchain-mcp\.service/);
   assert.match(install, /systemctl restart clockchain-mcp\.service/);
+});
+
+test("provisioning IAM policy is limited to MCP and host SSM prefixes", async () => {
+  const provision = await readFile(path.join(repoRoot, "infra", "scripts", "provision-clockchain-mcp-host.sh"), "utf8");
+  assert.match(provision, /parameter\/clockchain\/mcp\/\*/);
+  assert.match(provision, /parameter\/clockchain\/host\/\*/);
+  assert.doesNotMatch(provision, /parameter\/clockchain\/\*/);
 });
 
 test("root npm test runs workspace and infra tests with deterministic failure propagation", async () => {
