@@ -290,7 +290,7 @@ function canonicalMandateBody({
   };
 }
 
-function harness({ key = operatorKey(), messages = [], result = null, postImpl = null, env = {}, store = null, reset = true, resolveOwnedAgentId = null } = {}) {
+function harness({ key = operatorKey(), messages = [], result = null, postImpl = null, env = {}, store = null, reset = true, resolveOwnedAgentId = null, waitTiming = undefined } = {}) {
   if (reset) __resetHandshakeStateStore();
   store ??= createHandshakeStateStore({});
   const posted = [];
@@ -378,6 +378,7 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
       return signatureHex;
     },
     stateStore: store,
+    waitTiming,
   });
   return {
     clockchain,
@@ -416,6 +417,7 @@ async function preparePayerAwaitingAcceptance({
   key = operatorKey(),
   sharedStore = null,
   reset = true,
+  waitTiming = undefined,
 } = {}) {
   const requestorRelayKey = generateRelayKeyPair();
   const messages = [
@@ -424,7 +426,7 @@ async function preparePayerAwaitingAcceptance({
     relayMessage({ body: { funded: PAYER, paymentMoved: false, role: "payer" }, kind: "funding_record", role: "host", seq: "3" }),
     relayMessage({ body: { paymentMoved: false }, kind: "watching", role: "requestor", seq: "4", relayKey: requestorRelayKey }),
   ];
-  const h = harness({ key, messages, reset, store: sharedStore });
+  const h = harness({ key, messages, reset, store: sharedStore, waitTiming });
   const { fixture } = await preparePayerWithHostedArtifacts(h, key, requestorRelayKey);
   const first = await h.coordinator.next(SESSION_ID, "payer");
   assert.deepEqual(first, {
@@ -650,12 +652,11 @@ test("waitMs polls only the counterpart-transition wait state and returns when i
   let acceptanceSearches = 0;
   const originalSearch = h.clockchain.searchAsset;
   h.clockchain.searchAsset = async (assetReferenceId) => {
-    const records = await originalSearch(assetReferenceId);
     if (assetReferenceId === sessionKey(sessionDigest, "acceptance")) {
       acceptanceSearches += 1;
       if (acceptanceSearches === 2) pushAcceptanceRecord(h, sessionDigest, acceptance);
     }
-    return records;
+    return originalSearch(assetReferenceId);
   };
 
   const result = await h.coordinator.next(SESSION_ID, "payer", "hex", 100);
@@ -672,6 +673,42 @@ test("waitMs timeout returns the latest counterpart-transition wait state", asyn
     sessionId: SESSION_ID,
     stage: "awaiting_counterpart_transition",
   });
+});
+
+test("waitMs uses bounded exponential delay policy without busy-looping", async () => {
+  let now = 1000;
+  const sleeps = [];
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      now += ms;
+    },
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  assert.deepEqual(await h.coordinator.next(SESSION_ID, "payer", "hex", 1750), {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+  assert.deepEqual(sleeps, [250, 500, 1000]);
+});
+
+test("waitMs delay policy caps the first sleep to the remaining deadline", async () => {
+  let now = 5000;
+  const sleeps = [];
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      now += ms;
+    },
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  await h.coordinator.next(SESSION_ID, "payer", "hex", 100);
+  assert.deepEqual(sleeps, [100]);
 });
 
 test("waitMs releases the per-session role lock between retries", async () => {

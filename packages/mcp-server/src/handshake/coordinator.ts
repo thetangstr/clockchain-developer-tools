@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { gzipSync } from "node:zlib";
 import {
   buildAcceptance,
@@ -72,6 +73,11 @@ type ClockchainClient = {
 type WriteBudget = {
   check?: () => void;
   record?: () => void;
+};
+
+type WaitTiming = {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 };
 
 type CoordinatorState = JsonObject & {
@@ -155,10 +161,13 @@ export function createHandshakeCoordinator(options: {
   resolveOwnedAgentId(input: { address: string }): Promise<string | null>;
   stateStore?: HandshakeStateStore;
   budget?: WriteBudget;
+  waitTiming?: WaitTiming;
 }) {
   const stateStore = options.stateStore ?? createHandshakeStateStore();
   const env = options.env ?? process.env;
   const principal = options.principal;
+  const waitNow = options.waitTiming?.now ?? (() => performance.now());
+  const waitSleep = options.waitTiming?.sleep ?? sleep;
 
   const api = {
     __testDelay: undefined as undefined | (() => Promise<void>),
@@ -213,9 +222,10 @@ export function createHandshakeCoordinator(options: {
       const signingEncoding = parseSigningEncoding(signingEncodingInput);
       const waitMs = parseWaitMs(waitMsInput);
       const key = stateKey(principal, sessionId, role);
-      const deadline = Date.now() + waitMs;
+      const deadline = waitNow() + waitMs;
+      let nextDelayMs = 250;
       let latest: JsonObject;
-      do {
+      while (true) {
         latest = await withGlobalLock(key, async () => {
         if (api.__testDelay) await api.__testDelay();
         let record = await requireRecord(stateStore, key);
@@ -323,11 +333,11 @@ export function createHandshakeCoordinator(options: {
         return signRequest("sign_party_result", bytes, { sessionDigest: ready.sessionDigest, sessionId }, signingEncoding);
         });
         if (waitMs === 0 || !isCounterpartTransitionWait(latest)) return latest;
-        const remaining = deadline - Date.now();
+        const remaining = deadline - waitNow();
         if (remaining <= 0) return latest;
-        await sleep(Math.min(remaining, 10));
-      } while (Date.now() < deadline);
-      return latest;
+        await waitSleep(Math.min(remaining, nextDelayMs));
+        nextDelayMs = Math.min(nextDelayMs * 2, 1000);
+      }
     },
 
     async submit(sessionId: string, roleInput: string, signatureHex: string): Promise<JsonObject> {
