@@ -24,7 +24,10 @@ import {
   type HandshakeRecord,
   type HandshakeStateStore,
 } from "./state.js";
-import { createHandshakeRelayClient } from "./relay.js";
+import {
+  HandshakeRelayResultPendingError,
+  createHandshakeRelayClient,
+} from "./relay.js";
 import {
   recoverEip191Address as recoverEip191AddressFromRpc,
   resolveOwnedAgentId as resolveOwnedAgentIdFromRpc,
@@ -462,6 +465,14 @@ export function createHandshakeCoordinator(options: {
         return { certificate: envelope };
       } catch (error) {
         if (error instanceof HandshakeCoordinatorError) throw error;
+        if (error instanceof HandshakeRelayResultPendingError) {
+          return {
+            needed: "certificate",
+            retryAfterMs: 5000,
+            sessionId,
+            stage: "awaiting_certificate",
+          };
+        }
         throw new HandshakeCoordinatorError("Certificate verification failed.", "CERTIFICATE_INVALID");
       }
     },

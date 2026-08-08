@@ -25,6 +25,7 @@ import {
   HandshakeCoordinatorError,
   createHandshakeCoordinator,
 } from "../dist/handshake/coordinator.js";
+import { HandshakeRelayResultPendingError } from "../dist/handshake/relay.js";
 
 const NOW = 1786190400000;
 const SESSION_ID = "123e4567-e89b-42d3-a456-426614174001";
@@ -356,9 +357,7 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
     },
     async getResult() {
       if (result === null) {
-        const err = new Error("pending");
-        err.code = "RESULT_NOT_SET";
-        throw err;
+        throw new HandshakeRelayResultPendingError();
       }
       return result;
     },
@@ -839,6 +838,27 @@ test("certificate is unavailable before verified evidence and rejects the wrong 
     },
   }));
   await assert.rejects(bad.coordinator.getCertificate(SESSION_ID), { code: "CERTIFICATE_INVALID" });
+});
+
+test("certificate fetch treats a not-yet-published host result as normal waiting", async () => {
+  const key = operatorKey();
+  const pending = harness({ key });
+  await pending.coordinator.join("payer");
+  await pending.store.update({ principal: "did:example:alice", session: SESSION_ID, role: "payer" }, (record) => ({
+    ...record,
+    data: {
+      ...record.data,
+      discovery: discovery(key),
+      evidenceVerified: true,
+    },
+  }));
+
+  assert.deepEqual(await pending.coordinator.getCertificate(SESSION_ID), {
+    needed: "certificate",
+    retryAfterMs: 5000,
+    sessionId: SESSION_ID,
+    stage: "awaiting_certificate",
+  });
 });
 
 test("certificate verifies result parties and anchors against stored descriptor and transitions", async () => {
