@@ -139,7 +139,8 @@ export function createRuntimeHandshakeCoordinator(options: {
   return Object.freeze({
     getCertificate: (sessionId: string) => coordinatorForCall().getCertificate(sessionId),
     join: (role: string) => coordinatorForCall().join(role),
-    next: (sessionId: string, role: string) => coordinatorForCall().next(sessionId, role),
+    next: (sessionId: string, role: string, signingEncoding?: string, waitMs?: unknown) =>
+      coordinatorForCall().next(sessionId, role, signingEncoding, waitMs),
     status: (sessionId?: string) => coordinatorForCall().status(sessionId),
     submit: (sessionId: string, role: string, signatureHex: string) => coordinatorForCall().submit(sessionId, role, signatureHex),
   });
@@ -207,11 +208,15 @@ export function createHandshakeCoordinator(options: {
       });
     },
 
-    async next(sessionId: string, roleInput: string, signingEncodingInput: string = "hex"): Promise<JsonObject> {
+    async next(sessionId: string, roleInput: string, signingEncodingInput: string = "hex", waitMsInput: unknown = 0): Promise<JsonObject> {
       const role = publicRole(roleInput);
       const signingEncoding = parseSigningEncoding(signingEncodingInput);
+      const waitMs = parseWaitMs(waitMsInput);
       const key = stateKey(principal, sessionId, role);
-      return withGlobalLock(key, async () => {
+      const deadline = Date.now() + waitMs;
+      let latest: JsonObject;
+      do {
+        latest = await withGlobalLock(key, async () => {
         if (api.__testDelay) await api.__testDelay();
         let record = await requireRecord(stateStore, key);
         record = await refreshFromMailbox(options, stateStore, key, record);
@@ -316,7 +321,13 @@ export function createHandshakeCoordinator(options: {
           transitions,
         }));
         return signRequest("sign_party_result", bytes, { sessionDigest: ready.sessionDigest, sessionId }, signingEncoding);
-      });
+        });
+        if (waitMs === 0 || !isCounterpartTransitionWait(latest)) return latest;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return latest;
+        await sleep(Math.min(remaining, 10));
+      } while (Date.now() < deadline);
+      return latest;
     },
 
     async submit(sessionId: string, roleInput: string, signatureHex: string): Promise<JsonObject> {
@@ -1377,6 +1388,23 @@ function identityClaimBytes(sessionId: string, role: PublicRole, data: Coordinat
 function parseSigningEncoding(input: string): SigningEncoding {
   if (input === "hex" || input === "gzip-base64url") return input;
   throw new HandshakeCoordinatorError("Signing encoding must be hex or gzip-base64url.", "SIGNING_ENCODING_INVALID");
+}
+
+function parseWaitMs(input: unknown): number {
+  if (input === undefined) return 0;
+  if (typeof input === "number" && Number.isInteger(input) && input >= 0 && input <= 15000) return input;
+  throw new HandshakeCoordinatorError("waitMs must be an integer from 0 to 15000.", "WAIT_MS_INVALID");
+}
+
+function isCounterpartTransitionWait(result: JsonObject): boolean {
+  return (
+    result.needed === "counterpart_transition" &&
+    result.stage === "awaiting_counterpart_transition"
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(1, ms)));
 }
 
 function signRequest(stage: string, bytes: Buffer, context: JsonObject, signingEncoding: SigningEncoding): JsonObject {

@@ -70,10 +70,21 @@ const signingEncodingSchema = z
 
 type SigningEncoding = z.infer<typeof signingEncodingSchema>;
 
+const handshakeWaitMsSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(15000)
+  .optional()
+  .default(0)
+  .describe("Optional bounded wait in ms for counterpart_transition only. Defaults to 0.");
+
+type HandshakeWaitMs = z.infer<typeof handshakeWaitMsSchema>;
+
 export interface HandshakeCoordinator {
   status(sessionId?: string): Promise<unknown>;
   join(role: HandshakeRole): Promise<unknown>;
-  next(sessionId: string, role: HandshakeRole, signingEncoding?: SigningEncoding): Promise<unknown>;
+  next(sessionId: string, role: HandshakeRole, signingEncoding?: SigningEncoding, waitMs?: HandshakeWaitMs): Promise<unknown>;
   submit(sessionId: string, role: HandshakeRole, signatureHex: string): Promise<unknown>;
   getCertificate(sessionId: string): Promise<unknown>;
 }
@@ -1315,14 +1326,16 @@ export function registerTools(
         sessionId: z.string().describe("Handshake session id."),
         role: handshakeRoleSchema,
         signingEncoding: signingEncodingSchema,
+        waitMs: handshakeWaitMsSchema,
       },
     },
-    async ({ sessionId, role, signingEncoding }) =>
+    async ({ sessionId, role, signingEncoding, waitMs }) =>
       run("handshake_next", () =>
         handshakeCoordinator().next(
           sessionId,
           handshakeRoleSchema.parse(role),
           signingEncodingSchema.parse(signingEncoding),
+          handshakeWaitMsSchema.parse(waitMs),
         ),
       ),
   );
