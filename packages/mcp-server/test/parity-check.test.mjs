@@ -72,8 +72,8 @@ async function startParityServer(name, opts = {}) {
       if (req.method === "POST" && req.url === "/mcp") {
         const msg = await readJson(req);
         const tool = msg.params?.name;
-        calls.push({ authorization: req.headers.authorization, apiKey: req.headers["x-api-key"], tool });
         const args = msg.params?.arguments ?? {};
+        calls.push({ arguments: args, authorization: req.headers.authorization, apiKey: req.headers["x-api-key"], tool });
         const resultForTool = () => {
           if (tool === "get_timestamp") {
             return {
@@ -184,6 +184,7 @@ async function runAgainst(gcp, aws, opts = {}) {
     blockHeight: KNOWN_HEIGHT,
     reference: REFERENCE,
     action: ACTION,
+    allowDegraded: opts.allowDegraded,
     timeoutMs: opts.timeoutMs ?? 1000,
     maxBytes: opts.maxBytes ?? 100_000,
     stdout: { write: (s) => lines.push(s) },
@@ -205,6 +206,24 @@ test("passes green parity with direct JSON and SSE MCP responses", async () => {
     assert.doesNotMatch(output, new RegExp(SECRET_TOKEN));
     assert.doesNotMatch(output, /authorization|bearer|x-api-key/i);
     assert.doesNotMatch(output, new RegExp(ACTION));
+  });
+});
+
+test("forwards an explicit degraded-write override without changing the default", async () => {
+  await withServers({}, {}, async ({ gcp, aws }) => {
+    const defaultRun = await runAgainst(gcp, aws);
+    assert.equal(defaultRun.result.ok, true);
+    for (const call of [...gcp.calls, ...aws.calls].filter((item) => item.tool === "log_action")) {
+      assert.equal(Object.hasOwn(call.arguments, "allow_degraded"), false);
+    }
+  });
+
+  await withServers({}, {}, async ({ gcp, aws }) => {
+    const overridden = await runAgainst(gcp, aws, { allowDegraded: "true" });
+    assert.equal(overridden.result.ok, true);
+    for (const call of [...gcp.calls, ...aws.calls].filter((item) => item.tool === "log_action")) {
+      assert.equal(call.arguments.allow_degraded, true);
+    }
   });
 });
 
@@ -437,6 +456,18 @@ test("validates timeout and max response size as positive bounded numbers", asyn
       stdout: { write() {} },
     }),
     /maxBytes must be a positive number/,
+  );
+  await assert.rejects(
+    runParity({
+      gcpBaseUrl: "http://127.0.0.1",
+      awsBaseUrl: "http://127.0.0.1",
+      blockHeight: KNOWN_HEIGHT,
+      reference: REFERENCE,
+      action: ACTION,
+      allowDegraded: "yes",
+      stdout: { write() {} },
+    }),
+    /allowDegraded must be true or false/,
   );
 });
 

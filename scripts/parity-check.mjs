@@ -454,6 +454,12 @@ function positiveBoundedNumber(value, name, max) {
   return n;
 }
 
+function booleanOption(value, name) {
+  if (value === undefined || value === null || value === false || value === "false") return false;
+  if (value === true || value === "true") return true;
+  throw new Error(`${name} must be true or false`);
+}
+
 function anyFailed(results) {
   return results.some((r) => !r.ok);
 }
@@ -478,6 +484,7 @@ export async function runParity(options = {}) {
   const blockHeight = requireOption(options.blockHeight, "blockHeight");
   const reference = requireOption(options.reference, "reference");
   const action = requireOption(options.action, "action");
+  const allowDegraded = booleanOption(options.allowDegraded, "allowDegraded");
   const actionHash = sha256(action);
   const results = [];
 
@@ -547,6 +554,7 @@ export async function runParity(options = {}) {
       wait: true,
       wait_ms: LOG_WAIT_MS,
       idempotency_key: `parity:${reference}:aws`,
+      ...(allowDegraded ? { allow_degraded: true } : {}),
     }, writeLimits);
     const read = await callTool(gcpBaseUrl, gcpToken, "get_log_entry", {
       ledger_id: awsWrite.ledgerId,
@@ -563,6 +571,7 @@ export async function runParity(options = {}) {
       wait: true,
       wait_ms: LOG_WAIT_MS,
       idempotency_key: `parity:${reference}:gcp`,
+      ...(allowDegraded ? { allow_degraded: true } : {}),
     }, writeLimits);
     const read = await callTool(awsBaseUrl, awsToken, "get_log_entry", {
       ledger_id: gcpWrite.ledgerId,
@@ -597,6 +606,7 @@ function parseArgs(argv, env) {
     blockHeight: args.blockHeight ?? env.PARITY_BLOCK_HEIGHT,
     reference: args.reference ?? env.PARITY_REFERENCE,
     action: args.action ?? env.PARITY_ACTION,
+    allowDegraded: args.allowDegraded ?? env.PARITY_ALLOW_DEGRADED,
     timeoutMs: args.timeoutMs ?? env.PARITY_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS,
     maxBytes: args.maxBytes ?? env.PARITY_MAX_BYTES ?? DEFAULT_MAX_BYTES,
   };
@@ -610,7 +620,8 @@ async function main() {
     process.stderr.write(`parity-check: ${err instanceof Error ? err.message : String(err)}\n`);
     process.stderr.write(
       "usage: node scripts/parity-check.mjs --block-height <height> --reference <unique-ref> --action <harmless-action> " +
-        "[--gcp-url <url>] [--aws-url <url>] [--timeout-ms <ms>] [--max-bytes <bytes>]\n",
+        "[--gcp-url <url>] [--aws-url <url>] [--allow-degraded <true|false>] " +
+        "[--timeout-ms <ms>] [--max-bytes <bytes>]\n",
     );
     process.exitCode = 2;
   }
