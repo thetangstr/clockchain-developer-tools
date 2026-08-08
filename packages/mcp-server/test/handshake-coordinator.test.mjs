@@ -48,6 +48,12 @@ function operatorKey() {
   };
 }
 
+function sha256SignedBytes(bytesToSignHex) {
+  return createHash("sha256")
+    .update(Buffer.from(bytesToSignHex.slice(2), "hex"))
+    .digest("hex");
+}
+
 function discovery(key = operatorKey()) {
   return {
     schema: "handshake-discovery/v2",
@@ -501,6 +507,8 @@ test("repeated next calls return byte-identical pending mandate and request arti
   const firstMandate = await payer.coordinator.next(SESSION_ID, "payer");
   const secondMandate = await payer.coordinator.next(SESSION_ID, "payer");
   assert.equal(secondMandate.bytesToSignHex, firstMandate.bytesToSignHex);
+  assert.equal(firstMandate.bytesSha256, sha256SignedBytes(firstMandate.bytesToSignHex));
+  assert.equal(secondMandate.bytesSha256, firstMandate.bytesSha256);
 
   const payerRelayKey = generateRelayKeyPair();
   const requestor = harness({
@@ -515,6 +523,8 @@ test("repeated next calls return byte-identical pending mandate and request arti
   const firstRequest = await requestor.coordinator.next(SESSION_ID, "requestor");
   const secondRequest = await requestor.coordinator.next(SESSION_ID, "requestor");
   assert.equal(secondRequest.bytesToSignHex, firstRequest.bytesToSignHex);
+  assert.equal(firstRequest.bytesSha256, sha256SignedBytes(firstRequest.bytesToSignHex));
+  assert.equal(secondRequest.bytesSha256, firstRequest.bytesSha256);
 });
 
 test("invalid Clockchain calendar timestamps never become mandate signing bytes", async () => {

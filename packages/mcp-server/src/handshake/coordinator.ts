@@ -1362,6 +1362,7 @@ function identityClaimBytes(sessionId: string, role: PublicRole, data: Coordinat
 
 function signRequest(stage: string, bytes: Buffer, context: JsonObject): JsonObject {
   return {
+    bytesSha256: createHash("sha256").update(bytes).digest("hex"),
     bytesToSignHex: `0x${bytes.toString("hex")}`,
     context,
     stage,
