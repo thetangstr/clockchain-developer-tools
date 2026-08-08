@@ -222,10 +222,12 @@ export function createHandshakeCoordinator(options: {
       const signingEncoding = parseSigningEncoding(signingEncodingInput);
       const waitMs = parseWaitMs(waitMsInput);
       const key = stateKey(principal, sessionId, role);
-      const deadline = waitNow() + waitMs;
+      const deadline = waitMs > 0 ? readWaitNow(waitNow) + waitMs : 0;
       let nextDelayMs = 250;
-      let latest: JsonObject;
+      let latest: JsonObject = {};
+      let firstAttempt = true;
       while (true) {
+        if (!firstAttempt && waitMs > 0 && readWaitNow(waitNow) >= deadline) return latest;
         latest = await withGlobalLock(key, async () => {
         if (api.__testDelay) await api.__testDelay();
         let record = await requireRecord(stateStore, key);
@@ -332,10 +334,16 @@ export function createHandshakeCoordinator(options: {
         }));
         return signRequest("sign_party_result", bytes, { sessionDigest: ready.sessionDigest, sessionId }, signingEncoding);
         });
+        firstAttempt = false;
         if (waitMs === 0 || !isCounterpartTransitionWait(latest)) return latest;
-        const remaining = deadline - waitNow();
+        const beforeSleep = readWaitNow(waitNow);
+        const remaining = deadline - beforeSleep;
         if (remaining <= 0) return latest;
         await waitSleep(Math.min(remaining, nextDelayMs));
+        const afterSleep = readWaitNow(waitNow);
+        if (afterSleep <= beforeSleep) {
+          throw new HandshakeCoordinatorError("Handshake wait timing did not advance.", "WAIT_TIMING_INVALID");
+        }
         nextDelayMs = Math.min(nextDelayMs * 2, 1000);
       }
     },
@@ -1411,6 +1419,14 @@ function isCounterpartTransitionWait(result: JsonObject): boolean {
     result.needed === "counterpart_transition" &&
     result.stage === "awaiting_counterpart_transition"
   );
+}
+
+function readWaitNow(now: () => number): number {
+  const value = now();
+  if (!Number.isFinite(value)) {
+    throw new HandshakeCoordinatorError("Handshake wait timing must be finite.", "WAIT_TIMING_INVALID");
+  }
+  return value;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -463,6 +463,16 @@ function pushAcceptanceRecord(h, sessionDigest, acceptance) {
   });
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, reject, resolve };
+}
+
 function hexJson(hex) {
   return JSON.parse(Buffer.from(hex.slice(2), "hex").toString("utf8"));
 }
@@ -659,7 +669,7 @@ test("waitMs polls only the counterpart-transition wait state and returns when i
     return originalSearch(assetReferenceId);
   };
 
-  const result = await h.coordinator.next(SESSION_ID, "payer", "hex", 100);
+  const result = await h.coordinator.next(SESSION_ID, "payer", "hex", 300);
   assert.equal(result.stage, "sign_party_result");
   assert.equal(typeof result.bytesToSignHex, "string");
   assert.equal(acceptanceSearches >= 2, true);
@@ -711,25 +721,78 @@ test("waitMs delay policy caps the first sleep to the remaining deadline", async
   assert.deepEqual(sleeps, [100]);
 });
 
+test("waitMs does not start another poll when sleep reaches the deadline", async () => {
+  let now = 5000;
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms;
+    },
+  };
+  const { h, sessionDigest } = await preparePayerAwaitingAcceptance({ waitTiming });
+  let acceptanceSearches = 0;
+  const originalSearch = h.clockchain.searchAsset;
+  h.clockchain.searchAsset = async (assetReferenceId) => {
+    if (assetReferenceId === sessionKey(sessionDigest, "acceptance")) acceptanceSearches += 1;
+    return originalSearch(assetReferenceId);
+  };
+
+  assert.deepEqual(await h.coordinator.next(SESSION_ID, "payer", "hex", 250), {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+  assert.equal(acceptanceSearches, 1);
+});
+
+test("waitMs fails closed when injected timing makes no progress", async () => {
+  const waitTiming = {
+    now: () => 1000,
+    sleep: async () => {},
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  await assert.rejects(
+    h.coordinator.next(SESSION_ID, "payer", "hex", 1000),
+    { code: "WAIT_TIMING_INVALID" },
+  );
+});
+
+test("waitMs fails closed when injected timing is non-finite", async () => {
+  const waitTiming = {
+    now: () => Number.NaN,
+    sleep: async () => {},
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  await assert.rejects(
+    h.coordinator.next(SESSION_ID, "payer", "hex", 1000),
+    { code: "WAIT_TIMING_INVALID" },
+  );
+});
+
 test("waitMs releases the per-session role lock between retries", async () => {
   __resetHandshakeStateStore();
   const sharedStore = createHandshakeStateStore({});
-  const { h, messages } = await preparePayerAwaitingAcceptance({ sharedStore, reset: false });
-  let firstAcceptanceSearch = false;
-  const originalSearch = h.clockchain.searchAsset;
-  h.clockchain.searchAsset = async (assetReferenceId) => {
-    const records = await originalSearch(assetReferenceId);
-    if (assetReferenceId.includes(":acceptance")) firstAcceptanceSearch = true;
-    return records;
+  let now = 10_000;
+  const sleepEntered = deferred();
+  const releaseSleep = deferred();
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      sleepEntered.resolve(ms);
+      await releaseSleep.promise;
+      now += ms;
+    },
   };
 
-  const waiting = h.coordinator.next(SESSION_ID, "payer", "hex", 80);
+  const { acceptance, h, messages, sessionDigest } = await preparePayerAwaitingAcceptance({ sharedStore, reset: false, waitTiming });
+  const waiting = h.coordinator.next(SESSION_ID, "payer", "hex", 1000);
   let waitingSettled = false;
   waiting.then(() => {
     waitingSettled = true;
   });
-  while (!firstAcceptanceSearch) await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await sleepEntered.promise, 250);
   assert.equal(waitingSettled, false);
 
   const concurrent = harness({ messages, reset: false, store: sharedStore });
@@ -739,7 +802,13 @@ test("waitMs releases the per-session role lock between retries", async () => {
     sessionId: SESSION_ID,
     stage: "awaiting_counterpart_transition",
   });
-  assert.deepEqual(await waiting, immediate);
+  assert.equal(waitingSettled, false);
+
+  pushAcceptanceRecord(h, sessionDigest, acceptance);
+  releaseSleep.resolve();
+  const completed = await waiting;
+  assert.equal(completed.stage, "sign_party_result");
+  assert.equal(typeof completed.bytesToSignHex, "string");
 });
 
 test("invalid Clockchain calendar timestamps never become mandate signing bytes", async () => {
