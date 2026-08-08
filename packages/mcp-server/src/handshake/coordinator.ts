@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import {
   buildAcceptance,
   buildAcknowledgment,
@@ -32,6 +33,7 @@ import {
 type JsonObject = Record<string, any>;
 type PublicRole = "payer" | "requestor";
 type EvidenceRole = "payer" | "payee";
+type SigningEncoding = "hex" | "gzip-base64url";
 
 type RelayClient = {
   fetchDiscovery(): Promise<JsonObject>;
@@ -202,8 +204,9 @@ export function createHandshakeCoordinator(options: {
       });
     },
 
-    async next(sessionId: string, roleInput: string): Promise<JsonObject> {
+    async next(sessionId: string, roleInput: string, signingEncodingInput: string = "hex"): Promise<JsonObject> {
       const role = publicRole(roleInput);
+      const signingEncoding = parseSigningEncoding(signingEncodingInput);
       const key = stateKey(principal, sessionId, role);
       return withGlobalLock(key, async () => {
         if (api.__testDelay) await api.__testDelay();
@@ -216,7 +219,7 @@ export function createHandshakeCoordinator(options: {
           return signRequest("sign_identity", bytes, {
             role,
             sessionId,
-          });
+          }, signingEncoding);
         }
 
         if (!data.agentId) {
@@ -242,11 +245,11 @@ export function createHandshakeCoordinator(options: {
             return { needed: "requestor_identity_ready", sessionId, stage: "awaiting_counterpart" };
           }
           if (latest.pendingArtifact?.mandate) {
-            return signRequest("sign_mandate", canonicalBytes(latest.pendingArtifact.mandate), { sessionId });
+            return signRequest("sign_mandate", canonicalBytes(latest.pendingArtifact.mandate), { sessionId }, signingEncoding);
           }
           const artifact = await prepareMandate(options.clockchain, latest, sessionId);
           await stateStore.update(key, (current) => mergeData(key, current, { pendingArtifact: artifact, stage: "sign_mandate" }));
-          return signRequest("sign_mandate", canonicalBytes(artifact.mandate), { sessionId });
+          return signRequest("sign_mandate", canonicalBytes(artifact.mandate), { sessionId }, signingEncoding);
         }
 
         if (role === "requestor" && !latest.requestEnvelope) {
@@ -254,11 +257,11 @@ export function createHandshakeCoordinator(options: {
             return { needed: "payer_mandate", sessionId, stage: "awaiting_mandate" };
           }
           if (latest.pendingArtifact?.request) {
-            return signRequest("sign_payment_request", canonicalBytes(latest.pendingArtifact.request), { sessionId });
+            return signRequest("sign_payment_request", canonicalBytes(latest.pendingArtifact.request), { sessionId }, signingEncoding);
           }
           const artifact = prepareRequest(latest, sessionId);
           await stateStore.update(key, (current) => mergeData(key, current, { pendingArtifact: artifact, stage: "sign_payment_request" }));
-          return signRequest("sign_payment_request", canonicalBytes(artifact.request), { sessionId });
+          return signRequest("sign_payment_request", canonicalBytes(artifact.request), { sessionId }, signingEncoding);
         }
 
         record = await refreshFromMailbox(options, stateStore, key, record);
@@ -309,7 +312,7 @@ export function createHandshakeCoordinator(options: {
           stage: "sign_party_result",
           transitions,
         }));
-        return signRequest("sign_party_result", bytes, { sessionDigest: ready.sessionDigest, sessionId });
+        return signRequest("sign_party_result", bytes, { sessionDigest: ready.sessionDigest, sessionId }, signingEncoding);
       });
     },
 
@@ -1360,9 +1363,24 @@ function identityClaimBytes(sessionId: string, role: PublicRole, data: Coordinat
   });
 }
 
-function signRequest(stage: string, bytes: Buffer, context: JsonObject): JsonObject {
+function parseSigningEncoding(input: string): SigningEncoding {
+  if (input === "hex" || input === "gzip-base64url") return input;
+  throw new HandshakeCoordinatorError("Signing encoding must be hex or gzip-base64url.", "SIGNING_ENCODING_INVALID");
+}
+
+function signRequest(stage: string, bytes: Buffer, context: JsonObject, signingEncoding: SigningEncoding): JsonObject {
+  const bytesSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (signingEncoding === "gzip-base64url") {
+    return {
+      bytesEncoding: "gzip-base64url",
+      bytesSha256,
+      bytesToSignGzipBase64Url: gzipSync(bytes).toString("base64url"),
+      context,
+      stage,
+    };
+  }
   return {
-    bytesSha256: createHash("sha256").update(bytes).digest("hex"),
+    bytesSha256,
     bytesToSignHex: `0x${bytes.toString("hex")}`,
     context,
     stage,

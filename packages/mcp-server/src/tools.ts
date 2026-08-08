@@ -62,10 +62,18 @@ const handshakeRoleSchema = z
 
 type HandshakeRole = z.infer<typeof handshakeRoleSchema>;
 
+const signingEncodingSchema = z
+  .enum(["hex", "gzip-base64url"])
+  .optional()
+  .default("hex")
+  .describe("Optional signing payload encoding. Defaults to hex; gzip-base64url returns a shorter compressed payload.");
+
+type SigningEncoding = z.infer<typeof signingEncodingSchema>;
+
 export interface HandshakeCoordinator {
   status(sessionId?: string): Promise<unknown>;
   join(role: HandshakeRole): Promise<unknown>;
-  next(sessionId: string, role: HandshakeRole): Promise<unknown>;
+  next(sessionId: string, role: HandshakeRole, signingEncoding?: SigningEncoding): Promise<unknown>;
   submit(sessionId: string, role: HandshakeRole, signatureHex: string): Promise<unknown>;
   getCertificate(sessionId: string): Promise<unknown>;
 }
@@ -1306,11 +1314,16 @@ export function registerTools(
       inputSchema: {
         sessionId: z.string().describe("Handshake session id."),
         role: handshakeRoleSchema,
+        signingEncoding: signingEncodingSchema,
       },
     },
-    async ({ sessionId, role }) =>
+    async ({ sessionId, role, signingEncoding }) =>
       run("handshake_next", () =>
-        handshakeCoordinator().next(sessionId, handshakeRoleSchema.parse(role)),
+        handshakeCoordinator().next(
+          sessionId,
+          handshakeRoleSchema.parse(role),
+          signingEncodingSchema.parse(signingEncoding),
+        ),
       ),
   );
 

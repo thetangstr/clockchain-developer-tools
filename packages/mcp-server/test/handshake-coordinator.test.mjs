@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 
 import {
   buildAcceptance,
@@ -525,6 +526,29 @@ test("repeated next calls return byte-identical pending mandate and request arti
   assert.equal(secondRequest.bytesToSignHex, firstRequest.bytesToSignHex);
   assert.equal(firstRequest.bytesSha256, sha256SignedBytes(firstRequest.bytesToSignHex));
   assert.equal(secondRequest.bytesSha256, firstRequest.bytesSha256);
+});
+
+test("next can return one compact gzip-base64url signing payload with the same raw-byte digest", async () => {
+  const requestorRelayKey = generateRelayKeyPair();
+  const { coordinator } = harness({
+    messages: [
+      relayMessage({ body: { address: REQUESTOR }, kind: "identity_ready", role: "requestor", seq: "1", relayKey: requestorRelayKey }),
+      relayMessage({ body: { address: REQUESTOR, agentId: "202" }, kind: "party_ready", role: "requestor", seq: "2", relayKey: requestorRelayKey }),
+      relayMessage({ body: { funded: PAYER, paymentMoved: false, role: "payer" }, kind: "funding_record", role: "host", seq: "3" }),
+    ],
+  });
+  await joinAndIdentify(coordinator, "payer", PAYER_SIG);
+
+  const hex = await coordinator.next(SESSION_ID, "payer");
+  const compact = await coordinator.next(SESSION_ID, "payer", "gzip-base64url");
+  const decoded = gunzipSync(Buffer.from(compact.bytesToSignGzipBase64Url, "base64url"));
+
+  assert.equal(compact.bytesEncoding, "gzip-base64url");
+  assert.equal(Object.hasOwn(compact, "bytesToSignHex"), false);
+  assert.equal(`0x${decoded.toString("hex")}`, hex.bytesToSignHex);
+  assert.equal(compact.bytesSha256, sha256SignedBytes(hex.bytesToSignHex));
+  assert.ok(compact.bytesToSignGzipBase64Url.length < hex.bytesToSignHex.length);
+  await assert.rejects(coordinator.next(SESSION_ID, "payer", "zip"), { code: "SIGNING_ENCODING_INVALID" });
 });
 
 test("invalid Clockchain calendar timestamps never become mandate signing bytes", async () => {

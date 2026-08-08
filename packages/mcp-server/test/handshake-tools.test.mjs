@@ -41,7 +41,7 @@ test("handshake tools are registered with exact public names and non-secret came
 
   assert.deepEqual(Object.keys(tools.handshake_status.meta.inputSchema), ["sessionId"]);
   assert.deepEqual(Object.keys(tools.handshake_join.meta.inputSchema), ["role"]);
-  assert.deepEqual(Object.keys(tools.handshake_next.meta.inputSchema), ["sessionId", "role"]);
+  assert.deepEqual(Object.keys(tools.handshake_next.meta.inputSchema), ["sessionId", "role", "signingEncoding"]);
   assert.deepEqual(Object.keys(tools.handshake_submit.meta.inputSchema), ["sessionId", "role", "signatureHex"]);
   assert.deepEqual(Object.keys(tools.handshake_get_certificate.meta.inputSchema), ["sessionId"]);
 
@@ -64,9 +64,9 @@ test("handshake handlers delegate every call to the injected coordinator and ret
       calls.push(["join", role]);
       return { ok: "join", role };
     },
-    async next(sessionId, role) {
-      calls.push(["next", sessionId, role]);
-      return { ok: "next", sessionId, role };
+    async next(sessionId, role, signingEncoding) {
+      calls.push(["next", sessionId, role, signingEncoding]);
+      return { ok: "next", sessionId, role, signingEncoding };
     },
     async submit(sessionId, role, signatureHex) {
       calls.push(["submit", sessionId, role, signatureHex]);
@@ -82,10 +82,11 @@ test("handshake handlers delegate every call to the injected coordinator and ret
   assert.deepEqual(jsonOf(await tools.handshake_status.handler({})), { ok: "status" });
   assert.deepEqual(jsonOf(await tools.handshake_status.handler({ sessionId: "s1" })), { ok: "status", sessionId: "s1" });
   assert.deepEqual(jsonOf(await tools.handshake_join.handler({ role: "payer" })), { ok: "join", role: "payer" });
-  assert.deepEqual(jsonOf(await tools.handshake_next.handler({ sessionId: "s1", role: "requestor" })), {
+  assert.deepEqual(jsonOf(await tools.handshake_next.handler({ sessionId: "s1", role: "requestor", signingEncoding: "gzip-base64url" })), {
     ok: "next",
     sessionId: "s1",
     role: "requestor",
+    signingEncoding: "gzip-base64url",
   });
   assert.deepEqual(jsonOf(await tools.handshake_submit.handler({ sessionId: "s1", role: "payer", signatureHex: "0xabc" })), {
     ok: "submit",
@@ -102,7 +103,7 @@ test("handshake handlers delegate every call to the injected coordinator and ret
     ["status", undefined],
     ["status", "s1"],
     ["join", "payer"],
-    ["next", "s1", "requestor"],
+    ["next", "s1", "requestor", "gzip-base64url"],
     ["submit", "s1", "payer", "0xabc"],
     ["getCertificate", "s1"],
   ]);
