@@ -124,6 +124,9 @@ for (const [name, value] of Object.entries(expected)) {
 }
 const expectedHostSecrets = JSON.parse(await readFile(process.env.EXPECTED_HOST_SECRETS_FILE, "utf8"));
 assert.equal(process.env.HANDSHAKE_RELAY, "http://44.249.47.220:8080");
+assert.equal(process.env.MCP_HANDSHAKE_FILE, "/app/state/handshake.json");
+assert.equal(process.env.HANDSHAKE_ALLOW_DEGRADED, process.env.EXPECTED_HANDSHAKE_ALLOW_DEGRADED);
+assert.equal(process.env.EVM_RPC_URL, process.env.EXPECTED_EVM_RPC_URL);
 assert.equal(process.env.HANDSHAKE_KIT_REPO, "https://github.com/thetangstr/clockchain-handshake-v2.git");
 assert.equal(process.env.HANDSHAKE_SHA, "${expectedHandshakeSha}");
 assert.equal(process.env.CLOCKCHAIN_FUNDING_PASSWORD_FILE, "/app/keys/funding.password");
@@ -246,6 +249,8 @@ printf 'docker compose invoked\\n'
     EXPECTED_ENV_FILE: path.join(temp, "expected-env.json"),
     EXPECTED_HOST_SECRETS_FILE: path.join(temp, "expected-host-secrets.json"),
     EXPECTED_HOST_SECRET_DIR: hostSecretDir,
+    EXPECTED_HANDSHAKE_ALLOW_DEGRADED: "false",
+    EXPECTED_EVM_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com",
     CLOCKCHAIN_MCP_APP_ROOT: temp,
     CLOCKCHAIN_HOST_SECRET_DIR: hostSecretDir,
     HANDSHAKE_APP_ROOT: fakeHandshakeDir,
@@ -278,6 +283,8 @@ async function resolvedComposeConfig() {
       MCP_TOKEN_SIGNING_SECRET: "dummy-signing",
       HANDSHAKE_APP_ROOT: "/tmp/handshake-app",
       HANDSHAKE_RELAY: "http://44.249.47.220:8080",
+      HANDSHAKE_ALLOW_DEGRADED: "false",
+      EVM_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com",
       HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
       HANDSHAKE_SHA: expectedHandshakeSha,
       CLOCKCHAIN_HOST_SECRET_DIR: "/run/clockchain-host-secrets",
@@ -306,6 +313,11 @@ test("deployment assets define the locked EC2 compose target", async () => {
   assert.match(compose, /-\s+node\s+-\s+-e/s);
   assert.match(compose, /fetch\("http:\/\/127\.0\.0\.1:" \+ \(process\.env\.PORT \?\? "8080"\) \+ "\/health"\)/);
   assert.match(compose, /condition:\s*service_healthy/);
+  assert.match(compose, /HANDSHAKE_RELAY:\s*"\$\{HANDSHAKE_RELAY\}"/);
+  assert.match(compose, /MCP_HANDSHAKE_FILE:\s*\/app\/state\/handshake\.json/);
+  assert.match(compose, /HANDSHAKE_ALLOW_DEGRADED:\s*"\$\{HANDSHAKE_ALLOW_DEGRADED\}"/);
+  assert.match(compose, /EVM_RPC_URL:\s*"\$\{EVM_RPC_URL\}"/);
+  assert.match(compose, /mcp_state:\/app\/state/);
   assert.match(compose, /context:\s*\$\{HANDSHAKE_APP_ROOT:-\/opt\/clockchain-host\/app\}/);
   assert.match(compose, /HANDSHAKE_RELAY:\s*"\$\{HANDSHAKE_RELAY\}"/);
   assert.match(compose, /HANDSHAKE_SHA:\s*"\$\{HANDSHAKE_SHA\}"/);
@@ -313,6 +325,7 @@ test("deployment assets define the locked EC2 compose target", async () => {
   assert.match(compose, /CLOCKCHAIN_FUNDING_PASSWORD_FILE:\s*\/app\/keys\/funding\.password/);
   assert.match(compose, /\$\{CLOCKCHAIN_HOST_SECRET_DIR:-\/run\/clockchain-host-secrets\}:\/app\/keys:ro/);
   assert.match(compose, /host_runs:\/app\/runs/);
+  assert.match(compose, /mcp_state:/);
 
   const caddy = await readFile(caddyFile, "utf8");
   assert.match(caddy, /^mcp-aws\.clockchain\.network\s*\{/m);
@@ -323,6 +336,28 @@ test("deployment assets define the locked EC2 compose target", async () => {
   const unit = await readFile(systemdUnit, "utf8");
   assert.match(unit, /ExecStart=\/opt\/clockchain-mcp\/compose-up\.sh/);
   assert.match(unit, /WantedBy=multi-user\.target/);
+});
+
+test("resolved compose config gives mcp durable handshake state and relay defaults", async () => {
+  const cfg = await resolvedComposeConfig();
+  const mcp = cfg.services.mcp;
+
+  assert.equal(mcp.environment.HANDSHAKE_RELAY, "http://44.249.47.220:8080");
+  assert.equal(mcp.environment.MCP_HANDSHAKE_FILE, "/app/state/handshake.json");
+  assert.equal(mcp.environment.HANDSHAKE_ALLOW_DEGRADED, "false");
+  assert.equal(mcp.environment.EVM_RPC_URL, "https://ethereum-sepolia-rpc.publicnode.com");
+  assert.deepEqual(
+    mcp.volumes.filter((volume) => volume.target === "/app/state"),
+    [
+      {
+        type: "volume",
+        source: "mcp_state",
+        target: "/app/state",
+        volume: {},
+      },
+    ],
+  );
+  assert.ok(cfg.volumes.mcp_state);
 });
 
 test("resolved compose config adds the external host without network ingress", async () => {
@@ -442,6 +477,42 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
 
     const mode = (await stat(wrapper)).mode & 0o777;
     assert.equal(mode & 0o111, 0o111, "wrapper is executable");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper rejects invalid degraded handshake mode before docker", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: { HANDSHAKE_ALLOW_DEGRADED: "yes" },
+  });
+
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /HANDSHAKE_ALLOW_DEGRADED must be true or false/);
+    assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper exports operator nonsecret overrides without hardcoding live degraded mode", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: {
+      HANDSHAKE_ALLOW_DEGRADED: "true",
+      EVM_RPC_URL: "https://sepolia.example.invalid",
+      EXPECTED_HANDSHAKE_ALLOW_DEGRADED: "true",
+      EXPECTED_EVM_RPC_URL: "https://sepolia.example.invalid",
+    },
+  });
+
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
   } finally {
     await rm(temp, { recursive: true, force: true });
   }

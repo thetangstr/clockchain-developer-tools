@@ -7,6 +7,9 @@ DEPLOY_DIR="${CLOCKCHAIN_MCP_DEPLOY_DIR:-${APP_ROOT}/infra/clockchain-mcp}"
 COMPOSE_FILE="${CLOCKCHAIN_MCP_COMPOSE_FILE:-${DEPLOY_DIR}/docker-compose.yml}"
 HANDSHAKE_APP_ROOT="${HANDSHAKE_APP_ROOT:-/opt/clockchain-host/app}"
 HANDSHAKE_RELAY="${HANDSHAKE_RELAY:-http://44.249.47.220:8080}"
+MCP_HANDSHAKE_FILE=/app/state/handshake.json
+HANDSHAKE_ALLOW_DEGRADED="${HANDSHAKE_ALLOW_DEGRADED:-false}"
+EVM_RPC_URL="${EVM_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
 HANDSHAKE_KIT_REPO="${HANDSHAKE_KIT_REPO:-https://github.com/thetangstr/clockchain-handshake-v2.git}"
 CLOCKCHAIN_HOST_SECRET_DIR="${CLOCKCHAIN_HOST_SECRET_DIR:-/run/clockchain-host-secrets}"
 CLOCKCHAIN_HOST_UID="${CLOCKCHAIN_HOST_UID:-1000}"
@@ -118,6 +121,24 @@ validate_handshake_checkout() {
   export HANDSHAKE_SHA
 }
 
+validate_mcp_runtime_config() {
+  require_nonempty HANDSHAKE_RELAY "$HANDSHAKE_RELAY"
+  require_nonempty MCP_HANDSHAKE_FILE "$MCP_HANDSHAKE_FILE"
+  require_nonempty EVM_RPC_URL "$EVM_RPC_URL"
+  case "$HANDSHAKE_ALLOW_DEGRADED" in
+    true|false) ;;
+    *)
+      printf 'HANDSHAKE_ALLOW_DEGRADED must be true or false\n' >&2
+      return 1
+      ;;
+  esac
+
+  export HANDSHAKE_RELAY
+  export MCP_HANDSHAKE_FILE
+  export HANDSHAKE_ALLOW_DEGRADED
+  export EVM_RPC_URL
+}
+
 materialize_host_secrets() {
   local funding_wallet_json funding_wallet_public_json funding_password clockchain_token
   local stage_dir
@@ -152,6 +173,7 @@ materialize_host_secrets() {
   export CLOCKCHAIN_FUNDING_PASSWORD_FILE=/app/keys/funding.password
 }
 
+validate_mcp_runtime_config
 read_secret CLOCKCHAIN_API_KEY /clockchain/mcp/CLOCKCHAIN_API_KEY
 read_secret MCP_AUTH_TOKENS /clockchain/mcp/MCP_AUTH_TOKENS
 read_secret MCP_TOKEN_SIGNING_SECRET /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET

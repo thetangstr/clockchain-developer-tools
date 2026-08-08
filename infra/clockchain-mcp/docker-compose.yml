@@ -14,9 +14,15 @@ services:
       CLOCKCHAIN_WALLET_ID: "${CLOCKCHAIN_WALLET_ID}"
       CLOCKCHAIN_ENDPOINT: "${CLOCKCHAIN_ENDPOINT}"
       ERC8004_REGISTRY_ADDRESS: "${ERC8004_REGISTRY_ADDRESS}"
+      HANDSHAKE_RELAY: "${HANDSHAKE_RELAY}"
+      MCP_HANDSHAKE_FILE: /app/state/handshake.json
+      HANDSHAKE_ALLOW_DEGRADED: "${HANDSHAKE_ALLOW_DEGRADED}"
+      EVM_RPC_URL: "${EVM_RPC_URL}"
       CLOCKCHAIN_API_KEY: "${CLOCKCHAIN_API_KEY}"
       MCP_AUTH_TOKENS: "${MCP_AUTH_TOKENS}"
       MCP_TOKEN_SIGNING_SECRET: "${MCP_TOKEN_SIGNING_SECRET}"
+    volumes:
+      - mcp_state:/app/state
     expose:
       - "8080"
     healthcheck:
@@ -67,3 +73,4 @@ volumes:
   caddy_data:
   caddy_config:
   host_runs:
+  mcp_state:
