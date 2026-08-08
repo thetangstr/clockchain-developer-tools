@@ -19,6 +19,7 @@ import type { KeeperGate } from "./entitlement.js";
 export function buildServer(
   overrides?: Partial<ClockchainConfig>,
   gate?: KeeperGate,
+  principalId = "stdio",
 ): McpServer {
   const config: ClockchainConfig = { ...readConfigFromEnv(), ...(overrides ?? {}) };
   const server = new McpServer({
@@ -31,6 +32,11 @@ export function buildServer(
   // The default path ("full" or unset) is byte-for-byte behavior-identical to pre-CLO-99.
   const surface = (process.env.MCP_SURFACE ?? "full") as "full" | "product";
   // `gate` (CLO-48) is the per-request keeper gate wired in regardless of surface.
-  registerTools(server, config, { delegated: !overrides?.apiKey, surface, gate });
+  registerTools(server, config, {
+    delegated: !overrides?.apiKey,
+    surface,
+    gate,
+    principalId,
+  });
   return server;
 }

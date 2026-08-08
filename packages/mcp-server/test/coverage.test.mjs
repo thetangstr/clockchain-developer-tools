@@ -1,7 +1,7 @@
 // All-tools coverage + adversarial error-path eval (AGE-185), run offline as a
 // CI gate (it's part of `npm test`, which the deploy is gated on).
 //
-// Two guarantees across the ENTIRE 31-tool surface:
+// Two guarantees across the ENTIRE 36-tool surface:
 //   1. Completeness — the set of tools we assert on equals the set the server
 //      registers. Add a tool without covering it here and CI fails.
 //   2. Resilience — every tool, when the upstream gateway fails on every call,
@@ -58,6 +58,11 @@ const ARGS = {
   tsa_attest: { commitment_id: "L1", outcome: "kept", deadline: "2027-01-01" },
   tsa_settle: { commitment_id: "L1", outcome: "kept", consequence: "none" },
   tsa_status: { commitment_id: "L1" },
+  handshake_status: {},
+  handshake_join: { role: "payer" },
+  handshake_next: { sessionId: "S1", role: "payer" },
+  handshake_submit: { sessionId: "S1", role: "payer", signatureHex: "0xabc" },
+  handshake_get_certificate: { sessionId: "S1" },
 };
 
 // Read/verify tools that, by design, degrade GRACEFULLY to a clean
@@ -91,7 +96,7 @@ test("coverage completeness: every registered tool is in the ARGS matrix", () =>
   const covered = Object.keys(ARGS).sort();
   assert.deepEqual(registered, covered,
     "ARGS must list exactly the registered tools — add new tools here so they get coverage");
-  assert.ok(registered.length >= 31, `expected >= 31 tools, got ${registered.length}`);
+  assert.equal(registered.length, 36, `expected 36 tools, got ${registered.length}`);
 });
 
 test("resilience: no tool throws on upstream failure; gateway tools surface isError", async () => {

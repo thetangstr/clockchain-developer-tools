@@ -1,4 +1,10 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createHash } from "node:crypto";
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
@@ -194,6 +200,31 @@ export function callerKey(
   const cck = firstHeader(headers["x-clockchain-api-key"]).trim();
   if (cck) return `cck:${cck}`;
   return `ip:${remoteAddr ?? "unknown"}`;
+}
+
+/**
+ * Stable caller-state key without retaining an MCP token or Clockchain API key.
+ * The raw credential-derived caller key remains confined to the current request.
+ */
+export function principalIdForCallerKey(key: string): string {
+  return createHash("sha256").update(key, "utf8").digest("hex");
+}
+
+/**
+ * One opaque caller id for every stateful per-caller subsystem. A BYO key from
+ * the resolved auth branch takes precedence over any co-present token headers;
+ * otherwise {@link callerKey} preserves credential-kind separation before hashing.
+ */
+export function callerPrincipalId(
+  headers: IncomingHttpHeaders,
+  remoteAddr?: string,
+  selfServeJti?: string,
+  resolvedByoApiKey?: string,
+): string {
+  const key = resolvedByoApiKey
+    ? `cck:${resolvedByoApiKey}`
+    : callerKey(headers, remoteAddr, selfServeJti);
+  return principalIdForCallerKey(key);
 }
 
 /**
@@ -666,13 +697,15 @@ export async function runHttp(): Promise<void> {
         : "trial" in auth
           ? auth.trial.jti
           : undefined;
+    const effectiveCallerId = callerPrincipalId(
+      req.headers,
+      clientIp(req.headers, req.socket.remoteAddress),
+      selfServeJti,
+      byo?.apiKey,
+    );
     const rl = limiter.enabled
       ? limiter.allow(
-          callerKey(
-            req.headers,
-            clientIp(req.headers, req.socket.remoteAddress),
-            selfServeJti,
-          ),
+          effectiveCallerId,
         )
       : null;
     if (rl && !rl.allowed) {
@@ -737,7 +770,11 @@ export async function runHttp(): Promise<void> {
           return token;
         });
       }
-      const server = buildServer(byo, gate);
+      const server = buildServer(
+        byo,
+        gate,
+        effectiveCallerId,
+      );
       const transport = new StreamableHTTPServerTransport({
         // Stateless: no session id generation.
         sessionIdGenerator: undefined,

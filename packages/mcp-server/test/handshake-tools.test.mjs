@@ -1,0 +1,168 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import { __resetHandshakeStateStore } from "../dist/handshake/state.js";
+import { registerTools } from "../dist/tools.js";
+
+const cfg = { apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://test.local" };
+
+const HANDSHAKE_TOOLS = [
+  "handshake_status",
+  "handshake_join",
+  "handshake_next",
+  "handshake_submit",
+  "handshake_get_certificate",
+];
+
+const KEY_LIKE = /key|private|mnemonic|seed|secret|wallet|signer/i;
+
+function collectWith(coordinator) {
+  const registrations = {};
+  registerTools(
+    {
+      registerTool: (name, meta, handler) => {
+        registrations[name] = { meta, handler };
+      },
+    },
+    cfg,
+    { handshakeCoordinator: coordinator },
+  );
+  return registrations;
+}
+
+const textOf = (res) => (res.content || []).map((c) => c.text).join("\n");
+const jsonOf = (res) => JSON.parse(textOf(res));
+
+test("handshake tools are registered with exact public names and non-secret camelCase inputs", () => {
+  const tools = collectWith({});
+  for (const name of HANDSHAKE_TOOLS) {
+    assert.ok(tools[name], `${name} should be registered`);
+  }
+
+  assert.deepEqual(Object.keys(tools.handshake_status.meta.inputSchema), ["sessionId"]);
+  assert.deepEqual(Object.keys(tools.handshake_join.meta.inputSchema), ["role"]);
+  assert.deepEqual(Object.keys(tools.handshake_next.meta.inputSchema), ["sessionId", "role"]);
+  assert.deepEqual(Object.keys(tools.handshake_submit.meta.inputSchema), ["sessionId", "role", "signatureHex"]);
+  assert.deepEqual(Object.keys(tools.handshake_get_certificate.meta.inputSchema), ["sessionId"]);
+
+  for (const name of HANDSHAKE_TOOLS) {
+    for (const prop of Object.keys(tools[name].meta.inputSchema)) {
+      assert.doesNotMatch(prop, KEY_LIKE, `${name}.${prop} must not expose key-like input names`);
+      assert.equal(prop.includes("_"), false, `${name}.${prop} must be camelCase`);
+    }
+  }
+});
+
+test("handshake handlers delegate every call to the injected coordinator and return JSON text", async () => {
+  const calls = [];
+  const coordinator = {
+    async status(sessionId) {
+      calls.push(["status", sessionId]);
+      return { ok: "status", sessionId };
+    },
+    async join(role) {
+      calls.push(["join", role]);
+      return { ok: "join", role };
+    },
+    async next(sessionId, role) {
+      calls.push(["next", sessionId, role]);
+      return { ok: "next", sessionId, role };
+    },
+    async submit(sessionId, role, signatureHex) {
+      calls.push(["submit", sessionId, role, signatureHex]);
+      return { ok: "submit", sessionId, role, signatureHex };
+    },
+    async getCertificate(sessionId) {
+      calls.push(["getCertificate", sessionId]);
+      return { ok: "certificate", sessionId };
+    },
+  };
+  const tools = collectWith(coordinator);
+
+  assert.deepEqual(jsonOf(await tools.handshake_status.handler({})), { ok: "status" });
+  assert.deepEqual(jsonOf(await tools.handshake_status.handler({ sessionId: "s1" })), { ok: "status", sessionId: "s1" });
+  assert.deepEqual(jsonOf(await tools.handshake_join.handler({ role: "payer" })), { ok: "join", role: "payer" });
+  assert.deepEqual(jsonOf(await tools.handshake_next.handler({ sessionId: "s1", role: "requestor" })), {
+    ok: "next",
+    sessionId: "s1",
+    role: "requestor",
+  });
+  assert.deepEqual(jsonOf(await tools.handshake_submit.handler({ sessionId: "s1", role: "payer", signatureHex: "0xabc" })), {
+    ok: "submit",
+    sessionId: "s1",
+    role: "payer",
+    signatureHex: "0xabc",
+  });
+  assert.deepEqual(jsonOf(await tools.handshake_get_certificate.handler({ sessionId: "s1" })), {
+    ok: "certificate",
+    sessionId: "s1",
+  });
+
+  assert.deepEqual(calls, [
+    ["status", undefined],
+    ["status", "s1"],
+    ["join", "payer"],
+    ["next", "s1", "requestor"],
+    ["submit", "s1", "payer", "0xabc"],
+    ["getCertificate", "s1"],
+  ]);
+});
+
+test('handshake role input rejects "requester"; public enum is payer/requestor only', async () => {
+  const coordinator = {
+    async join() {
+      throw new Error("coordinator should not receive invalid role");
+    },
+  };
+  const tools = collectWith(coordinator);
+  const res = await tools.handshake_join.handler({ role: "requester" });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /payer|requestor/);
+});
+
+test("full-surface tools lazily construct the runtime coordinator without test injection", async () => {
+  const previousRelay = process.env.HANDSHAKE_RELAY;
+  const previousFetch = globalThis.fetch;
+  const relayUrl = "https://relay.runtime.test";
+  const now = Date.now();
+  const { publicKey } = generateKeyPairSync("ed25519");
+  const operatorPublicKey = publicKey
+    .export({ format: "der", type: "spki" })
+    .subarray(-32)
+    .toString("base64");
+
+  process.env.HANDSHAKE_RELAY = relayUrl;
+  __resetHandshakeStateStore();
+  globalThis.fetch = async (url) => {
+    assert.equal(String(url), `${relayUrl}/v1/discovery/current`);
+    return new Response(JSON.stringify({
+      schema: "handshake-discovery/v2",
+      expiresAtMs: String(now + 60 * 60 * 1000),
+      issuedAtMs: String(now),
+      kitRepoUrl: "https://github.com/clockchain/handshake-kit",
+      operatorPublicKey,
+      paymentMoved: false,
+      relayUrl,
+      repositorySha: "b".repeat(40),
+      sessionId: "runtime-session",
+    }), {
+      headers: { "content-type": "application/json" },
+      status: 200,
+    });
+  };
+
+  try {
+    const registrations = {};
+    registerTools(
+      { registerTool: (name, meta, handler) => { registrations[name] = { meta, handler }; } },
+      cfg,
+      { principalId: "opaque-principal" },
+    );
+    assert.deepEqual(jsonOf(await registrations.handshake_status.handler({})), { sessions: [] });
+  } finally {
+    __resetHandshakeStateStore();
+    globalThis.fetch = previousFetch;
+    if (previousRelay === undefined) delete process.env.HANDSHAKE_RELAY;
+    else process.env.HANDSHAKE_RELAY = previousRelay;
+  }
+});

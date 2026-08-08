@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck, callerKey, createRateLimiter, rateLimitHeaders, sanitizeSub, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, callerPrincipalId, principalIdForCallerKey, createRateLimiter, rateLimitHeaders, sanitizeSub, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
 import { mintToken } from "../dist/token.js";
 
 const tokens = ["tester-a", "tester-b"];
@@ -75,6 +75,46 @@ test("callerKey keys on token when present, else IP", () => {
   assert.equal(callerKey({ "x-api-key": "tester-b" }, "1.2.3.4"), "tok:tester-b");
   assert.equal(callerKey({}, "1.2.3.4"), "ip:1.2.3.4");
   assert.equal(callerKey({}, undefined), "ip:unknown");
+});
+
+test("principalIdForCallerKey is stable and does not retain the credential", () => {
+  const raw = "tok:credential-that-must-not-be-persisted";
+  const principal = principalIdForCallerKey(raw);
+  assert.match(principal, /^[0-9a-f]{64}$/);
+  assert.equal(principal, principalIdForCallerKey(raw));
+  assert.equal(principal.includes("credential"), false);
+  assert.notEqual(principal, principalIdForCallerKey("tok:another-credential"));
+});
+
+test("callerPrincipalId hashes the effective token/API-key caller before stateful use", () => {
+  const tokenSecret = "credential-that-must-not-be-retained";
+  const principal = callerPrincipalId({ authorization: `Bearer ${tokenSecret}` }, "203.0.113.5");
+  assert.match(principal, /^[0-9a-f]{64}$/);
+  assert.equal(principal.includes(tokenSecret), false);
+  assert.equal(
+    principal,
+    callerPrincipalId({ authorization: `Bearer ${tokenSecret}` }, "198.51.100.7"),
+  );
+  assert.notEqual(
+    principal,
+    callerPrincipalId({ "x-clockchain-api-key": tokenSecret }, "203.0.113.5"),
+  );
+});
+
+test("resolved BYO auth wins principal isolation over co-present MCP headers", () => {
+  const headers = {
+    authorization: "Bearer shared-stale-token",
+    "x-api-key": "another-shared-token",
+    "x-clockchain-api-key": "byo-a",
+  };
+  assert.equal(
+    callerPrincipalId(headers, "203.0.113.5", undefined, "byo-a"),
+    principalIdForCallerKey("cck:byo-a"),
+  );
+  assert.notEqual(
+    callerPrincipalId(headers, "203.0.113.5", undefined, "byo-a"),
+    callerPrincipalId(headers, "203.0.113.5", undefined, "byo-b"),
+  );
 });
 
 test("rate limiter disabled when perMin <= 0 (always allows)", () => {
