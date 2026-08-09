@@ -184,6 +184,7 @@ export function createHandshakeCoordinator(options: {
       const role = publicRole(roleInput);
       const discovery = await options.relay.fetchDiscovery();
       const sessionId = stringField(discovery, "sessionId", "DISCOVERY_INVALID");
+      const operatorPublicKey = stringField(discovery, "operatorPublicKey", "DISCOVERY_INVALID");
       const key = stateKey(principal, sessionId, role);
       return withGlobalLock(key, async () => {
         const current = await ensureRecord(stateStore, key, discovery);
@@ -209,6 +210,7 @@ export function createHandshakeCoordinator(options: {
           });
         });
         return {
+          operatorPublicKey,
           relayUrl: discovery.relayUrl,
           repositorySha: discovery.repositorySha,
           sessionId,

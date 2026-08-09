@@ -168,6 +168,7 @@ test("full-surface tools lazily construct the runtime coordinator without test i
     );
     assert.deepEqual(jsonOf(await registrations.handshake_status.handler({})), { sessions: [] });
     const joined = jsonOf(await registrations.handshake_join.handler({ role: "payer" }));
+    assert.equal(joined.operatorPublicKey, operatorPublicKey);
     const next = jsonOf(await registrations.handshake_next.handler({
       role: "payer",
       sessionId: joined.sessionId,

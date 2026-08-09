@@ -290,7 +290,7 @@ function canonicalMandateBody({
   };
 }
 
-function harness({ key = operatorKey(), messages = [], result = null, postImpl = null, env = {}, store = null, reset = true, resolveOwnedAgentId = null, waitTiming = undefined } = {}) {
+function harness({ key = operatorKey(), messages = [], result = null, postImpl = null, env = {}, store = null, reset = true, resolveOwnedAgentId = null, waitTiming = undefined, discoveryDocument = null } = {}) {
   if (reset) __resetHandshakeStateStore();
   store ??= createHandshakeStateStore({});
   const posted = [];
@@ -333,7 +333,7 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
   };
   const relay = {
     async fetchDiscovery() {
-      return discovery(key);
+      return discoveryDocument ?? discovery(key);
     },
     async getMessages() {
       return { messages };
@@ -481,6 +481,25 @@ test("rejects roles outside the public payer/requestor surface", async () => {
   const { coordinator } = harness();
   await assert.rejects(coordinator.join("payee"), { code: "ROLE_INVALID" });
   await assert.rejects(coordinator.next(SESSION_ID, "host"), { code: "ROLE_INVALID" });
+});
+
+test("join exposes the exact operator public key fetched from discovery", async () => {
+  const key = operatorKey();
+  const { coordinator } = harness({ key });
+
+  assert.equal((await coordinator.join("payer")).operatorPublicKey, key.publicKeyRaw);
+});
+
+test("join rejects discovery with an empty operator public key", async () => {
+  const key = operatorKey();
+  const { coordinator } = harness({
+    discoveryDocument: {
+      ...discovery(key),
+      operatorPublicKey: "",
+    },
+  });
+
+  await assert.rejects(coordinator.join("payer"), { code: "DISCOVERY_INVALID" });
 });
 
 test("submit rejects non-EIP-191-shaped signatures before recovery", async () => {
