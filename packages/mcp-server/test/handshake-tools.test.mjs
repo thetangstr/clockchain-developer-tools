@@ -40,7 +40,7 @@ test("handshake tools are registered with exact public names and non-secret came
   }
 
   assert.deepEqual(Object.keys(tools.handshake_status.meta.inputSchema), ["sessionId"]);
-  assert.deepEqual(Object.keys(tools.handshake_join.meta.inputSchema), ["role"]);
+  assert.deepEqual(Object.keys(tools.handshake_join.meta.inputSchema), ["role", "invitationId", "terms"]);
   assert.deepEqual(Object.keys(tools.handshake_next.meta.inputSchema), ["sessionId", "role", "signingEncoding", "waitMs"]);
   assert.deepEqual(Object.keys(tools.handshake_submit.meta.inputSchema), ["sessionId", "role", "signatureHex"]);
   assert.deepEqual(Object.keys(tools.handshake_get_certificate.meta.inputSchema), ["sessionId"]);
@@ -60,9 +60,9 @@ test("handshake handlers delegate every call to the injected coordinator and ret
       calls.push(["status", sessionId]);
       return { ok: "status", sessionId };
     },
-    async join(role) {
-      calls.push(["join", role]);
-      return { ok: "join", role };
+    async join(role, invitationId, terms) {
+      calls.push(["join", role, invitationId, terms]);
+      return { ok: "join", role, invitationId, terms };
     },
     async next(sessionId, role, signingEncoding, waitMs) {
       calls.push(["next", sessionId, role, signingEncoding, waitMs]);
@@ -82,6 +82,22 @@ test("handshake handlers delegate every call to the injected coordinator and ret
   assert.deepEqual(jsonOf(await tools.handshake_status.handler({})), { ok: "status" });
   assert.deepEqual(jsonOf(await tools.handshake_status.handler({ sessionId: "s1" })), { ok: "status", sessionId: "s1" });
   assert.deepEqual(jsonOf(await tools.handshake_join.handler({ role: "payer" })), { ok: "join", role: "payer" });
+  const terms = {
+    amount: { currency: "USD", value: "18750" },
+    invoiceReference: "HS-8842",
+    purpose: "Invoice HS-8842 against PO NS-1847",
+    validForMinutes: 45,
+  };
+  assert.deepEqual(jsonOf(await tools.handshake_join.handler({
+    invitationId: "123e4567-e89b-42d3-a456-426614174001",
+    role: "requestor",
+    terms,
+  })), {
+    invitationId: "123e4567-e89b-42d3-a456-426614174001",
+    ok: "join",
+    role: "requestor",
+    terms,
+  });
   assert.deepEqual(jsonOf(await tools.handshake_next.handler({ sessionId: "s1", role: "requestor", signingEncoding: "gzip-base64url", waitMs: 1234 })), {
     ok: "next",
     sessionId: "s1",
@@ -103,7 +119,8 @@ test("handshake handlers delegate every call to the injected coordinator and ret
   assert.deepEqual(calls, [
     ["status", undefined],
     ["status", "s1"],
-    ["join", "payer"],
+    ["join", "payer", undefined, undefined],
+    ["join", "requestor", "123e4567-e89b-42d3-a456-426614174001", terms],
     ["next", "s1", "requestor", "gzip-base64url", 1234],
     ["submit", "s1", "payer", "0xabc"],
     ["getCertificate", "s1"],
@@ -120,6 +137,33 @@ test('handshake role input rejects "requester"; public enum is payer/requestor o
   const res = await tools.handshake_join.handler({ role: "requester" });
   assert.equal(res.isError, true);
   assert.match(textOf(res), /payer|requestor/);
+});
+
+test("handshake_join rejects malformed invitation and invoice terms before coordinator dispatch", async () => {
+  let called = false;
+  const tools = collectWith({
+    async join() {
+      called = true;
+      return {};
+    },
+  });
+  const valid = {
+    amount: { currency: "USD", value: "18750" },
+    invoiceReference: "HS-8842",
+    purpose: "Invoice HS-8842 against PO NS-1847",
+    validForMinutes: 45,
+  };
+  const invalid = [
+    { invitationId: "current", role: "requestor", terms: valid },
+    { role: "payer", terms: { ...valid, amount: { currency: "EUR", value: "18750" } } },
+    { role: "payer", terms: { ...valid, amount: { currency: "USD", value: "018750" } } },
+    { role: "payer", terms: { ...valid, validForMinutes: 29 } },
+    { role: "payer", terms: { ...valid, extra: true } },
+  ];
+  for (const input of invalid) {
+    assert.equal((await tools.handshake_join.handler(input)).isError, true);
+  }
+  assert.equal(called, false);
 });
 
 test("full-surface tools lazily construct the runtime coordinator without test injection", async () => {

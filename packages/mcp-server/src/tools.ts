@@ -62,6 +62,28 @@ const handshakeRoleSchema = z
 
 type HandshakeRole = z.infer<typeof handshakeRoleSchema>;
 
+const handshakeInvitationIdSchema = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  .optional()
+  .describe("Optional exact relay session invitation. Omit only to join current discovery.");
+
+const handshakeBusinessTermsSchema = z
+  .object({
+    amount: z.object({
+      currency: z.literal("USD"),
+      value: z.string().regex(/^(?:0|[1-9][0-9]{0,15})$/),
+    }).strict(),
+    invoiceReference: z.string().min(1).max(128).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+    purpose: z.string().min(1).max(128).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+    validForMinutes: z.number().int().min(30).max(240).optional(),
+  })
+  .strict()
+  .optional()
+  .describe("Optional invoice authorization terms independently supplied by this party.");
+
+type HandshakeBusinessTerms = z.infer<typeof handshakeBusinessTermsSchema>;
+
 const signingEncodingSchema = z
   .enum(["hex", "gzip-base64url"])
   .optional()
@@ -83,7 +105,7 @@ type HandshakeWaitMs = z.infer<typeof handshakeWaitMsSchema>;
 
 export interface HandshakeCoordinator {
   status(sessionId?: string): Promise<unknown>;
-  join(role: HandshakeRole): Promise<unknown>;
+  join(role: HandshakeRole, invitationId?: string, terms?: HandshakeBusinessTerms): Promise<unknown>;
   next(sessionId: string, role: HandshakeRole, signingEncoding?: SigningEncoding, waitMs?: HandshakeWaitMs): Promise<unknown>;
   submit(sessionId: string, role: HandshakeRole, signatureHex: string): Promise<unknown>;
   getCertificate(sessionId: string): Promise<unknown>;
@@ -1308,11 +1330,17 @@ export function registerTools(
         "Join the current relay discovery session as payer or requestor.",
       inputSchema: {
         role: handshakeRoleSchema,
+        invitationId: handshakeInvitationIdSchema,
+        terms: handshakeBusinessTermsSchema,
       },
     },
-    async ({ role }) =>
+    async ({ role, invitationId, terms }) =>
       run("handshake_join", () =>
-        handshakeCoordinator().join(handshakeRoleSchema.parse(role)),
+        handshakeCoordinator().join(
+          handshakeRoleSchema.parse(role),
+          handshakeInvitationIdSchema.parse(invitationId),
+          handshakeBusinessTermsSchema.parse(terms),
+        ),
       ),
   );
 
