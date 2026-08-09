@@ -294,6 +294,7 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
   if (reset) __resetHandshakeStateStore();
   store ??= createHandshakeStateStore({});
   const posted = [];
+  const discoveryRequests = [];
   const intents = [];
   const records = [];
   const clockchain = {
@@ -332,7 +333,8 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
     },
   };
   const relay = {
-    async fetchDiscovery() {
+    async fetchDiscovery(invitationId) {
+      discoveryRequests.push(invitationId);
       return discoveryDocument ?? discovery(key);
     },
     async getMessages() {
@@ -383,6 +385,7 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
   return {
     clockchain,
     coordinator,
+    discoveryRequests,
     intents,
     key,
     messages,
@@ -488,6 +491,25 @@ test("join exposes the exact operator public key fetched from discovery", async 
   const { coordinator } = harness({ key });
 
   assert.equal((await coordinator.join("payer")).operatorPublicKey, key.publicKeyRaw);
+});
+
+test("join binds the requestor to the exact Payer invitation", async () => {
+  const h = harness();
+
+  const joined = await h.coordinator.join("requestor", SESSION_ID);
+
+  assert.equal(joined.invitationId, SESSION_ID);
+  assert.equal(joined.invitationUrl, `${RELAY_URL}/v1/discovery/${SESSION_ID}`);
+  assert.equal(joined.sessionId, SESSION_ID);
+  assert.deepEqual(h.discoveryRequests, [SESSION_ID]);
+});
+
+test("legacy Payer join still resolves current discovery", async () => {
+  const h = harness();
+
+  await h.coordinator.join("payer");
+
+  assert.deepEqual(h.discoveryRequests, [undefined]);
 });
 
 test("join rejects discovery with an empty operator public key", async () => {

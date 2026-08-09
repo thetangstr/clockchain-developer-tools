@@ -13,6 +13,7 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_JSON_BYTES = 8 * 1024 * 1024;
 const MIN_DISCOVERY_LIFETIME_MS = 30 * 60 * 1000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const INVITATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const DECIMAL_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 
@@ -132,9 +133,18 @@ export function createHandshakeRelayClient(options: {
   }
 
   return Object.freeze({
-    fetchDiscovery: async (): Promise<HandshakeRelayDiscovery> => {
-      const json = await requestJson("/v1/discovery/current");
-      return validateDiscovery(json, relayBase, now());
+    fetchDiscovery: async (sessionId?: string): Promise<HandshakeRelayDiscovery> => {
+      if (sessionId !== undefined && !INVITATION_ID_PATTERN.test(sessionId)) {
+        invalid("SESSION_ID_INVALID");
+      }
+      const path = sessionId === undefined
+        ? "/v1/discovery/current"
+        : `/v1/discovery/${encodeURIComponent(sessionId)}`;
+      const result = validateDiscovery(await requestJson(path), relayBase, now());
+      if (sessionId !== undefined && result.sessionId !== sessionId) {
+        invalid("DISCOVERY_SESSION_MISMATCH");
+      }
+      return result;
     },
 
     getMessages: async ({ after = "0", sessionId }: { after?: string; sessionId: string }): Promise<HandshakeRelayMessages> => {

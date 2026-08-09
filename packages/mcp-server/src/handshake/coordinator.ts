@@ -40,7 +40,7 @@ type EvidenceRole = "payer" | "payee";
 type SigningEncoding = "hex" | "gzip-base64url";
 
 type RelayClient = {
-  fetchDiscovery(): Promise<JsonObject>;
+  fetchDiscovery(sessionId?: string): Promise<JsonObject>;
   getMessages(input: { after?: string; sessionId: string }): Promise<{ messages: readonly JsonObject[] }>;
   postMessage(input: {
     body: unknown;
@@ -144,7 +144,7 @@ export function createRuntimeHandshakeCoordinator(options: {
   });
   return Object.freeze({
     getCertificate: (sessionId: string) => coordinatorForCall().getCertificate(sessionId),
-    join: (role: string) => coordinatorForCall().join(role),
+    join: (role: string, invitationId?: string, termsInput?: unknown) => coordinatorForCall().join(role, invitationId, termsInput),
     next: (sessionId: string, role: string, signingEncoding?: string, waitMs?: unknown) =>
       coordinatorForCall().next(sessionId, role, signingEncoding, waitMs),
     status: (sessionId?: string) => coordinatorForCall().status(sessionId),
@@ -180,9 +180,9 @@ export function createHandshakeCoordinator(options: {
       };
     },
 
-    async join(roleInput: string): Promise<JsonObject> {
+    async join(roleInput: string, invitationId?: string, _termsInput?: unknown): Promise<JsonObject> {
       const role = publicRole(roleInput);
-      const discovery = await options.relay.fetchDiscovery();
+      const discovery = await options.relay.fetchDiscovery(invitationId);
       const sessionId = stringField(discovery, "sessionId", "DISCOVERY_INVALID");
       const operatorPublicKey = stringField(discovery, "operatorPublicKey", "DISCOVERY_INVALID");
       const key = stateKey(principal, sessionId, role);
@@ -210,6 +210,8 @@ export function createHandshakeCoordinator(options: {
           });
         });
         return {
+          invitationId: sessionId,
+          invitationUrl: `${String(discovery.relayUrl).replace(/\/+$/, "")}/v1/discovery/${encodeURIComponent(sessionId)}`,
           operatorPublicKey,
           relayUrl: discovery.relayUrl,
           repositorySha: discovery.repositorySha,

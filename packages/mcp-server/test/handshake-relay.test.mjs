@@ -69,6 +69,30 @@ test("fetches and validates current discovery from the trusted relay", async () 
   assert.deepEqual(current, discovery());
 });
 
+test("fetches and binds discovery for an exact invitation session", async () => {
+  const fetch = mockFetch((url) => {
+    assert.equal(url, `${TRUSTED_RELAY}/v1/discovery/${SESSION_ID}`);
+    return jsonResponse(discovery());
+  });
+  const client = createHandshakeRelayClient({ fetch, now: () => NOW, relayUrl: TRUSTED_RELAY });
+
+  assert.deepEqual(await client.fetchDiscovery(SESSION_ID), discovery());
+  assert.equal(fetch.calls.length, 1);
+});
+
+test("rejects malformed or substituted invitation sessions without falling through to current", async () => {
+  const fetch = mockFetch(() => jsonResponse(discovery({
+    sessionId: "123e4567-e89b-42d3-a456-426614174099",
+  })));
+  const client = createHandshakeRelayClient({ fetch, now: () => NOW, relayUrl: TRUSTED_RELAY });
+
+  await assert.rejects(client.fetchDiscovery("not-a-session"), { code: "SESSION_ID_INVALID" });
+  assert.equal(fetch.calls.length, 0);
+  await assert.rejects(client.fetchDiscovery(SESSION_ID), { code: "DISCOVERY_SESSION_MISMATCH" });
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(fetch.calls[0].url, `${TRUSTED_RELAY}/v1/discovery/${SESSION_ID}`);
+});
+
 test("requires canonical discovery v2 fields including kitRepoUrl", async () => {
   const missingKitRepo = createHandshakeRelayClient({
     fetch: async () => jsonResponse(discovery({ kitRepoUrl: undefined })),
