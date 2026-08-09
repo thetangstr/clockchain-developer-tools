@@ -42,6 +42,12 @@ const OTHER = "0x3333333333333333333333333333333333333333";
 const PAYER_SIG = `0x${"11".repeat(65)}`;
 const REQUESTOR_SIG = `0x${"22".repeat(65)}`;
 const OTHER_SIG = `0x${"33".repeat(65)}`;
+const INVOICE_TERMS = Object.freeze({
+  amount: Object.freeze({ currency: "USD", value: "18750" }),
+  invoiceReference: "HS-8842",
+  purpose: "Invoice HS-8842 against PO NS-1847",
+  validForMinutes: 45,
+});
 
 function operatorKey() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -247,8 +253,10 @@ function relayMessage({ body, kind, role, sessionId = SESSION_ID, seq = "1", rel
 
 function canonicalMandateBody({
   amount = { currency: "USD", value: "100" },
+  invoiceReferencePrefix = "INV-",
   payee = { address: REQUESTOR, agentId: "202" },
   payer = { address: PAYER, agentId: "101" },
+  purpose = "Invoice settlement",
   signature = PAYER_SIG,
   sessionId = "123e4567-e89b-42d3-a456-426614174099",
 } = {}) {
@@ -257,11 +265,11 @@ function canonicalMandateBody({
     expiresAtMs: String(NOW + 45 * 60 * 1000),
     intakeDigest: createHash("sha256").update(INTAKE_REQUEST_ID).digest("hex"),
     intakeRequestId: INTAKE_REQUEST_ID,
-    invoiceReferencePrefix: "INV-",
+    invoiceReferencePrefix,
     issuedAtMs: String(NOW),
     payee,
     payer,
-    purpose: "Invoice settlement",
+    purpose,
     releaseId: "handshake-v6",
     repositorySha: REPOSITORY_SHA,
     sessionId,
@@ -581,6 +589,109 @@ test("payer mandate signing bytes and mailbox body use exact canonical prepared 
   });
   assert.equal(postedMandate.sessionUuid, mandate.sessionId);
   assert.equal(postedMandate.mandateEnvelope.signature.value, PAYER_SIG);
+});
+
+test("Payer business terms become the existing signed mandate without changing its schema", async () => {
+  const requestorRelayKey = generateRelayKeyPair();
+  const h = harness({
+    messages: [
+      relayMessage({ body: { address: REQUESTOR }, kind: "identity_ready", role: "requestor", seq: "1", relayKey: requestorRelayKey }),
+      relayMessage({ body: { address: REQUESTOR, agentId: "202" }, kind: "party_ready", role: "requestor", seq: "2", relayKey: requestorRelayKey }),
+      relayMessage({ body: { funded: PAYER, paymentMoved: false, role: "payer" }, kind: "funding_record", role: "host", seq: "3" }),
+    ],
+  });
+  const joined = await h.coordinator.join("payer", SESSION_ID, INVOICE_TERMS);
+  await h.coordinator.submit(joined.sessionId, "payer", PAYER_SIG);
+
+  const signingRequest = await h.coordinator.next(joined.sessionId, "payer");
+  const mandate = hexJson(signingRequest.bytesToSignHex);
+
+  assert.equal(signingRequest.stage, "sign_mandate");
+  assert.equal(mandate.schema, "clockchain.bilateral-payer-mandate/v1");
+  assert.deepEqual(mandate.amount, INVOICE_TERMS.amount);
+  assert.equal(mandate.invoiceReferencePrefix, INVOICE_TERMS.invoiceReference);
+  assert.equal(mandate.purpose, INVOICE_TERMS.purpose);
+  assert.equal(BigInt(mandate.expiresAtMs) - BigInt(mandate.issuedAtMs), 45n * 60n * 1000n);
+});
+
+test("Requestor refuses a signed mandate that differs from its independent expected terms", async () => {
+  const payerRelayKey = generateRelayKeyPair();
+  const h = harness({
+    messages: [
+      relayMessage({ body: { address: PAYER }, kind: "identity_ready", role: "payer", seq: "1", relayKey: payerRelayKey }),
+      relayMessage({ body: { address: PAYER, agentId: "101" }, kind: "party_ready", role: "payer", seq: "2", relayKey: payerRelayKey }),
+      relayMessage({ body: { funded: REQUESTOR, paymentMoved: false, role: "requestor" }, kind: "funding_record", role: "host", seq: "3" }),
+      relayMessage({
+        body: canonicalMandateBody({
+          amount: INVOICE_TERMS.amount,
+          invoiceReferencePrefix: INVOICE_TERMS.invoiceReference,
+          purpose: INVOICE_TERMS.purpose,
+        }),
+        kind: "mandate",
+        role: "payer",
+        seq: "4",
+        relayKey: payerRelayKey,
+      }),
+    ],
+  });
+  const joined = await h.coordinator.join("requestor", SESSION_ID, {
+    ...INVOICE_TERMS,
+    amount: { currency: "USD", value: "18751" },
+  });
+  await h.coordinator.submit(joined.sessionId, "requestor", REQUESTOR_SIG);
+
+  await assert.rejects(
+    h.coordinator.next(joined.sessionId, "requestor"),
+    { code: "BUSINESS_TERMS_MISMATCH" },
+  );
+  assert.equal(h.posted.some((entry) => entry.kind === "payment_request"), false);
+});
+
+test("matching Requestor expectations become the existing exact payment request", async () => {
+  const payerRelayKey = generateRelayKeyPair();
+  const h = harness({
+    messages: [
+      relayMessage({ body: { address: PAYER }, kind: "identity_ready", role: "payer", seq: "1", relayKey: payerRelayKey }),
+      relayMessage({ body: { address: PAYER, agentId: "101" }, kind: "party_ready", role: "payer", seq: "2", relayKey: payerRelayKey }),
+      relayMessage({ body: { funded: REQUESTOR, paymentMoved: false, role: "requestor" }, kind: "funding_record", role: "host", seq: "3" }),
+      relayMessage({
+        body: canonicalMandateBody({
+          amount: INVOICE_TERMS.amount,
+          invoiceReferencePrefix: INVOICE_TERMS.invoiceReference,
+          purpose: INVOICE_TERMS.purpose,
+        }),
+        kind: "mandate",
+        role: "payer",
+        seq: "4",
+        relayKey: payerRelayKey,
+      }),
+    ],
+  });
+  const joined = await h.coordinator.join("requestor", SESSION_ID, INVOICE_TERMS);
+  await h.coordinator.submit(joined.sessionId, "requestor", REQUESTOR_SIG);
+
+  const signingRequest = await h.coordinator.next(joined.sessionId, "requestor");
+  const request = hexJson(signingRequest.bytesToSignHex);
+
+  assert.equal(signingRequest.stage, "sign_payment_request");
+  assert.equal(request.schema, "clockchain.bilateral-payment-request/v1");
+  assert.deepEqual(request.amount, INVOICE_TERMS.amount);
+  assert.equal(request.invoiceReference, INVOICE_TERMS.invoiceReference);
+  assert.equal(request.purpose, INVOICE_TERMS.purpose);
+});
+
+test("join rejects malformed business terms before creating role state", async () => {
+  for (const terms of [
+    { ...INVOICE_TERMS, amount: { currency: "EUR", value: "18750" } },
+    { ...INVOICE_TERMS, amount: { currency: "USD", value: "018750" } },
+    { ...INVOICE_TERMS, invoiceReference: " HS-8842" },
+    { ...INVOICE_TERMS, validForMinutes: 29 },
+    { ...INVOICE_TERMS, validForMinutes: 241 },
+  ]) {
+    const h = harness();
+    await assert.rejects(h.coordinator.join("payer", SESSION_ID, terms), { code: "BUSINESS_TERMS_INVALID" });
+    assert.deepEqual((await h.coordinator.status(SESSION_ID)).sessions, []);
+  }
 });
 
 test("status exposes the caller's next required action", async () => {

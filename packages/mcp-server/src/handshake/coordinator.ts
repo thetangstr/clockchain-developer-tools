@@ -38,6 +38,12 @@ type JsonObject = Record<string, any>;
 type PublicRole = "payer" | "requestor";
 type EvidenceRole = "payer" | "payee";
 type SigningEncoding = "hex" | "gzip-base64url";
+type HandshakeBusinessTerms = Readonly<{
+  amount: Readonly<{ currency: "USD"; value: string }>;
+  invoiceReference: string;
+  purpose: string;
+  validForMinutes?: number;
+}>;
 
 type RelayClient = {
   fetchDiscovery(sessionId?: string): Promise<JsonObject>;
@@ -82,6 +88,7 @@ type WaitTiming = {
 
 type CoordinatorState = JsonObject & {
   agentId?: string;
+  businessTerms?: HandshakeBusinessTerms;
   certificateVerified?: boolean;
   counterpart?: { address: string; agentId?: string; senderKey?: string };
   discovery?: JsonObject;
@@ -180,14 +187,26 @@ export function createHandshakeCoordinator(options: {
       };
     },
 
-    async join(roleInput: string, invitationId?: string, _termsInput?: unknown): Promise<JsonObject> {
+    async join(roleInput: string, invitationId?: string, termsInput?: unknown): Promise<JsonObject> {
       const role = publicRole(roleInput);
+      const requestedTerms = normalizeBusinessTerms(termsInput, role);
       const discovery = await options.relay.fetchDiscovery(invitationId);
       const sessionId = stringField(discovery, "sessionId", "DISCOVERY_INVALID");
       const operatorPublicKey = stringField(discovery, "operatorPublicKey", "DISCOVERY_INVALID");
       const key = stateKey(principal, sessionId, role);
       return withGlobalLock(key, async () => {
         const current = await ensureRecord(stateStore, key, discovery);
+        const currentData = dataOf(current);
+        if (
+          currentData.businessTerms &&
+          requestedTerms &&
+          !sameCanonical(currentData.businessTerms, requestedTerms)
+        ) {
+          throw new HandshakeCoordinatorError("Handshake business terms are already pinned for this role.", "BUSINESS_TERMS_CONFLICT");
+        }
+        if (!currentData.businessTerms && requestedTerms && currentData.identityAddress) {
+          throw new HandshakeCoordinatorError("Handshake business terms cannot change after identity signing.", "BUSINESS_TERMS_CONFLICT");
+        }
         const ownAddress = typeof current.data?.identityAddress === "string" ? current.data.identityAddress : undefined;
         const messages = await loadMessages(options.relay, sessionId);
         const seat = findSeat(messages, role);
@@ -205,6 +224,7 @@ export function createHandshakeCoordinator(options: {
             ? { privateKeyPem: record.relayEd25519Pem, senderKey: currentSenderKey }
             : generateRelayKeyPair();
           return mergeData(key, { ...record, relayEd25519Pem: relay.privateKeyPem } as HandshakeRecord | null, {
+            businessTerms: currentData.businessTerms ?? requestedTerms,
             discovery,
             relay: { senderKey: relay.senderKey },
           });
@@ -1183,16 +1203,17 @@ async function prepareMandate(clockchain: ClockchainClient, data: CoordinatorSta
   const sessionUuid = randomUUID();
   const intakeRequestId = randomUUID();
   const intakeDigest = createHash("sha256").update(intakeRequestId, "utf8").digest("hex");
+  const terms = data.businessTerms ?? LEGACY_BUSINESS_TERMS;
   const mandate = preparePayerMandate({
-    amount: { currency: "USD", value: "100" },
-    expiresAtMs: String(BigInt(issuedAtMs) + 45n * 60n * 1000n),
+    amount: terms.amount,
+    expiresAtMs: String(BigInt(issuedAtMs) + BigInt(terms.validForMinutes ?? 45) * 60n * 1000n),
     intakeDigest,
     intakeRequestId,
-    invoiceReferencePrefix: "INV-",
+    invoiceReferencePrefix: data.businessTerms ? terms.invoiceReference : "INV-",
     issuedAtMs,
     payee: { address: data.counterpart?.address, agentId: data.counterpart?.agentId },
     payer: { address: data.identityAddress, agentId: data.agentId },
-    purpose: "Invoice settlement",
+    purpose: terms.purpose,
     releaseId: "handshake-v6",
     repositorySha: data.discovery?.repositorySha,
     sessionId: sessionUuid,
@@ -1241,6 +1262,21 @@ function parseClockchainLedgerTime(value: string): number {
 
 function prepareRequest(data: CoordinatorState, _sessionId: string): JsonObject {
   const mandate = data.mandateEnvelope?.mandate ?? data.mandateEnvelope;
+  const terms = data.businessTerms ?? LEGACY_BUSINESS_TERMS;
+  if (
+    data.businessTerms &&
+    (
+      mandate.amount?.currency !== terms.amount.currency ||
+      mandate.amount?.value !== terms.amount.value ||
+      mandate.invoiceReferencePrefix !== terms.invoiceReference ||
+      mandate.purpose !== terms.purpose
+    )
+  ) {
+    throw new HandshakeCoordinatorError(
+      "The signed payer mandate does not match the Requestor's expected invoice terms.",
+      "BUSINESS_TERMS_MISMATCH",
+    );
+  }
   return {
     request: preparePaymentRequest({
     amount: mandate.amount,
@@ -1248,7 +1284,7 @@ function prepareRequest(data: CoordinatorState, _sessionId: string): JsonObject 
     expiresAtMs: mandate.expiresAtMs,
     intakeDigest: mandate.intakeDigest,
     intakeRequestId: mandate.intakeRequestId,
-    invoiceReference: "INV-0001",
+    invoiceReference: terms.invoiceReference,
     mandateDigest: digestHex(data.mandateEnvelope?.mandate ?? data.mandateEnvelope),
     payee: { address: data.identityAddress, agentId: data.agentId },
     payer: mandate.payer,
@@ -1260,6 +1296,58 @@ function prepareRequest(data: CoordinatorState, _sessionId: string): JsonObject 
     subjectRun: mandate.subjectRun,
     }),
   };
+}
+
+const LEGACY_BUSINESS_TERMS: HandshakeBusinessTerms = Object.freeze({
+  amount: Object.freeze({ currency: "USD", value: "100" }),
+  invoiceReference: "INV-0001",
+  purpose: "Invoice settlement",
+  validForMinutes: 45,
+});
+
+function normalizeBusinessTerms(input: unknown, role: PublicRole): HandshakeBusinessTerms | undefined {
+  if (input === undefined) return undefined;
+  try {
+    const keys = role === "payer"
+      ? ["amount", "invoiceReference", "purpose", "validForMinutes"]
+      : Object.prototype.hasOwnProperty.call(input, "validForMinutes")
+        ? ["amount", "invoiceReference", "purpose", "validForMinutes"]
+        : ["amount", "invoiceReference", "purpose"];
+    assertExactObjectKeys(input, keys, "BUSINESS_TERMS_INVALID");
+    assertExactObjectKeys(input.amount, ["currency", "value"], "BUSINESS_TERMS_INVALID");
+    if (
+      input.amount.currency !== "USD" ||
+      typeof input.amount.value !== "string" ||
+      input.amount.value.length > 16 ||
+      !/^(?:0|[1-9][0-9]*)$/.test(input.amount.value) ||
+      !printableBusinessField(input.invoiceReference) ||
+      !printableBusinessField(input.purpose)
+    ) {
+      throw new HandshakeCoordinatorError("Handshake business terms are invalid.", "BUSINESS_TERMS_INVALID");
+    }
+    if (
+      input.validForMinutes !== undefined &&
+      (!Number.isInteger(input.validForMinutes) || input.validForMinutes < 30 || input.validForMinutes > 240)
+    ) {
+      throw new HandshakeCoordinatorError("Handshake business terms are invalid.", "BUSINESS_TERMS_INVALID");
+    }
+    if (role === "payer" && input.validForMinutes === undefined) {
+      throw new HandshakeCoordinatorError("Payer business terms require a validity window.", "BUSINESS_TERMS_INVALID");
+    }
+    return Object.freeze({
+      amount: Object.freeze({ currency: "USD", value: input.amount.value }),
+      invoiceReference: input.invoiceReference,
+      purpose: input.purpose,
+      ...(input.validForMinutes === undefined ? {} : { validForMinutes: input.validForMinutes }),
+    });
+  } catch (error) {
+    if (error instanceof HandshakeCoordinatorError && error.code === "BUSINESS_TERMS_INVALID") throw error;
+    throw new HandshakeCoordinatorError("Handshake business terms are invalid.", "BUSINESS_TERMS_INVALID");
+  }
+}
+
+function printableBusinessField(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 && value.trim() === value && /^[ -~]+$/.test(value);
 }
 
 async function assertPoolHealthy(clockchain: ClockchainClient, env: Record<string, string | undefined>): Promise<JsonObject> {
