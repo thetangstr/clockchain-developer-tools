@@ -44,6 +44,10 @@ test("handshake tools are registered with exact public names and non-secret came
   assert.deepEqual(Object.keys(tools.handshake_next.meta.inputSchema), ["sessionId", "role", "signingEncoding", "waitMs"]);
   assert.deepEqual(Object.keys(tools.handshake_submit.meta.inputSchema), ["sessionId", "role", "signatureHex"]);
   assert.deepEqual(Object.keys(tools.handshake_get_certificate.meta.inputSchema), ["sessionId"]);
+  assert.match(
+    tools.handshake_join.meta.description,
+    /Payer must supply the exact mandate terms.*Requestor must independently supply the terms it expects/is,
+  );
 
   for (const name of HANDSHAKE_TOOLS) {
     for (const prop of Object.keys(tools[name].meta.inputSchema)) {

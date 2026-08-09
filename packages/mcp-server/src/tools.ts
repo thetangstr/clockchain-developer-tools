@@ -1327,7 +1327,9 @@ export function registerTools(
     {
       title: "Join a bilateral handshake",
       description:
-        "Join the current relay discovery session as payer or requestor.",
+        "Join the exact invitation as payer or requestor. Payer must supply the exact mandate terms " +
+        "before signing; Requestor must independently supply the terms it expects so a different " +
+        "signed mandate fails closed. Reuse the returned sessionId for every later handshake call.",
       inputSchema: {
         role: handshakeRoleSchema,
         invitationId: handshakeInvitationIdSchema,
