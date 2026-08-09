@@ -239,7 +239,7 @@ async function run(name: string, work: () => Promise<unknown>) {
  * + nonce; the server never holds a key.
  *
  * `opts.surface` controls which tools are registered:
- *   - "full" (default): all 31 tools — the full testnet surface.
+ *   - "full" (default): all 36 tools — the full testnet surface.
  *   - "product": only `get_time` — the production-safe slice (CLO-99).
  *
  * `get_time` is always registered regardless of surface. Full behavior is

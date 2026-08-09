@@ -9,7 +9,8 @@ test("landing page is well-formed HTML with the core message", () => {
   assert.match(LANDING_HTML, /<\/html>\s*$/i);
   assert.match(LANDING_HTML, /Clockchain/);
   assert.match(LANDING_HTML, /modules/i);
-  assert.match(LANDING_HTML, /\b31\b/);
+  assert.match(LANDING_HTML, /\b36\b/);
+  assert.doesNotMatch(LANDING_HTML, /31 tools/);
 });
 
 test("landing page points agents at the real endpoint + key headers, not a fake", () => {
@@ -42,6 +43,7 @@ test("MCP_MANIFEST (served at /.well-known/mcp.json) is self-configuring + remot
   assert.equal(MCP_MANIFEST.type, "http");
   assert.equal(MCP_MANIFEST.remote, true);
   assert.equal(MCP_MANIFEST.package, null); // no package to hunt for
+  assert.match(MCP_MANIFEST.description, /36 tools/);
   // Two co-equal auth methods: MCP token (x-api-key) and BYO Clockchain key.
   const methodHeaders = MCP_MANIFEST.authentication.methods.flatMap(
     (m) => m.header ?? m.headers,
