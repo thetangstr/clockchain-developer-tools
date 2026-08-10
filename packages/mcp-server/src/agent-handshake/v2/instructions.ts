@@ -57,6 +57,7 @@ export function buildV2Instructions(rawPin: unknown): string {
     `Download exactly ${manifestUrl} as ./manifest.json and ${helperUrl} as ./${HELPER_FILENAME}. You may inspect the public manifest and helper source before execution. Do not modify either downloaded file.`,
     `For --version and every local helper operation, use this exact verified prefix and append only the requested helper arguments: ${bootstrap}. The bootstrap hashes the raw manifest against the pinned digest, hashes the helper against that verified manifest, and can compile only those verified bytes in memory. Never run the helper directly, invent bytes, or substitute a wallet, policy, session, or role.`,
     "The Initiator may mandate live ERC-8004 registration. Registration and EIP-191 signing happen locally; Clockchain only funds the exact public session-key address when fresh registration is required and verifies the public on-chain record.",
+    "When agent_handshake_next returns needed: erc8004_registration, run the pinned helper operation register with the same absolute state directory used for init and policy. After it succeeds, call agent_handshake_next again with the unchanged local role access. Do not keep polling instead of performing that returned local action.",
     "No browser, repository clone, plugin, general Clockchain credential, payment, or external business action is part of this workflow. Codex and Claude Code use the same seven tools.",
   ].join("\n\n");
 }

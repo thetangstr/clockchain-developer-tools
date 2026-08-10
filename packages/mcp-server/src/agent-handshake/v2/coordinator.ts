@@ -327,7 +327,19 @@ export function createV2Coordinator(options: {
         let registration = null;
         if (current.terms.identityPolicy.erc8004 !== "not_required") {
           registration = await options.resolveRegistration({ address: current.sessionKeyAddress, fromBlock: current.discovery.sessionOpenedBlock ?? "0" });
-          if (!registration) return Object.freeze({ needed: "erc8004_registration", role, sessionId: auth.keyValue.session, stage: "awaiting_identity_registration", identityPolicy: current.terms.identityPolicy });
+          if (!registration) return Object.freeze({
+            needed: "erc8004_registration",
+            role,
+            sessionId: auth.keyValue.session,
+            stage: "awaiting_identity_registration",
+            identityPolicy: current.terms.identityPolicy,
+            localAction: Object.freeze({
+              executor: "pinned_helper",
+              operation: "register",
+              stateDir: "reuse_exact_absolute_state_dir",
+              afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
+            }),
+          });
           if (current.terms.identityPolicy.erc8004 === "required_fresh" && BigInt(registration.registrationBlock) <= BigInt(current.discovery.sessionOpenedBlock ?? "0")) fail();
         }
         const party = normalizeV2Party({ sessionKeyAddress: current.sessionKeyAddress, policyDigest: current.policyDigest, erc8004: registration }, current.terms.identityPolicy) as JsonObject;

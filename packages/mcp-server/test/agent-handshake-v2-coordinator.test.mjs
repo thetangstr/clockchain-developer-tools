@@ -163,3 +163,59 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   assert.equal((await coordinator.getCertificate({ access: accesses.initiator })).certificate.result.outcome, "VERIFIED");
   assert.equal((await coordinator.getCertificate({ access: accesses.responder })).certificate.result.outcome, "VERIFIED");
 });
+
+test("fresh identity registration is returned as an executable pinned-helper action", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const messages = [];
+  const address = "0x7564105e977516c53be337314c7e53838967bdac";
+  const relay = {
+    fetchDiscovery: async () => discovery,
+    getMessages: async () => ({ messages }),
+    postMessage: async (input) => {
+      messages.push({ ...input, body: input.body, senderKey: input.senderKey });
+      return { ok: true, seq: String(messages.length) };
+    },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay,
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => address,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+  });
+
+  const invited = await coordinator.invite(terms);
+  const localPolicy = policy("initiator");
+  const digest = v2CanonicalRecord(localPolicy).digest;
+  await coordinator.join({
+    access: invited.initiatorAccess,
+    helperVersion: "2.1.0",
+    sessionKeyAddress: address,
+    policyDigest: digest,
+  });
+  await coordinator.submit({
+    access: invited.initiatorAccess,
+    policyDigest: digest,
+    signatureHex: `0x${"1".repeat(128)}1b`,
+  });
+  messages.push({ kind: "agent_v2_funding_record", role: "host", body: { role: "initiator", address } });
+
+  assert.deepEqual(await coordinator.next({ access: invited.initiatorAccess }), {
+    needed: "erc8004_registration",
+    role: "initiator",
+    sessionId,
+    stage: "awaiting_identity_registration",
+    identityPolicy: terms.identityPolicy,
+    localAction: {
+      executor: "pinned_helper",
+      operation: "register",
+      stateDir: "reuse_exact_absolute_state_dir",
+      afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
+    },
+  });
+});
