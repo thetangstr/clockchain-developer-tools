@@ -34,6 +34,7 @@ test("one copied invitation creates distinct, role-scoped principals and is clai
     statementDigest,
     expMs,
   });
+  assert.equal(accepted.claimedAtMs, String(nbfMs + 1));
   assert.notEqual(accepted.responderAccess, created.initiatorAccess);
   await assert.rejects(() => service.accept({
     invitation: created.responderInvitation,
@@ -81,4 +82,3 @@ test("persistent invitation state is private, digest-only, and restart-safe", as
   await restarted.accept({ invitation: created.responderInvitation, sessionId, statementDigest, expMs });
   await assert.rejects(() => restarted.accept({ invitation: created.responderInvitation, sessionId, statementDigest, expMs }));
 });
-

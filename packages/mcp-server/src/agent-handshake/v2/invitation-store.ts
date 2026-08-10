@@ -228,7 +228,7 @@ export function createV2InvitationService(options: {
         expectedRole: "responder", expectedStatementDigest: stored.statementDigest,
         expectedExpMs: stored.expMs, requiredTool: "agent_handshake_accept_invitation",
       });
-      await options.store.claim({
+      const claimed = await options.store.claim({
         invitationDigest: digest(input.invitation), jti: verified.payload.jti, nowMs: String(nowMs()),
       });
       const responderAccess = mintV2RoleAccess({
@@ -236,7 +236,11 @@ export function createV2InvitationService(options: {
         statementDigest: stored.statementDigest, allowedTools: AGENT_HANDSHAKE_ROLE_TOOLS,
         nbfMs: verified.payload.nbfMs, expMs: stored.expMs,
       });
-      return Object.freeze({ responderAccess, metadata: stored.metadata });
+      return Object.freeze({
+        claimedAtMs: claimed.claimedAtMs,
+        responderAccess,
+        metadata: stored.metadata,
+      });
     },
   });
 }

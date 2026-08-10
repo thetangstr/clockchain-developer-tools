@@ -27,7 +27,7 @@ import {
 type JsonObject = Record<string, any>;
 type InvitationService = Readonly<{
   create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; metadata?: V2InvitationMetadata }): Promise<{ initiatorAccess: string; responderInvitation: string }>;
-  accept(input: { invitation: string }): Promise<{ responderAccess: string; metadata: V2InvitationMetadata | null }>;
+  accept(input: { invitation: string }): Promise<{ claimedAtMs: string | null; responderAccess: string; metadata: V2InvitationMetadata | null }>;
 }>;
 type Relay = Readonly<{
   fetchDiscovery(sessionId?: string): Promise<unknown>;
@@ -234,7 +234,7 @@ export function createV2Coordinator(options: {
     return data(updated);
   }
 
-  async function storeInitial(access: string, metadata: V2InvitationMetadata, role: V2Role): Promise<void> {
+  async function storeInitial(access: string, metadata: V2InvitationMetadata, role: V2Role): Promise<HandshakeKey> {
     const certificate = metadata.hostSessionKeyCertificate as JsonObject;
     const verified = verifyV2RoleAccess(access, {
       keys: options.accessKeys, nowMs: now(), expectedSessionId: certificate.certificate?.sessionId,
@@ -252,6 +252,7 @@ export function createV2Coordinator(options: {
       ...merge(current, keyValue, { discovery: found, terms: metadata.terms, relay: { senderKey: relayKey.senderKey }, stage: "invited" }),
       relayEd25519Pem: relayKey.privateKeyPem,
     }));
+    return keyValue;
   }
 
   return Object.freeze({
@@ -273,8 +274,12 @@ export function createV2Coordinator(options: {
 
     async acceptInvitation(invitation: string): Promise<JsonObject> {
       const accepted = await options.invitationService.accept({ invitation });
-      if (!accepted.metadata) fail();
-      await storeInitial(accepted.responderAccess, accepted.metadata, "responder");
+      if (!accepted.metadata || !accepted.claimedAtMs) fail();
+      const keyValue = await storeInitial(accepted.responderAccess, accepted.metadata, "responder");
+      await post(keyValue, "agent_v2_invitation_claimed", {
+        claimedAtMs: accepted.claimedAtMs,
+        externalBusinessActionPerformed: false,
+      });
       return Object.freeze({ responderAccess: accepted.responderAccess, sessionId: (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs });
     },
 
@@ -390,8 +395,10 @@ export function createV2Coordinator(options: {
       const recovered = (await options.recoverEip191Address({ bytes, signatureHex: input.signatureHex })).toLowerCase();
       if (recovered !== current.sessionKeyAddress) fail();
       if (current.pending.operation === "identity_claim") {
-        await post(auth.keyValue, "agent_v2_identity_claim", { sessionKeyAddress: current.sessionKeyAddress, policyDigest: current.policyDigest });
-        await post(auth.keyValue, "agent_v2_identity_signature", { claim: current.pending.payload, signature: { address: recovered, algorithm: "eip191", value: input.signatureHex } });
+        await post(auth.keyValue, "agent_v2_identity_claim", {
+          claim: current.pending.payload,
+          signature: { address: recovered, algorithm: "eip191", value: input.signatureHex },
+        });
       } else if (current.pending.operation === "proposal") {
         const proposalEnvelope = signatureEnvelope("proposal", current.pending.payload, recovered, input.signatureHex);
         await post(auth.keyValue, "agent_v2_proposal", { proposalEnvelope });

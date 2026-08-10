@@ -96,6 +96,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
 
   const invited = await coordinator.invite(terms);
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
+  const invitationClaimed = messages.find((message) => message.kind === "agent_v2_invitation_claimed");
+  assert.equal(invitationClaimed.role, "responder");
+  assert.equal(invitationClaimed.body.claimedAtMs, String(nowMs + 1));
   assert.notEqual(invited.initiatorAccess, accepted.responderAccess);
   const accesses = { initiator: invited.initiatorAccess, responder: accepted.responderAccess };
   for (const role of ["initiator", "responder"]) {
@@ -104,6 +107,13 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.equal(joined.signingRequest.operation, "identity_claim");
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
+  const identityMessages = messages.filter((message) => message.kind === "agent_v2_identity_claim");
+  assert.equal(identityMessages.length, 2);
+  assert.equal(messages.some((message) => message.kind === "agent_v2_identity_signature"), false);
+  assert.deepEqual(
+    identityMessages.map((message) => Object.keys(message.body).sort()),
+    [["claim", "signature"], ["claim", "signature"]],
+  );
   for (const role of ["initiator", "responder"]) {
     messages.push({ kind: "agent_v2_funding_record", role: "host", body: { role, address: addresses[role] } });
     const ready = await coordinator.next({ access: accesses[role] });
