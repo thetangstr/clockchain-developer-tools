@@ -58,7 +58,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
-const ADDRESS = /^0x[0-9a-f]{40}$/;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SIGNATURE = /^0x[0-9a-f]{130}$/;
 
 export class V2CoordinatorError extends Error {
@@ -285,19 +285,20 @@ export function createV2Coordinator(options: {
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
       if (input.helperVersion !== "2.1.0" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
+      const sessionKeyAddress = input.sessionKeyAddress.toLowerCase();
       const auth = await authorize(input.access, "agent_handshake_join");
       const expectedPolicy = localPolicy(auth.current.terms, auth.verified.payload.role);
       if (v2CanonicalRecord(expectedPolicy).digest !== input.policyDigest) fail();
-      if (auth.current.policyDigest && (auth.current.policyDigest !== input.policyDigest || auth.current.sessionKeyAddress !== input.sessionKeyAddress)) fail();
+      if (auth.current.policyDigest && (auth.current.policyDigest !== input.policyDigest || auth.current.sessionKeyAddress !== sessionKeyAddress)) fail();
       const claim = normalizeV2IdentityClaim({
         schema: "clockchain.agent-handshake-identity-claim/v2", protocol: "clockchain.agent-handshake/v2",
         sessionId: auth.keyValue.session, repositorySha: auth.current.discovery.repositorySha,
-        role: auth.verified.payload.role, sessionKeyAddress: input.sessionKeyAddress,
+        role: auth.verified.payload.role, sessionKeyAddress,
         policyDigest: input.policyDigest, statementDigest: v2CanonicalRecord(auth.current.terms).digest,
         externalBusinessActionPerformed: false,
       }) as JsonObject;
       const updated = await store.update(auth.keyValue, (current) => merge(current, auth.keyValue, {
-        policyDigest: input.policyDigest, sessionKeyAddress: input.sessionKeyAddress,
+        policyDigest: input.policyDigest, sessionKeyAddress,
         pending: { operation: "identity_claim", payload: claim }, stage: "sign_identity",
       }));
       return Object.freeze({

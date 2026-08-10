@@ -169,6 +169,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
   const messages = [];
   const address = "0x7564105e977516c53be337314c7e53838967bdac";
+  const presentedAddress = "0x7564105E977516c53be337314c7e53838967bdac";
   const relay = {
     fetchDiscovery: async () => discovery,
     getMessages: async () => ({ messages }),
@@ -195,7 +196,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
   await coordinator.join({
     access: invited.initiatorAccess,
     helperVersion: "2.1.0",
-    sessionKeyAddress: address,
+    sessionKeyAddress: presentedAddress,
     policyDigest: digest,
   });
   await coordinator.submit({
