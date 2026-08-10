@@ -5,7 +5,7 @@ import {
 
 type JsonObject = Record<string, unknown>;
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
-type MessageRole = "payer" | "requestor";
+type MessageRole = "initiator" | "payer" | "requestor" | "responder";
 type EvidenceRole = "payer" | "payee";
 
 const DISCOVERY_SCHEMA = "handshake-discovery/v2";
@@ -324,7 +324,7 @@ function validateDecimal(value: string, code: string): void {
 }
 
 function validateMessageRole(role: string): asserts role is MessageRole {
-  if (role !== "payer" && role !== "requestor") invalid("ROLE_INVALID");
+  if (!["initiator", "payer", "requestor", "responder"].includes(role)) invalid("ROLE_INVALID");
 }
 
 function validateEvidenceRole(role: string): asserts role is EvidenceRole {

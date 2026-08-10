@@ -341,6 +341,43 @@ test("signs and posts a relay message after reading highest seq, retrying only S
   assert.equal(fetch.calls[2].url, `${TRUSTED_RELAY}/v1/sessions/${SESSION_ID}/messages`);
 });
 
+test("posts both generic stakeholder roles while rejecting unknown relay roles", async () => {
+  const keys = generateRelayKeyPair();
+  const acceptedRoles = [];
+  const fetch = mockFetch((url, init, call) => {
+    if (call % 2 === 1) return jsonResponse({ ok: true, messages: [] });
+    const envelope = JSON.parse(init.body);
+    acceptedRoles.push(envelope.role);
+    assert.equal(verifyRelayMessageEnvelope(envelope), true);
+    return jsonResponse({ ok: true, seq: "1" });
+  });
+  const client = createHandshakeRelayClient({ fetch, relayUrl: TRUSTED_RELAY });
+
+  for (const role of ["initiator", "responder"]) {
+    await client.postMessage({
+      body: { ok: true },
+      kind: "identity_ready",
+      privateKeyPem: keys.privateKeyPem,
+      role,
+      senderKey: keys.senderKey,
+      sessionId: SESSION_ID,
+    });
+  }
+
+  assert.deepEqual(acceptedRoles, ["initiator", "responder"]);
+  await assert.rejects(
+    client.postMessage({
+      body: { ok: true },
+      kind: "identity_ready",
+      privateKeyPem: keys.privateKeyPem,
+      role: "host",
+      senderKey: keys.senderKey,
+      sessionId: SESSION_ID,
+    }),
+    { code: "ROLE_INVALID" },
+  );
+});
+
 test("does not retry ambiguous network failures while writing", async () => {
   const keys = generateRelayKeyPair();
   const fetch = mockFetch((url, init, call) => {
