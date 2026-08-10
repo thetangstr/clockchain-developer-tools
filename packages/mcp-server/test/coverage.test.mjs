@@ -63,6 +63,18 @@ const ARGS = {
   handshake_next: { sessionId: "S1", role: "payer" },
   handshake_submit: { sessionId: "S1", role: "payer", signatureHex: "0xabc" },
   handshake_get_certificate: { sessionId: "S1" },
+  agent_handshake_status: {},
+  agent_handshake_join: {
+    role: "initiator",
+    terms: {
+      reference: "NS-1847",
+      statement: "Two stakeholder agents may communicate about NS-1847.",
+      validForMinutes: 45,
+    },
+  },
+  agent_handshake_next: { sessionId: "S1", role: "initiator" },
+  agent_handshake_submit: { sessionId: "S1", role: "initiator", signatureHex: `0x${"1".repeat(130)}` },
+  agent_handshake_get_certificate: { sessionId: "S1" },
 };
 
 // Read/verify tools that, by design, degrade GRACEFULLY to a clean
@@ -79,6 +91,7 @@ const GRACEFUL_OK = new Set([
   "verify_identity_at",
   "get_identity_history",
   "list_schedules",
+  "agent_handshake_status",
 ]);
 
 // Fail every upstream call so we exercise each tool's error handling. Use 400
@@ -96,7 +109,7 @@ test("coverage completeness: every registered tool is in the ARGS matrix", () =>
   const covered = Object.keys(ARGS).sort();
   assert.deepEqual(registered, covered,
     "ARGS must list exactly the registered tools — add new tools here so they get coverage");
-  assert.equal(registered.length, 36, `expected 36 tools, got ${registered.length}`);
+  assert.equal(registered.length, 41, `expected 41 tools, got ${registered.length}`);
 });
 
 test("resilience: no tool throws on upstream failure; gateway tools surface isError", async () => {

@@ -25,6 +25,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BudgetExceededError, getSharedLogBudget, unlimitedLogBudget } from "./budget.js";
 import { createRuntimeHandshakeCoordinator } from "./handshake/coordinator.js";
+import { createRuntimeAgentHandshakeCoordinator } from "./agent-handshake/coordinator.js";
 import { idempotent } from "./idempotency.js";
 import type { KeeperGate } from "./entitlement.js";
 import { assertToolClassified } from "./entitlement.js";
@@ -108,6 +109,28 @@ export interface HandshakeCoordinator {
   join(role: HandshakeRole, invitationId?: string, terms?: HandshakeBusinessTerms): Promise<unknown>;
   next(sessionId: string, role: HandshakeRole, signingEncoding?: SigningEncoding, waitMs?: HandshakeWaitMs): Promise<unknown>;
   submit(sessionId: string, role: HandshakeRole, signatureHex: string): Promise<unknown>;
+  getCertificate(sessionId: string): Promise<unknown>;
+}
+
+const agentHandshakeRoleSchema = z
+  .enum(["initiator", "responder"])
+  .describe("Generic stakeholder role. Must be exactly initiator or responder.");
+
+type AgentHandshakeRole = z.infer<typeof agentHandshakeRoleSchema>;
+
+const agentHandshakeTermsSchema = z.object({
+  reference: z.string().min(1).max(128).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+  statement: z.string().min(1).max(256).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+  validForMinutes: z.number().int().min(1).max(60),
+}).strict();
+
+type AgentHandshakeTerms = z.infer<typeof agentHandshakeTermsSchema>;
+
+export interface AgentHandshakeCoordinator {
+  status(sessionId?: string): Promise<unknown>;
+  join(role: AgentHandshakeRole, invitationId: string | undefined, terms: AgentHandshakeTerms): Promise<unknown>;
+  next(sessionId: string, role: AgentHandshakeRole): Promise<unknown>;
+  submit(sessionId: string, role: AgentHandshakeRole, signatureHex: string): Promise<unknown>;
   getCertificate(sessionId: string): Promise<unknown>;
 }
 
@@ -276,6 +299,7 @@ export function registerTools(
     gate?: KeeperGate;
     principalId?: string;
     handshakeCoordinator?: HandshakeCoordinator;
+    agentHandshakeCoordinator?: AgentHandshakeCoordinator;
   } = {},
 ): void {
   // Fail-closed classification guard (CLO-48 review FIX 2). We intercept
@@ -318,6 +342,7 @@ export function registerTools(
   // them. Disabled when MCP_LOG_BUDGET is unset -> identical to v1.
   const budget = opts.delegated === false ? unlimitedLogBudget() : getSharedLogBudget();
   let runtimeHandshakeCoordinator: HandshakeCoordinator | undefined;
+  let runtimeAgentHandshakeCoordinator: AgentHandshakeCoordinator | undefined;
   const handshakeCoordinator = (): HandshakeCoordinator => {
     if (opts.handshakeCoordinator) return opts.handshakeCoordinator;
     runtimeHandshakeCoordinator ??= createRuntimeHandshakeCoordinator({
@@ -326,6 +351,14 @@ export function registerTools(
       principal: opts.principalId ?? "stdio",
     });
     return runtimeHandshakeCoordinator;
+  };
+  const agentHandshakeCoordinator = (): AgentHandshakeCoordinator => {
+    if (opts.agentHandshakeCoordinator) return opts.agentHandshakeCoordinator;
+    runtimeAgentHandshakeCoordinator ??= createRuntimeAgentHandshakeCoordinator({
+      clockchain: client,
+      principal: opts.principalId ?? "stdio",
+    });
+    return runtimeAgentHandshakeCoordinator;
   };
 
   // ===== TIME MCP =====
@@ -1405,6 +1438,96 @@ export function registerTools(
     async ({ sessionId }) =>
       run("handshake_get_certificate", () =>
         handshakeCoordinator().getCertificate(sessionId),
+      ),
+  );
+
+  // ===== GENERIC TWO-STAKEHOLDER HANDSHAKE MCP =====
+  // Additive to the bilateral authorization namespace. These tools bind a
+  // shared statement and never translate it into invoice or transfer terms.
+  server.registerTool(
+    "agent_handshake_status",
+    {
+      title: "Read stakeholder handshake status",
+      description: "Read generic two-stakeholder handshake progress for this independently authenticated agent.",
+      inputSchema: {
+        sessionId: z.string().optional().describe("Optional generic handshake session id."),
+      },
+    },
+    async ({ sessionId }) =>
+      run("agent_handshake_status", () => agentHandshakeCoordinator().status(sessionId)),
+  );
+
+  server.registerTool(
+    "agent_handshake_join",
+    {
+      title: "Join a stakeholder handshake",
+      description:
+        "Join as Initiator or Responder and independently pin the exact shared statement, reference, and validity window.",
+      inputSchema: {
+        role: agentHandshakeRoleSchema,
+        invitationId: handshakeInvitationIdSchema,
+        terms: agentHandshakeTermsSchema,
+      },
+    },
+    async ({ role, invitationId, terms }) =>
+      run("agent_handshake_join", () =>
+        agentHandshakeCoordinator().join(
+          agentHandshakeRoleSchema.parse(role),
+          handshakeInvitationIdSchema.parse(invitationId),
+          agentHandshakeTermsSchema.parse(terms),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "agent_handshake_next",
+    {
+      title: "Get next stakeholder handshake action",
+      description: "Return the next generic handshake action or exact public bytes that this local stakeholder must sign.",
+      inputSchema: {
+        sessionId: z.string().describe("Generic handshake session id."),
+        role: agentHandshakeRoleSchema,
+      },
+    },
+    async ({ sessionId, role }) =>
+      run("agent_handshake_next", () =>
+        agentHandshakeCoordinator().next(sessionId, agentHandshakeRoleSchema.parse(role)),
+      ),
+  );
+
+  server.registerTool(
+    "agent_handshake_submit",
+    {
+      title: "Submit a stakeholder handshake signature",
+      description: "Submit only the caller-produced public EIP-191 signature for the pending generic handshake action.",
+      inputSchema: {
+        sessionId: z.string().describe("Generic handshake session id."),
+        role: agentHandshakeRoleSchema,
+        signatureHex: z.string().regex(/^0x[0-9a-f]{130}$/).describe("Caller-produced EIP-191 signature hex."),
+      },
+    },
+    async ({ sessionId, role, signatureHex }) =>
+      run("agent_handshake_submit", () =>
+        agentHandshakeCoordinator().submit(
+          sessionId,
+          agentHandshakeRoleSchema.parse(role),
+          signatureHex,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "agent_handshake_get_certificate",
+    {
+      title: "Get verified stakeholder handshake certificate",
+      description: "Fetch the generic signed result after both independent stakeholder evidence packages verify.",
+      inputSchema: {
+        sessionId: z.string().describe("Generic handshake session id."),
+      },
+    },
+    async ({ sessionId }) =>
+      run("agent_handshake_get_certificate", () =>
+        agentHandshakeCoordinator().getCertificate(sessionId),
       ),
   );
 }

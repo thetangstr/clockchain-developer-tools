@@ -13,10 +13,17 @@ const HANDSHAKE_TOOLS = [
   "handshake_submit",
   "handshake_get_certificate",
 ];
+const AGENT_HANDSHAKE_TOOLS = [
+  "agent_handshake_status",
+  "agent_handshake_join",
+  "agent_handshake_next",
+  "agent_handshake_submit",
+  "agent_handshake_get_certificate",
+];
 
 const KEY_LIKE = /key|private|mnemonic|seed|secret|wallet|signer/i;
 
-function collectWith(coordinator) {
+function collectWith(coordinator, agentCoordinator = coordinator) {
   const registrations = {};
   registerTools(
     {
@@ -25,7 +32,7 @@ function collectWith(coordinator) {
       },
     },
     cfg,
-    { handshakeCoordinator: coordinator },
+    { agentHandshakeCoordinator: agentCoordinator, handshakeCoordinator: coordinator },
   );
   return registrations;
 }
@@ -55,6 +62,45 @@ test("handshake tools are registered with exact public names and non-secret came
       assert.equal(prop.includes("_"), false, `${name}.${prop} must be camelCase`);
     }
   }
+});
+
+test("generic handshake tools are additive, exact, and free of payment inputs", () => {
+  const tools = collectWith({});
+  for (const name of AGENT_HANDSHAKE_TOOLS) assert.ok(tools[name], `${name} should be registered`);
+  assert.deepEqual(Object.keys(tools.agent_handshake_status.meta.inputSchema), ["sessionId"]);
+  assert.deepEqual(Object.keys(tools.agent_handshake_join.meta.inputSchema), ["role", "invitationId", "terms"]);
+  assert.deepEqual(Object.keys(tools.agent_handshake_next.meta.inputSchema), ["sessionId", "role"]);
+  assert.deepEqual(Object.keys(tools.agent_handshake_submit.meta.inputSchema), ["sessionId", "role", "signatureHex"]);
+  assert.deepEqual(Object.keys(tools.agent_handshake_get_certificate.meta.inputSchema), ["sessionId"]);
+  const publicText = JSON.stringify(AGENT_HANDSHAKE_TOOLS.map((name) => tools[name].meta)).toLowerCase();
+  for (const word of ["amount", "currency", "invoice", "payer", "payee", "payment", "requestor"]) {
+    assert.equal(publicText.includes(word), false, word);
+  }
+});
+
+test("generic handshake handlers delegate to their own coordinator", async () => {
+  const calls = [];
+  const coordinator = {
+    async status(sessionId) { calls.push(["status", sessionId]); return { mode: "generic", sessionId }; },
+    async join(role, invitationId, terms) { calls.push(["join", role, invitationId, terms]); return { role }; },
+    async next(sessionId, role) { calls.push(["next", sessionId, role]); return { role, sessionId }; },
+    async submit(sessionId, role, signatureHex) { calls.push(["submit", sessionId, role, signatureHex]); return { role }; },
+    async getCertificate(sessionId) { calls.push(["certificate", sessionId]); return { sessionId }; },
+  };
+  const tools = collectWith({}, coordinator);
+  const terms = { reference: "NS-1847", statement: "Two stakeholder agents may communicate about NS-1847.", validForMinutes: 45 };
+  await tools.agent_handshake_status.handler({ sessionId: "s" });
+  await tools.agent_handshake_join.handler({ role: "initiator", terms });
+  await tools.agent_handshake_next.handler({ role: "responder", sessionId: "s" });
+  await tools.agent_handshake_submit.handler({ role: "initiator", sessionId: "s", signatureHex: `0x${"1".repeat(130)}` });
+  await tools.agent_handshake_get_certificate.handler({ sessionId: "s" });
+  assert.deepEqual(calls, [
+    ["status", "s"],
+    ["join", "initiator", undefined, terms],
+    ["next", "s", "responder"],
+    ["submit", "s", "initiator", `0x${"1".repeat(130)}`],
+    ["certificate", "s"],
+  ]);
 });
 
 test("handshake handlers delegate every call to the injected coordinator and return JSON text", async () => {
