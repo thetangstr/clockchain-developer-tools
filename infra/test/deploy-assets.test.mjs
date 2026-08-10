@@ -405,6 +405,8 @@ test("deployment runbook fixes the release order, secret boundary, canaries, and
   assert.match(source, /\/health/);
   assert.match(source, /\/\.well-known\/agent-handshake\.json/);
   assert.match(source, /\/handshake\/mcp/);
+  assert.match(source, /AmazonSSMManagedInstanceCore/);
+  assert.match(source, /exact new instance is SSM\s+`Online`/i);
   assert.match(source, /rollback/i);
   assert.match(source, /generic v1 and bilateral/i);
   assert.doesNotMatch(source, /secretBase64"\s*:\s*"[A-Za-z0-9+/=]{20,}/);
@@ -753,6 +755,35 @@ test("provisioning IAM policy is limited to MCP and host SSM prefixes", async ()
   assert.match(provision, /parameter\/clockchain\/mcp\/\*/);
   assert.match(provision, /parameter\/clockchain\/host\/\*/);
   assert.doesNotMatch(provision, /parameter\/clockchain\/\*/);
+});
+
+test("provisioning attaches only the managed SSM core policy needed for Run Command", async () => {
+  const provision = await readFile(path.join(repoRoot, "infra", "scripts", "provision-clockchain-mcp-host.sh"), "utf8");
+  assert.match(
+    provision,
+    /SSM_CORE_POLICY_ARN="arn:aws:iam::aws:policy\/AmazonSSMManagedInstanceCore"/,
+  );
+  assert.match(
+    provision,
+    /aws iam attach-role-policy \\\n+\s+--role-name "\$ROLE_NAME" \\\n+\s+--policy-arn "\$SSM_CORE_POLICY_ARN"/,
+  );
+  assert.doesNotMatch(provision, /arn:aws:iam::aws:policy\/AdministratorAccess/);
+  assert.doesNotMatch(provision, /arn:aws:iam::aws:policy\/AmazonSSMFullAccess/);
+});
+
+test("provisioning waits for the exact instance to become SSM Online", async () => {
+  const provision = await readFile(path.join(repoRoot, "infra", "scripts", "provision-clockchain-mcp-host.sh"), "utf8");
+  assert.match(provision, /wait_for_ssm_online\(\) \{/);
+  assert.match(
+    provision,
+    /Key=InstanceIds,Values=\$\{instance_id\}/,
+  );
+  assert.match(provision, /PingStatus/);
+  assert.match(provision, /Online/);
+  assert.match(provision, /for attempt in \{1\.\.24\}; do/);
+  assert.match(provision, /sleep 5/);
+  assert.match(provision, /SSM_STATUS=%s/);
+  assert.match(provision, /wait_for_ssm_online "\$instance_id"/);
 });
 
 test("root npm test runs workspace and infra tests with deterministic failure propagation", async () => {

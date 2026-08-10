@@ -11,6 +11,11 @@ The instance role may decrypt only `/clockchain/mcp/*` and
 never place a value in this repository, Compose, systemd, shell history, or a
 support log.
 
+The role also attaches AWS's `AmazonSSMManagedInstanceCore` policy so the SSM
+agent can use Run Command without opening another administrative ingress path.
+Provisioning does not report success until the exact new instance is SSM
+`Online`; the parameter-read policy above remains separately prefix-limited.
+
 - `/clockchain/mcp/CLOCKCHAIN_API_KEY`
 - `/clockchain/mcp/MCP_AUTH_TOKENS`
 - `/clockchain/mcp/MCP_TOKEN_SIGNING_SECRET`
