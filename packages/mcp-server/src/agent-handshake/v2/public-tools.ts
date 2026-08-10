@@ -25,6 +25,7 @@ const TERMINAL_ERROR_NAMES = new Set([
   "V2InvitationError",
   "V2RoleAccessError",
 ]);
+const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 const identityPolicy = z.discriminatedUnion("erc8004", [
   z.object({
     erc8004: z.literal("required_fresh"),
@@ -85,6 +86,15 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
         const result = await invoke(definition.name, args);
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown> };
       } catch (error) {
+        const observedName = (error as Error)?.name;
+        const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName)
+          ? observedName
+          : "Error";
+        console.warn(JSON.stringify({
+          event: "agent_handshake_tool_failure",
+          tool: definition.name,
+          errorName,
+        }));
         const retryable = !TERMINAL_ERROR_NAMES.has((error as Error)?.name) &&
           (error as Error)?.message !== "rate_limited";
         const body = retryable

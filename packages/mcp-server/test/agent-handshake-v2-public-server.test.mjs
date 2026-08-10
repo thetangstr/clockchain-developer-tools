@@ -136,25 +136,37 @@ test("public HTTP routing ignores full-surface credentials, trusts only configur
 });
 
 test("public tools distinguish retryable infrastructure failures from terminal protocol rejection", async () => {
-  for (const candidate of [
-    { error: Object.assign(new Error("rpc unavailable"), { name: "RpcRequestError" }), retryable: true },
-    { error: Object.assign(new Error("invalid role state"), { name: "V2CoordinatorError" }), retryable: false },
-  ]) {
-    const handler = createV2PublicHttpHandler({ pin, invoke: async () => { throw candidate.error; } });
-    const httpServer = createServer((req, res) => handler(req, res));
-    await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
-    const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
-    try {
-      const result = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: "a".repeat(80) } });
-      const body = JSON.parse(result.body.result.content[0].text);
-      assert.equal(body.retryable, candidate.retryable);
-      assert.equal(result.body.result.isError === true, !candidate.retryable);
-      if (candidate.retryable) {
-        assert.equal(body.error, "HANDSHAKE_TEMPORARILY_UNAVAILABLE");
-        assert.equal(body.retryAfterMs, 5000);
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (value) => warnings.push(value);
+  try {
+    for (const candidate of [
+      { error: Object.assign(new Error("rpc unavailable"), { name: "RpcRequestError" }), retryable: true },
+      { error: Object.assign(new Error("secret invalid role state"), { name: "V2CoordinatorError" }), retryable: false },
+    ]) {
+      const handler = createV2PublicHttpHandler({ pin, invoke: async () => { throw candidate.error; } });
+      const httpServer = createServer((req, res) => handler(req, res));
+      await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+      const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+      try {
+        const result = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: "a".repeat(80) } });
+        const body = JSON.parse(result.body.result.content[0].text);
+        assert.equal(body.retryable, candidate.retryable);
+        assert.equal(result.body.result.isError === true, !candidate.retryable);
+        if (candidate.retryable) {
+          assert.equal(body.error, "HANDSHAKE_TEMPORARILY_UNAVAILABLE");
+          assert.equal(body.retryAfterMs, 5000);
+        }
+      } finally {
+        await new Promise((resolve) => httpServer.close(resolve));
       }
-    } finally {
-      await new Promise((resolve) => httpServer.close(resolve));
     }
+  } finally {
+    console.warn = originalWarn;
   }
+  assert.deepEqual(warnings.map((entry) => JSON.parse(entry)), [
+    { event: "agent_handshake_tool_failure", tool: "agent_handshake_status", errorName: "RpcRequestError" },
+    { event: "agent_handshake_tool_failure", tool: "agent_handshake_status", errorName: "V2CoordinatorError" },
+  ]);
+  assert.equal(warnings.join("\n").includes("secret invalid role state"), false);
 });
