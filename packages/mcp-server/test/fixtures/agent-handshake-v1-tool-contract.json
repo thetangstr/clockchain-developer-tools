@@ -1,0 +1,229 @@
+{
+  "schema": "clockchain.agent-handshake-v1-tool-contract/v1",
+  "tools": [
+    {
+      "name": "agent_handshake_invite",
+      "title": "Invite a responder to a stakeholder handshake",
+      "description": "Create one single-use Responder invitation bound to the current session and the exact shared statement.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "terms": {
+            "type": "object",
+            "properties": {
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[ -~]+$"
+              },
+              "statement": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[ -~]+$"
+              },
+              "validForMinutes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60
+              }
+            },
+            "required": [
+              "reference",
+              "statement",
+              "validForMinutes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "terms"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "agent_handshake_status",
+      "title": "Read stakeholder handshake status",
+      "description": "Read generic two-stakeholder handshake progress for this independently authenticated agent.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Optional generic handshake session id."
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "agent_handshake_join",
+      "title": "Join a stakeholder handshake",
+      "description": "Join as Initiator or Responder and independently pin the exact shared statement, reference, and validity window.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "initiator",
+              "responder"
+            ],
+            "description": "Generic stakeholder role. Must be exactly initiator or responder."
+          },
+          "invitationId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "description": "Optional exact relay session invitation. Omit only to join current discovery."
+          },
+          "terms": {
+            "type": "object",
+            "properties": {
+              "reference": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[ -~]+$"
+              },
+              "statement": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[ -~]+$"
+              },
+              "validForMinutes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60
+              }
+            },
+            "required": [
+              "reference",
+              "statement",
+              "validForMinutes"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "role",
+          "terms"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "agent_handshake_next",
+      "title": "Get next stakeholder handshake action",
+      "description": "Return the next generic handshake action or exact public bytes that this local stakeholder must sign.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Generic handshake session id."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "initiator",
+              "responder"
+            ],
+            "description": "Generic stakeholder role. Must be exactly initiator or responder."
+          },
+          "signingEncoding": {
+            "type": "string",
+            "enum": [
+              "hex",
+              "gzip-base64url"
+            ],
+            "default": "hex",
+            "description": "Optional signing payload encoding. Defaults to hex; gzip-base64url returns a shorter compressed payload."
+          }
+        },
+        "required": [
+          "sessionId",
+          "role"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "agent_handshake_submit",
+      "title": "Submit a stakeholder handshake signature",
+      "description": "Submit only the caller-produced public EIP-191 signature for the pending generic handshake action.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Generic handshake session id."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "initiator",
+              "responder"
+            ],
+            "description": "Generic stakeholder role. Must be exactly initiator or responder."
+          },
+          "signatureHex": {
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{130}$",
+            "description": "Caller-produced EIP-191 signature hex."
+          }
+        },
+        "required": [
+          "sessionId",
+          "role",
+          "signatureHex"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    },
+    {
+      "name": "agent_handshake_get_certificate",
+      "title": "Get verified stakeholder handshake certificate",
+      "description": "Fetch the generic signed result after both independent stakeholder evidence packages verify.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Generic handshake session id."
+          }
+        },
+        "required": [
+          "sessionId"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ]
+}

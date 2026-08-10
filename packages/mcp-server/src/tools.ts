@@ -25,6 +25,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BudgetExceededError, getSharedLogBudget, unlimitedLogBudget } from "./budget.js";
 import { createRuntimeHandshakeCoordinator } from "./handshake/coordinator.js";
+import { createRuntimeAgentHandshakeCoordinator } from "./agent-handshake/coordinator.js";
+import { agentHandshakeStatementDigest } from "./agent-handshake/protocol.js";
+import { getRuntimeAgentHandshakeInvitationService } from "./agent-handshake/invitation-store.js";
+import type { HandshakeSessionTokenPayload } from "./token.js";
 import { idempotent } from "./idempotency.js";
 import type { KeeperGate } from "./entitlement.js";
 import { assertToolClassified } from "./entitlement.js";
@@ -62,12 +66,79 @@ const handshakeRoleSchema = z
 
 type HandshakeRole = z.infer<typeof handshakeRoleSchema>;
 
+const handshakeInvitationIdSchema = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  .optional()
+  .describe("Optional exact relay session invitation. Omit only to join current discovery.");
+
+const handshakeBusinessTermsSchema = z
+  .object({
+    amount: z.object({
+      currency: z.literal("USD"),
+      value: z.string().regex(/^(?:0|[1-9][0-9]{0,15})$/),
+    }).strict(),
+    invoiceReference: z.string().min(1).max(128).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+    purpose: z.string().min(1).max(128).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+    validForMinutes: z.number().int().min(30).max(240).optional(),
+  })
+  .strict()
+  .optional()
+  .describe("Optional invoice authorization terms independently supplied by this party.");
+
+type HandshakeBusinessTerms = z.infer<typeof handshakeBusinessTermsSchema>;
+
+const signingEncodingSchema = z
+  .enum(["hex", "gzip-base64url"])
+  .optional()
+  .default("hex")
+  .describe("Optional signing payload encoding. Defaults to hex; gzip-base64url returns a shorter compressed payload.");
+
+type SigningEncoding = z.infer<typeof signingEncodingSchema>;
+
+const handshakeWaitMsSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(15000)
+  .optional()
+  .default(0)
+  .describe("Optional bounded wait in ms for counterpart_transition only. Defaults to 0.");
+
+type HandshakeWaitMs = z.infer<typeof handshakeWaitMsSchema>;
+
 export interface HandshakeCoordinator {
   status(sessionId?: string): Promise<unknown>;
-  join(role: HandshakeRole): Promise<unknown>;
-  next(sessionId: string, role: HandshakeRole): Promise<unknown>;
+  join(role: HandshakeRole, invitationId?: string, terms?: HandshakeBusinessTerms): Promise<unknown>;
+  next(sessionId: string, role: HandshakeRole, signingEncoding?: SigningEncoding, waitMs?: HandshakeWaitMs): Promise<unknown>;
   submit(sessionId: string, role: HandshakeRole, signatureHex: string): Promise<unknown>;
   getCertificate(sessionId: string): Promise<unknown>;
+}
+
+const agentHandshakeRoleSchema = z
+  .enum(["initiator", "responder"])
+  .describe("Generic stakeholder role. Must be exactly initiator or responder.");
+
+type AgentHandshakeRole = z.infer<typeof agentHandshakeRoleSchema>;
+
+const agentHandshakeTermsSchema = z.object({
+  reference: z.string().min(1).max(128).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+  statement: z.string().min(1).max(256).regex(/^[ -~]+$/).refine((value) => value.trim() === value),
+  validForMinutes: z.number().int().min(1).max(60),
+}).strict();
+
+type AgentHandshakeTerms = z.infer<typeof agentHandshakeTermsSchema>;
+
+export interface AgentHandshakeCoordinator {
+  status(sessionId?: string): Promise<unknown>;
+  join(role: AgentHandshakeRole, invitationId: string | undefined, terms: AgentHandshakeTerms): Promise<unknown>;
+  next(sessionId: string, role: AgentHandshakeRole, signingEncoding?: SigningEncoding): Promise<unknown>;
+  submit(sessionId: string, role: AgentHandshakeRole, signatureHex: string): Promise<unknown>;
+  getCertificate(sessionId: string): Promise<unknown>;
+}
+
+export interface AgentHandshakeInvitationService {
+  invite(terms: AgentHandshakeTerms): Promise<unknown>;
 }
 
 /**
@@ -220,7 +291,7 @@ async function run(name: string, work: () => Promise<unknown>) {
  * + nonce; the server never holds a key.
  *
  * `opts.surface` controls which tools are registered:
- *   - "full" (default): all 31 tools — the full testnet surface.
+ *   - "full" (default): all 42 tools — the full testnet surface.
  *   - "product": only `get_time` — the production-safe slice (CLO-99).
  *
  * `get_time` is always registered regardless of surface. Full behavior is
@@ -235,6 +306,9 @@ export function registerTools(
     gate?: KeeperGate;
     principalId?: string;
     handshakeCoordinator?: HandshakeCoordinator;
+    agentHandshakeCoordinator?: AgentHandshakeCoordinator;
+    agentHandshakeInvitationService?: AgentHandshakeInvitationService;
+    agentHandshakeScope?: HandshakeSessionTokenPayload;
   } = {},
 ): void {
   // Fail-closed classification guard (CLO-48 review FIX 2). We intercept
@@ -250,6 +324,7 @@ export function registerTools(
   // returns the gate's structured `402 account_required` tool error and never
   // invokes the real handler.
   const gate = opts.gate;
+  const agentHandshakeScope = opts.agentHandshakeScope;
   {
     const orig = server.registerTool.bind(server) as (
       name: string,
@@ -262,10 +337,36 @@ export function registerTools(
       handler,
     ) => {
       assertToolClassified(name);
-      if (!gate) return orig(name, meta, handler);
       return orig(name, meta, async (...args: unknown[]) => {
-        const blocked = await gate.check(name);
-        return blocked ?? handler(...args);
+        if (agentHandshakeScope) {
+          const input = (args[0] ?? {}) as Record<string, unknown>;
+          let allowed = agentHandshakeScope.tools.includes(name);
+          if (allowed && typeof input.sessionId === "string") {
+            allowed = input.sessionId === agentHandshakeScope.invitationId;
+          }
+          if (allowed && typeof input.role === "string") {
+            allowed = input.role === agentHandshakeScope.role;
+          }
+          if (allowed && name === "agent_handshake_join") {
+            try {
+              allowed = input.invitationId === agentHandshakeScope.invitationId &&
+                agentHandshakeStatementDigest(input.terms) === agentHandshakeScope.statementDigest;
+            } catch {
+              allowed = false;
+            }
+          }
+          if (!allowed) {
+            return {
+              isError: true as const,
+              content: [{ type: "text" as const, text: JSON.stringify({ error: "HANDSHAKE_SCOPE_DENIED" }) }],
+            };
+          }
+        }
+        if (gate) {
+          const blocked = await gate.check(name);
+          if (blocked) return blocked;
+        }
+        return handler(...args);
       });
     };
   }
@@ -277,6 +378,8 @@ export function registerTools(
   // them. Disabled when MCP_LOG_BUDGET is unset -> identical to v1.
   const budget = opts.delegated === false ? unlimitedLogBudget() : getSharedLogBudget();
   let runtimeHandshakeCoordinator: HandshakeCoordinator | undefined;
+  let runtimeAgentHandshakeCoordinator: AgentHandshakeCoordinator | undefined;
+  let runtimeAgentHandshakeInvitationService: AgentHandshakeInvitationService | undefined;
   const handshakeCoordinator = (): HandshakeCoordinator => {
     if (opts.handshakeCoordinator) return opts.handshakeCoordinator;
     runtimeHandshakeCoordinator ??= createRuntimeHandshakeCoordinator({
@@ -285,6 +388,19 @@ export function registerTools(
       principal: opts.principalId ?? "stdio",
     });
     return runtimeHandshakeCoordinator;
+  };
+  const agentHandshakeCoordinator = (): AgentHandshakeCoordinator => {
+    if (opts.agentHandshakeCoordinator) return opts.agentHandshakeCoordinator;
+    runtimeAgentHandshakeCoordinator ??= createRuntimeAgentHandshakeCoordinator({
+      clockchain: client,
+      principal: opts.principalId ?? "stdio",
+    });
+    return runtimeAgentHandshakeCoordinator;
+  };
+  const agentHandshakeInvitationService = (): AgentHandshakeInvitationService => {
+    if (opts.agentHandshakeInvitationService) return opts.agentHandshakeInvitationService;
+    runtimeAgentHandshakeInvitationService ??= getRuntimeAgentHandshakeInvitationService();
+    return runtimeAgentHandshakeInvitationService;
   };
 
   // ===== TIME MCP =====
@@ -1286,14 +1402,22 @@ export function registerTools(
     {
       title: "Join a bilateral handshake",
       description:
-        "Join the current relay discovery session as payer or requestor.",
+        "Join the exact invitation as payer or requestor. Payer must supply the exact mandate terms " +
+        "before signing; Requestor must independently supply the terms it expects so a different " +
+        "signed mandate fails closed. Reuse the returned sessionId for every later handshake call.",
       inputSchema: {
         role: handshakeRoleSchema,
+        invitationId: handshakeInvitationIdSchema,
+        terms: handshakeBusinessTermsSchema,
       },
     },
-    async ({ role }) =>
+    async ({ role, invitationId, terms }) =>
       run("handshake_join", () =>
-        handshakeCoordinator().join(handshakeRoleSchema.parse(role)),
+        handshakeCoordinator().join(
+          handshakeRoleSchema.parse(role),
+          handshakeInvitationIdSchema.parse(invitationId),
+          handshakeBusinessTermsSchema.parse(terms),
+        ),
       ),
   );
 
@@ -1306,11 +1430,18 @@ export function registerTools(
       inputSchema: {
         sessionId: z.string().describe("Handshake session id."),
         role: handshakeRoleSchema,
+        signingEncoding: signingEncodingSchema,
+        waitMs: handshakeWaitMsSchema,
       },
     },
-    async ({ sessionId, role }) =>
+    async ({ sessionId, role, signingEncoding, waitMs }) =>
       run("handshake_next", () =>
-        handshakeCoordinator().next(sessionId, handshakeRoleSchema.parse(role)),
+        handshakeCoordinator().next(
+          sessionId,
+          handshakeRoleSchema.parse(role),
+          signingEncodingSchema.parse(signingEncoding),
+          handshakeWaitMsSchema.parse(waitMs),
+        ),
       ),
   );
 
@@ -1349,6 +1480,117 @@ export function registerTools(
     async ({ sessionId }) =>
       run("handshake_get_certificate", () =>
         handshakeCoordinator().getCertificate(sessionId),
+      ),
+  );
+
+  // ===== GENERIC TWO-STAKEHOLDER HANDSHAKE MCP =====
+  // Additive to the bilateral authorization namespace. These tools bind a
+  // shared statement and never translate it into invoice or transfer terms.
+  server.registerTool(
+    "agent_handshake_invite",
+    {
+      title: "Invite a responder to a stakeholder handshake",
+      description:
+        "Create one single-use Responder invitation bound to the current session and the exact shared statement.",
+      inputSchema: {
+        terms: agentHandshakeTermsSchema,
+      },
+    },
+    async ({ terms }) =>
+      run("agent_handshake_invite", () =>
+        agentHandshakeInvitationService().invite(agentHandshakeTermsSchema.parse(terms)),
+      ),
+  );
+
+  server.registerTool(
+    "agent_handshake_status",
+    {
+      title: "Read stakeholder handshake status",
+      description: "Read generic two-stakeholder handshake progress for this independently authenticated agent.",
+      inputSchema: {
+        sessionId: z.string().optional().describe("Optional generic handshake session id."),
+      },
+    },
+    async ({ sessionId }) =>
+      run("agent_handshake_status", () => agentHandshakeCoordinator().status(sessionId)),
+  );
+
+  server.registerTool(
+    "agent_handshake_join",
+    {
+      title: "Join a stakeholder handshake",
+      description:
+        "Join as Initiator or Responder and independently pin the exact shared statement, reference, and validity window.",
+      inputSchema: {
+        role: agentHandshakeRoleSchema,
+        invitationId: handshakeInvitationIdSchema,
+        terms: agentHandshakeTermsSchema,
+      },
+    },
+    async ({ role, invitationId, terms }) =>
+      run("agent_handshake_join", () =>
+        agentHandshakeCoordinator().join(
+          agentHandshakeRoleSchema.parse(role),
+          handshakeInvitationIdSchema.parse(invitationId),
+          agentHandshakeTermsSchema.parse(terms),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "agent_handshake_next",
+    {
+      title: "Get next stakeholder handshake action",
+      description: "Return the next generic handshake action or exact public bytes that this local stakeholder must sign.",
+      inputSchema: {
+        sessionId: z.string().describe("Generic handshake session id."),
+        role: agentHandshakeRoleSchema,
+        signingEncoding: signingEncodingSchema,
+      },
+    },
+    async ({ sessionId, role, signingEncoding }) =>
+      run("agent_handshake_next", () =>
+        agentHandshakeCoordinator().next(
+          sessionId,
+          agentHandshakeRoleSchema.parse(role),
+          signingEncodingSchema.parse(signingEncoding),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "agent_handshake_submit",
+    {
+      title: "Submit a stakeholder handshake signature",
+      description: "Submit only the caller-produced public EIP-191 signature for the pending generic handshake action.",
+      inputSchema: {
+        sessionId: z.string().describe("Generic handshake session id."),
+        role: agentHandshakeRoleSchema,
+        signatureHex: z.string().regex(/^0x[0-9a-f]{130}$/).describe("Caller-produced EIP-191 signature hex."),
+      },
+    },
+    async ({ sessionId, role, signatureHex }) =>
+      run("agent_handshake_submit", () =>
+        agentHandshakeCoordinator().submit(
+          sessionId,
+          agentHandshakeRoleSchema.parse(role),
+          signatureHex,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "agent_handshake_get_certificate",
+    {
+      title: "Get verified stakeholder handshake certificate",
+      description: "Fetch the generic signed result after both independent stakeholder evidence packages verify.",
+      inputSchema: {
+        sessionId: z.string().describe("Generic handshake session id."),
+      },
+    },
+    async ({ sessionId }) =>
+      run("agent_handshake_get_certificate", () =>
+        agentHandshakeCoordinator().getCertificate(sessionId),
       ),
   );
 }

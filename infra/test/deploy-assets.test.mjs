@@ -13,6 +13,7 @@ const wrapper = path.join(deployDir, "compose-up.sh");
 const composeFile = path.join(deployDir, "docker-compose.yml");
 const caddyFile = path.join(deployDir, "Caddyfile");
 const systemdUnit = path.join(deployDir, "clockchain-mcp.service");
+const runbook = path.join(deployDir, "RUNBOOK.md");
 const installScript = path.join(repoRoot, "infra", "scripts", "install-clockchain-mcp-deploy-assets.sh");
 const rootPackageJson = path.join(repoRoot, "package.json");
 
@@ -20,6 +21,9 @@ const expectedSecretNames = [
   "/clockchain/mcp/CLOCKCHAIN_API_KEY",
   "/clockchain/mcp/MCP_AUTH_TOKENS",
   "/clockchain/mcp/MCP_TOKEN_SIGNING_SECRET",
+  "/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN",
+  "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE",
+  "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS",
 ];
 
 const expectedHostSecretNames = [
@@ -27,6 +31,7 @@ const expectedHostSecretNames = [
   "/clockchain/host/FUNDING_WALLET_PUBLIC_JSON",
   "/clockchain/host/FUNDING_PASSWORD",
   "/clockchain/host/CLOCKCHAIN_TOKEN",
+  "/clockchain/host/AGENT_HANDSHAKE_V2_HOST_ROOT_KEY",
 ];
 const expectedHandshakeSha = "0123456789abcdef0123456789abcdef01234567";
 
@@ -34,6 +39,9 @@ const expectedEnv = {
   CLOCKCHAIN_API_KEY: "api-key-line-1\napi-key-line-2\n",
   MCP_AUTH_TOKENS: "token-a,token-b\n",
   MCP_TOKEN_SIGNING_SECRET: "signing-secret\nwith-newline\n",
+  AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.0","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
+  AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: '{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\n',
+  AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: '{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\n',
 };
 
 const expectedHostSecrets = {
@@ -41,6 +49,7 @@ const expectedHostSecrets = {
   "funding-wallet.public.json": '{"public":"wallet"}\n',
   "funding.password": "pass line 1\npass line 2\n",
   "clockchain.token": "clockchain-token\n",
+  "agent-handshake-v2-host-root.pem": "-----BEGIN PRIVATE KEY-----\nfixture-root\n-----END PRIVATE KEY-----\n",
 };
 
 const oldHostSecrets = {
@@ -48,6 +57,7 @@ const oldHostSecrets = {
   "funding-wallet.public.json": '{"public":"old"}\n',
   "funding.password": "old password\n",
   "clockchain.token": "old token\n",
+  "agent-handshake-v2-host-root.pem": "old root\n",
 };
 
 async function pathExists(file) {
@@ -130,6 +140,7 @@ assert.equal(process.env.EVM_RPC_URL, process.env.EXPECTED_EVM_RPC_URL);
 assert.equal(process.env.HANDSHAKE_KIT_REPO, "https://github.com/thetangstr/clockchain-handshake-v2.git");
 assert.equal(process.env.HANDSHAKE_SHA, "${expectedHandshakeSha}");
 assert.equal(process.env.CLOCKCHAIN_FUNDING_PASSWORD_FILE, "/app/keys/funding.password");
+assert.equal(process.env.CLOCKCHAIN_HOST_ROOT_KEY_ID, "root-2026-08");
 assert.equal(process.env.CLOCKCHAIN_HOST_SECRET_DIR, process.env.EXPECTED_HOST_SECRET_DIR);
 assert.deepEqual((await readdir(process.env.CLOCKCHAIN_HOST_SECRET_DIR)).sort(), Object.keys(expectedHostSecrets).sort());
 for (const [file, value] of Object.entries(expectedHostSecrets)) {
@@ -176,10 +187,14 @@ case "$name" in
   /clockchain/mcp/CLOCKCHAIN_API_KEY) value=$'api-key-line-1\\napi-key-line-2\\n' ;;
   /clockchain/mcp/MCP_AUTH_TOKENS) value=$'token-a,token-b\\n' ;;
   /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET) value=$'signing-secret\\nwith-newline\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.0","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE) value=$'{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) value=$'{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\\n' ;;
   /clockchain/host/FUNDING_WALLET_JSON) value=$'{"wallet":"line-1\\\\nline-2"}\\n' ;;
   /clockchain/host/FUNDING_WALLET_PUBLIC_JSON) value=$'{"public":"wallet"}\\n' ;;
   /clockchain/host/FUNDING_PASSWORD) value=$'pass line 1\\npass line 2\\n' ;;
   /clockchain/host/CLOCKCHAIN_TOKEN) value=$'clockchain-token\\n' ;;
+  /clockchain/host/AGENT_HANDSHAKE_V2_HOST_ROOT_KEY) value=$'-----BEGIN PRIVATE KEY-----\\nfixture-root\\n-----END PRIVATE KEY-----\\n' ;;
   /clockchain/host/MISSING_SECRET) value='' ;;
   *) echo "unexpected parameter: $name" >&2; exit 65 ;;
 esac
@@ -281,6 +296,15 @@ async function resolvedComposeConfig() {
       CLOCKCHAIN_API_KEY: "dummy-api",
       MCP_AUTH_TOKENS: "dummy-token",
       MCP_TOKEN_SIGNING_SECRET: "dummy-signing",
+      AGENT_HANDSHAKE_RELEASE_PIN: JSON.stringify({
+        version: "2.1.0",
+        sourceCommit: expectedHandshakeSha,
+        manifestDigest: "a".repeat(64),
+        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/",
+        hostRoots: [{ kid: "root-2026-08", fingerprint: "b".repeat(64) }],
+      }),
+      AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: "dummy-role-active",
+      AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: "dummy-role-previous",
       HANDSHAKE_APP_ROOT: "/tmp/handshake-app",
       HANDSHAKE_RELAY: "http://44.249.47.220:8080",
       HANDSHAKE_ALLOW_DEGRADED: "false",
@@ -288,6 +312,7 @@ async function resolvedComposeConfig() {
       HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
       HANDSHAKE_SHA: expectedHandshakeSha,
       CLOCKCHAIN_HOST_SECRET_DIR: "/run/clockchain-host-secrets",
+      CLOCKCHAIN_HOST_ROOT_KEY_ID: "root-2026-08",
     },
   });
   assert.equal(result.code, 0, result.stderr);
@@ -326,7 +351,7 @@ test("host secret mount assertion accepts compose bind metadata variants", () =>
 });
 
 test("deployment assets define the locked EC2 compose target", async () => {
-  for (const file of [wrapper, composeFile, caddyFile, systemdUnit]) {
+  for (const file of [wrapper, composeFile, caddyFile, systemdUnit, runbook]) {
     assert.equal(await pathExists(file), true, `${path.relative(repoRoot, file)} exists`);
   }
 
@@ -353,6 +378,8 @@ test("deployment assets define the locked EC2 compose target", async () => {
   assert.match(compose, /HANDSHAKE_RELAY:\s*"\$\{HANDSHAKE_RELAY\}"/);
   assert.match(compose, /HANDSHAKE_SHA:\s*"\$\{HANDSHAKE_SHA\}"/);
   assert.match(compose, /HANDSHAKE_KIT_REPO:\s*"\$\{HANDSHAKE_KIT_REPO\}"/);
+  assert.match(compose, /HANDSHAKE_PROTOCOL:\s*"clockchain\.agent-handshake\/v2"/);
+  assert.match(compose, /command:\s*\["node",\s*"bin\/agent-handshake-host\.mjs"\]/);
   assert.match(compose, /CLOCKCHAIN_FUNDING_PASSWORD_FILE:\s*\/app\/keys\/funding\.password/);
   assert.match(compose, /\$\{CLOCKCHAIN_HOST_SECRET_DIR:-\/run\/clockchain-host-secrets\}:\/app\/keys:ro/);
   assert.match(compose, /host_runs:\/app\/runs/);
@@ -369,6 +396,20 @@ test("deployment assets define the locked EC2 compose target", async () => {
   assert.match(unit, /WantedBy=multi-user\.target/);
 });
 
+test("deployment runbook fixes the release order, secret boundary, canaries, and rollback", async () => {
+  const source = await readFile(runbook, "utf8");
+  for (const name of [...expectedSecretNames, ...expectedHostSecretNames]) {
+    assert.match(source, new RegExp(name.replaceAll("/", "\\/")));
+  }
+  assert.match(source, /helper release[\s\S]*host[\s\S]*MCP[\s\S]*Research/i);
+  assert.match(source, /\/health/);
+  assert.match(source, /\/\.well-known\/agent-handshake\.json/);
+  assert.match(source, /\/handshake\/mcp/);
+  assert.match(source, /rollback/i);
+  assert.match(source, /generic v1 and bilateral/i);
+  assert.doesNotMatch(source, /secretBase64"\s*:\s*"[A-Za-z0-9+/=]{20,}/);
+});
+
 test("resolved compose config gives mcp durable handshake state and relay defaults", async () => {
   const cfg = await resolvedComposeConfig();
   const mcp = cfg.services.mcp;
@@ -377,6 +418,9 @@ test("resolved compose config gives mcp durable handshake state and relay defaul
   assert.equal(mcp.environment.MCP_HANDSHAKE_FILE, "/app/state/handshake.json");
   assert.equal(mcp.environment.HANDSHAKE_ALLOW_DEGRADED, "false");
   assert.equal(mcp.environment.EVM_RPC_URL, "https://ethereum-sepolia-rpc.publicnode.com");
+  assert.equal(mcp.environment.AGENT_HANDSHAKE_V2_INVITATION_FILE, "/app/state/agent-handshake-v2-invitations.json");
+  assert.equal(mcp.environment.AGENT_HANDSHAKE_V2_STATE_FILE, "/app/state/agent-handshake-v2-state.json");
+  assert.equal(mcp.environment.AGENT_HANDSHAKE_TRUSTED_PROXY, "172.30.0.3");
   assert.deepEqual(
     mcp.volumes.filter((volume) => volume.target === "/app/state"),
     [
@@ -399,11 +443,22 @@ test("resolved compose config adds the external host without network ingress", a
   assert.equal(host.restart, "unless-stopped");
   assert.equal(host.ports, undefined);
   assert.equal(host.expose, undefined);
+  assert.deepEqual(host.command, ["node", "bin/agent-handshake-host.mjs"]);
   assert.deepEqual(host.environment, {
+    AGENT_HANDSHAKE_PROTOCOL: "clockchain.agent-handshake/v2",
+    AGENT_HANDSHAKE_V2_FUNDING_ALERT_DAILY_ETH: "0.80",
+    AGENT_HANDSHAKE_V2_FUNDING_ALERT_HOURLY_ETH: "0.16",
+    AGENT_HANDSHAKE_V2_FUNDING_LEDGER: "/app/runs/private/v2-funding-ledger.jsonl",
+    AGENT_HANDSHAKE_V2_FUNDING_QUEUE_LIMIT: "16",
     HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
+    CLOCKCHAIN_FUNDING_KEYSTORE: "/app/keys/funding-wallet.json",
     CLOCKCHAIN_FUNDING_PASSWORD_FILE: "/app/keys/funding.password",
+    CLOCKCHAIN_HOST_ROOT_KEY_FILE: "/app/keys/agent-handshake-v2-host-root.pem",
+    CLOCKCHAIN_HOST_ROOT_KEY_ID: "root-2026-08",
+    HANDSHAKE_PROTOCOL: "clockchain.agent-handshake/v2",
     HANDSHAKE_RELAY: "http://44.249.47.220:8080",
     HANDSHAKE_SHA: expectedHandshakeSha,
+    SEPOLIA_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com",
   });
   assert.equal(host.volumes.length, 2);
   assertHostSecretBindMount(host.volumes[0]);
@@ -522,6 +577,26 @@ test("compose wrapper rejects invalid degraded handshake mode before docker", as
   }
 });
 
+test("compose wrapper rejects invalid release metadata and repeated role signing keys", async () => {
+  for (const extra of [
+    { AGENT_HANDSHAKE_RELEASE_PIN_PARAM: "/clockchain/host/MISSING_SECRET" },
+    { AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM: "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE" },
+  ]) {
+    const { temp, dockerOkFile, env } = await createWrapperFixture({ env: extra });
+    try {
+      const result = await run(wrapper, [], { cwd: temp, env });
+      assert.notEqual(result.code, 0);
+      assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+      for (const secret of Object.values(expectedEnv)) {
+        assert.equal(result.stdout.includes(secret), false);
+        assert.equal(result.stderr.includes(secret), false);
+      }
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
 test("compose wrapper exports operator nonsecret overrides without hardcoding live degraded mode", async () => {
   const { temp, dockerOkFile, env } = await createWrapperFixture({
     env: {
@@ -550,6 +625,20 @@ test("compose wrapper refuses docker when a host SecureString is missing", async
   try {
     const result = await run(wrapper, [], { cwd: temp, env });
 
+    assert.notEqual(result.code, 0);
+    assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper refuses docker when the host-root SecureString is missing", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: { CLOCKCHAIN_HOST_ROOT_KEY_PARAM: "/clockchain/host/MISSING_SECRET" },
+  });
+
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
     assert.notEqual(result.code, 0);
     assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
   } finally {

@@ -16,9 +16,12 @@ import {
   mintTrialToken,
   mintClaim,
   looksLikeSelfServe,
+  verifyHandshakeSessionToken,
+  type HandshakeSessionTokenPayload,
   type TokenPayload,
   type TrialTokenPayload,
 } from "./token.js";
+import { getRuntimeAgentHandshakeInvitationService } from "./agent-handshake/invitation-store.js";
 import { createStore, type Store } from "./store.js";
 import {
   getOrCreateSession,
@@ -33,6 +36,14 @@ import {
   type KeeperGate,
 } from "./entitlement.js";
 import { runPromote } from "./promote.js";
+import {
+  createV2PublicHttpHandler,
+} from "./agent-handshake/v2/public-server.js";
+import {
+  buildV2Manifest,
+  readV2ReleasePin,
+} from "./agent-handshake/v2/instructions.js";
+import { createRuntimeV2Coordinator } from "./agent-handshake/v2/coordinator.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -410,6 +421,22 @@ export async function runHttp(): Promise<void> {
   const store: Store = createStore();
   const promoteSecret = process.env.MCP_PROMOTE_SECRET || signingSecret;
 
+  let publicHandshakeHandler: ReturnType<typeof createV2PublicHttpHandler> | undefined;
+  let publicHandshakeCoordinator: ReturnType<typeof createRuntimeV2Coordinator> | undefined;
+  const getPublicHandshakeHandler = () => {
+    if (publicHandshakeHandler) return publicHandshakeHandler;
+    const pin = readV2ReleasePin(process.env);
+    publicHandshakeCoordinator ??= createRuntimeV2Coordinator(process.env);
+    publicHandshakeHandler = createV2PublicHttpHandler({
+      pin,
+      trustedProxy: process.env.AGENT_HANDSHAKE_TRUSTED_PROXY,
+      invitePerHour: Number(process.env.AGENT_HANDSHAKE_INVITES_PER_HOUR ?? "5"),
+      callsPerMinute: Number(process.env.AGENT_HANDSHAKE_CALLS_PER_MINUTE ?? "120"),
+      invoke: (name, args) => publicHandshakeCoordinator!.invoke(name, args),
+    });
+    return publicHandshakeHandler;
+  };
+
   // A request is authorized if it carries a valid static MCP token OR a valid
   // self-serve signed token (v:1 demo or v:2 trial). Static tokens and v:1 demo
   // tokens resolve to AUTHENTICATED and bypass the trial/keeper layer (LLD §13);
@@ -420,6 +447,7 @@ export async function runHttp(): Promise<void> {
     | { ok: false }
     | { ok: true; reason: "static_token" }
     | { ok: true; reason: "demo_token_v1"; payload: TokenPayload }
+    | { ok: true; scope: HandshakeSessionTokenPayload }
     | { ok: true; trial: TrialTokenPayload };
   const checkAuth = (req: IncomingMessage): AuthOutcome => {
     if (isAuthorized(req.headers, tokens)) return { ok: true, reason: "static_token" };
@@ -430,6 +458,8 @@ export async function runHttp(): Promise<void> {
     if (v1.valid) return { ok: true, reason: "demo_token_v1", payload: v1.payload };
     const v2 = verifyTrialToken(signingSecret, presented);
     if (v2.valid) return { ok: true, trial: v2.payload };
+    const v3 = verifyHandshakeSessionToken(signingSecret, presented);
+    if (v3.valid) return { ok: true, scope: v3.payload };
     return { ok: false };
   };
 
@@ -465,6 +495,61 @@ export async function runHttp(): Promise<void> {
         "cache-control": "public, max-age=300",
       });
       res.end(JSON.stringify(MCP_MANIFEST, null, 2));
+      return;
+    }
+
+    if (req.method === "GET" && pathOf(req.url) === "/.well-known/agent-handshake.json") {
+      try {
+        res.writeHead(200, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "public, max-age=300",
+        });
+        res.end(JSON.stringify(buildV2Manifest(readV2ReleasePin(process.env)), null, 2));
+      } catch {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
+      }
+      return;
+    }
+
+    if (pathOf(req.url) === "/handshake/mcp") {
+      try {
+        await getPublicHandshakeHandler()(req, res);
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
+        }
+      }
+      return;
+    }
+
+    // A Responder exchanges the URL-fragment capability exactly once. The
+    // capability is never sent in a query string and the response is never
+    // cacheable. All public failures intentionally collapse to one code.
+    if (req.method === "POST" && pathOf(req.url) === "/handshake/invitations/exchange") {
+      let body: unknown;
+      try {
+        body = await readJsonBody(req, 16 * 1024);
+        if (
+          body === null || typeof body !== "object" || Array.isArray(body) ||
+          Object.keys(body).length !== 1 || typeof (body as { capability?: unknown }).capability !== "string"
+        ) throw new Error("invalid");
+        const result = await getRuntimeAgentHandshakeInvitationService().exchange(
+          (body as { capability: string }).capability,
+        );
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(409, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        res.end(JSON.stringify({ error: "INVITATION_UNAVAILABLE" }));
+      }
       return;
     }
 
@@ -636,7 +721,9 @@ export async function runHttp(): Promise<void> {
     const auth: AuthOutcome = byo ? { ok: true, reason: "static_token" } : checkAuth(req);
     if (!byo && !auth.ok) {
       const presented = presentedApiKey(req.headers);
-      if (presented) {
+      // A malformed or expired signed-token-shaped credential must never fall
+      // through as BYO: that would erase its session/role/tool restrictions.
+      if (presented && !looksLikeSelfServe(presented)) {
         byo = clockchainOverridesFromKey(presented, req.headers);
       } else {
         // No credential presented — return actionable guidance, not a dead end.
@@ -696,6 +783,8 @@ export async function runHttp(): Promise<void> {
         ? auth.payload.jti
         : "trial" in auth
           ? auth.trial.jti
+          : "scope" in auth
+            ? auth.scope.jti
           : undefined;
     const effectiveCallerId = callerPrincipalId(
       req.headers,
@@ -774,6 +863,7 @@ export async function runHttp(): Promise<void> {
         byo,
         gate,
         effectiveCallerId,
+        !byo && auth.ok && "scope" in auth ? auth.scope : undefined,
       );
       const transport = new StreamableHTTPServerTransport({
         // Stateless: no session id generation.

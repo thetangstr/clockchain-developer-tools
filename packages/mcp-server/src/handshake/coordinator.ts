@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import { gzipSync } from "node:zlib";
 import {
   buildAcceptance,
   buildAcknowledgment,
@@ -23,7 +25,10 @@ import {
   type HandshakeRecord,
   type HandshakeStateStore,
 } from "./state.js";
-import { createHandshakeRelayClient } from "./relay.js";
+import {
+  HandshakeRelayResultPendingError,
+  createHandshakeRelayClient,
+} from "./relay.js";
 import {
   recoverEip191Address as recoverEip191AddressFromRpc,
   resolveOwnedAgentId as resolveOwnedAgentIdFromRpc,
@@ -32,9 +37,16 @@ import {
 type JsonObject = Record<string, any>;
 type PublicRole = "payer" | "requestor";
 type EvidenceRole = "payer" | "payee";
+type SigningEncoding = "hex" | "gzip-base64url";
+type HandshakeBusinessTerms = Readonly<{
+  amount: Readonly<{ currency: "USD"; value: string }>;
+  invoiceReference: string;
+  purpose: string;
+  validForMinutes?: number;
+}>;
 
 type RelayClient = {
-  fetchDiscovery(): Promise<JsonObject>;
+  fetchDiscovery(sessionId?: string): Promise<JsonObject>;
   getMessages(input: { after?: string; sessionId: string }): Promise<{ messages: readonly JsonObject[] }>;
   postMessage(input: {
     body: unknown;
@@ -69,8 +81,14 @@ type WriteBudget = {
   record?: () => void;
 };
 
+type WaitTiming = {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
 type CoordinatorState = JsonObject & {
   agentId?: string;
+  businessTerms?: HandshakeBusinessTerms;
   certificateVerified?: boolean;
   counterpart?: { address: string; agentId?: string; senderKey?: string };
   discovery?: JsonObject;
@@ -133,8 +151,9 @@ export function createRuntimeHandshakeCoordinator(options: {
   });
   return Object.freeze({
     getCertificate: (sessionId: string) => coordinatorForCall().getCertificate(sessionId),
-    join: (role: string) => coordinatorForCall().join(role),
-    next: (sessionId: string, role: string) => coordinatorForCall().next(sessionId, role),
+    join: (role: string, invitationId?: string, termsInput?: unknown) => coordinatorForCall().join(role, invitationId, termsInput),
+    next: (sessionId: string, role: string, signingEncoding?: string, waitMs?: unknown) =>
+      coordinatorForCall().next(sessionId, role, signingEncoding, waitMs),
     status: (sessionId?: string) => coordinatorForCall().status(sessionId),
     submit: (sessionId: string, role: string, signatureHex: string) => coordinatorForCall().submit(sessionId, role, signatureHex),
   });
@@ -149,10 +168,13 @@ export function createHandshakeCoordinator(options: {
   resolveOwnedAgentId(input: { address: string }): Promise<string | null>;
   stateStore?: HandshakeStateStore;
   budget?: WriteBudget;
+  waitTiming?: WaitTiming;
 }) {
   const stateStore = options.stateStore ?? createHandshakeStateStore();
   const env = options.env ?? process.env;
   const principal = options.principal;
+  const waitNow = options.waitTiming?.now ?? (() => performance.now());
+  const waitSleep = options.waitTiming?.sleep ?? sleep;
 
   const api = {
     __testDelay: undefined as undefined | (() => Promise<void>),
@@ -165,13 +187,26 @@ export function createHandshakeCoordinator(options: {
       };
     },
 
-    async join(roleInput: string): Promise<JsonObject> {
+    async join(roleInput: string, invitationId?: string, termsInput?: unknown): Promise<JsonObject> {
       const role = publicRole(roleInput);
-      const discovery = await options.relay.fetchDiscovery();
+      const requestedTerms = normalizeBusinessTerms(termsInput, role);
+      const discovery = await options.relay.fetchDiscovery(invitationId);
       const sessionId = stringField(discovery, "sessionId", "DISCOVERY_INVALID");
+      const operatorPublicKey = stringField(discovery, "operatorPublicKey", "DISCOVERY_INVALID");
       const key = stateKey(principal, sessionId, role);
       return withGlobalLock(key, async () => {
         const current = await ensureRecord(stateStore, key, discovery);
+        const currentData = dataOf(current);
+        if (
+          currentData.businessTerms &&
+          requestedTerms &&
+          !sameCanonical(currentData.businessTerms, requestedTerms)
+        ) {
+          throw new HandshakeCoordinatorError("Handshake business terms are already pinned for this role.", "BUSINESS_TERMS_CONFLICT");
+        }
+        if (!currentData.businessTerms && requestedTerms && currentData.identityAddress) {
+          throw new HandshakeCoordinatorError("Handshake business terms cannot change after identity signing.", "BUSINESS_TERMS_CONFLICT");
+        }
         const ownAddress = typeof current.data?.identityAddress === "string" ? current.data.identityAddress : undefined;
         const messages = await loadMessages(options.relay, sessionId);
         const seat = findSeat(messages, role);
@@ -189,11 +224,15 @@ export function createHandshakeCoordinator(options: {
             ? { privateKeyPem: record.relayEd25519Pem, senderKey: currentSenderKey }
             : generateRelayKeyPair();
           return mergeData(key, { ...record, relayEd25519Pem: relay.privateKeyPem } as HandshakeRecord | null, {
+            businessTerms: currentData.businessTerms ?? requestedTerms,
             discovery,
             relay: { senderKey: relay.senderKey },
           });
         });
         return {
+          invitationId: sessionId,
+          invitationUrl: `${String(discovery.relayUrl).replace(/\/+$/, "")}/v1/discovery/${encodeURIComponent(sessionId)}`,
+          operatorPublicKey,
           relayUrl: discovery.relayUrl,
           repositorySha: discovery.repositorySha,
           sessionId,
@@ -202,10 +241,18 @@ export function createHandshakeCoordinator(options: {
       });
     },
 
-    async next(sessionId: string, roleInput: string): Promise<JsonObject> {
+    async next(sessionId: string, roleInput: string, signingEncodingInput: string = "hex", waitMsInput: unknown = 0): Promise<JsonObject> {
       const role = publicRole(roleInput);
+      const signingEncoding = parseSigningEncoding(signingEncodingInput);
+      const waitMs = parseWaitMs(waitMsInput);
       const key = stateKey(principal, sessionId, role);
-      return withGlobalLock(key, async () => {
+      const deadline = waitMs > 0 ? readWaitNow(waitNow) + waitMs : 0;
+      let nextDelayMs = 250;
+      let latest: JsonObject = {};
+      let firstAttempt = true;
+      while (true) {
+        if (!firstAttempt && waitMs > 0 && readWaitNow(waitNow) >= deadline) return latest;
+        latest = await withGlobalLock(key, async () => {
         if (api.__testDelay) await api.__testDelay();
         let record = await requireRecord(stateStore, key);
         record = await refreshFromMailbox(options, stateStore, key, record);
@@ -216,7 +263,7 @@ export function createHandshakeCoordinator(options: {
           return signRequest("sign_identity", bytes, {
             role,
             sessionId,
-          });
+          }, signingEncoding);
         }
 
         if (!data.agentId) {
@@ -242,11 +289,11 @@ export function createHandshakeCoordinator(options: {
             return { needed: "requestor_identity_ready", sessionId, stage: "awaiting_counterpart" };
           }
           if (latest.pendingArtifact?.mandate) {
-            return signRequest("sign_mandate", canonicalBytes(latest.pendingArtifact.mandate), { sessionId });
+            return signRequest("sign_mandate", canonicalBytes(latest.pendingArtifact.mandate), { sessionId }, signingEncoding);
           }
           const artifact = await prepareMandate(options.clockchain, latest, sessionId);
           await stateStore.update(key, (current) => mergeData(key, current, { pendingArtifact: artifact, stage: "sign_mandate" }));
-          return signRequest("sign_mandate", canonicalBytes(artifact.mandate), { sessionId });
+          return signRequest("sign_mandate", canonicalBytes(artifact.mandate), { sessionId }, signingEncoding);
         }
 
         if (role === "requestor" && !latest.requestEnvelope) {
@@ -254,11 +301,11 @@ export function createHandshakeCoordinator(options: {
             return { needed: "payer_mandate", sessionId, stage: "awaiting_mandate" };
           }
           if (latest.pendingArtifact?.request) {
-            return signRequest("sign_payment_request", canonicalBytes(latest.pendingArtifact.request), { sessionId });
+            return signRequest("sign_payment_request", canonicalBytes(latest.pendingArtifact.request), { sessionId }, signingEncoding);
           }
           const artifact = prepareRequest(latest, sessionId);
           await stateStore.update(key, (current) => mergeData(key, current, { pendingArtifact: artifact, stage: "sign_payment_request" }));
-          return signRequest("sign_payment_request", canonicalBytes(artifact.request), { sessionId });
+          return signRequest("sign_payment_request", canonicalBytes(artifact.request), { sessionId }, signingEncoding);
         }
 
         record = await refreshFromMailbox(options, stateStore, key, record);
@@ -309,8 +356,20 @@ export function createHandshakeCoordinator(options: {
           stage: "sign_party_result",
           transitions,
         }));
-        return signRequest("sign_party_result", bytes, { sessionDigest: ready.sessionDigest, sessionId });
-      });
+        return signRequest("sign_party_result", bytes, { sessionDigest: ready.sessionDigest, sessionId }, signingEncoding);
+        });
+        firstAttempt = false;
+        if (waitMs === 0 || !isCounterpartTransitionWait(latest)) return latest;
+        const beforeSleep = readWaitNow(waitNow);
+        const remaining = deadline - beforeSleep;
+        if (remaining <= 0) return latest;
+        await waitSleep(Math.min(remaining, nextDelayMs));
+        const afterSleep = readWaitNow(waitNow);
+        if (afterSleep <= beforeSleep) {
+          throw new HandshakeCoordinatorError("Handshake wait timing did not advance.", "WAIT_TIMING_INVALID");
+        }
+        nextDelayMs = Math.min(nextDelayMs * 2, 1000);
+      }
     },
 
     async submit(sessionId: string, roleInput: string, signatureHex: string): Promise<JsonObject> {
@@ -459,6 +518,14 @@ export function createHandshakeCoordinator(options: {
         return { certificate: envelope };
       } catch (error) {
         if (error instanceof HandshakeCoordinatorError) throw error;
+        if (error instanceof HandshakeRelayResultPendingError) {
+          return {
+            needed: "certificate",
+            retryAfterMs: 5000,
+            sessionId,
+            stage: "awaiting_certificate",
+          };
+        }
         throw new HandshakeCoordinatorError("Certificate verification failed.", "CERTIFICATE_INVALID");
       }
     },
@@ -1136,16 +1203,17 @@ async function prepareMandate(clockchain: ClockchainClient, data: CoordinatorSta
   const sessionUuid = randomUUID();
   const intakeRequestId = randomUUID();
   const intakeDigest = createHash("sha256").update(intakeRequestId, "utf8").digest("hex");
+  const terms = data.businessTerms ?? LEGACY_BUSINESS_TERMS;
   const mandate = preparePayerMandate({
-    amount: { currency: "USD", value: "100" },
-    expiresAtMs: String(BigInt(issuedAtMs) + 45n * 60n * 1000n),
+    amount: terms.amount,
+    expiresAtMs: String(BigInt(issuedAtMs) + BigInt(terms.validForMinutes ?? 45) * 60n * 1000n),
     intakeDigest,
     intakeRequestId,
-    invoiceReferencePrefix: "INV-",
+    invoiceReferencePrefix: data.businessTerms ? terms.invoiceReference : "INV-",
     issuedAtMs,
     payee: { address: data.counterpart?.address, agentId: data.counterpart?.agentId },
     payer: { address: data.identityAddress, agentId: data.agentId },
-    purpose: "Invoice settlement",
+    purpose: terms.purpose,
     releaseId: "handshake-v6",
     repositorySha: data.discovery?.repositorySha,
     sessionId: sessionUuid,
@@ -1194,6 +1262,21 @@ function parseClockchainLedgerTime(value: string): number {
 
 function prepareRequest(data: CoordinatorState, _sessionId: string): JsonObject {
   const mandate = data.mandateEnvelope?.mandate ?? data.mandateEnvelope;
+  const terms = data.businessTerms ?? LEGACY_BUSINESS_TERMS;
+  if (
+    data.businessTerms &&
+    (
+      mandate.amount?.currency !== terms.amount.currency ||
+      mandate.amount?.value !== terms.amount.value ||
+      mandate.invoiceReferencePrefix !== terms.invoiceReference ||
+      mandate.purpose !== terms.purpose
+    )
+  ) {
+    throw new HandshakeCoordinatorError(
+      "The signed payer mandate does not match the Requestor's expected invoice terms.",
+      "BUSINESS_TERMS_MISMATCH",
+    );
+  }
   return {
     request: preparePaymentRequest({
     amount: mandate.amount,
@@ -1201,7 +1284,7 @@ function prepareRequest(data: CoordinatorState, _sessionId: string): JsonObject 
     expiresAtMs: mandate.expiresAtMs,
     intakeDigest: mandate.intakeDigest,
     intakeRequestId: mandate.intakeRequestId,
-    invoiceReference: "INV-0001",
+    invoiceReference: terms.invoiceReference,
     mandateDigest: digestHex(data.mandateEnvelope?.mandate ?? data.mandateEnvelope),
     payee: { address: data.identityAddress, agentId: data.agentId },
     payer: mandate.payer,
@@ -1213,6 +1296,58 @@ function prepareRequest(data: CoordinatorState, _sessionId: string): JsonObject 
     subjectRun: mandate.subjectRun,
     }),
   };
+}
+
+const LEGACY_BUSINESS_TERMS: HandshakeBusinessTerms = Object.freeze({
+  amount: Object.freeze({ currency: "USD", value: "100" }),
+  invoiceReference: "INV-0001",
+  purpose: "Invoice settlement",
+  validForMinutes: 45,
+});
+
+function normalizeBusinessTerms(input: unknown, role: PublicRole): HandshakeBusinessTerms | undefined {
+  if (input === undefined) return undefined;
+  try {
+    const keys = role === "payer"
+      ? ["amount", "invoiceReference", "purpose", "validForMinutes"]
+      : Object.prototype.hasOwnProperty.call(input, "validForMinutes")
+        ? ["amount", "invoiceReference", "purpose", "validForMinutes"]
+        : ["amount", "invoiceReference", "purpose"];
+    assertExactObjectKeys(input, keys, "BUSINESS_TERMS_INVALID");
+    assertExactObjectKeys(input.amount, ["currency", "value"], "BUSINESS_TERMS_INVALID");
+    if (
+      input.amount.currency !== "USD" ||
+      typeof input.amount.value !== "string" ||
+      input.amount.value.length > 16 ||
+      !/^(?:0|[1-9][0-9]*)$/.test(input.amount.value) ||
+      !printableBusinessField(input.invoiceReference) ||
+      !printableBusinessField(input.purpose)
+    ) {
+      throw new HandshakeCoordinatorError("Handshake business terms are invalid.", "BUSINESS_TERMS_INVALID");
+    }
+    if (
+      input.validForMinutes !== undefined &&
+      (!Number.isInteger(input.validForMinutes) || input.validForMinutes < 30 || input.validForMinutes > 240)
+    ) {
+      throw new HandshakeCoordinatorError("Handshake business terms are invalid.", "BUSINESS_TERMS_INVALID");
+    }
+    if (role === "payer" && input.validForMinutes === undefined) {
+      throw new HandshakeCoordinatorError("Payer business terms require a validity window.", "BUSINESS_TERMS_INVALID");
+    }
+    return Object.freeze({
+      amount: Object.freeze({ currency: "USD", value: input.amount.value }),
+      invoiceReference: input.invoiceReference,
+      purpose: input.purpose,
+      ...(input.validForMinutes === undefined ? {} : { validForMinutes: input.validForMinutes }),
+    });
+  } catch (error) {
+    if (error instanceof HandshakeCoordinatorError && error.code === "BUSINESS_TERMS_INVALID") throw error;
+    throw new HandshakeCoordinatorError("Handshake business terms are invalid.", "BUSINESS_TERMS_INVALID");
+  }
+}
+
+function printableBusinessField(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 && value.trim() === value && /^[ -~]+$/.test(value);
 }
 
 async function assertPoolHealthy(clockchain: ClockchainClient, env: Record<string, string | undefined>): Promise<JsonObject> {
@@ -1360,8 +1495,49 @@ function identityClaimBytes(sessionId: string, role: PublicRole, data: Coordinat
   });
 }
 
-function signRequest(stage: string, bytes: Buffer, context: JsonObject): JsonObject {
+function parseSigningEncoding(input: string): SigningEncoding {
+  if (input === "hex" || input === "gzip-base64url") return input;
+  throw new HandshakeCoordinatorError("Signing encoding must be hex or gzip-base64url.", "SIGNING_ENCODING_INVALID");
+}
+
+function parseWaitMs(input: unknown): number {
+  if (input === undefined) return 0;
+  if (typeof input === "number" && Number.isInteger(input) && input >= 0 && input <= 15000) return input;
+  throw new HandshakeCoordinatorError("waitMs must be an integer from 0 to 15000.", "WAIT_MS_INVALID");
+}
+
+function isCounterpartTransitionWait(result: JsonObject): boolean {
+  return (
+    result.needed === "counterpart_transition" &&
+    result.stage === "awaiting_counterpart_transition"
+  );
+}
+
+function readWaitNow(now: () => number): number {
+  const value = now();
+  if (!Number.isFinite(value)) {
+    throw new HandshakeCoordinatorError("Handshake wait timing must be finite.", "WAIT_TIMING_INVALID");
+  }
+  return value;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(1, ms)));
+}
+
+function signRequest(stage: string, bytes: Buffer, context: JsonObject, signingEncoding: SigningEncoding): JsonObject {
+  const bytesSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (signingEncoding === "gzip-base64url") {
+    return {
+      bytesEncoding: "gzip-base64url",
+      bytesSha256,
+      bytesToSignGzipBase64Url: gzipSync(bytes).toString("base64url"),
+      context,
+      stage,
+    };
+  }
   return {
+    bytesSha256,
     bytesToSignHex: `0x${bytes.toString("hex")}`,
     context,
     stage,

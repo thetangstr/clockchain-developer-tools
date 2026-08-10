@@ -166,6 +166,10 @@ export function createHandshakeStateStore(env: NodeJS.ProcessEnv | Record<string
   return shared;
 }
 
+export function createIsolatedHandshakeStateStore(path?: string): HandshakeStateStore {
+  return path ? new FileHandshakeStateStore(path) : new InMemoryHandshakeStateStore();
+}
+
 export function __resetHandshakeStateStore(): void {
   shared = null;
 }

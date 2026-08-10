@@ -39,6 +39,13 @@ HTTP endpoint.
 Endpoint:   https://mcp.clockchain.network/mcp
 Transport:  streamable HTTP
 
+TWO-PERSON STAKEHOLDER HANDSHAKE — separate public surface:
+  Endpoint: https://mcp.clockchain.network/handshake/mcp
+  Manifest: https://mcp.clockchain.network/.well-known/agent-handshake.json
+  This surface has exactly seven handshake tools. It uses single-use invitations
+  and role capabilities, not an MCP token or Clockchain API key. Party keys and
+  signatures stay local in Codex or Claude Code.
+
 AUTH — pick ONE (using the wrong header is the #1 cause of a 401):
   (a) Testnet token (shared testnet pool) — get one INSTANTLY, no signup:
         curl -X POST https://mcp.clockchain.network/token
@@ -66,7 +73,7 @@ Client supports stdio only (command + args, no HTTP transport)? Bridge the
 remote server through mcp-remote — works in any stdio-only client:
   npx -y mcp-remote https://mcp.clockchain.network/mcp --header "x-api-key:<YOUR_TOKEN>"
 
-Then list your MCP servers, confirm "clockchain" is connected (31 tools), and
+Then list your MCP servers, confirm "clockchain" is connected (42 tools), and
 call get_time to read the current consensus time.
 
 Docs:  https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md
@@ -83,7 +90,7 @@ export const MCP_MANIFEST = {
   displayName: "Clockchain MCP",
   description:
     "Hosted MCP server: consensus time, notarization, agent-attested receipts, " +
-    "audit trails, agent identity, and commitments. 31 tools, one endpoint.",
+    "audit trails, agent identity, and commitments. 42 tools, one endpoint.",
   type: "http",
   transport: "streamable-http",
   endpoint: "https://mcp.clockchain.network/mcp",
@@ -128,6 +135,11 @@ export const MCP_MANIFEST = {
     "If you have a Clockchain API key, use the x-clockchain-* headers — NOT x-api-key.",
   ],
   instructions: "https://mcp.clockchain.network/llms.txt",
+  agentHandshake: {
+    endpoint: "https://mcp.clockchain.network/handshake/mcp",
+    manifest: "https://mcp.clockchain.network/.well-known/agent-handshake.json",
+    authentication: "single-use invitation and role-scoped capability",
+  },
   docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
 } as const;
 
@@ -152,9 +164,9 @@ export const LANDING_HTML = `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Clockchain MCP — time your agents can prove</title>
-<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. 31 tools across 6 modules, one endpoint." />
+<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. 42 tools across seven modules, one endpoint." />
 <meta property="og:title" content="Clockchain MCP" />
-<meta property="og:description" content="Time your agents can prove. 31 tools, one endpoint." />
+<meta property="og:description" content="Time your agents can prove. 42 tools, one endpoint." />
 <meta property="og:type" content="website" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -303,7 +315,7 @@ export const LANDING_HTML = `<!doctype html>
 <header class="hero"><div class="wrap">
   <span class="eyebrow">Model Context Protocol · Testnet</span>
   <h1>Time your agents can <span class="green">prove.</span></h1>
-  <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — 31 tools across six modules, one endpoint.</p>
+  <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — 42 tools across seven modules, one endpoint.</p>
   <div class="cta">
     <a class="btn btn-green" href="#install">Add to your agent</a>
     <a class="btn btn-ghost" href="https://clockchain-research.vercel.app/dashboard">View live status</a>
@@ -387,7 +399,7 @@ export const LANDING_HTML = `<!doctype html>
       <span class="sn">3</span>
       <div class="sbody">
         <h4>Verify</h4>
-        <p>Open a <b>new</b> session, run <span class="mono">/mcp</span> (you should see <span class="mono">clockchain</span> with all 31 tools), then ask: <em>"use clockchain to get the current consensus time."</em></p>
+        <p>Open a <b>new</b> session, run <span class="mono">/mcp</span> (you should see <span class="mono">clockchain</span> with all 42 tools), then ask: <em>"use clockchain to get the current consensus time."</em></p>
       </div>
     </li>
   </ol>

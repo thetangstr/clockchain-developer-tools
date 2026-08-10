@@ -2,6 +2,7 @@ import { readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTools } from "./tools.js";
 import type { KeeperGate } from "./entitlement.js";
+import type { HandshakeSessionTokenPayload } from "./token.js";
 
 /**
  * Build and return the configured Clockchain MCP server.
@@ -20,6 +21,7 @@ export function buildServer(
   overrides?: Partial<ClockchainConfig>,
   gate?: KeeperGate,
   principalId = "stdio",
+  agentHandshakeScope?: HandshakeSessionTokenPayload,
 ): McpServer {
   const config: ClockchainConfig = { ...readConfigFromEnv(), ...(overrides ?? {}) };
   const server = new McpServer({
@@ -27,7 +29,7 @@ export function buildServer(
     version: "0.1.0",
   });
   // MCP_SURFACE controls which tools are exposed (CLO-99):
-  //   "full" (default) — all 31 tools, the full testnet surface (behavior-identical to v1).
+  //   "full" (default) — all 42 tools, the full testnet surface.
   //   "product"        — only get_time, the production-safe slice.
   // The default path ("full" or unset) is byte-for-byte behavior-identical to pre-CLO-99.
   const surface = (process.env.MCP_SURFACE ?? "full") as "full" | "product";
@@ -37,6 +39,7 @@ export function buildServer(
     surface,
     gate,
     principalId,
+    agentHandshakeScope,
   });
   return server;
 }

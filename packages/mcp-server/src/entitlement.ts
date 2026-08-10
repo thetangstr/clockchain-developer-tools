@@ -95,6 +95,13 @@ export const FREE_TOOLS: ReadonlySet<string> = new Set([
   "handshake_next",
   "handshake_submit",
   "handshake_get_certificate",
+  // Generic two-stakeholder handshake
+  "agent_handshake_invite",
+  "agent_handshake_status",
+  "agent_handshake_join",
+  "agent_handshake_next",
+  "agent_handshake_submit",
+  "agent_handshake_get_certificate",
 ]);
 
 /**

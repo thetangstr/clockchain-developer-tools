@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 
 import {
   buildAcceptance,
@@ -23,7 +24,9 @@ import {
 import {
   HandshakeCoordinatorError,
   createHandshakeCoordinator,
+  createRuntimeHandshakeCoordinator,
 } from "../dist/handshake/coordinator.js";
+import { HandshakeRelayResultPendingError } from "../dist/handshake/relay.js";
 
 const NOW = 1786190400000;
 const SESSION_ID = "123e4567-e89b-42d3-a456-426614174001";
@@ -39,6 +42,12 @@ const OTHER = "0x3333333333333333333333333333333333333333";
 const PAYER_SIG = `0x${"11".repeat(65)}`;
 const REQUESTOR_SIG = `0x${"22".repeat(65)}`;
 const OTHER_SIG = `0x${"33".repeat(65)}`;
+const INVOICE_TERMS = Object.freeze({
+  amount: Object.freeze({ currency: "USD", value: "18750" }),
+  invoiceReference: "HS-8842",
+  purpose: "Invoice HS-8842 against PO NS-1847",
+  validForMinutes: 45,
+});
 
 function operatorKey() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -46,6 +55,12 @@ function operatorKey() {
     privateKeyPem: privateKey.export({ format: "pem", type: "pkcs8" }),
     publicKeyRaw: publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64"),
   };
+}
+
+function sha256SignedBytes(bytesToSignHex) {
+  return createHash("sha256")
+    .update(Buffer.from(bytesToSignHex.slice(2), "hex"))
+    .digest("hex");
 }
 
 function discovery(key = operatorKey()) {
@@ -238,8 +253,10 @@ function relayMessage({ body, kind, role, sessionId = SESSION_ID, seq = "1", rel
 
 function canonicalMandateBody({
   amount = { currency: "USD", value: "100" },
+  invoiceReferencePrefix = "INV-",
   payee = { address: REQUESTOR, agentId: "202" },
   payer = { address: PAYER, agentId: "101" },
+  purpose = "Invoice settlement",
   signature = PAYER_SIG,
   sessionId = "123e4567-e89b-42d3-a456-426614174099",
 } = {}) {
@@ -248,11 +265,11 @@ function canonicalMandateBody({
     expiresAtMs: String(NOW + 45 * 60 * 1000),
     intakeDigest: createHash("sha256").update(INTAKE_REQUEST_ID).digest("hex"),
     intakeRequestId: INTAKE_REQUEST_ID,
-    invoiceReferencePrefix: "INV-",
+    invoiceReferencePrefix,
     issuedAtMs: String(NOW),
     payee,
     payer,
-    purpose: "Invoice settlement",
+    purpose,
     releaseId: "handshake-v6",
     repositorySha: REPOSITORY_SHA,
     sessionId,
@@ -281,10 +298,11 @@ function canonicalMandateBody({
   };
 }
 
-function harness({ key = operatorKey(), messages = [], result = null, postImpl = null, env = {}, store = null, reset = true, resolveOwnedAgentId = null } = {}) {
+function harness({ key = operatorKey(), messages = [], result = null, postImpl = null, env = {}, store = null, reset = true, resolveOwnedAgentId = null, waitTiming = undefined, discoveryDocument = null } = {}) {
   if (reset) __resetHandshakeStateStore();
   store ??= createHandshakeStateStore({});
   const posted = [];
+  const discoveryRequests = [];
   const intents = [];
   const records = [];
   const clockchain = {
@@ -323,8 +341,9 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
     },
   };
   const relay = {
-    async fetchDiscovery() {
-      return discovery(key);
+    async fetchDiscovery(invitationId) {
+      discoveryRequests.push(invitationId);
+      return discoveryDocument ?? discovery(key);
     },
     async getMessages() {
       return { messages };
@@ -349,9 +368,7 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
     },
     async getResult() {
       if (result === null) {
-        const err = new Error("pending");
-        err.code = "RESULT_NOT_SET";
-        throw err;
+        throw new HandshakeRelayResultPendingError();
       }
       return result;
     },
@@ -371,10 +388,12 @@ function harness({ key = operatorKey(), messages = [], result = null, postImpl =
       return signatureHex;
     },
     stateStore: store,
+    waitTiming,
   });
   return {
     clockchain,
     coordinator,
+    discoveryRequests,
     intents,
     key,
     messages,
@@ -405,6 +424,66 @@ async function preparePayerWithHostedArtifacts(h, key, requestorRelayKey) {
   return { fixture, mandateEnvelope, signingRequest };
 }
 
+async function preparePayerAwaitingAcceptance({
+  key = operatorKey(),
+  sharedStore = null,
+  reset = true,
+  waitTiming = undefined,
+} = {}) {
+  const requestorRelayKey = generateRelayKeyPair();
+  const messages = [
+    relayMessage({ body: { address: REQUESTOR }, kind: "identity_ready", role: "requestor", seq: "1", relayKey: requestorRelayKey }),
+    relayMessage({ body: { address: REQUESTOR, agentId: "202", paymentMoved: false }, kind: "party_ready", role: "requestor", seq: "2", relayKey: requestorRelayKey }),
+    relayMessage({ body: { funded: PAYER, paymentMoved: false, role: "payer" }, kind: "funding_record", role: "host", seq: "3" }),
+    relayMessage({ body: { paymentMoved: false }, kind: "watching", role: "requestor", seq: "4", relayKey: requestorRelayKey }),
+  ];
+  const h = harness({ key, messages, reset, store: sharedStore, waitTiming });
+  const { fixture } = await preparePayerWithHostedArtifacts(h, key, requestorRelayKey);
+  const first = await h.coordinator.next(SESSION_ID, "payer");
+  assert.deepEqual(first, {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+  const sessionDigest = digestHex(fixture.descriptor);
+  const proposalMessage = buildProposal({
+    amount: fixture.descriptor.amountOptions[0],
+    descriptor: fixture.descriptor,
+    sessionDigest,
+  });
+  const proposalRecord = h.records.find((record) => record.assetReferenceId === sessionKey(sessionDigest, "proposal"));
+  const acceptance = buildAcceptance({
+    proposal: proposalMessage,
+    proposalTriple: {
+      anchoredHash: proposalRecord.assetHash,
+      blockHeight: proposalRecord.blockHeight,
+      kind: "proposal",
+      ledgerId: proposalRecord.ledgerId,
+    },
+  });
+  return { acceptance, fixture, h, messages, requestorRelayKey, sessionDigest };
+}
+
+function pushAcceptanceRecord(h, sessionDigest, acceptance) {
+  h.records.push({
+    assetHash: digestHex(acceptance),
+    assetReferenceId: sessionKey(sessionDigest, "acceptance"),
+    blockHeight: "101",
+    blockTimeRaw: "2026-08-08T12:00:10.000Z",
+    ledgerId: "123e4567-e89b-42d3-a456-426614174011",
+  });
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, reject, resolve };
+}
+
 function hexJson(hex) {
   return JSON.parse(Buffer.from(hex.slice(2), "hex").toString("utf8"));
 }
@@ -413,6 +492,44 @@ test("rejects roles outside the public payer/requestor surface", async () => {
   const { coordinator } = harness();
   await assert.rejects(coordinator.join("payee"), { code: "ROLE_INVALID" });
   await assert.rejects(coordinator.next(SESSION_ID, "host"), { code: "ROLE_INVALID" });
+});
+
+test("join exposes the exact operator public key fetched from discovery", async () => {
+  const key = operatorKey();
+  const { coordinator } = harness({ key });
+
+  assert.equal((await coordinator.join("payer")).operatorPublicKey, key.publicKeyRaw);
+});
+
+test("join binds the requestor to the exact Payer invitation", async () => {
+  const h = harness();
+
+  const joined = await h.coordinator.join("requestor", SESSION_ID);
+
+  assert.equal(joined.invitationId, SESSION_ID);
+  assert.equal(joined.invitationUrl, `${RELAY_URL}/v1/discovery/${SESSION_ID}`);
+  assert.equal(joined.sessionId, SESSION_ID);
+  assert.deepEqual(h.discoveryRequests, [SESSION_ID]);
+});
+
+test("legacy Payer join still resolves current discovery", async () => {
+  const h = harness();
+
+  await h.coordinator.join("payer");
+
+  assert.deepEqual(h.discoveryRequests, [undefined]);
+});
+
+test("join rejects discovery with an empty operator public key", async () => {
+  const key = operatorKey();
+  const { coordinator } = harness({
+    discoveryDocument: {
+      ...discovery(key),
+      operatorPublicKey: "",
+    },
+  });
+
+  await assert.rejects(coordinator.join("payer"), { code: "DISCOVERY_INVALID" });
 });
 
 test("submit rejects non-EIP-191-shaped signatures before recovery", async () => {
@@ -474,6 +591,109 @@ test("payer mandate signing bytes and mailbox body use exact canonical prepared 
   assert.equal(postedMandate.mandateEnvelope.signature.value, PAYER_SIG);
 });
 
+test("Payer business terms become the existing signed mandate without changing its schema", async () => {
+  const requestorRelayKey = generateRelayKeyPair();
+  const h = harness({
+    messages: [
+      relayMessage({ body: { address: REQUESTOR }, kind: "identity_ready", role: "requestor", seq: "1", relayKey: requestorRelayKey }),
+      relayMessage({ body: { address: REQUESTOR, agentId: "202" }, kind: "party_ready", role: "requestor", seq: "2", relayKey: requestorRelayKey }),
+      relayMessage({ body: { funded: PAYER, paymentMoved: false, role: "payer" }, kind: "funding_record", role: "host", seq: "3" }),
+    ],
+  });
+  const joined = await h.coordinator.join("payer", SESSION_ID, INVOICE_TERMS);
+  await h.coordinator.submit(joined.sessionId, "payer", PAYER_SIG);
+
+  const signingRequest = await h.coordinator.next(joined.sessionId, "payer");
+  const mandate = hexJson(signingRequest.bytesToSignHex);
+
+  assert.equal(signingRequest.stage, "sign_mandate");
+  assert.equal(mandate.schema, "clockchain.bilateral-payer-mandate/v1");
+  assert.deepEqual(mandate.amount, INVOICE_TERMS.amount);
+  assert.equal(mandate.invoiceReferencePrefix, INVOICE_TERMS.invoiceReference);
+  assert.equal(mandate.purpose, INVOICE_TERMS.purpose);
+  assert.equal(BigInt(mandate.expiresAtMs) - BigInt(mandate.issuedAtMs), 45n * 60n * 1000n);
+});
+
+test("Requestor refuses a signed mandate that differs from its independent expected terms", async () => {
+  const payerRelayKey = generateRelayKeyPair();
+  const h = harness({
+    messages: [
+      relayMessage({ body: { address: PAYER }, kind: "identity_ready", role: "payer", seq: "1", relayKey: payerRelayKey }),
+      relayMessage({ body: { address: PAYER, agentId: "101" }, kind: "party_ready", role: "payer", seq: "2", relayKey: payerRelayKey }),
+      relayMessage({ body: { funded: REQUESTOR, paymentMoved: false, role: "requestor" }, kind: "funding_record", role: "host", seq: "3" }),
+      relayMessage({
+        body: canonicalMandateBody({
+          amount: INVOICE_TERMS.amount,
+          invoiceReferencePrefix: INVOICE_TERMS.invoiceReference,
+          purpose: INVOICE_TERMS.purpose,
+        }),
+        kind: "mandate",
+        role: "payer",
+        seq: "4",
+        relayKey: payerRelayKey,
+      }),
+    ],
+  });
+  const joined = await h.coordinator.join("requestor", SESSION_ID, {
+    ...INVOICE_TERMS,
+    amount: { currency: "USD", value: "18751" },
+  });
+  await h.coordinator.submit(joined.sessionId, "requestor", REQUESTOR_SIG);
+
+  await assert.rejects(
+    h.coordinator.next(joined.sessionId, "requestor"),
+    { code: "BUSINESS_TERMS_MISMATCH" },
+  );
+  assert.equal(h.posted.some((entry) => entry.kind === "payment_request"), false);
+});
+
+test("matching Requestor expectations become the existing exact payment request", async () => {
+  const payerRelayKey = generateRelayKeyPair();
+  const h = harness({
+    messages: [
+      relayMessage({ body: { address: PAYER }, kind: "identity_ready", role: "payer", seq: "1", relayKey: payerRelayKey }),
+      relayMessage({ body: { address: PAYER, agentId: "101" }, kind: "party_ready", role: "payer", seq: "2", relayKey: payerRelayKey }),
+      relayMessage({ body: { funded: REQUESTOR, paymentMoved: false, role: "requestor" }, kind: "funding_record", role: "host", seq: "3" }),
+      relayMessage({
+        body: canonicalMandateBody({
+          amount: INVOICE_TERMS.amount,
+          invoiceReferencePrefix: INVOICE_TERMS.invoiceReference,
+          purpose: INVOICE_TERMS.purpose,
+        }),
+        kind: "mandate",
+        role: "payer",
+        seq: "4",
+        relayKey: payerRelayKey,
+      }),
+    ],
+  });
+  const joined = await h.coordinator.join("requestor", SESSION_ID, INVOICE_TERMS);
+  await h.coordinator.submit(joined.sessionId, "requestor", REQUESTOR_SIG);
+
+  const signingRequest = await h.coordinator.next(joined.sessionId, "requestor");
+  const request = hexJson(signingRequest.bytesToSignHex);
+
+  assert.equal(signingRequest.stage, "sign_payment_request");
+  assert.equal(request.schema, "clockchain.bilateral-payment-request/v1");
+  assert.deepEqual(request.amount, INVOICE_TERMS.amount);
+  assert.equal(request.invoiceReference, INVOICE_TERMS.invoiceReference);
+  assert.equal(request.purpose, INVOICE_TERMS.purpose);
+});
+
+test("join rejects malformed business terms before creating role state", async () => {
+  for (const terms of [
+    { ...INVOICE_TERMS, amount: { currency: "EUR", value: "18750" } },
+    { ...INVOICE_TERMS, amount: { currency: "USD", value: "018750" } },
+    { ...INVOICE_TERMS, invoiceReference: " HS-8842" },
+    { ...INVOICE_TERMS, validForMinutes: 29 },
+    { ...INVOICE_TERMS, validForMinutes: 241 },
+  ]) {
+    const h = harness();
+    await assert.rejects(h.coordinator.join("payer", SESSION_ID, terms), { code: "BUSINESS_TERMS_INVALID" });
+    assert.deepEqual((await h.coordinator.status(SESSION_ID)).sessions, []);
+  }
+});
+
 test("status exposes the caller's next required action", async () => {
   const { coordinator } = harness();
   await coordinator.join("payer");
@@ -501,6 +721,8 @@ test("repeated next calls return byte-identical pending mandate and request arti
   const firstMandate = await payer.coordinator.next(SESSION_ID, "payer");
   const secondMandate = await payer.coordinator.next(SESSION_ID, "payer");
   assert.equal(secondMandate.bytesToSignHex, firstMandate.bytesToSignHex);
+  assert.equal(firstMandate.bytesSha256, sha256SignedBytes(firstMandate.bytesToSignHex));
+  assert.equal(secondMandate.bytesSha256, firstMandate.bytesSha256);
 
   const payerRelayKey = generateRelayKeyPair();
   const requestor = harness({
@@ -515,6 +737,230 @@ test("repeated next calls return byte-identical pending mandate and request arti
   const firstRequest = await requestor.coordinator.next(SESSION_ID, "requestor");
   const secondRequest = await requestor.coordinator.next(SESSION_ID, "requestor");
   assert.equal(secondRequest.bytesToSignHex, firstRequest.bytesToSignHex);
+  assert.equal(firstRequest.bytesSha256, sha256SignedBytes(firstRequest.bytesToSignHex));
+  assert.equal(secondRequest.bytesSha256, firstRequest.bytesSha256);
+});
+
+test("next can return one compact gzip-base64url signing payload with the same raw-byte digest", async () => {
+  const requestorRelayKey = generateRelayKeyPair();
+  const { coordinator } = harness({
+    messages: [
+      relayMessage({ body: { address: REQUESTOR }, kind: "identity_ready", role: "requestor", seq: "1", relayKey: requestorRelayKey }),
+      relayMessage({ body: { address: REQUESTOR, agentId: "202" }, kind: "party_ready", role: "requestor", seq: "2", relayKey: requestorRelayKey }),
+      relayMessage({ body: { funded: PAYER, paymentMoved: false, role: "payer" }, kind: "funding_record", role: "host", seq: "3" }),
+    ],
+  });
+  await joinAndIdentify(coordinator, "payer", PAYER_SIG);
+
+  const hex = await coordinator.next(SESSION_ID, "payer");
+  const compact = await coordinator.next(SESSION_ID, "payer", "gzip-base64url");
+  const decoded = gunzipSync(Buffer.from(compact.bytesToSignGzipBase64Url, "base64url"));
+
+  assert.equal(compact.bytesEncoding, "gzip-base64url");
+  assert.equal(Object.hasOwn(compact, "bytesToSignHex"), false);
+  assert.equal(`0x${decoded.toString("hex")}`, hex.bytesToSignHex);
+  assert.equal(compact.bytesSha256, sha256SignedBytes(hex.bytesToSignHex));
+  assert.ok(compact.bytesToSignGzipBase64Url.length < hex.bytesToSignHex.length);
+  await assert.rejects(coordinator.next(SESSION_ID, "payer", "zip"), { code: "SIGNING_ENCODING_INVALID" });
+});
+
+test("runtime coordinator forwards compact signing encoding to the core coordinator", async () => {
+  const { clockchain, relay } = harness();
+  const coordinator = createRuntimeHandshakeCoordinator({
+    clockchain,
+    principal: "did:example:alice",
+    relay,
+    stateStore: createHandshakeStateStore({}),
+  });
+  const joined = await coordinator.join("payer");
+  const compact = await coordinator.next(joined.sessionId, "payer", "gzip-base64url");
+
+  assert.equal(compact.bytesEncoding, "gzip-base64url");
+  assert.equal(Object.hasOwn(compact, "bytesToSignHex"), false);
+  assert.equal(typeof compact.bytesToSignGzipBase64Url, "string");
+});
+
+test("next rejects invalid waitMs values before polling", async () => {
+  const { coordinator } = harness();
+  await coordinator.join("payer");
+
+  for (const waitMs of [-1, 1.5, 15001, "100"]) {
+    await assert.rejects(
+      coordinator.next(SESSION_ID, "payer", "hex", waitMs),
+      { code: "WAIT_MS_INVALID" },
+    );
+  }
+});
+
+test("default next returns counterpart-transition wait state immediately", async () => {
+  const { h } = await preparePayerAwaitingAcceptance();
+  let searches = 0;
+  const originalSearch = h.clockchain.searchAsset;
+  h.clockchain.searchAsset = async (...args) => {
+    searches += 1;
+    return originalSearch(...args);
+  };
+
+  assert.deepEqual(await h.coordinator.next(SESSION_ID, "payer"), {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+  assert.equal(searches, 1);
+});
+
+test("waitMs polls only the counterpart-transition wait state and returns when it appears", async () => {
+  const { acceptance, h, sessionDigest } = await preparePayerAwaitingAcceptance();
+  let acceptanceSearches = 0;
+  const originalSearch = h.clockchain.searchAsset;
+  h.clockchain.searchAsset = async (assetReferenceId) => {
+    if (assetReferenceId === sessionKey(sessionDigest, "acceptance")) {
+      acceptanceSearches += 1;
+      if (acceptanceSearches === 2) pushAcceptanceRecord(h, sessionDigest, acceptance);
+    }
+    return originalSearch(assetReferenceId);
+  };
+
+  const result = await h.coordinator.next(SESSION_ID, "payer", "hex", 300);
+  assert.equal(result.stage, "sign_party_result");
+  assert.equal(typeof result.bytesToSignHex, "string");
+  assert.equal(acceptanceSearches >= 2, true);
+});
+
+test("waitMs timeout returns the latest counterpart-transition wait state", async () => {
+  const { h } = await preparePayerAwaitingAcceptance();
+
+  assert.deepEqual(await h.coordinator.next(SESSION_ID, "payer", "hex", 20), {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+});
+
+test("waitMs uses bounded exponential delay policy without busy-looping", async () => {
+  let now = 1000;
+  const sleeps = [];
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      now += ms;
+    },
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  assert.deepEqual(await h.coordinator.next(SESSION_ID, "payer", "hex", 1750), {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+  assert.deepEqual(sleeps, [250, 500, 1000]);
+});
+
+test("waitMs delay policy caps the first sleep to the remaining deadline", async () => {
+  let now = 5000;
+  const sleeps = [];
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+      now += ms;
+    },
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  await h.coordinator.next(SESSION_ID, "payer", "hex", 100);
+  assert.deepEqual(sleeps, [100]);
+});
+
+test("waitMs does not start another poll when sleep reaches the deadline", async () => {
+  let now = 5000;
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms;
+    },
+  };
+  const { h, sessionDigest } = await preparePayerAwaitingAcceptance({ waitTiming });
+  let acceptanceSearches = 0;
+  const originalSearch = h.clockchain.searchAsset;
+  h.clockchain.searchAsset = async (assetReferenceId) => {
+    if (assetReferenceId === sessionKey(sessionDigest, "acceptance")) acceptanceSearches += 1;
+    return originalSearch(assetReferenceId);
+  };
+
+  assert.deepEqual(await h.coordinator.next(SESSION_ID, "payer", "hex", 250), {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+  assert.equal(acceptanceSearches, 1);
+});
+
+test("waitMs fails closed when injected timing makes no progress", async () => {
+  const waitTiming = {
+    now: () => 1000,
+    sleep: async () => {},
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  await assert.rejects(
+    h.coordinator.next(SESSION_ID, "payer", "hex", 1000),
+    { code: "WAIT_TIMING_INVALID" },
+  );
+});
+
+test("waitMs fails closed when injected timing is non-finite", async () => {
+  const waitTiming = {
+    now: () => Number.NaN,
+    sleep: async () => {},
+  };
+  const { h } = await preparePayerAwaitingAcceptance({ waitTiming });
+
+  await assert.rejects(
+    h.coordinator.next(SESSION_ID, "payer", "hex", 1000),
+    { code: "WAIT_TIMING_INVALID" },
+  );
+});
+
+test("waitMs releases the per-session role lock between retries", async () => {
+  __resetHandshakeStateStore();
+  const sharedStore = createHandshakeStateStore({});
+  let now = 10_000;
+  const sleepEntered = deferred();
+  const releaseSleep = deferred();
+  const waitTiming = {
+    now: () => now,
+    sleep: async (ms) => {
+      sleepEntered.resolve(ms);
+      await releaseSleep.promise;
+      now += ms;
+    },
+  };
+
+  const { acceptance, h, messages, sessionDigest } = await preparePayerAwaitingAcceptance({ sharedStore, reset: false, waitTiming });
+  const waiting = h.coordinator.next(SESSION_ID, "payer", "hex", 1000);
+  let waitingSettled = false;
+  waiting.then(() => {
+    waitingSettled = true;
+  });
+  assert.equal(await sleepEntered.promise, 250);
+  assert.equal(waitingSettled, false);
+
+  const concurrent = harness({ messages, reset: false, store: sharedStore });
+  const immediate = await concurrent.coordinator.next(SESSION_ID, "payer");
+  assert.deepEqual(immediate, {
+    needed: "counterpart_transition",
+    sessionId: SESSION_ID,
+    stage: "awaiting_counterpart_transition",
+  });
+  assert.equal(waitingSettled, false);
+
+  pushAcceptanceRecord(h, sessionDigest, acceptance);
+  releaseSleep.resolve();
+  const completed = await waiting;
+  assert.equal(completed.stage, "sign_party_result");
+  assert.equal(typeof completed.bytesToSignHex, "string");
 });
 
 test("invalid Clockchain calendar timestamps never become mandate signing bytes", async () => {
@@ -805,6 +1251,27 @@ test("certificate is unavailable before verified evidence and rejects the wrong 
     },
   }));
   await assert.rejects(bad.coordinator.getCertificate(SESSION_ID), { code: "CERTIFICATE_INVALID" });
+});
+
+test("certificate fetch treats a not-yet-published host result as normal waiting", async () => {
+  const key = operatorKey();
+  const pending = harness({ key });
+  await pending.coordinator.join("payer");
+  await pending.store.update({ principal: "did:example:alice", session: SESSION_ID, role: "payer" }, (record) => ({
+    ...record,
+    data: {
+      ...record.data,
+      discovery: discovery(key),
+      evidenceVerified: true,
+    },
+  }));
+
+  assert.deepEqual(await pending.coordinator.getCertificate(SESSION_ID), {
+    needed: "certificate",
+    retryAfterMs: 5000,
+    sessionId: SESSION_ID,
+    stage: "awaiting_certificate",
+  });
 });
 
 test("certificate verifies result parties and anchors against stored descriptor and transitions", async () => {
