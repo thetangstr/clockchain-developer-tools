@@ -59,6 +59,14 @@ test("role access uses canonical unpadded HS256 capabilities and derives its pri
 test("access verification enforces key rotation, binding, tool scope, time, and secret strength", () => {
   const access = mint();
   assert.throws(() => verify(access.slice(0, -1) + (access.endsWith("a") ? "b" : "a")));
+  const [payloadSegment, signatureSegment] = access.split(".");
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const signatureBytes = Buffer.from(signatureSegment, "base64url");
+  const alias = [...alphabet]
+    .map((character) => signatureSegment.slice(0, -1) + character)
+    .find((candidate) => candidate !== signatureSegment && Buffer.from(candidate, "base64url").equals(signatureBytes));
+  assert.ok(alias, "fixture must expose a non-canonical base64url alias");
+  assert.throws(() => verify(`${payloadSegment}.${alias}`));
   assert.throws(() => verify(`${access}=`));
   assert.throws(() => verify(access, { expectedSessionId: randomUUID() }));
   assert.throws(() => verify(access, { expectedRole: "responder" }));
@@ -77,4 +85,3 @@ test("unexpired previous-key capabilities verify but minting requires the active
   assert.equal(verify(access).payload.kid, previous.kid);
   assert.throws(() => verify(access, { keys: [active] }));
 });
-

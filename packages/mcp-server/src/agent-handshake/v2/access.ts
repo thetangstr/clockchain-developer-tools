@@ -167,7 +167,10 @@ export function verifyV2RoleAccess(access: string, options: {
     if (!matched) invalid();
     const supplied = Buffer.from(signatureSegment, "base64url");
     const expected = signature(segment, matched.secret);
-    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) invalid();
+    if (
+      encode(supplied) !== signatureSegment || supplied.length !== expected.length ||
+      !timingSafeEqual(supplied, expected)
+    ) invalid();
     if (
       !Number.isSafeInteger(options.nowMs) ||
       options.nowMs < Number(parsed.nbfMs) - CLOCK_SKEW_MS || options.nowMs >= Number(parsed.expMs) ||
