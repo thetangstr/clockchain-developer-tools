@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { gunzipSync } from "node:zlib";
 
 import { createHandshakeStateStore, __resetHandshakeStateStore } from "../dist/handshake/state.js";
 import { createAgentHandshakeCoordinator } from "../dist/agent-handshake/coordinator.js";
@@ -62,7 +63,18 @@ test("two distinct principals advance through identity, statement, anchors, and 
     assert.equal((await coordinators[role].next("22222222-3333-4444-8555-666666666666", role)).stage, "party_ready");
   }
   const proposal = await coordinators.initiator.next("22222222-3333-4444-8555-666666666666", "initiator");
+  const compactProposal = await coordinators.initiator.next(
+    "22222222-3333-4444-8555-666666666666",
+    "initiator",
+    "gzip-base64url",
+  );
   assert.equal(proposal.action, "sign_proposal");
+  assert.equal(compactProposal.bytesEncoding, "gzip-base64url");
+  assert.equal(Object.hasOwn(compactProposal, "bytesToSignHex"), false);
+  assert.equal(
+    gunzipSync(Buffer.from(compactProposal.bytesToSignGzipBase64Url, "base64url")).toString("hex"),
+    proposal.bytesToSignHex,
+  );
   await coordinators.initiator.submit(proposal.sessionId, "initiator", `0x${"2".repeat(130)}`);
   const acceptance = await coordinators.responder.next(proposal.sessionId, "responder");
   assert.equal(acceptance.action, "sign_acceptance");

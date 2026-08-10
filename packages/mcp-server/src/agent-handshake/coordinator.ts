@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 
 import {
   type HandshakeKey,
@@ -36,6 +37,7 @@ import {
 } from "./protocol.js";
 
 type JsonObject = Record<string, any>;
+type SigningEncoding = "gzip-base64url" | "hex";
 type RelayClient = {
   fetchDiscovery(sessionId?: string): Promise<JsonObject>;
   getMessages(input: { after?: string; sessionId: string }): Promise<{ messages: readonly JsonObject[] }>;
@@ -124,8 +126,23 @@ function signature(value: string): string {
   return value;
 }
 
-function signRequest(action: string, bytes: Buffer, extra: JsonObject): JsonObject {
-  return { action, bytesEncoding: "hex", bytesToSignHex: bytes.toString("hex"), ...extra };
+function signRequest(action: string, bytes: Buffer, extra: JsonObject, encoding: SigningEncoding): JsonObject {
+  const bytesSha256 = createHash("sha256").update(bytes).digest("hex");
+  if (encoding === "gzip-base64url") {
+    return {
+      action,
+      bytesEncoding: "gzip-base64url",
+      bytesSha256,
+      bytesToSignGzipBase64Url: gzipSync(bytes).toString("base64url"),
+      ...extra,
+    };
+  }
+  return { action, bytesEncoding: "hex", bytesSha256, bytesToSignHex: bytes.toString("hex"), ...extra };
+}
+
+function signingEncoding(value: string): SigningEncoding {
+  if (value === "hex" || value === "gzip-base64url") return value;
+  fail("AGENT_HANDSHAKE_SIGNING_ENCODING_INVALID");
 }
 
 function identityBytes(sessionId: string, roleValue: AgentHandshakeRole, principal: string): Buffer {
@@ -373,13 +390,14 @@ export function createAgentHandshakeCoordinator(options: {
       };
     },
 
-    async next(sessionId: string, roleInput: string): Promise<JsonObject> {
+    async next(sessionId: string, roleInput: string, signingEncodingInput = "hex"): Promise<JsonObject> {
       const roleValue = role(roleInput);
+      const encoding = signingEncoding(signingEncodingInput);
       const keyValue = key(options.principal, sessionId, roleValue);
       let record = await refresh(options.relay, store, keyValue);
       let current = data(record);
       if (!current.identityAddress) {
-        return signRequest("sign_identity", identityBytes(sessionId, roleValue, options.principal), { role: roleValue, sessionId });
+        return signRequest("sign_identity", identityBytes(sessionId, roleValue, options.principal), { role: roleValue, sessionId }, encoding);
       }
       if (!current.agentId) {
         const entries = await messages(options.relay, sessionId);
@@ -412,7 +430,7 @@ export function createAgentHandshakeCoordinator(options: {
         : { initiator: counterpart, responder: own };
       if (roleValue === "initiator" && !current.proposalEnvelope) {
         if (current.pending?.kind === "proposal") {
-          return signRequest("sign_proposal", canonicalBytes(current.pending.value), { role: roleValue, sessionId });
+          return signRequest("sign_proposal", canonicalBytes(current.pending.value), { role: roleValue, sessionId }, encoding);
         }
         const issuedAtMs = String(now());
         const proposal = buildAgentProposal({
@@ -425,7 +443,7 @@ export function createAgentHandshakeCoordinator(options: {
           terms: current.terms!,
         });
         await store.update(keyValue, (value) => merge(value, keyValue, { pending: { kind: "proposal", value: proposal } }));
-        return signRequest("sign_proposal", canonicalBytes(proposal), { role: roleValue, sessionId });
+        return signRequest("sign_proposal", canonicalBytes(proposal), { role: roleValue, sessionId }, encoding);
       }
       if (roleValue === "responder" && !current.acceptanceEnvelope) {
         if (!current.proposalEnvelope) return { needed: "proposal", role: roleValue, sessionId, stage: "awaiting_proposal" };
@@ -436,11 +454,11 @@ export function createAgentHandshakeCoordinator(options: {
           proposal.responder.address !== own.address || proposal.responder.agentId !== own.agentId
         ) fail("AGENT_HANDSHAKE_PROPOSAL_MISMATCH");
         if (current.pending?.kind === "acceptance") {
-          return signRequest("sign_acceptance", canonicalBytes(current.pending.value), { role: roleValue, sessionId });
+          return signRequest("sign_acceptance", canonicalBytes(current.pending.value), { role: roleValue, sessionId }, encoding);
         }
         const acceptance = buildAgentAcceptance({ issuedAtMs: String(now()), proposalEnvelope: current.proposalEnvelope });
         await store.update(keyValue, (value) => merge(value, keyValue, { pending: { kind: "acceptance", value: acceptance } }));
-        return signRequest("sign_acceptance", canonicalBytes(acceptance), { role: roleValue, sessionId });
+        return signRequest("sign_acceptance", canonicalBytes(acceptance), { role: roleValue, sessionId }, encoding);
       }
       record = await refresh(options.relay, store, keyValue);
       current = data(record);
@@ -478,7 +496,7 @@ export function createAgentHandshakeCoordinator(options: {
         transitionDigests: transitions.map((entry) => entry.digest),
       });
       await store.update(keyValue, (value) => merge(value, keyValue, { pending: { kind: "evidence", value: evidenceResult } }));
-      return signRequest("sign_party_result", canonicalBytes(evidenceResult), { role: roleValue, sessionId });
+      return signRequest("sign_party_result", canonicalBytes(evidenceResult), { role: roleValue, sessionId }, encoding);
     },
 
     async submit(sessionId: string, roleInput: string, signatureHex: string): Promise<JsonObject> {

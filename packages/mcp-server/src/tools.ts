@@ -132,7 +132,7 @@ type AgentHandshakeTerms = z.infer<typeof agentHandshakeTermsSchema>;
 export interface AgentHandshakeCoordinator {
   status(sessionId?: string): Promise<unknown>;
   join(role: AgentHandshakeRole, invitationId: string | undefined, terms: AgentHandshakeTerms): Promise<unknown>;
-  next(sessionId: string, role: AgentHandshakeRole): Promise<unknown>;
+  next(sessionId: string, role: AgentHandshakeRole, signingEncoding?: SigningEncoding): Promise<unknown>;
   submit(sessionId: string, role: AgentHandshakeRole, signatureHex: string): Promise<unknown>;
   getCertificate(sessionId: string): Promise<unknown>;
 }
@@ -1545,11 +1545,16 @@ export function registerTools(
       inputSchema: {
         sessionId: z.string().describe("Generic handshake session id."),
         role: agentHandshakeRoleSchema,
+        signingEncoding: signingEncodingSchema,
       },
     },
-    async ({ sessionId, role }) =>
+    async ({ sessionId, role, signingEncoding }) =>
       run("agent_handshake_next", () =>
-        agentHandshakeCoordinator().next(sessionId, agentHandshakeRoleSchema.parse(role)),
+        agentHandshakeCoordinator().next(
+          sessionId,
+          agentHandshakeRoleSchema.parse(role),
+          signingEncodingSchema.parse(signingEncoding),
+        ),
       ),
   );
 
