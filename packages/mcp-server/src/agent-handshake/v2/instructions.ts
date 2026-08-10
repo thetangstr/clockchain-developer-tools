@@ -10,6 +10,13 @@ const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const KID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const PREFIX = "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/";
+const HELPER_FILENAME = "clockchain-agent-handshake.cjs";
+
+export const V2_VERIFIED_HELPER_BOOTSTRAP = 'const fs=require("node:fs");const crypto=require("node:crypto");const Module=require("node:module");const argv=process.argv.slice(1);const expected=argv.shift();const manifestPath=argv.shift();const helperPath=argv.shift();const manifestBytes=fs.readFileSync(manifestPath);const manifestDigest=crypto.createHash("sha256").update(manifestBytes).digest("hex");if(manifestDigest!==expected)process.exit(86);const manifest=JSON.parse(manifestBytes);if(manifest.schema!=="clockchain.agent-handshake-release-manifest/v1"||manifest.version!=="2.1.0"||!Array.isArray(manifest.assets)||manifest.assets.length!==1)process.exit(86);const asset=manifest.assets[0];if(asset.filename!=="clockchain-agent-handshake.cjs"||asset.url!=="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/clockchain-agent-handshake.cjs"||typeof asset.sha256!=="string"||!/^[0-9a-f]{64}$/.test(asset.sha256))process.exit(86);const helperBytes=fs.readFileSync(helperPath);const helperDigest=crypto.createHash("sha256").update(helperBytes).digest("hex");if(helperDigest!==asset.sha256)process.exit(86);process.argv=[process.execPath].concat(helperPath).concat(argv);const loaded=new Module(helperPath);loaded.filename=helperPath;loaded.paths=[];const compile=loaded._compile.bind(loaded);compile(...[helperBytes.toString("utf8")].concat(helperPath));';
+
+function verifiedBootstrapPrefix(pin: V2ReleasePin): string {
+  return `node --input-type=commonjs --eval '${V2_VERIFIED_HELPER_BOOTSTRAP}' ${pin.manifestDigest} ./manifest.json ./${HELPER_FILENAME}`;
+}
 
 export function validateV2ReleasePin(value: unknown): V2ReleasePin {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Agent handshake release pin is unavailable.");
@@ -39,11 +46,15 @@ export function validateV2ReleasePin(value: unknown): V2ReleasePin {
 export function buildV2Instructions(rawPin: unknown): string {
   const pin = validateV2ReleasePin(rawPin);
   const roots = pin.hostRoots.map((root) => `${root.kid}:${root.fingerprint}`).join(",");
+  const manifestUrl = `${pin.allowedAssetPrefix}manifest.json`;
+  const helperUrl = `${pin.allowedAssetPrefix}${HELPER_FILENAME}`;
+  const bootstrap = verifiedBootstrapPrefix(pin);
   return [
-    `LOCAL SIGNING REQUIRED. Helper ${pin.version}; manifest sha256 ${pin.manifestDigest}; assets ${pin.allowedAssetPrefix}; trusted host roots ${roots}. STOP immediately if the downloaded manifest, asset digest, native signature, helper version, host root, local policy, exact signing bytes, role, session, or statement disagrees.`,
+    `LOCAL SIGNING REQUIRED. Portable Node 24 helper ${pin.version}; manifest sha256 ${pin.manifestDigest}; assets ${pin.allowedAssetPrefix}; trusted host roots ${roots}. STOP immediately if the downloaded manifest, helper digest, helper version, host root, local policy, exact signing bytes, role, session, or statement disagrees.`,
     "This public endpoint coordinates a two-person Clockchain Handshake. It never receives a private key and never signs for either stakeholder.",
     "Use agent_handshake_invite once as the Initiator, copy only the returned Responder invitation to the other person, then keep each returned role access value private and stable for the run.",
-    "For every local operation, download only the pinned helper asset for this platform, verify it against the pinned manifest, and pass the structured signing request to that helper. Never invent bytes or substitute a wallet, policy, session, or role.",
+    `Download exactly ${manifestUrl} as ./manifest.json and ${helperUrl} as ./${HELPER_FILENAME}. Do not write or edit either downloaded file.`,
+    `For --version and every local helper operation, use this exact verified prefix and append only the requested helper arguments: ${bootstrap}. The bootstrap hashes the raw manifest against the pinned digest, hashes the helper against that verified manifest, and can compile only those verified bytes in memory. Never run the helper directly, invent bytes, or substitute a wallet, policy, session, or role.`,
     "The Initiator may mandate live ERC-8004 registration. Registration and EIP-191 signing happen locally; Clockchain only funds the exact public session-key address when fresh registration is required and verifies the public on-chain record.",
     "No browser, repository clone, plugin, general Clockchain credential, payment, or external business action is part of this workflow. Codex and Claude Code use the same seven tools.",
   ].join("\n\n");
@@ -62,6 +73,11 @@ export function buildV2Manifest(rawPin: unknown) {
       sourceCommit: pin.sourceCommit,
       manifestDigest: pin.manifestDigest,
       allowedAssetPrefix: pin.allowedAssetPrefix,
+      filename: HELPER_FILENAME,
+      manifestUrl: `${pin.allowedAssetPrefix}manifest.json`,
+      helperUrl: `${pin.allowedAssetPrefix}${HELPER_FILENAME}`,
+      nodeRuntimeMajor: "24",
+      verifiedBootstrapPrefix: verifiedBootstrapPrefix(pin),
     }),
     hostRoots: pin.hostRoots,
     supportedClients: Object.freeze(["codex", "claude-code"]),
@@ -73,4 +89,3 @@ export function readV2ReleasePin(env: Record<string, string | undefined>): V2Rel
   if (!raw) throw new Error("Agent handshake release pin is unavailable.");
   try { return validateV2ReleasePin(JSON.parse(raw)); } catch { throw new Error("Agent handshake release pin is unavailable."); }
 }
-
