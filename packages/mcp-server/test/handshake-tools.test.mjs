@@ -14,6 +14,7 @@ const HANDSHAKE_TOOLS = [
   "handshake_get_certificate",
 ];
 const AGENT_HANDSHAKE_TOOLS = [
+  "agent_handshake_invite",
   "agent_handshake_status",
   "agent_handshake_join",
   "agent_handshake_next",
@@ -67,6 +68,7 @@ test("handshake tools are registered with exact public names and non-secret came
 test("generic handshake tools are additive, exact, and free of payment inputs", () => {
   const tools = collectWith({});
   for (const name of AGENT_HANDSHAKE_TOOLS) assert.ok(tools[name], `${name} should be registered`);
+  assert.deepEqual(Object.keys(tools.agent_handshake_invite.meta.inputSchema), ["terms"]);
   assert.deepEqual(Object.keys(tools.agent_handshake_status.meta.inputSchema), ["sessionId"]);
   assert.deepEqual(Object.keys(tools.agent_handshake_join.meta.inputSchema), ["role", "invitationId", "terms"]);
   assert.deepEqual(Object.keys(tools.agent_handshake_next.meta.inputSchema), ["sessionId", "role"]);

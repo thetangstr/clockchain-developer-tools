@@ -248,3 +248,161 @@ export function verifyClaim(
 ): { valid: true; payload: ClaimTokenPayload } | { valid: false; reason: string } {
   return verifyV2<ClaimTokenPayload>(promoteSecret, token, "claim", nowSec);
 }
+
+// ===========================================================================
+// v:3 generic-handshake capabilities and session-scoped transport tokens.
+// ===========================================================================
+
+export interface HandshakeInvitationPayload {
+  v: 3;
+  kind: "handshake_invitation";
+  invitationId: string;
+  role: "responder";
+  statementDigest: string;
+  iat: number;
+  exp: number;
+  jti: string;
+}
+
+export const HANDSHAKE_SESSION_TOOLS = Object.freeze([
+  "agent_handshake_status",
+  "agent_handshake_join",
+  "agent_handshake_next",
+  "agent_handshake_submit",
+  "agent_handshake_get_certificate",
+]);
+
+export interface HandshakeSessionTokenPayload {
+  v: 3;
+  kind: "handshake_session";
+  invitationId: string;
+  role: "responder";
+  statementDigest: string;
+  tools: readonly string[];
+  iat: number;
+  exp: number;
+  jti: string;
+}
+
+function mintV3<T extends object>(secret: string, payload: T): string {
+  const seg = b64url(Buffer.from(JSON.stringify(payload), "utf8"));
+  return `${PREFIX}${seg}.${sign(seg, secret)}`;
+}
+
+function verifyV3<T extends { v: 3; kind: string; exp: number }>(
+  secret: string,
+  token: string,
+  kind: T["kind"],
+  keys: readonly string[],
+  nowSec: number,
+): { valid: true; payload: T } | { valid: false; reason: string } {
+  if (!secret || typeof token !== "string" || !token.startsWith(PREFIX)) {
+    return { valid: false, reason: "invalid" };
+  }
+  const body = token.slice(PREFIX.length);
+  const dot = body.indexOf(".");
+  if (dot <= 0 || body.indexOf(".", dot + 1) !== -1) return { valid: false, reason: "invalid" };
+  const seg = body.slice(0, dot);
+  const signature = body.slice(dot + 1);
+  const expected = sign(seg, secret);
+  const a = Buffer.from(signature);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return { valid: false, reason: "invalid" };
+  let payload: T;
+  try {
+    payload = JSON.parse(b64urlDecode(seg).toString("utf8")) as T;
+  } catch {
+    return { valid: false, reason: "invalid" };
+  }
+  const actualKeys = Object.keys(payload).sort();
+  const expectedKeys = [...keys].sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index]) ||
+    payload.v !== 3 || payload.kind !== kind ||
+    !Number.isSafeInteger(payload.exp) || nowSec >= payload.exp
+  ) return { valid: false, reason: "invalid" };
+  return { valid: true, payload };
+}
+
+export function mintHandshakeInvitation(
+  secret: string,
+  input: Omit<HandshakeInvitationPayload, "kind" | "role" | "v">,
+): { token: string; payload: HandshakeInvitationPayload } {
+  const payload: HandshakeInvitationPayload = {
+    v: 3,
+    kind: "handshake_invitation",
+    invitationId: input.invitationId,
+    role: "responder",
+    statementDigest: input.statementDigest,
+    iat: input.iat,
+    exp: input.exp,
+    jti: input.jti,
+  };
+  return { token: mintV3(secret, payload), payload };
+}
+
+export function verifyHandshakeInvitation(
+  secret: string,
+  token: string,
+  nowSec = Math.floor(Date.now() / 1000),
+): { valid: true; payload: HandshakeInvitationPayload } | { valid: false; reason: string; payload?: never } {
+  const verified = verifyV3<HandshakeInvitationPayload>(
+    secret,
+    token,
+    "handshake_invitation",
+    ["v", "kind", "invitationId", "role", "statementDigest", "iat", "exp", "jti"],
+    nowSec,
+  );
+  if (!verified.valid) return verified;
+  if (
+    verified.payload.role !== "responder" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(verified.payload.invitationId) ||
+    !/^[0-9a-f]{64}$/.test(verified.payload.statementDigest) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(verified.payload.jti) ||
+    !Number.isSafeInteger(verified.payload.iat) || verified.payload.iat >= verified.payload.exp
+  ) return { valid: false, reason: "invalid" };
+  return verified;
+}
+
+export function mintHandshakeSessionToken(
+  secret: string,
+  input: Omit<HandshakeSessionTokenPayload, "kind" | "role" | "tools" | "v">,
+): { token: string; payload: HandshakeSessionTokenPayload } {
+  const payload: HandshakeSessionTokenPayload = {
+    v: 3,
+    kind: "handshake_session",
+    invitationId: input.invitationId,
+    role: "responder",
+    statementDigest: input.statementDigest,
+    tools: HANDSHAKE_SESSION_TOOLS,
+    iat: input.iat,
+    exp: input.exp,
+    jti: input.jti,
+  };
+  return { token: mintV3(secret, payload), payload };
+}
+
+export function verifyHandshakeSessionToken(
+  secret: string,
+  token: string,
+  nowSec = Math.floor(Date.now() / 1000),
+): { valid: true; payload: HandshakeSessionTokenPayload } | { valid: false; reason: string; payload?: never } {
+  const verified = verifyV3<HandshakeSessionTokenPayload>(
+    secret,
+    token,
+    "handshake_session",
+    ["v", "kind", "invitationId", "role", "statementDigest", "tools", "iat", "exp", "jti"],
+    nowSec,
+  );
+  if (!verified.valid) return verified;
+  if (
+    verified.payload.role !== "responder" ||
+    JSON.stringify(verified.payload.tools) !== JSON.stringify(HANDSHAKE_SESSION_TOOLS) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(verified.payload.invitationId) ||
+    !/^[0-9a-f]{64}$/.test(verified.payload.statementDigest) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(verified.payload.jti) ||
+    !Number.isSafeInteger(verified.payload.iat) || verified.payload.iat >= verified.payload.exp
+  ) return { valid: false, reason: "invalid" };
+  return verified;
+}

@@ -26,6 +26,9 @@ import { z } from "zod";
 import { BudgetExceededError, getSharedLogBudget, unlimitedLogBudget } from "./budget.js";
 import { createRuntimeHandshakeCoordinator } from "./handshake/coordinator.js";
 import { createRuntimeAgentHandshakeCoordinator } from "./agent-handshake/coordinator.js";
+import { agentHandshakeStatementDigest } from "./agent-handshake/protocol.js";
+import { getRuntimeAgentHandshakeInvitationService } from "./agent-handshake/invitation-store.js";
+import type { HandshakeSessionTokenPayload } from "./token.js";
 import { idempotent } from "./idempotency.js";
 import type { KeeperGate } from "./entitlement.js";
 import { assertToolClassified } from "./entitlement.js";
@@ -132,6 +135,10 @@ export interface AgentHandshakeCoordinator {
   next(sessionId: string, role: AgentHandshakeRole): Promise<unknown>;
   submit(sessionId: string, role: AgentHandshakeRole, signatureHex: string): Promise<unknown>;
   getCertificate(sessionId: string): Promise<unknown>;
+}
+
+export interface AgentHandshakeInvitationService {
+  invite(terms: AgentHandshakeTerms): Promise<unknown>;
 }
 
 /**
@@ -284,7 +291,7 @@ async function run(name: string, work: () => Promise<unknown>) {
  * + nonce; the server never holds a key.
  *
  * `opts.surface` controls which tools are registered:
- *   - "full" (default): all 36 tools — the full testnet surface.
+ *   - "full" (default): all 42 tools — the full testnet surface.
  *   - "product": only `get_time` — the production-safe slice (CLO-99).
  *
  * `get_time` is always registered regardless of surface. Full behavior is
@@ -300,6 +307,8 @@ export function registerTools(
     principalId?: string;
     handshakeCoordinator?: HandshakeCoordinator;
     agentHandshakeCoordinator?: AgentHandshakeCoordinator;
+    agentHandshakeInvitationService?: AgentHandshakeInvitationService;
+    agentHandshakeScope?: HandshakeSessionTokenPayload;
   } = {},
 ): void {
   // Fail-closed classification guard (CLO-48 review FIX 2). We intercept
@@ -315,6 +324,7 @@ export function registerTools(
   // returns the gate's structured `402 account_required` tool error and never
   // invokes the real handler.
   const gate = opts.gate;
+  const agentHandshakeScope = opts.agentHandshakeScope;
   {
     const orig = server.registerTool.bind(server) as (
       name: string,
@@ -327,10 +337,36 @@ export function registerTools(
       handler,
     ) => {
       assertToolClassified(name);
-      if (!gate) return orig(name, meta, handler);
       return orig(name, meta, async (...args: unknown[]) => {
-        const blocked = await gate.check(name);
-        return blocked ?? handler(...args);
+        if (agentHandshakeScope) {
+          const input = (args[0] ?? {}) as Record<string, unknown>;
+          let allowed = agentHandshakeScope.tools.includes(name);
+          if (allowed && typeof input.sessionId === "string") {
+            allowed = input.sessionId === agentHandshakeScope.invitationId;
+          }
+          if (allowed && typeof input.role === "string") {
+            allowed = input.role === agentHandshakeScope.role;
+          }
+          if (allowed && name === "agent_handshake_join") {
+            try {
+              allowed = input.invitationId === agentHandshakeScope.invitationId &&
+                agentHandshakeStatementDigest(input.terms) === agentHandshakeScope.statementDigest;
+            } catch {
+              allowed = false;
+            }
+          }
+          if (!allowed) {
+            return {
+              isError: true as const,
+              content: [{ type: "text" as const, text: JSON.stringify({ error: "HANDSHAKE_SCOPE_DENIED" }) }],
+            };
+          }
+        }
+        if (gate) {
+          const blocked = await gate.check(name);
+          if (blocked) return blocked;
+        }
+        return handler(...args);
       });
     };
   }
@@ -343,6 +379,7 @@ export function registerTools(
   const budget = opts.delegated === false ? unlimitedLogBudget() : getSharedLogBudget();
   let runtimeHandshakeCoordinator: HandshakeCoordinator | undefined;
   let runtimeAgentHandshakeCoordinator: AgentHandshakeCoordinator | undefined;
+  let runtimeAgentHandshakeInvitationService: AgentHandshakeInvitationService | undefined;
   const handshakeCoordinator = (): HandshakeCoordinator => {
     if (opts.handshakeCoordinator) return opts.handshakeCoordinator;
     runtimeHandshakeCoordinator ??= createRuntimeHandshakeCoordinator({
@@ -359,6 +396,11 @@ export function registerTools(
       principal: opts.principalId ?? "stdio",
     });
     return runtimeAgentHandshakeCoordinator;
+  };
+  const agentHandshakeInvitationService = (): AgentHandshakeInvitationService => {
+    if (opts.agentHandshakeInvitationService) return opts.agentHandshakeInvitationService;
+    runtimeAgentHandshakeInvitationService ??= getRuntimeAgentHandshakeInvitationService();
+    return runtimeAgentHandshakeInvitationService;
   };
 
   // ===== TIME MCP =====
@@ -1444,6 +1486,22 @@ export function registerTools(
   // ===== GENERIC TWO-STAKEHOLDER HANDSHAKE MCP =====
   // Additive to the bilateral authorization namespace. These tools bind a
   // shared statement and never translate it into invoice or transfer terms.
+  server.registerTool(
+    "agent_handshake_invite",
+    {
+      title: "Invite a responder to a stakeholder handshake",
+      description:
+        "Create one single-use Responder invitation bound to the current session and the exact shared statement.",
+      inputSchema: {
+        terms: agentHandshakeTermsSchema,
+      },
+    },
+    async ({ terms }) =>
+      run("agent_handshake_invite", () =>
+        agentHandshakeInvitationService().invite(agentHandshakeTermsSchema.parse(terms)),
+      ),
+  );
+
   server.registerTool(
     "agent_handshake_status",
     {
