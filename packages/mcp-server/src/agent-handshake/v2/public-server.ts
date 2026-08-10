@@ -36,7 +36,7 @@ function limiter(limit: number, windowMs: number, now: () => number) {
 }
 
 export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2PublicInvoke }): McpServer {
-  const server = new McpServer({ name: "clockchain-agent-handshake", version: "2.1.0" }, {
+  const server = new McpServer({ name: "clockchain-agent-handshake", version: "2.1.1" }, {
     instructions: buildV2Instructions(options.pin),
   });
   registerV2PublicTools(server, options.invoke);
@@ -86,4 +86,3 @@ export function createV2PublicHttpHandler(options: {
     }
   };
 }
-

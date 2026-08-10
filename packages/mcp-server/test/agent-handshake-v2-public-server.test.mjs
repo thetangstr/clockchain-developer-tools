@@ -13,10 +13,10 @@ import {
 import { V2_VERIFIED_HELPER_BOOTSTRAP, buildV2Instructions, buildV2Manifest } from "../dist/agent-handshake/v2/instructions.js";
 
 const pin = {
-  version: "2.1.0",
+  version: "2.1.1",
   sourceCommit: "d".repeat(40),
   manifestDigest: "a".repeat(64),
-  allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/",
+  allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.1/",
   hostRoots: [
     { kid: "root-2026-08", fingerprint: "b".repeat(64) },
     { kid: "root-2026-07", fingerprint: "c".repeat(64) },
@@ -39,7 +39,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   const instructions = buildV2Instructions(pin);
   const first = instructions.slice(0, 512);
   assert.match(first, /local signing/i);
-  assert.match(first, /2\.1\.0/);
+  assert.match(first, /2\.1\.1/);
   assert.ok(first.includes(pin.manifestDigest));
   assert.ok(first.includes(pin.allowedAssetPrefix));
   assert.ok(first.includes(pin.hostRoots[0].kid));

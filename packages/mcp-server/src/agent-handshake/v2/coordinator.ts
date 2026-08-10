@@ -140,7 +140,7 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
   const bytes = canonicalBytes(payload);
   return Object.freeze({
     schema: "clockchain.agent-handshake-signing-request/v1",
-    helperVersion: "2.1.0",
+    helperVersion: "2.1.1",
     operation,
     role,
     sessionId: current.discovery.sessionId,
@@ -290,7 +290,7 @@ export function createV2Coordinator(options: {
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
-      if (input.helperVersion !== "2.1.0" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
+      if (input.helperVersion !== "2.1.1" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
       const sessionKeyAddress = input.sessionKeyAddress.toLowerCase();
       const auth = await authorize(input.access, "agent_handshake_join");
       const expectedPolicy = localPolicy(auth.current.terms, auth.verified.payload.role);

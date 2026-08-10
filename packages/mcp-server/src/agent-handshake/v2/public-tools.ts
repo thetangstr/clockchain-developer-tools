@@ -61,7 +61,7 @@ const definitions = Object.freeze([
     description: "Claim one Responder invitation once and receive non-transferable Responder role access.",
     schema: { invitation: z.string().min(80).max(4096) },
   },
-  { name: "agent_handshake_join", title: "Join handshake", description: "Bind this fresh local agent and its exact local policy to the assigned role.", schema: { access, helperVersion: z.literal("2.1.0"), sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/), policyDigest: z.string().regex(/^[0-9a-f]{64}$/) } },
+  { name: "agent_handshake_join", title: "Join handshake", description: "Bind this fresh local agent and its exact local policy to the assigned role.", schema: { access, helperVersion: z.literal("2.1.1"), sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/), policyDigest: z.string().regex(/^[0-9a-f]{64}$/) } },
   { name: "agent_handshake_status", title: "Read handshake status", description: "Read public progress for this role and session.", schema: { access } },
   { name: "agent_handshake_next", title: "Get next handshake operation", description: "Get the next typed local signing or registration operation, or wait safely.", schema: { access } },
   { name: "agent_handshake_submit", title: "Submit local signature", description: "Submit only a signature over the exact bytes returned by the coordinator and the unchanged local-policy digest.", schema: { access, policyDigest: z.string().regex(/^[0-9a-f]{64}$/), signatureHex: z.string().regex(/^0x[0-9a-f]{130}$/) } },
