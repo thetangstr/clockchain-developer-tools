@@ -36,6 +36,13 @@ import {
   type KeeperGate,
 } from "./entitlement.js";
 import { runPromote } from "./promote.js";
+import {
+  createV2PublicHttpHandler,
+} from "./agent-handshake/v2/public-server.js";
+import {
+  buildV2Manifest,
+  readV2ReleasePin,
+} from "./agent-handshake/v2/instructions.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -413,6 +420,20 @@ export async function runHttp(): Promise<void> {
   const store: Store = createStore();
   const promoteSecret = process.env.MCP_PROMOTE_SECRET || signingSecret;
 
+  let publicHandshakeHandler: ReturnType<typeof createV2PublicHttpHandler> | undefined;
+  const getPublicHandshakeHandler = () => {
+    if (publicHandshakeHandler) return publicHandshakeHandler;
+    const pin = readV2ReleasePin(process.env);
+    publicHandshakeHandler = createV2PublicHttpHandler({
+      pin,
+      trustedProxy: process.env.AGENT_HANDSHAKE_TRUSTED_PROXY,
+      invitePerHour: Number(process.env.AGENT_HANDSHAKE_INVITES_PER_HOUR ?? "5"),
+      callsPerMinute: Number(process.env.AGENT_HANDSHAKE_CALLS_PER_MINUTE ?? "120"),
+      invoke: async () => { throw new Error("coordinator unavailable"); },
+    });
+    return publicHandshakeHandler;
+  };
+
   // A request is authorized if it carries a valid static MCP token OR a valid
   // self-serve signed token (v:1 demo or v:2 trial). Static tokens and v:1 demo
   // tokens resolve to AUTHENTICATED and bypass the trial/keeper layer (LLD §13);
@@ -471,6 +492,32 @@ export async function runHttp(): Promise<void> {
         "cache-control": "public, max-age=300",
       });
       res.end(JSON.stringify(MCP_MANIFEST, null, 2));
+      return;
+    }
+
+    if (req.method === "GET" && pathOf(req.url) === "/.well-known/agent-handshake.json") {
+      try {
+        res.writeHead(200, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "public, max-age=300",
+        });
+        res.end(JSON.stringify(buildV2Manifest(readV2ReleasePin(process.env)), null, 2));
+      } catch {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
+      }
+      return;
+    }
+
+    if (pathOf(req.url) === "/handshake/mcp") {
+      try {
+        await getPublicHandshakeHandler()(req, res);
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
+        }
+      }
       return;
     }
 

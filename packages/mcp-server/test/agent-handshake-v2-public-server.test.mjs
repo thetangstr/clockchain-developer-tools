@@ -1,0 +1,103 @@
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import test from "node:test";
+
+import {
+  V2_PUBLIC_TOOL_NAMES,
+  buildV2PublicServer,
+} from "../dist/agent-handshake/v2/public-server.js";
+import {
+  createV2PublicHttpHandler,
+  v2PublicClientIp,
+} from "../dist/agent-handshake/v2/public-server.js";
+import { buildV2Instructions, buildV2Manifest } from "../dist/agent-handshake/v2/instructions.js";
+
+const pin = {
+  version: "2.1.0",
+  sourceCommit: "d".repeat(40),
+  manifestDigest: "a".repeat(64),
+  allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/",
+  hostRoots: [
+    { kid: "root-2026-08", fingerprint: "b".repeat(64) },
+    { kid: "root-2026-07", fingerprint: "c".repeat(64) },
+  ],
+};
+
+const ACCEPT = "application/json, text/event-stream";
+async function rpc(url, method, params = {}, headers = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: ACCEPT, ...headers },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const text = await response.text();
+  const data = text.split("\n").find((line) => line.startsWith("data:"));
+  return { status: response.status, body: JSON.parse(data ? data.slice(5) : text) };
+}
+
+test("public initialization leads with the immutable local-authority boundary", async () => {
+  const instructions = buildV2Instructions(pin);
+  const first = instructions.slice(0, 512);
+  assert.match(first, /local signing/i);
+  assert.match(first, /2\.1\.0/);
+  assert.ok(first.includes(pin.manifestDigest));
+  assert.ok(first.includes(pin.allowedAssetPrefix));
+  assert.ok(first.includes(pin.hostRoots[0].kid));
+  assert.ok(first.includes(pin.hostRoots[0].fingerprint));
+  assert.match(first, /stop/i);
+  assert.deepEqual(buildV2Manifest(pin).endpoint, "https://mcp.clockchain.network/handshake/mcp");
+});
+
+test("the dedicated MCP server exposes exactly seven tools and no prompts or resources", async () => {
+  const httpServer = createServer(async (req, res) => {
+    const server = buildV2PublicServer({ pin, invoke: async (name) => ({ ok: true, name }) });
+    const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => { void transport.close(); void server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  });
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const initialized = await rpc(url, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "fresh-client", version: "1" },
+    });
+    assert.equal(initialized.body.result.serverInfo.name, "clockchain-agent-handshake");
+    assert.equal(initialized.body.result.instructions, buildV2Instructions(pin));
+    assert.equal("resources" in initialized.body.result.capabilities, false);
+    assert.equal("prompts" in initialized.body.result.capabilities, false);
+    const listed = await rpc(url, "tools/list");
+    assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), V2_PUBLIC_TOOL_NAMES);
+    assert.equal(listed.body.result.tools.some((tool) => tool.annotations?.requiresUserInteraction === true), false);
+    assert.equal((await rpc(url, "resources/list")).body.error.code, -32601);
+    assert.equal((await rpc(url, "prompts/list")).body.error.code, -32601);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
+test("public HTTP routing ignores full-surface credentials, trusts only configured proxies, and rate limits", async () => {
+  assert.equal(v2PublicClientIp({ "x-forwarded-for": "203.0.113.9" }, "198.51.100.2", "198.51.100.1"), "198.51.100.2");
+  assert.equal(v2PublicClientIp({ "x-forwarded-for": "203.0.113.9, 198.51.100.1" }, "198.51.100.1", "198.51.100.1"), "203.0.113.9");
+  let now = 1000;
+  const handler = createV2PublicHttpHandler({ pin, now: () => now, invitePerHour: 5, callsPerMinute: 120, invoke: async (name) => ({ ok: true, name }) });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const listed = await rpc(url, "tools/list", {}, { "x-clockchain-api-key": "must-be-ignored" });
+    assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), V2_PUBLIC_TOOL_NAMES);
+    for (let index = 0; index < 5; index += 1) {
+      const result = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } } });
+      assert.equal(result.body.result.isError, undefined);
+    }
+    const limited = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } } });
+    assert.equal(limited.body.result.isError, true);
+    now += 60 * 60_000 + 1;
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});

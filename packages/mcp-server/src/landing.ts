@@ -39,6 +39,13 @@ HTTP endpoint.
 Endpoint:   https://mcp.clockchain.network/mcp
 Transport:  streamable HTTP
 
+TWO-PERSON STAKEHOLDER HANDSHAKE — separate public surface:
+  Endpoint: https://mcp.clockchain.network/handshake/mcp
+  Manifest: https://mcp.clockchain.network/.well-known/agent-handshake.json
+  This surface has exactly seven handshake tools. It uses single-use invitations
+  and role capabilities, not an MCP token or Clockchain API key. Party keys and
+  signatures stay local in Codex or Claude Code.
+
 AUTH — pick ONE (using the wrong header is the #1 cause of a 401):
   (a) Testnet token (shared testnet pool) — get one INSTANTLY, no signup:
         curl -X POST https://mcp.clockchain.network/token
@@ -128,6 +135,11 @@ export const MCP_MANIFEST = {
     "If you have a Clockchain API key, use the x-clockchain-* headers — NOT x-api-key.",
   ],
   instructions: "https://mcp.clockchain.network/llms.txt",
+  agentHandshake: {
+    endpoint: "https://mcp.clockchain.network/handshake/mcp",
+    manifest: "https://mcp.clockchain.network/.well-known/agent-handshake.json",
+    authentication: "single-use invitation and role-scoped capability",
+  },
   docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
 } as const;
 
