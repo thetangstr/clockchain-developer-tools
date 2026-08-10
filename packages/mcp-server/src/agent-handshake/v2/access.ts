@@ -186,3 +186,36 @@ export function verifyV2RoleAccess(access: string, options: {
     invalid();
   }
 }
+
+export function readV2RoleAccessPayload(access: string): V2RoleAccessPayload {
+  try {
+    if (typeof access !== "string" || access.includes("=") || access.split(".").length !== 2) invalid();
+    const [segment, signatureSegment] = access.split(".");
+    if (!BASE64URL.test(segment) || !BASE64URL.test(signatureSegment)) invalid();
+    const decoded = Buffer.from(segment, "base64url");
+    if (encode(decoded) !== segment) invalid();
+    const parsed = payload(JSON.parse(decoded.toString("utf8")));
+    if (encode(accessBytes(parsed)) !== segment) invalid();
+    return parsed;
+  } catch (error) {
+    if (error instanceof V2RoleAccessError) throw error;
+    invalid();
+  }
+}
+
+export function authorizeV2RoleAccess(access: string, options: {
+  keys: readonly V2AccessKey[];
+  nowMs: number;
+  requiredTool: string;
+}): Readonly<{ payload: V2RoleAccessPayload; principal: string }> {
+  const untrusted = readV2RoleAccessPayload(access);
+  return verifyV2RoleAccess(access, {
+    keys: options.keys,
+    nowMs: options.nowMs,
+    expectedSessionId: untrusted.sessionId,
+    expectedRole: untrusted.role,
+    expectedStatementDigest: untrusted.statementDigest,
+    expectedExpMs: untrusted.expMs,
+    requiredTool: options.requiredTool,
+  });
+}

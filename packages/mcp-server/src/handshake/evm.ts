@@ -29,6 +29,7 @@ interface TransferLog {
   address?: string;
   blockNumber?: string;
   logIndex?: string;
+  transactionHash?: string;
   topics?: string[];
 }
 
@@ -125,6 +126,55 @@ export async function resolveOwnedAgentId(options: ResolveOwnedAgentIdOptions): 
     high = low - 1n;
   }
 
+  return null;
+}
+
+export async function resolveOwnedAgentRegistration(options: ResolveOwnedAgentIdOptions): Promise<Readonly<{
+  agentId: string;
+  registrationBlock: string;
+  registrationTx: string;
+}> | null> {
+  const fetchImpl = options.fetchImpl ?? globalFetch();
+  const registryAddress = normalizeAddress(options.registryAddress, "registryAddress");
+  const ownerAddress = normalizeAddress(options.address, "address");
+  const latest = hexQuantity(await rpcString(options.rpcUrl, fetchImpl, "eth_blockNumber", [], "read the latest block before scanning ERC-721 transfers"));
+  const earliest = resolveEarliestBlock(registryAddress, options.fromBlock);
+  if (earliest > latest) return null;
+  const seenTokens = new Set<string>();
+  let ownerOfProbes = 0;
+  for (let high = latest; high >= earliest;) {
+    const low = high - earliest + 1n > MAX_LOG_BLOCKS ? high - MAX_LOG_BLOCKS + 1n : earliest;
+    const logs = await rpcArray(options.rpcUrl, fetchImpl, "eth_getLogs", [{
+      address: registryAddress,
+      fromBlock: toHexQuantity(low),
+      toBlock: toHexQuantity(high),
+      topics: [TRANSFER_TOPIC, null, topicAddress(ownerAddress)],
+    }], "load ERC-721 Transfer logs for acquired agent tokens");
+    const transferLogs = logs.filter(isTransferLog).sort((a, b) =>
+      compareHexQuantity(b.blockNumber ?? "0x0", a.blockNumber ?? "0x0") ||
+      compareHexQuantity(b.logIndex ?? "0x0", a.logIndex ?? "0x0"));
+    for (const log of transferLogs) {
+      const tokenWord = log.topics?.[3];
+      if (!tokenWord || !isBytesHex(tokenWord, 32) || seenTokens.has(tokenWord)) continue;
+      seenTokens.add(tokenWord);
+      ownerOfProbes += 1;
+      if (ownerOfProbes > MAX_OWNER_OF_PROBES) throw new Error(`ownerOf candidate probe cap exceeded (${MAX_OWNER_OF_PROBES}); pass a narrower fromBlock`);
+      const owner = await ownerOf(options.rpcUrl, fetchImpl, registryAddress, tokenWord);
+      if (owner !== ownerAddress) continue;
+      const transactionHash = log.transactionHash;
+      const blockNumber = log.blockNumber;
+      if (typeof transactionHash !== "string" || !isBytesHex(transactionHash, 32) || typeof blockNumber !== "string") {
+        throw new Error("ERC-8004 registration log is missing its transaction or block binding");
+      }
+      return Object.freeze({
+        agentId: BigInt(tokenWord).toString(10),
+        registrationBlock: hexQuantity(blockNumber).toString(10),
+        registrationTx: transactionHash.toLowerCase(),
+      });
+    }
+    if (low === earliest) break;
+    high = low - 1n;
+  }
   return null;
 }
 

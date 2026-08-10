@@ -43,6 +43,7 @@ import {
   buildV2Manifest,
   readV2ReleasePin,
 } from "./agent-handshake/v2/instructions.js";
+import { createRuntimeV2Coordinator } from "./agent-handshake/v2/coordinator.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -421,15 +422,17 @@ export async function runHttp(): Promise<void> {
   const promoteSecret = process.env.MCP_PROMOTE_SECRET || signingSecret;
 
   let publicHandshakeHandler: ReturnType<typeof createV2PublicHttpHandler> | undefined;
+  let publicHandshakeCoordinator: ReturnType<typeof createRuntimeV2Coordinator> | undefined;
   const getPublicHandshakeHandler = () => {
     if (publicHandshakeHandler) return publicHandshakeHandler;
     const pin = readV2ReleasePin(process.env);
+    publicHandshakeCoordinator ??= createRuntimeV2Coordinator(process.env);
     publicHandshakeHandler = createV2PublicHttpHandler({
       pin,
       trustedProxy: process.env.AGENT_HANDSHAKE_TRUSTED_PROXY,
       invitePerHour: Number(process.env.AGENT_HANDSHAKE_INVITES_PER_HOUR ?? "5"),
       callsPerMinute: Number(process.env.AGENT_HANDSHAKE_CALLS_PER_MINUTE ?? "120"),
-      invoke: async () => { throw new Error("coordinator unavailable"); },
+      invoke: (name, args) => publicHandshakeCoordinator!.invoke(name, args),
     });
     return publicHandshakeHandler;
   };
