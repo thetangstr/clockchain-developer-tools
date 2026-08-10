@@ -57,6 +57,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /local stakeholder's own prompt explicitly confirms/i);
   assert.match(instructions, /needed.*erc8004_registration.*pinned helper.*register.*same absolute state directory.*agent_handshake_next/is);
   assert.match(instructions, /mkdir -m 700 \.\/clockchain-state.*absolute.*\$PWD\/clockchain-state.*every local helper operation/is);
+  assert.match(instructions, /agent_handshake_accept_invitation exactly once.*first successful result.*never retry/is);
   assert.doesNotMatch(instructions, /keep each returned role access value private/i);
   const manifest = buildV2Manifest(pin);
   assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
