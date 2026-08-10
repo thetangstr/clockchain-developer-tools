@@ -83,6 +83,11 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     assert.equal("prompts" in initialized.body.result.capabilities, false);
     const listed = await rpc(url, "tools/list");
     assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), V2_PUBLIC_TOOL_NAMES);
+    const invite = listed.body.result.tools.find((tool) => tool.name === "agent_handshake_invite");
+    const inviteSchema = JSON.stringify(invite.inputSchema);
+    assert.match(inviteSchema, /eip155:11155111/);
+    assert.match(inviteSchema, /0x8004a818bfb912233c491871b3d84c89a494bd9e/);
+    assert.match(inviteSchema, /required_fresh/);
     assert.equal(listed.body.result.tools.some((tool) => tool.annotations?.requiresUserInteraction === true), false);
     assert.equal((await rpc(url, "resources/list")).body.error.code, -32601);
     assert.equal((await rpc(url, "prompts/list")).body.error.code, -32601);

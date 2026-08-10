@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  AGENT_HANDSHAKE_V2_CHAIN_ID,
+  AGENT_HANDSHAKE_V2_REGISTRY_ADDRESS,
+} from "./protocol.js";
+
 export const V2_PUBLIC_TOOL_NAMES = Object.freeze([
   "agent_handshake_invite",
   "agent_handshake_accept_invitation",
@@ -14,11 +19,23 @@ export type V2PublicToolName = typeof V2_PUBLIC_TOOL_NAMES[number];
 export type V2PublicInvoke = (name: V2PublicToolName, args: Record<string, unknown>) => Promise<unknown>;
 
 const access = z.string().min(80).max(4096);
-const identityPolicy = z.object({
-  erc8004: z.enum(["required_fresh", "required_existing_or_fresh", "not_required"]),
-  chainId: z.string().nullable(),
-  registryAddress: z.string().nullable(),
-}).strict();
+const identityPolicy = z.discriminatedUnion("erc8004", [
+  z.object({
+    erc8004: z.literal("required_fresh"),
+    chainId: z.literal(AGENT_HANDSHAKE_V2_CHAIN_ID),
+    registryAddress: z.literal(AGENT_HANDSHAKE_V2_REGISTRY_ADDRESS),
+  }).strict(),
+  z.object({
+    erc8004: z.literal("required_existing_or_fresh"),
+    chainId: z.literal(AGENT_HANDSHAKE_V2_CHAIN_ID),
+    registryAddress: z.literal(AGENT_HANDSHAKE_V2_REGISTRY_ADDRESS),
+  }).strict(),
+  z.object({
+    erc8004: z.literal("not_required"),
+    chainId: z.null(),
+    registryAddress: z.null(),
+  }).strict(),
+]);
 
 const definitions = Object.freeze([
   {
