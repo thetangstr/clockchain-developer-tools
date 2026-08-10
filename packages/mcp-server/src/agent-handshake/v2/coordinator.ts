@@ -77,7 +77,7 @@ function discovery(value: unknown): JsonObject {
   const item = exact(value, [
     "schema", "protocol", "sessionId", "repositorySha", "kitRepoUrl", "relayUrl",
     "createdAtMs", "invitationExpiresAtMs", "sessionDeadlineMs", "hostSessionKeyCertificate",
-    "externalBusinessActionPerformed",
+    "sessionOpenedBlock", "externalBusinessActionPerformed",
   ]);
   if (
     item.schema !== "clockchain.agent-handshake-discovery/v2" ||
@@ -85,6 +85,7 @@ function discovery(value: unknown): JsonObject {
     !SHA.test(item.repositorySha) || typeof item.kitRepoUrl !== "string" ||
     typeof item.relayUrl !== "string" || !DECIMAL.test(item.createdAtMs) ||
     !DECIMAL.test(item.invitationExpiresAtMs) || !DECIMAL.test(item.sessionDeadlineMs) ||
+    !DECIMAL.test(item.sessionOpenedBlock) ||
     BigInt(item.createdAtMs) >= BigInt(item.invitationExpiresAtMs) ||
     BigInt(item.invitationExpiresAtMs) > BigInt(item.sessionDeadlineMs) ||
     item.hostSessionKeyCertificate === null || typeof item.hostSessionKeyCertificate !== "object" ||
@@ -125,7 +126,7 @@ function metadataFrom(discoveryValue: JsonObject, terms: JsonObject): V2Invitati
     invitationExpiresAtMs: discoveryValue.invitationExpiresAtMs,
     sessionDeadlineMs: discoveryValue.sessionDeadlineMs,
     createdAtMs: discoveryValue.createdAtMs,
-    sessionOpenedBlock: String(discoveryValue.hostSessionKeyCertificate?.certificate?.sessionOpenedBlock ?? "0"),
+    sessionOpenedBlock: discoveryValue.sessionOpenedBlock,
   });
 }
 

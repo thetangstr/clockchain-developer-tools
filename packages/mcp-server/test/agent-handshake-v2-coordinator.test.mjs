@@ -30,6 +30,7 @@ const discovery = {
   createdAtMs: String(nowMs),
   invitationExpiresAtMs: String(nowMs + 120000),
   sessionDeadlineMs: String(nowMs + 600000),
+  sessionOpenedBlock: "6999",
   hostSessionKeyCertificate,
   externalBusinessActionPerformed: false,
 };
@@ -152,4 +153,3 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   assert.equal((await coordinator.getCertificate({ access: accesses.initiator })).certificate.result.outcome, "VERIFIED");
   assert.equal((await coordinator.getCertificate({ access: accesses.responder })).certificate.result.outcome, "VERIFIED");
 });
-
