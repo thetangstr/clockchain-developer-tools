@@ -259,6 +259,11 @@ export interface HandshakeInvitationPayload {
   invitationId: string;
   role: "responder";
   statementDigest: string;
+  terms: {
+    reference: string;
+    statement: string;
+    validForMinutes: string;
+  };
   iat: number;
   exp: number;
   jti: string;
@@ -335,6 +340,7 @@ export function mintHandshakeInvitation(
     invitationId: input.invitationId,
     role: "responder",
     statementDigest: input.statementDigest,
+    terms: input.terms,
     iat: input.iat,
     exp: input.exp,
     jti: input.jti,
@@ -351,7 +357,7 @@ export function verifyHandshakeInvitation(
     secret,
     token,
     "handshake_invitation",
-    ["v", "kind", "invitationId", "role", "statementDigest", "iat", "exp", "jti"],
+    ["v", "kind", "invitationId", "role", "statementDigest", "terms", "iat", "exp", "jti"],
     nowSec,
   );
   if (!verified.valid) return verified;
@@ -359,10 +365,20 @@ export function verifyHandshakeInvitation(
     verified.payload.role !== "responder" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(verified.payload.invitationId) ||
     !/^[0-9a-f]{64}$/.test(verified.payload.statementDigest) ||
+    !isHandshakeInvitationTerms(verified.payload.terms) ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(verified.payload.jti) ||
     !Number.isSafeInteger(verified.payload.iat) || verified.payload.iat >= verified.payload.exp
   ) return { valid: false, reason: "invalid" };
   return verified;
+}
+
+function isHandshakeInvitationTerms(value: unknown): value is HandshakeInvitationPayload["terms"] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const terms = value as Record<string, unknown>;
+  return Object.keys(terms).sort().join("\0") === ["reference", "statement", "validForMinutes"].sort().join("\0") &&
+    typeof terms.reference === "string" && terms.reference.length > 0 && terms.reference.length <= 128 &&
+    typeof terms.statement === "string" && terms.statement.length > 0 && terms.statement.length <= 256 &&
+    typeof terms.validForMinutes === "string" && /^(?:[1-9]|[1-5][0-9]|60)$/.test(terms.validForMinutes);
 }
 
 export function mintHandshakeSessionToken(

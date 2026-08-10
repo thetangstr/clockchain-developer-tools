@@ -221,6 +221,7 @@ export function createAgentHandshakeInvitationService(options: {
         invitationId: discovery.sessionId,
         jti,
         statementDigest,
+        terms,
       });
       await options.store.put({
         capabilityHash: capabilityHash(minted.token),
@@ -248,6 +249,7 @@ export function createAgentHandshakeInvitationService(options: {
       invitationId: string;
       role: "responder";
       statementDigest: string;
+      terms: AgentHandshakeTerms;
       token: string;
       tools: readonly string[];
     }>> {
@@ -279,6 +281,7 @@ export function createAgentHandshakeInvitationService(options: {
           invitationId: minted.payload.invitationId,
           role: minted.payload.role,
           statementDigest: minted.payload.statementDigest,
+          terms: verified.payload.terms,
           token: minted.token,
           tools: minted.payload.tools,
         });

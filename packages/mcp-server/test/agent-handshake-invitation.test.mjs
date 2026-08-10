@@ -20,6 +20,7 @@ import { registerTools } from "../dist/tools.js";
 const SECRET = "invitation-secret-for-tests";
 const SESSION_ID = "22222222-3333-4444-8555-666666666666";
 const DIGEST = "a".repeat(64);
+const TERMS = { reference: "NS-1847", statement: "Two agents may communicate about NS-1847.", validForMinutes: "45" };
 
 test("invitation and scoped transport tokens are signed, exact, and distinct", () => {
   const invitation = mintHandshakeInvitation(SECRET, {
@@ -28,8 +29,11 @@ test("invitation and scoped transport tokens are signed, exact, and distinct", (
     invitationId: SESSION_ID,
     jti: "33333333-4444-4555-8666-777777777777",
     statementDigest: DIGEST,
+    terms: TERMS,
   });
-  assert.equal(verifyHandshakeInvitation(SECRET, invitation.token, 1500).valid, true);
+  const verified = verifyHandshakeInvitation(SECRET, invitation.token, 1500);
+  assert.equal(verified.valid, true);
+  assert.deepEqual(verified.payload.terms, TERMS);
   assert.equal(verifyHandshakeInvitation(SECRET, `${invitation.token}x`, 1500).valid, false);
   assert.equal(verifyHandshakeInvitation(SECRET, invitation.token, 2000).valid, false);
   assert.equal(invitation.token.includes(SESSION_ID), false);
@@ -58,6 +62,7 @@ test("an invitation exchanges once for a responder-only principal", async () => 
   assert.equal(verified.valid, true);
   assert.equal(verified.payload.role, "responder");
   assert.equal(verified.payload.invitationId, SESSION_ID);
+  assert.deepEqual(fulfilled.terms, TERMS);
   assert.notEqual(verified.payload.jti, verifyHandshakeInvitation(SECRET, capability, 1000).payload.jti);
   const rejected = first.status === "rejected" ? first.reason : second.reason;
   assert.ok(rejected instanceof AgentHandshakeInvitationError);
@@ -102,7 +107,7 @@ test("exchange rejects wrong current session with one fixed public error", async
   });
   const invitation = mintHandshakeInvitation(SECRET, {
     exp: 2000, iat: 1000, invitationId: SESSION_ID,
-    jti: "33333333-4444-4555-8666-777777777777", statementDigest: DIGEST,
+    jti: "33333333-4444-4555-8666-777777777777", statementDigest: DIGEST, terms: TERMS,
   });
   await assert.rejects(() => service.exchange(invitation.token), {
     code: "INVITATION_UNAVAILABLE",
