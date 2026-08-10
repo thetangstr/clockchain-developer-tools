@@ -66,7 +66,12 @@ test("an unanchored Clockchain ledger response is retryable instead of a termina
   const clockchain = {
     searchAsset: async () => [],
     log: async () => ({ ledgerId: "33333333-4444-4555-8666-777777777770" }),
-    getLedgerEntry: async () => ({}),
+    getLedgerEntry: async () => ({
+      ledgerId: "33333333-4444-4555-8666-777777777770",
+      blockHeight: null,
+      assetHash: "pending",
+      assetReferenceId: "pending",
+    }),
     getChainRecord: async () => null,
     getBlock: async () => ({}),
   };

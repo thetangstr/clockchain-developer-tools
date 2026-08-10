@@ -502,15 +502,17 @@ async function anchorV2(client: any, transition: JsonObject, canWrite: boolean):
   if (!UUID.test(ledgerId)) fail();
   const ledger = await client.getLedgerEntry(ledgerId);
   if (
-    !ledger || typeof ledger !== "object" || ledger.blockHeight === undefined ||
-    ledger.ledgerId === undefined || ledger.assetHash === undefined || ledger.assetReferenceId === undefined
+    !ledger || typeof ledger !== "object" || ledger.blockHeight === undefined || ledger.blockHeight === null ||
+    ledger.ledgerId === undefined || ledger.ledgerId === null || ledger.assetHash === undefined ||
+    ledger.assetHash === null || ledger.assetReferenceId === undefined || ledger.assetReferenceId === null
   ) transient();
   const blockHeight = String(ledger.blockHeight ?? "");
   if (!DECIMAL.test(blockHeight) || ledger.ledgerId !== ledgerId || ledger.assetHash !== digest || ledger.assetReferenceId !== reference) fail();
   const chain = await client.getChainRecord(blockHeight, ledgerId);
   if (
-    !chain || typeof chain !== "object" || chain.blockHeight === undefined ||
-    chain.assetHash === undefined || chain.assetReferenceId === undefined
+    !chain || typeof chain !== "object" || chain.blockHeight === undefined || chain.blockHeight === null ||
+    chain.assetHash === undefined || chain.assetHash === null ||
+    chain.assetReferenceId === undefined || chain.assetReferenceId === null
   ) transient();
   if (!chain || chain.assetHash !== digest || chain.assetReferenceId !== reference || String(chain.blockHeight) !== blockHeight) fail();
   const block = await client.getBlock(blockHeight);
