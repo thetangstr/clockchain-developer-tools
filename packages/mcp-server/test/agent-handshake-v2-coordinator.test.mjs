@@ -118,6 +118,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     messages.push({ kind: "agent_v2_funding_record", role: "host", body: { role, address: addresses[role] } });
     const ready = await coordinator.next({ access: accesses[role] });
     assert.equal(ready.stage, "party_ready");
+    assert.equal(ready.nextAction, "call_agent_handshake_next_with_unchanged_role_access");
   }
   const proposal = await coordinator.next({ access: accesses.initiator });
   assert.equal(proposal.signingRequest.operation, "proposal");

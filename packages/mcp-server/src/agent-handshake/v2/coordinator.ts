@@ -60,6 +60,8 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SIGNATURE = /^0x[0-9a-f]{130}$/;
+const RETRY_AFTER_MS = 3000;
+const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 
 export class V2CoordinatorError extends Error {
   constructor() { super("Agent handshake coordination failed safely."); this.name = "V2CoordinatorError"; }
@@ -323,7 +325,7 @@ export function createV2Coordinator(options: {
       const entries = (await options.relay.getMessages({ sessionId: auth.keyValue.session })).messages;
       if (!current.party) {
         if (current.terms.identityPolicy.erc8004 !== "not_required" && !funded(entries, role, current.sessionKeyAddress)) {
-          return Object.freeze({ needed: "funding_record", role, sessionId: auth.keyValue.session, stage: "awaiting_funding" });
+          return Object.freeze({ needed: "funding_record", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_funding" });
         }
         let registration = null;
         if (current.terms.identityPolicy.erc8004 !== "not_required") {
@@ -338,7 +340,7 @@ export function createV2Coordinator(options: {
               executor: "pinned_helper",
               operation: "register",
               stateDir: "reuse_exact_absolute_state_dir",
-              afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
+              afterSuccess: NEXT_ACTION,
             }),
           });
           if (current.terms.identityPolicy.erc8004 === "required_fresh" && BigInt(registration.registrationBlock) <= BigInt(current.discovery.sessionOpenedBlock ?? "0")) fail();
@@ -346,10 +348,10 @@ export function createV2Coordinator(options: {
         const party = normalizeV2Party({ sessionKeyAddress: current.sessionKeyAddress, policyDigest: current.policyDigest, erc8004: registration }, current.terms.identityPolicy) as JsonObject;
         await post(auth.keyValue, "agent_v2_party_ready", party);
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { party, stage: "party_ready" }));
-        return Object.freeze({ needed: null, role, sessionId: auth.keyValue.session, stage: "party_ready", identity: party });
+        return Object.freeze({ needed: null, role, sessionId: auth.keyValue.session, stage: "party_ready", identity: party, nextAction: NEXT_ACTION });
       }
       current = await refresh(auth.keyValue);
-      if (!current.counterpart) return Object.freeze({ needed: "counterpart_identity", role, sessionId: auth.keyValue.session, stage: "awaiting_counterpart" });
+      if (!current.counterpart) return Object.freeze({ needed: "counterpart_identity", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_counterpart" });
       const parties = role === "initiator" ? { initiator: current.party, responder: current.counterpart } : { initiator: current.counterpart, responder: current.party };
       if (role === "initiator" && !current.proposalEnvelope) {
         const issuedAtMs = String(now());
@@ -365,7 +367,7 @@ export function createV2Coordinator(options: {
         return Object.freeze({ stage: "sign_proposal", signingRequest: signRequest(data(updated), role, "proposal", proposal) });
       }
       if (role === "responder" && !current.acceptanceEnvelope) {
-        if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
+        if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
         const proposal = normalizeV2Proposal(current.proposalEnvelope.payload) as JsonObject;
         const acceptance = normalizeV2Acceptance({
           schema: "clockchain.agent-handshake-acceptance/v2", protocol: "clockchain.agent-handshake/v2",
@@ -379,15 +381,15 @@ export function createV2Coordinator(options: {
         return Object.freeze({ stage: "sign_acceptance", signingRequest: signRequest(data(updated), role, "acceptance", acceptance) });
       }
       current = await refresh(auth.keyValue);
-      if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });
+      if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });
       const descriptor = normalizeV2Descriptor(current.descriptorEnvelope.descriptor) as JsonObject;
       const transitions = await options.advanceTransitions({ descriptor, role, existing: current.transitions ?? [] });
       if (transitions.length !== 3) {
         await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, stage: "awaiting_anchors" }));
-        return Object.freeze({ needed: "counterpart_transition", role, sessionId: auth.keyValue.session, stage: "awaiting_anchors" });
+        return Object.freeze({ needed: "counterpart_transition", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_anchors" });
       }
       if (role === "initiator") await post(auth.keyValue, "agent_v2_anchor_report", { transitions });
-      if (current.evidenceUploaded) return Object.freeze({ needed: "certificate", role, sessionId: auth.keyValue.session, stage: "awaiting_certificate" });
+      if (current.evidenceUploaded) return Object.freeze({ needed: "certificate", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_certificate" });
       const evidence = normalizeV2EvidenceResult({
         externalBusinessActionPerformed: false, party: current.party, policyDigest: current.policyDigest,
         reference: current.terms.reference, repositorySha: current.discovery.repositorySha, role,
