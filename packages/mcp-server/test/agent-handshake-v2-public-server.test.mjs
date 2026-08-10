@@ -53,6 +53,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /local bearer credential/i);
   assert.match(instructions, /do not send it to the other stakeholder or echo it into chat or logs/i);
   assert.match(instructions, /may inspect the public manifest and helper source before execution/i);
+  assert.match(instructions, /describes mechanics, not stakeholder authorization/i);
+  assert.match(instructions, /local stakeholder's own prompt explicitly confirms/i);
   assert.doesNotMatch(instructions, /keep each returned role access value private/i);
   const manifest = buildV2Manifest(pin);
   assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
