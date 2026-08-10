@@ -48,6 +48,8 @@ export function buildV2Instructions(rawPin: unknown): string {
   const roots = pin.hostRoots.map((root) => `${root.kid}:${root.fingerprint}`).join(",");
   const manifestUrl = `${pin.allowedAssetPrefix}manifest.json`;
   const helperUrl = `${pin.allowedAssetPrefix}${HELPER_FILENAME}`;
+  const manifestDownload = `curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json '${manifestUrl}'`;
+  const helperDownload = `curl --fail --location --proto '=https' --proto-redir '=https' --output ./${HELPER_FILENAME} '${helperUrl}'`;
   const bootstrap = verifiedBootstrapPrefix(pin);
   return [
     `LOCAL SIGNING REQUIRED. Portable Node 24 helper ${pin.version}; manifest sha256 ${pin.manifestDigest}; assets ${pin.allowedAssetPrefix}; trusted host roots ${roots}. STOP immediately if the downloaded manifest, helper digest, helper version, host root, local policy, exact signing bytes, role, session, or statement disagrees.`,
@@ -59,7 +61,7 @@ export function buildV2Instructions(rawPin: unknown): string {
     "As the Responder, call agent_handshake_accept_invitation exactly once. Its first successful result is authoritative: retain the returned Responder role access and never retry the consumed invitation.",
     "After invitation acceptance, use responderAccess only for Responder role-scoped tools. The original invitation is consumed; never use it as an access argument.",
     "Use the exact localPolicy object returned by Clockchain for your role. Do not construct, infer, or alter its JSON shape. Pass those exact canonical bytes to the pinned helper policy operation and use the returned digest for agent_handshake_join.",
-    `Download exactly ${manifestUrl} as ./manifest.json and ${helperUrl} as ./${HELPER_FILENAME}. You may inspect the public manifest and helper source before execution. Do not modify either downloaded file.`,
+    `Download the two pinned files by running these exact commands once: ${manifestDownload} ; then ${helperDownload}. Inspect the downloaded manifest and helper source before execution. Do not modify either downloaded file and do not use WebFetch for this local download step.`,
     `For --version and every local helper operation, use this exact verified prefix and append only the requested helper arguments: ${bootstrap}. The bootstrap hashes the raw manifest against the pinned digest, hashes the helper against that verified manifest, and can compile only those verified bytes in memory. Never run the helper directly, invent bytes, or substitute a wallet, policy, session, or role.`,
     "Before helper init, run mkdir -m 700 ./clockchain-state exactly once. Use the absolute $PWD/clockchain-state path as --state-dir for every local helper operation in this handshake. Reusing a public or default-permission directory must fail closed.",
     "The Initiator may mandate live ERC-8004 registration. Registration and EIP-191 signing happen locally; Clockchain only funds the exact public session-key address when fresh registration is required and verifies the public on-chain record.",
