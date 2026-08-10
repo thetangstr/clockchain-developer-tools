@@ -18,6 +18,14 @@ services:
       MCP_HANDSHAKE_FILE: /app/state/handshake.json
       MCP_HANDSHAKE_INVITATION_FILE: /app/state/agent-handshake-invitations.json
       AGENT_HANDSHAKE_JOIN_URL: "${AGENT_HANDSHAKE_JOIN_URL:-https://clockchain-research.vercel.app/handshake/join}"
+      AGENT_HANDSHAKE_RELEASE_PIN: "${AGENT_HANDSHAKE_RELEASE_PIN}"
+      AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: "${AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE}"
+      AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: "${AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS:-}"
+      AGENT_HANDSHAKE_V2_INVITATION_FILE: /app/state/agent-handshake-v2-invitations.json
+      AGENT_HANDSHAKE_V2_STATE_FILE: /app/state/agent-handshake-v2-state.json
+      AGENT_HANDSHAKE_INVITES_PER_HOUR: "5"
+      AGENT_HANDSHAKE_CALLS_PER_MINUTE: "120"
+      AGENT_HANDSHAKE_TRUSTED_PROXY: "172.30.0.3"
       HANDSHAKE_ALLOW_DEGRADED: "${HANDSHAKE_ALLOW_DEGRADED}"
       EVM_RPC_URL: "${EVM_RPC_URL}"
       CLOCKCHAIN_API_KEY: "${CLOCKCHAIN_API_KEY}"
@@ -27,6 +35,9 @@ services:
       - mcp_state:/app/state
     expose:
       - "8080"
+    networks:
+      clockchain_edge:
+        ipv4_address: 172.30.0.2
     healthcheck:
       test:
         - CMD
@@ -47,12 +58,22 @@ services:
   host:
     build:
       context: ${HANDSHAKE_APP_ROOT:-/opt/clockchain-host/app}
+    command: ["node", "bin/agent-handshake-host.mjs"]
     environment:
       HANDSHAKE_RELAY: "${HANDSHAKE_RELAY}"
       HANDSHAKE_SHA: "${HANDSHAKE_SHA}"
       HANDSHAKE_KIT_REPO: "${HANDSHAKE_KIT_REPO}"
-      HANDSHAKE_PROTOCOL: "${HANDSHAKE_PROTOCOL:-bilateral-payment-v1}"
+      HANDSHAKE_PROTOCOL: "clockchain.agent-handshake/v2"
+      AGENT_HANDSHAKE_PROTOCOL: "clockchain.agent-handshake/v2"
+      CLOCKCHAIN_HOST_ROOT_KEY_ID: "${CLOCKCHAIN_HOST_ROOT_KEY_ID}"
+      CLOCKCHAIN_HOST_ROOT_KEY_FILE: /app/keys/agent-handshake-v2-host-root.pem
+      AGENT_HANDSHAKE_V2_FUNDING_LEDGER: /app/runs/private/v2-funding-ledger.jsonl
+      AGENT_HANDSHAKE_V2_FUNDING_QUEUE_LIMIT: "16"
+      AGENT_HANDSHAKE_V2_FUNDING_ALERT_HOURLY_ETH: "0.16"
+      AGENT_HANDSHAKE_V2_FUNDING_ALERT_DAILY_ETH: "0.80"
+      CLOCKCHAIN_FUNDING_KEYSTORE: /app/keys/funding-wallet.json
       CLOCKCHAIN_FUNDING_PASSWORD_FILE: /app/keys/funding.password
+      SEPOLIA_RPC_URL: "${EVM_RPC_URL}"
     volumes:
       - ${CLOCKCHAIN_HOST_SECRET_DIR:-/run/clockchain-host-secrets}:/app/keys:ro
       - host_runs:/app/runs
@@ -66,6 +87,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    networks:
+      clockchain_edge:
+        ipv4_address: 172.30.0.3
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -77,3 +101,9 @@ volumes:
   caddy_config:
   host_runs:
   mcp_state:
+
+networks:
+  clockchain_edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
