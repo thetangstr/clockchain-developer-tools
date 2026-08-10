@@ -50,6 +50,10 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /Node 24/);
   assert.ok(instructions.includes(V2_VERIFIED_HELPER_BOOTSTRAP));
   assert.match(instructions, /compile only those verified bytes in memory/i);
+  assert.match(instructions, /local bearer credential/i);
+  assert.match(instructions, /do not send it to the other stakeholder or echo it into chat or logs/i);
+  assert.match(instructions, /may inspect the public manifest and helper source before execution/i);
+  assert.doesNotMatch(instructions, /keep each returned role access value private/i);
   const manifest = buildV2Manifest(pin);
   assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
   assert.equal(manifest.helper.filename, "clockchain-agent-handshake.cjs");
