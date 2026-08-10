@@ -61,6 +61,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /Every needed or stage response is nonterminal.*retryAfterMs.*agent_handshake_next.*final certificate.*unrecoverable error/is);
   assert.match(instructions, /exact localPolicy object returned by Clockchain.*do not construct, infer, or alter.*helper policy operation/is);
   assert.match(instructions, /Never infer that the other stakeholder stopped from a waiting response/is);
+  assert.match(instructions, /HANDSHAKE_TEMPORARILY_UNAVAILABLE.*retryable: true.*retryAfterMs.*retry the same tool.*terminal protocol rejection/is);
   assert.doesNotMatch(instructions, /keep each returned role access value private/i);
   const manifest = buildV2Manifest(pin);
   assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
@@ -128,5 +129,29 @@ test("public HTTP routing ignores full-surface credentials, trusts only configur
     now += 60 * 60_000 + 1;
   } finally {
     await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
+test("public tools distinguish retryable infrastructure failures from terminal protocol rejection", async () => {
+  for (const candidate of [
+    { error: Object.assign(new Error("rpc unavailable"), { name: "RpcRequestError" }), retryable: true },
+    { error: Object.assign(new Error("invalid role state"), { name: "V2CoordinatorError" }), retryable: false },
+  ]) {
+    const handler = createV2PublicHttpHandler({ pin, invoke: async () => { throw candidate.error; } });
+    const httpServer = createServer((req, res) => handler(req, res));
+    await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+    try {
+      const result = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: "a".repeat(80) } });
+      const body = JSON.parse(result.body.result.content[0].text);
+      assert.equal(body.retryable, candidate.retryable);
+      assert.equal(result.body.result.isError === true, !candidate.retryable);
+      if (candidate.retryable) {
+        assert.equal(body.error, "HANDSHAKE_TEMPORARILY_UNAVAILABLE");
+        assert.equal(body.retryAfterMs, 5000);
+      }
+    } finally {
+      await new Promise((resolve) => httpServer.close(resolve));
+    }
   }
 });

@@ -19,6 +19,12 @@ export type V2PublicToolName = typeof V2_PUBLIC_TOOL_NAMES[number];
 export type V2PublicInvoke = (name: V2PublicToolName, args: Record<string, unknown>) => Promise<unknown>;
 
 const access = z.string().min(80).max(4096);
+const TERMINAL_ERROR_NAMES = new Set([
+  "AgentHandshakeV2ValidationError",
+  "V2CoordinatorError",
+  "V2InvitationError",
+  "V2RoleAccessError",
+]);
 const identityPolicy = z.discriminatedUnion("erc8004", [
   z.object({
     erc8004: z.literal("required_fresh"),
@@ -78,8 +84,15 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
       try {
         const result = await invoke(definition.name, args);
         return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown> };
-      } catch {
-        return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: "HANDSHAKE_UNAVAILABLE" }) }] };
+      } catch (error) {
+        const retryable = !TERMINAL_ERROR_NAMES.has((error as Error)?.name) &&
+          (error as Error)?.message !== "rate_limited";
+        const body = retryable
+          ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 }
+          : { error: "HANDSHAKE_UNAVAILABLE", retryable: false };
+        return retryable
+          ? { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body }
+          : { isError: true, content: [{ type: "text", text: JSON.stringify(body) }] };
       }
     });
   }
