@@ -59,6 +59,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /mkdir -m 700 \.\/clockchain-state.*absolute.*\$PWD\/clockchain-state.*every local helper operation/is);
   assert.match(instructions, /agent_handshake_accept_invitation exactly once.*first successful result.*never retry/is);
   assert.match(instructions, /Every needed or stage response is nonterminal.*retryAfterMs.*agent_handshake_next.*final certificate.*unrecoverable error/is);
+  assert.match(instructions, /exact localPolicy object returned by Clockchain.*do not construct, infer, or alter.*helper policy operation/is);
   assert.match(instructions, /Never infer that the other stakeholder stopped from a waiting response/is);
   assert.doesNotMatch(instructions, /keep each returned role access value private/i);
   const manifest = buildV2Manifest(pin);

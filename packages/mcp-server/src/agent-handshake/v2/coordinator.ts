@@ -271,7 +271,7 @@ export function createV2Coordinator(options: {
         metadata,
       });
       await storeInitial(created.initiatorAccess, metadata, "initiator");
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms });
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: localPolicy(terms, "initiator") });
     },
 
     async acceptInvitation(invitation: string): Promise<JsonObject> {
@@ -282,7 +282,7 @@ export function createV2Coordinator(options: {
         claimedAtMs: accepted.claimedAtMs,
         externalBusinessActionPerformed: false,
       });
-      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId: (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs });
+      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId: (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: localPolicy(accepted.metadata.terms as JsonObject, "responder") });
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {

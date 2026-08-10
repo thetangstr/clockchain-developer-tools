@@ -95,7 +95,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   });
 
   const invited = await coordinator.invite(terms);
+  assert.deepEqual(invited.localPolicy, policy("initiator"));
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
+  assert.deepEqual(accepted.localPolicy, policy("responder"));
   const invitationClaimed = messages.find((message) => message.kind === "agent_v2_invitation_claimed");
   assert.equal(invitationClaimed.role, "responder");
   assert.equal(invitationClaimed.body.claimedAtMs, String(nowMs + 1));
