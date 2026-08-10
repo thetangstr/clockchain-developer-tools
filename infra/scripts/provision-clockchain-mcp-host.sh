@@ -9,6 +9,7 @@ KEY_PATH="/Users/Kailor/.ssh/clockchain-mcp.pem"
 ROLE_NAME="clockchain-mcp-ec2-role"
 PROFILE_NAME="clockchain-mcp-instance-profile"
 POLICY_NAME="clockchain-mcp-ssm-parameter-read"
+SSM_CORE_POLICY_ARN="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 SG_NAME="clockchain-mcp-sg"
 PARAM_NAME="/clockchain/mcp/PING"
 AMI_PARAM="/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
@@ -178,6 +179,9 @@ JSON
     --role-name "$ROLE_NAME" \
     --policy-name "$POLICY_NAME" \
     --policy-document "file://${policy_doc}"
+  aws iam attach-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-arn "$SSM_CORE_POLICY_ARN"
   aws iam create-instance-profile \
     --instance-profile-name "$PROFILE_NAME" \
     --tags Key=Name,Value="$NAME" Key=Project,Value=clockchain Key=Component,Value=mcp Key=ManagedBy,Value=codex-b2 >/dev/null
@@ -251,6 +255,25 @@ allocate_and_associate_eip() {
   printf '%s\t%s\n' "$allocation_id" "$public_ip"
 }
 
+wait_for_ssm_online() {
+  local instance_id="$1" attempt status
+
+  for attempt in {1..24}; do
+    status="$(aws_region ssm describe-instance-information \
+      --filters "Key=InstanceIds,Values=${instance_id}" \
+      --query 'InstanceInformationList[0].PingStatus' \
+      --output text 2>/dev/null || true)"
+    if [[ "$status" == "Online" ]]; then
+      printf '%s\n' "$status"
+      return 0
+    fi
+    log "Waiting for SSM instance ${instance_id} to report Online (${attempt}/24)"
+    sleep 5
+  done
+
+  die "SSM instance ${instance_id} did not report Online"
+}
+
 main() {
   require_cmd aws
   require_cmd curl
@@ -260,7 +283,7 @@ main() {
   validate_identity
   validate_clean_slate
 
-  local vpc_id subnet_id ssh_cidr ami_id sg_id instance_id allocation_id public_ip
+  local vpc_id subnet_id ssh_cidr ami_id sg_id instance_id allocation_id public_ip ssm_status
   read -r vpc_id subnet_id < <(select_public_default_subnet)
   ssh_cidr="$(current_public_cidr)"
   ami_id="$(aws_region ssm get-parameter --name "$AMI_PARAM" --query 'Parameter.Value' --output text)"
@@ -285,6 +308,7 @@ main() {
 
   log "Waiting for instance ${instance_id} to pass status checks"
   aws_region ec2 wait instance-status-ok --instance-ids "$instance_id"
+  ssm_status="$(wait_for_ssm_online "$instance_id")"
 
   printf 'INSTANCE_ID=%s\n' "$instance_id"
   printf 'ALLOCATION_ID=%s\n' "$allocation_id"
@@ -297,6 +321,7 @@ main() {
   printf 'IAM_ROLE=%s\n' "$ROLE_NAME"
   printf 'INSTANCE_PROFILE=%s\n' "$PROFILE_NAME"
   printf 'SSM_PARAMETER=%s\n' "$PARAM_NAME"
+  printf 'SSM_STATUS=%s\n' "$ssm_status"
 }
 
 main "$@"
