@@ -51,6 +51,7 @@ services:
       HANDSHAKE_RELAY: "${HANDSHAKE_RELAY}"
       HANDSHAKE_SHA: "${HANDSHAKE_SHA}"
       HANDSHAKE_KIT_REPO: "${HANDSHAKE_KIT_REPO}"
+      HANDSHAKE_PROTOCOL: "${HANDSHAKE_PROTOCOL:-bilateral-payment-v1}"
       CLOCKCHAIN_FUNDING_PASSWORD_FILE: /app/keys/funding.password
     volumes:
       - ${CLOCKCHAIN_HOST_SECRET_DIR:-/run/clockchain-host-secrets}:/app/keys:ro

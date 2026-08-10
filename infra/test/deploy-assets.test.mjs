@@ -353,6 +353,7 @@ test("deployment assets define the locked EC2 compose target", async () => {
   assert.match(compose, /HANDSHAKE_RELAY:\s*"\$\{HANDSHAKE_RELAY\}"/);
   assert.match(compose, /HANDSHAKE_SHA:\s*"\$\{HANDSHAKE_SHA\}"/);
   assert.match(compose, /HANDSHAKE_KIT_REPO:\s*"\$\{HANDSHAKE_KIT_REPO\}"/);
+  assert.match(compose, /HANDSHAKE_PROTOCOL:\s*"\$\{HANDSHAKE_PROTOCOL:-bilateral-payment-v1\}"/);
   assert.match(compose, /CLOCKCHAIN_FUNDING_PASSWORD_FILE:\s*\/app\/keys\/funding\.password/);
   assert.match(compose, /\$\{CLOCKCHAIN_HOST_SECRET_DIR:-\/run\/clockchain-host-secrets\}:\/app\/keys:ro/);
   assert.match(compose, /host_runs:\/app\/runs/);
@@ -402,6 +403,7 @@ test("resolved compose config adds the external host without network ingress", a
   assert.deepEqual(host.environment, {
     HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
     CLOCKCHAIN_FUNDING_PASSWORD_FILE: "/app/keys/funding.password",
+    HANDSHAKE_PROTOCOL: "bilateral-payment-v1",
     HANDSHAKE_RELAY: "http://44.249.47.220:8080",
     HANDSHAKE_SHA: expectedHandshakeSha,
   });
