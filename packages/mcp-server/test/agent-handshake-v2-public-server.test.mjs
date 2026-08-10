@@ -65,6 +65,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /agent_handshake_accept_invitation exactly once.*first successful result.*never retry/is);
   assert.match(instructions, /Every needed or stage response is nonterminal.*retryAfterMs.*agent_handshake_next.*final certificate.*unrecoverable error/is);
   assert.match(instructions, /exact localPolicy object returned by Clockchain.*do not construct, infer, or alter.*helper policy operation/is);
+  assert.match(instructions, /statementDigest.*sha-256.*canonical.*terms object.*not.*raw statement text/is);
   assert.match(instructions, /Never infer that the other stakeholder stopped from a waiting response/is);
   assert.match(instructions, /HANDSHAKE_TEMPORARILY_UNAVAILABLE.*retryable: true.*retryAfterMs.*retry the same tool.*terminal protocol rejection/is);
   assert.match(instructions, /role-scoped.*access argument.*same Clockchain MCP.*required credential use.*not.*disclosure/is);
