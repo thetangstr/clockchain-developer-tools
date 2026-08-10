@@ -281,6 +281,32 @@ test("resolveOwnedAgentId honors explicit fromBlock over canonical registry defa
   assert.equal(filter.fromBlock, "0x10");
 });
 
+test("resolveOwnedAgentId accepts the canonical decimal block carried by v2 discovery", async () => {
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push(body);
+    const result = body.method === "eth_blockNumber" ? "0xaee226" : [];
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ jsonrpc: "2.0", id: body.id, result }),
+    };
+  };
+
+  assert.equal(await resolveOwnedAgentId({
+    rpcUrl: RPC_URL,
+    registryAddress: SEPOLIA_ERC8004_REGISTRY,
+    address: ADDRESS,
+    fromBlock: "11461142",
+    fetchImpl,
+  }), null);
+
+  const filter = calls.find((call) => call.method === "eth_getLogs").params[0];
+  assert.equal(filter.fromBlock, "0xaee216");
+  assert.equal(filter.toBlock, "0xaee226");
+});
+
 test("resolveOwnedAgentId fails clearly when the reverse scan range exceeds the cap", async () => {
   const { fetchImpl } = rpcFetch((body) => {
     if (body.method === "eth_blockNumber") return "0x500001";
