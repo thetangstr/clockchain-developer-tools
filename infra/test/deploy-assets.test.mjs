@@ -753,6 +753,20 @@ test("installer enables and restarts the systemd unit", async () => {
   assert.match(install, /systemctl restart clockchain-mcp\.service/);
 });
 
+test("release runbook reinstalls deploy assets before every MCP restart", async () => {
+  const runbook = await readFile(path.join(deployDir, "RUNBOOK.md"), "utf8");
+  assert.match(
+    runbook,
+    /infra\/scripts\/install-clockchain-mcp-deploy-assets\.sh/,
+    "deploys must refresh the out-of-checkout systemd wrapper before restart",
+  );
+  assert.doesNotMatch(
+    runbook,
+    /then run `compose-up\.sh`/,
+    "the copied wrapper must not be invoked without first reinstalling it",
+  );
+});
+
 test("provisioning IAM policy is limited to MCP and host SSM prefixes", async () => {
   const provision = await readFile(path.join(repoRoot, "infra", "scripts", "provision-clockchain-mcp-host.sh"), "utf8");
   assert.match(provision, /parameter\/clockchain\/mcp\/\*/);

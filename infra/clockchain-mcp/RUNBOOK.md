@@ -44,9 +44,14 @@ stakeholder capabilities are never stored in SSM.
 2. Install the matching Handshake commit in the host checkout, keep the checkout
    clean, load the active host-root private key from SSM, and record its public
    fingerprint in the release pin.
-3. Install the matching MCP commit, rotate the active/previous role-access key
-   pair if required, then run `compose-up.sh`. It verifies the exact Handshake
-   SHA before Docker starts and atomically replaces the private host files.
+3. Install the matching MCP commit and rotate the active/previous role-access
+   key pair if required. From that exact checkout, run
+   `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`. The installer
+   first refreshes the out-of-checkout `compose-up.sh` and systemd unit, then
+   restarts the service. The refreshed wrapper verifies the exact Handshake SHA
+   before Docker starts and atomically replaces the private host files. Never
+   restart the service directly after changing the checkout: systemd deliberately
+   executes `/opt/clockchain-mcp/compose-up.sh`, not the copy inside the repo.
 4. Deploy Research only after the production MCP manifest reports the same
    helper digest and host-root ring that Research pins.
 
