@@ -35,8 +35,12 @@ stakeholder capabilities are never stored in SSM.
 
 ## Release and deploy order
 
-1. Publish and independently verify the signed helper release. Do not deploy a
-   pin until every supported asset passes its clean-platform check.
+1. Publish and independently verify the portable Node 24 helper release. Hash
+   the raw manifest bytes against the approved release pin, hash the helper
+   bytes against that verified manifest, and execute only the captured verified
+   bytes in memory. Do not deploy a pin until the portable asset passes its
+   clean-platform check. This release makes no native code-signing or
+   notarization claim.
 2. Install the matching Handshake commit in the host checkout, keep the checkout
    clean, load the active host-root private key from SSM, and record its public
    fingerprint in the release pin.

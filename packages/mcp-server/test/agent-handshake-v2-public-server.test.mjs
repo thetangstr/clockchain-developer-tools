@@ -10,7 +10,7 @@ import {
   createV2PublicHttpHandler,
   v2PublicClientIp,
 } from "../dist/agent-handshake/v2/public-server.js";
-import { buildV2Instructions, buildV2Manifest } from "../dist/agent-handshake/v2/instructions.js";
+import { V2_VERIFIED_HELPER_BOOTSTRAP, buildV2Instructions, buildV2Manifest } from "../dist/agent-handshake/v2/instructions.js";
 
 const pin = {
   version: "2.1.0",
@@ -45,7 +45,19 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.ok(first.includes(pin.hostRoots[0].kid));
   assert.ok(first.includes(pin.hostRoots[0].fingerprint));
   assert.match(first, /stop/i);
-  assert.deepEqual(buildV2Manifest(pin).endpoint, "https://mcp.clockchain.network/handshake/mcp");
+  assert.equal(instructions.includes("native signature"), false);
+  assert.equal(instructions.includes("node ./clockchain-agent-handshake.cjs"), false);
+  assert.match(instructions, /Node 24/);
+  assert.ok(instructions.includes(V2_VERIFIED_HELPER_BOOTSTRAP));
+  assert.match(instructions, /compile only those verified bytes in memory/i);
+  const manifest = buildV2Manifest(pin);
+  assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
+  assert.equal(manifest.helper.filename, "clockchain-agent-handshake.cjs");
+  assert.equal(manifest.helper.nodeRuntimeMajor, "24");
+  assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(pin.manifestDigest));
+  assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(V2_VERIFIED_HELPER_BOOTSTRAP));
+  assert.equal(V2_VERIFIED_HELPER_BOOTSTRAP.includes(","), false);
+  assert.equal(V2_VERIFIED_HELPER_BOOTSTRAP.includes("'"), false);
 });
 
 test("the dedicated MCP server exposes exactly seven tools and no prompts or resources", async () => {

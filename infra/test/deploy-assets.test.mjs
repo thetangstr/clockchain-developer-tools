@@ -402,6 +402,9 @@ test("deployment runbook fixes the release order, secret boundary, canaries, and
     assert.match(source, new RegExp(name.replaceAll("/", "\\/")));
   }
   assert.match(source, /helper release[\s\S]*host[\s\S]*MCP[\s\S]*Research/i);
+  assert.match(source, /portable Node 24 helper release/i);
+  assert.match(source, /raw manifest bytes[\s\S]*helper\s+bytes[\s\S]*verified\s+bytes in memory/i);
+  assert.doesNotMatch(source, /signed helper release/i);
   assert.match(source, /\/health/);
   assert.match(source, /\/\.well-known\/agent-handshake\.json/);
   assert.match(source, /\/handshake\/mcp/);
