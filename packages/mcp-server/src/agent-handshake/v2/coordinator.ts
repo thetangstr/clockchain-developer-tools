@@ -66,7 +66,11 @@ const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 export class V2CoordinatorError extends Error {
   constructor() { super("Agent handshake coordination failed safely."); this.name = "V2CoordinatorError"; }
 }
+export class V2TransientCoordinatorError extends Error {
+  constructor() { super("Agent handshake coordination is waiting for durable infrastructure state."); this.name = "V2TransientCoordinatorError"; }
+}
 function fail(): never { throw new V2CoordinatorError(); }
+function transient(): never { throw new V2TransientCoordinatorError(); }
 
 function exact(value: unknown, keys: readonly string[]): JsonObject {
   if (value === null || typeof value !== "object" || Array.isArray(value)) fail();
@@ -497,17 +501,25 @@ async function anchorV2(client: any, transition: JsonObject, canWrite: boolean):
   const ledgerId = String(record.ledgerId ?? "");
   if (!UUID.test(ledgerId)) fail();
   const ledger = await client.getLedgerEntry(ledgerId);
+  if (
+    !ledger || typeof ledger !== "object" || ledger.blockHeight === undefined ||
+    ledger.ledgerId === undefined || ledger.assetHash === undefined || ledger.assetReferenceId === undefined
+  ) transient();
   const blockHeight = String(ledger.blockHeight ?? "");
   if (!DECIMAL.test(blockHeight) || ledger.ledgerId !== ledgerId || ledger.assetHash !== digest || ledger.assetReferenceId !== reference) fail();
   const chain = await client.getChainRecord(blockHeight, ledgerId);
+  if (
+    !chain || typeof chain !== "object" || chain.blockHeight === undefined ||
+    chain.assetHash === undefined || chain.assetReferenceId === undefined
+  ) transient();
   if (!chain || chain.assetHash !== digest || chain.assetReferenceId !== reference || String(chain.blockHeight) !== blockHeight) fail();
   const block = await client.getBlock(blockHeight);
   const blockTimeRaw = String(block.blockTime ?? block.madMarzulloTime ?? "");
-  if (!blockTimeRaw) fail();
+  if (!blockTimeRaw) transient();
   return Object.freeze({ blockTimeRaw, digest, message: transition, onChain: Object.freeze({ blockHeight, ledgerId }) });
 }
 
-async function advanceRuntimeV2(client: any, input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]> {
+export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]> {
   const descriptor = input.descriptor;
   const sessionDigest = v2CanonicalRecord(descriptor).digest;
   const base = {
@@ -569,6 +581,6 @@ export function createRuntimeV2Coordinator(env: Record<string, string | undefine
         registrationBlock: found.registrationBlock,
       }) : null;
     },
-    advanceTransitions: (input) => advanceRuntimeV2(clockchain, input),
+    advanceTransitions: (input) => __advanceRuntimeV2(clockchain, input),
   });
 }

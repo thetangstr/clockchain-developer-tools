@@ -4,8 +4,10 @@ import test from "node:test";
 
 import { createHandshakeStateStore, __resetHandshakeStateStore } from "../dist/handshake/state.js";
 import { createV2InvitationService, createV2InvitationStore } from "../dist/agent-handshake/v2/invitation-store.js";
-import { createV2Coordinator } from "../dist/agent-handshake/v2/coordinator.js";
+import * as v2CoordinatorModule from "../dist/agent-handshake/v2/coordinator.js";
 import { v2CanonicalRecord } from "../dist/agent-handshake/v2/protocol.js";
+
+const { createV2Coordinator } = v2CoordinatorModule;
 
 const terms = {
   reference: "NS-1847",
@@ -48,6 +50,32 @@ function policy(role) {
     externalBusinessActionsAllowed: false,
   };
 }
+
+test("an unanchored Clockchain ledger response is retryable instead of a terminal protocol rejection", async () => {
+  assert.equal(typeof v2CoordinatorModule.__advanceRuntimeV2, "function");
+  const descriptor = {
+    agreementExpiresAtMs: String(nowMs + 90_000),
+    externalBusinessActionPerformed: false,
+    initiator: { sessionKeyAddress: "0x7564105e977516c53be337314c7e53838967bdac" },
+    protocol: "clockchain.agent-handshake/v2",
+    reference: terms.reference,
+    responder: { sessionKeyAddress: "0xe1fae9b4fab2f5726677ecfa912d96b0b683e6a9" },
+    schema: "clockchain.agent-handshake-descriptor/v2",
+    statementDigest: v2CanonicalRecord(terms).digest,
+  };
+  const clockchain = {
+    searchAsset: async () => [],
+    log: async () => ({ ledgerId: "33333333-4444-4555-8666-777777777770" }),
+    getLedgerEntry: async () => ({}),
+    getChainRecord: async () => null,
+    getBlock: async () => ({}),
+  };
+
+  await assert.rejects(
+    () => v2CoordinatorModule.__advanceRuntimeV2(clockchain, { descriptor, role: "initiator", existing: [] }),
+    (error) => error?.name === "V2TransientCoordinatorError",
+  );
+});
 
 test("two distinct role capabilities drive the complete v2 local-signing state machine", async () => {
   __resetHandshakeStateStore();
