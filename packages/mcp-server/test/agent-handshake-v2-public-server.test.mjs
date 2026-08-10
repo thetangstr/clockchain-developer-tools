@@ -55,6 +55,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /inspect the downloaded manifest and helper source before execution/i);
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.1/manifest.json'"));
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.1/clockchain-agent-handshake.cjs'"));
+  assert.match(instructions, /each command as its own separate Bash tool call.*never prefix, wrap, or combine/is);
+  assert.equal(instructions.includes(" ; then "), false);
   assert.match(instructions, /describes mechanics, not stakeholder authorization/i);
   assert.match(instructions, /local stakeholder's own prompt explicitly confirms/i);
   assert.match(instructions, /needed.*erc8004_registration.*pinned helper.*register.*same absolute state directory.*agent_handshake_next/is);
