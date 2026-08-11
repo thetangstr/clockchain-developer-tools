@@ -171,23 +171,36 @@ function evidenceEnvelope(result: JsonObject, address: string, signatureHex: str
   });
 }
 
-const STATE_DIR_PLACEHOLDER = "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR";
+function localStateDir(sessionId: string, role: V2Role): string {
+  if (!UUID.test(sessionId)) fail();
+  return `$HOME/.clockchain/handshakes/${sessionId}/${role}`;
+}
 
-function helperStep(operation: string, payload?: JsonObject): JsonObject {
-  const argvAfterVerifiedPrefix = [operation, "--state-dir", STATE_DIR_PLACEHOLDER];
+function helperStep(operation: string, sessionId: string, role: V2Role, payload?: JsonObject): JsonObject {
+  const stateDir = localStateDir(sessionId, role);
+  const argvAfterVerifiedPrefix = [operation, "--state-dir", stateDir];
   if (payload !== undefined) {
     argvAfterVerifiedPrefix.push("--payload-base64url", Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"));
   }
-  return Object.freeze({ operation, argvAfterVerifiedPrefix: Object.freeze(argvAfterVerifiedPrefix) });
+  const shellCommandSuffix = argvAfterVerifiedPrefix
+    .map((value, index) => index === 2 ? `"${value}"` : value)
+    .join(" ");
+  return Object.freeze({ operation, argvAfterVerifiedPrefix: Object.freeze(argvAfterVerifiedPrefix), shellCommandSuffix });
 }
 
-function setupLocalAction(policy: JsonObject): JsonObject {
+function setupLocalAction(policy: JsonObject, sessionId: string, role: V2Role): JsonObject {
+  const stateDir = localStateDir(sessionId, role);
   return Object.freeze({
     executor: "pinned_helper",
     operations: Object.freeze(["init", "policy", "inspect"]),
     payloadEncoding: "base64url_utf8_json",
     policyPayload: policy,
-    helperSteps: Object.freeze([helperStep("init"), helperStep("policy", policy), helperStep("inspect")]),
+    stateDirectoryCommand: `mkdir -p -m 700 "${stateDir}"`,
+    helperSteps: Object.freeze([
+      helperStep("init", sessionId, role),
+      helperStep("policy", sessionId, role, policy),
+      helperStep("inspect", sessionId, role),
+    ]),
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
     afterSuccess: "call_agent_handshake_join_with_helper_output",
@@ -195,12 +208,14 @@ function setupLocalAction(policy: JsonObject): JsonObject {
 }
 
 function signingLocalAction(signingRequest: JsonObject): JsonObject {
+  const role = signingRequest.role as V2Role;
+  const sessionId = signingRequest.sessionId as string;
   return Object.freeze({
     executor: "pinned_helper",
     operation: "sign",
     payloadEncoding: "base64url_utf8_json",
     payload: signingRequest,
-    helperStep: helperStep("sign", signingRequest),
+    helperStep: helperStep("sign", sessionId, role, signingRequest),
     stateDir: "reuse_exact_absolute_state_dir",
     afterSuccess: "call_agent_handshake_submit_with_helper_output_and_unchanged_policy_digest",
   });
@@ -227,7 +242,7 @@ function certificateLocalAction(input: {
     operation: "verify-certificate",
     payloadEncoding: "base64url_utf8_json",
     payload,
-    helperStep: helperStep("verify-certificate", payload),
+    helperStep: helperStep("verify-certificate", input.sessionId, input.role, payload),
     stateDir: "reuse_exact_absolute_state_dir",
     terminalProof: "use_verified_helper_output_only",
   });
@@ -338,7 +353,7 @@ export function createV2Coordinator(options: {
       });
       await storeInitial(created.initiatorAccess, metadata, "initiator");
       const policy = localPolicy(terms, "initiator") as JsonObject;
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(policy) });
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(policy, found.sessionId, "initiator") });
     },
 
     async acceptInvitation(invitation: string): Promise<JsonObject> {
@@ -350,7 +365,8 @@ export function createV2Coordinator(options: {
         externalBusinessActionPerformed: false,
       });
       const policy = localPolicy(accepted.metadata.terms as JsonObject, "responder") as JsonObject;
-      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId: (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(policy) });
+      const sessionId = (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId as string;
+      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(policy, sessionId, "responder") });
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
@@ -413,7 +429,7 @@ export function createV2Coordinator(options: {
               executor: "pinned_helper",
               operation: "register",
               stateDir: "reuse_exact_absolute_state_dir",
-              helperStep: helperStep("register"),
+              helperStep: helperStep("register", auth.keyValue.session, role),
               afterSuccess: NEXT_ACTION,
             }),
           });

@@ -56,12 +56,12 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.1/manifest.json'"));
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.1/clockchain-agent-handshake.cjs'"));
   assert.match(instructions, /each command as its own separate Bash tool call.*never prefix, wrap, or combine/is);
-  assert.match(instructions, /every Bash action.*one standalone Bash tool call.*never combine.*do not create.*clockchain-state.*until after.*downloaded.*inspected/is);
+  assert.match(instructions, /every Bash action.*one standalone Bash tool call.*never combine.*do not run.*stateDirectoryCommand.*until after.*downloaded.*inspected/is);
   assert.equal(instructions.includes(" ; then "), false);
   assert.match(instructions, /describes mechanics, not stakeholder authorization/i);
   assert.match(instructions, /local stakeholder's own prompt explicitly confirms/i);
   assert.match(instructions, /needed.*erc8004_registration.*pinned helper.*register.*same absolute state directory.*agent_handshake_next/is);
-  assert.match(instructions, /mkdir -m 700 \.\/clockchain-state.*absolute.*\$PWD\/clockchain-state.*every local helper operation/is);
+  assert.match(instructions, /session-scoped \$HOME path.*every local helper operation.*do not assign.*shell variable.*replace.*\$PWD/is);
   assert.match(instructions, /agent_handshake_accept_invitation exactly once.*first successful result.*never retry/is);
   assert.match(instructions, /Every needed or stage response is nonterminal.*retryAfterMs.*agent_handshake_next.*final certificate.*unrecoverable error/is);
   assert.match(instructions, /exact localPolicy object returned by Clockchain.*do not construct, infer, or alter.*helper policy operation/is);
@@ -70,7 +70,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /never.*shared.*temp.*directory/is);
   assert.match(instructions, /manifest digest.*applies only.*manifest\.json.*helper.*separate.*sha-256.*verified manifest/is);
   assert.match(instructions, /after.*init.*policy.*inspect.*call agent_handshake_join.*do not.*register.*before.*join.*fund.*agent_handshake_next.*erc8004_registration/is);
-  assert.match(instructions, /argvAfterVerifiedPrefix.*exact order.*replace only.*REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR.*never.*re-encode.*payload/is);
+  assert.match(instructions, /stateDirectoryCommand.*session-scoped.*client.*\$HOME.*shellCommandSuffix.*verbatim.*never.*re-encode.*payload/is);
   assert.match(instructions, /operation.*does not include.*--payload-base64url.*do not add/is);
   assert.match(instructions, /Never infer that the other stakeholder stopped from a waiting response/is);
   assert.match(instructions, /HANDSHAKE_TEMPORARILY_UNAVAILABLE.*retryable: true.*retryAfterMs.*retry the same tool.*terminal protocol rejection/is);
