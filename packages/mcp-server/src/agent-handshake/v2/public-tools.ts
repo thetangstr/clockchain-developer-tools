@@ -19,6 +19,13 @@ export type V2PublicToolName = typeof V2_PUBLIC_TOOL_NAMES[number];
 export type V2PublicInvoke = (name: V2PublicToolName, args: Record<string, unknown>) => Promise<unknown>;
 
 const access = z.string().min(80).max(4096);
+const ROLE_SCOPED_TOOLS = new Set([
+  "agent_handshake_join",
+  "agent_handshake_status",
+  "agent_handshake_next",
+  "agent_handshake_submit",
+  "agent_handshake_get_certificate",
+]);
 const TERMINAL_ERROR_NAMES = new Set([
   "AgentHandshakeV2ValidationError",
   "V2CoordinatorError",
@@ -90,7 +97,10 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
     }, async (args: Record<string, unknown>) => {
       try {
         const result = await invoke(definition.name, args);
-        return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result as Record<string, unknown> };
+        const body = ROLE_SCOPED_TOOLS.has(definition.name)
+          ? { ...(result as Record<string, unknown>), roleAccess: args.access }
+          : result as Record<string, unknown>;
+        return { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
       } catch (error) {
         const observedName = (error as Error)?.name;
         const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName)

@@ -66,6 +66,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /session-scoped \$TMPDIR path.*every local helper operation.*do not assign.*shell variable.*replace.*\$HOME.*\$PWD/is);
   assert.match(instructions, /agent_handshake_accept_invitation exactly once.*first successful result.*never retry/is);
   assert.match(instructions, /Every needed or stage response is nonterminal.*retryAfterMs.*agent_handshake_next.*final certificate.*unrecoverable error/is);
+  assert.match(instructions, /every successful role-scoped response echoes roleAccess.*use it byte-for-byte.*immediately following.*access argument/is);
   assert.match(instructions, /exact localPolicy object returned by Clockchain.*do not construct, infer, or alter.*helper policy operation/is);
   assert.match(instructions, /statementDigest.*sha-256.*canonical.*terms object.*not.*raw statement text/is);
   assert.match(instructions, /already.*fresh.*disposable.*working directory.*do not create or switch to another working directory/is);
@@ -120,6 +121,9 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     assert.match(inviteSchema, /0x8004a818bfb912233c491871b3d84c89a494bd9e/);
     assert.match(inviteSchema, /required_fresh/);
     assert.equal(listed.body.result.tools.some((tool) => tool.annotations?.requiresUserInteraction === true), false);
+    const roleAccess = "r".repeat(80);
+    const status = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess } });
+    assert.equal(status.body.result.structuredContent.roleAccess, roleAccess);
     assert.equal((await rpc(url, "resources/list")).body.error.code, -32601);
     assert.equal((await rpc(url, "prompts/list")).body.error.code, -32601);
   } finally {
