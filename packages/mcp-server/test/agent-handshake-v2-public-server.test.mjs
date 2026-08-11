@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import test from "node:test";
 
@@ -75,6 +76,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /after.*init.*policy.*inspect.*call agent_handshake_join.*do not.*register.*before.*join.*fund.*agent_handshake_next.*erc8004_registration/is);
   assert.match(instructions, /stateDirectoryCommand.*session-scoped.*client.*isolated \$TMPDIR.*helperStep\.shellCommand.*verbatim.*never.*concatenate.*re-encode.*payload/is);
   assert.match(instructions, /operation.*does not include.*--payload-base64url.*do not add/is);
+  assert.match(instructions, /signing and certificate response.*one authoritative payload-bearing.*helperStep\.shellCommand.*execute it verbatim/is);
+  assert.match(instructions, /summary fields.*confirmation only.*never.*reconstruct.*payload/is);
   assert.match(instructions, /Never infer that the other stakeholder stopped from a waiting response/is);
   assert.match(instructions, /HANDSHAKE_TEMPORARILY_UNAVAILABLE.*retryable: true.*retryAfterMs.*retry the same tool.*terminal protocol rejection/is);
   assert.match(instructions, /role-scoped.*access argument.*same Clockchain MCP.*required credential use.*not.*disclosure/is);
@@ -94,12 +97,25 @@ test("public initialization leads with the immutable local-authority boundary", 
 });
 
 test("the dedicated MCP server exposes exactly seven tools and no prompts or resources", async () => {
+  const signingPayload = Buffer.from(JSON.stringify({ operation: "identity_claim", role: "initiator" }), "utf8").toString("base64url");
+  const signingCommand = `verified-helper sign --payload-base64url ${signingPayload}`;
   const httpServer = createServer(async (req, res) => {
     const server = buildV2PublicServer({ pin, invoke: async (name) => ({
       ok: true,
       name,
       ...(name === "agent_handshake_invite" ? { initiatorAccess: "i".repeat(80) } : {}),
       ...(name === "agent_handshake_accept_invitation" ? { responderAccess: "r".repeat(80) } : {}),
+      ...(name === "agent_handshake_join" ? {
+        signingSummary: { schema: "clockchain.agent-handshake-signing-summary/v1", operation: "identity_claim" },
+        localAction: { helperStep: {
+          operation: "sign",
+          role: "initiator",
+          sessionId: "11111111-2222-4333-8444-555555555555",
+          commandLength: Buffer.byteLength(signingCommand),
+          commandSha256: createHash("sha256").update(signingCommand).digest("hex"),
+          shellCommand: signingCommand,
+        } },
+      } : {}),
     }) });
     const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -133,6 +149,18 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     const roleAccess = "r".repeat(80);
     const status = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess } });
     assert.equal(status.body.result.structuredContent.roleAccess, roleAccess);
+    const joined = await rpc(url, "tools/call", { name: "agent_handshake_join", arguments: {
+      access: roleAccess,
+      helperVersion: "2.1.2",
+      sessionKeyAddress: `0x${"1".repeat(40)}`,
+      policyDigest: "2".repeat(64),
+    } });
+    const serializedJoin = JSON.stringify(joined.body.result);
+    assert.equal(serializedJoin.split(signingPayload).length - 1, 1);
+    assert.equal(JSON.parse(joined.body.result.content[0].text).localAction.helperStep.shellCommand, signingCommand);
+    assert.equal(Object.hasOwn(joined.body.result.structuredContent.localAction.helperStep, "shellCommand"), false);
+    assert.equal(joined.body.result.structuredContent.localAction.helperStep.commandLength, Buffer.byteLength(signingCommand));
+    assert.equal(joined.body.result.structuredContent.localAction.helperStep.commandSha256, createHash("sha256").update(signingCommand).digest("hex"));
     assert.equal((await rpc(url, "resources/list")).body.error.code, -32601);
     assert.equal((await rpc(url, "prompts/list")).body.error.code, -32601);
   } finally {

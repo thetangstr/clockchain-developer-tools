@@ -111,7 +111,27 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
         const body = typeof authoritativeAccess === "string"
           ? { ...publicRecord, roleAccess: authoritativeAccess }
           : publicRecord;
-        return { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
+        const localAction = body.localAction;
+        const helperStep = localAction !== null && typeof localAction === "object" && !Array.isArray(localAction)
+          ? (localAction as Record<string, unknown>).helperStep
+          : undefined;
+        const hasAuthoritativeHelperCommand = helperStep !== null && typeof helperStep === "object" && !Array.isArray(helperStep) &&
+          typeof (helperStep as Record<string, unknown>).shellCommand === "string";
+        const structuredBody = hasAuthoritativeHelperCommand
+          ? {
+              ...body,
+              localAction: {
+                ...(localAction as Record<string, unknown>),
+                helperStep: Object.fromEntries(
+                  Object.entries(helperStep as Record<string, unknown>).filter(([key]) => key !== "shellCommand"),
+                ),
+              },
+            }
+          : body;
+        return {
+          content: [{ type: "text", text: JSON.stringify(body) }],
+          structuredContent: structuredBody,
+        };
       } catch (error) {
         const observedName = (error as Error)?.name;
         const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName)

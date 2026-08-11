@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import test from "node:test";
 
 import { createHandshakeStateStore, __resetHandshakeStateStore } from "../dist/handshake/state.js";
@@ -50,6 +50,66 @@ function policy(role) {
     identityPolicy: terms.identityPolicy,
     externalBusinessActionsAllowed: false,
   };
+}
+
+function compactPayloadFrom(response, operation) {
+  assert.equal(Object.hasOwn(response, "signingRequest"), false);
+  assert.equal(response.signingSummary.schema, "clockchain.agent-handshake-signing-summary/v1");
+  assert.equal(response.signingSummary.operation, operation);
+  assert.equal(response.signingSummary.role, response.localAction.helperStep.role);
+  assert.equal(response.signingSummary.sessionId, response.localAction.helperStep.sessionId);
+  assert.match(response.signingSummary.bytesSha256, /^[0-9a-f]{64}$/);
+  assert.equal(response.localAction.operation, "sign");
+  assert.deepEqual(Object.keys(response.localAction.helperStep), [
+    "operation", "role", "sessionId", "commandLength", "commandSha256", "shellCommand",
+  ]);
+  const command = response.localAction.helperStep.shellCommand;
+  assert.equal(response.localAction.helperStep.commandLength, Buffer.byteLength(command));
+  assert.equal(response.localAction.helperStep.commandSha256, createHash("sha256").update(command).digest("hex"));
+  const match = command.match(/--payload-base64url\s+([A-Za-z0-9_-]+)$/);
+  assert.ok(match);
+  const payload = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
+  assert.equal(payload.operation, operation);
+  assert.equal(payload.role, response.signingSummary.role);
+  assert.equal(payload.sessionId, response.signingSummary.sessionId);
+  assert.equal(payload.bytesSha256, response.signingSummary.bytesSha256);
+  const serialized = JSON.stringify(response);
+  assert.equal(serialized.split("--payload-base64url").length - 1, 1);
+  assert.equal(serialized.split(match[1]).length - 1, 1);
+  assert.equal(serialized.includes("argvAfterVerifiedPrefix"), false);
+  assert.equal(serialized.includes("shellCommandSuffix"), false);
+  assert.ok(Buffer.byteLength(serialized) < 8192);
+  return payload;
+}
+
+function compactCertificatePayloadFrom(response, role) {
+  assert.equal(Object.hasOwn(response, "certificate"), false);
+  assert.equal(response.certificateSummary.schema, "clockchain.agent-handshake-certificate-summary/v1");
+  assert.equal(response.certificateSummary.outcome, "VERIFIED");
+  assert.equal(response.certificateSummary.role, role);
+  assert.equal(response.certificateSummary.sessionId, sessionId);
+  assert.match(response.certificateSummary.resultDigest, /^[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(response.localAction.helperStep), [
+    "operation", "role", "sessionId", "commandLength", "commandSha256", "shellCommand",
+  ]);
+  const command = response.localAction.helperStep.shellCommand;
+  assert.equal(response.localAction.helperStep.operation, "verify-certificate");
+  assert.equal(response.localAction.helperStep.role, role);
+  assert.equal(response.localAction.helperStep.sessionId, sessionId);
+  assert.equal(response.localAction.helperStep.commandLength, Buffer.byteLength(command));
+  assert.equal(response.localAction.helperStep.commandSha256, createHash("sha256").update(command).digest("hex"));
+  const match = command.match(/--payload-base64url\s+([A-Za-z0-9_-]+)$/);
+  assert.ok(match);
+  const payload = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
+  assert.equal(payload.role, role);
+  assert.equal(payload.sessionId, sessionId);
+  const serialized = JSON.stringify(response);
+  assert.equal(serialized.split("--payload-base64url").length - 1, 1);
+  assert.equal(serialized.split(match[1]).length - 1, 1);
+  assert.equal(serialized.includes("argvAfterVerifiedPrefix"), false);
+  assert.equal(serialized.includes("shellCommandSuffix"), false);
+  assert.ok(Buffer.byteLength(serialized) < 16384);
+  return payload;
 }
 
 test("an unanchored Clockchain ledger response is retryable instead of a terminal protocol rejection", async () => {
@@ -190,14 +250,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   for (const role of ["initiator", "responder"]) {
     const localPolicy = policy(role);
     const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.2", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
-    assert.equal(joined.signingRequest.operation, "identity_claim");
-    assert.deepEqual(joined.localAction.payload, joined.signingRequest);
-    assert.equal(joined.localAction.operation, "sign");
-    assert.deepEqual(joined.localAction.helperStep.argvAfterVerifiedPrefix, [
-      "sign", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/${role}`, "--payload-base64url",
-      Buffer.from(JSON.stringify(joined.signingRequest), "utf8").toString("base64url"),
-    ]);
-    assert.equal(joined.localAction.helperStep.shellCommand, `${verifiedHelperPrefix} ${joined.localAction.helperStep.shellCommandSuffix}`);
+    const identityRequest = compactPayloadFrom(joined, "identity_claim");
+    assert.equal(identityRequest.policyDigest, v2CanonicalRecord(localPolicy).digest);
+    assert.equal(Object.hasOwn(joined, "hostSessionKeyCertificate"), false);
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   const identityMessages = messages.filter((message) => message.kind === "agent_v2_identity_claim");
@@ -214,12 +269,10 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.equal(ready.nextAction, "call_agent_handshake_next_with_unchanged_role_access");
   }
   const proposal = await coordinator.next({ access: accesses.initiator });
-  assert.equal(proposal.signingRequest.operation, "proposal");
-  assert.deepEqual(proposal.localAction.payload, proposal.signingRequest);
+  compactPayloadFrom(proposal, "proposal");
   await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: `0x${"2".repeat(128)}1b` });
   const acceptance = await coordinator.next({ access: accesses.responder });
-  assert.equal(acceptance.signingRequest.operation, "acceptance");
-  assert.deepEqual(acceptance.localAction.payload, acceptance.signingRequest);
+  compactPayloadFrom(acceptance, "acceptance");
   await coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: `0x${"3".repeat(128)}1c` });
 
   const proposalPayload = messages.find((message) => message.kind === "agent_v2_proposal").body.proposalEnvelope.payload;
@@ -245,8 +298,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
 
   for (const role of ["initiator", "responder"]) {
     const evidence = await coordinator.next({ access: accesses[role] });
-    assert.equal(evidence.signingRequest.operation, "evidence");
-    assert.deepEqual(evidence.localAction.payload, evidence.signingRequest);
+    compactPayloadFrom(evidence, "evidence");
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(policy(role)).digest, signatureHex: `0x${"4".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   result = { result: {
@@ -259,15 +311,10 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   }, signer: {}, hostSessionKeyCertificate };
   const initiatorCertificate = await coordinator.getCertificate({ access: accesses.initiator });
   const responderCertificate = await coordinator.getCertificate({ access: accesses.responder });
-  assert.equal(initiatorCertificate.certificate.result.outcome, "VERIFIED");
-  assert.equal(responderCertificate.certificate.result.outcome, "VERIFIED");
-  assert.equal(initiatorCertificate.localAction.operation, "verify-certificate");
-  assert.deepEqual(initiatorCertificate.localAction.helperStep.argvAfterVerifiedPrefix.slice(0, 4), [
-    "verify-certificate", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`, "--payload-base64url",
-  ]);
-  assert.equal(initiatorCertificate.localAction.payload.role, "initiator");
-  assert.deepEqual(initiatorCertificate.localAction.payload.certificate, initiatorCertificate.certificate);
-  assert.equal(responderCertificate.localAction.payload.role, "responder");
+  const initiatorCertificatePayload = compactCertificatePayloadFrom(initiatorCertificate, "initiator");
+  const responderCertificatePayload = compactCertificatePayloadFrom(responderCertificate, "responder");
+  assert.deepEqual(initiatorCertificatePayload.certificate, result);
+  assert.deepEqual(responderCertificatePayload.certificate, result);
   const certificateRecords = await stateStore.list();
   assert.equal(certificateRecords.length, 2);
   for (const record of certificateRecords) {
