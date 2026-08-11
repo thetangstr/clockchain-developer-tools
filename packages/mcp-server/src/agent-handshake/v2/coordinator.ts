@@ -11,6 +11,7 @@ import { recoverEip191Address, resolveOwnedAgentRegistration } from "../../hands
 import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
 import type { V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore } from "./invitation-store.js";
+import { readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
   normalizeV2Acceptance,
   normalizeV2Descriptor,
@@ -176,7 +177,7 @@ function localStateDir(sessionId: string, role: V2Role): string {
   return `$TMPDIR/.clockchain/handshakes/${sessionId}/${role}`;
 }
 
-function helperStep(operation: string, sessionId: string, role: V2Role, payload?: JsonObject): JsonObject {
+function helperStep(verifiedHelperPrefix: string, operation: string, sessionId: string, role: V2Role, payload?: JsonObject): JsonObject {
   const stateDir = localStateDir(sessionId, role);
   const argvAfterVerifiedPrefix = [operation, "--state-dir", stateDir];
   if (payload !== undefined) {
@@ -185,10 +186,15 @@ function helperStep(operation: string, sessionId: string, role: V2Role, payload?
   const shellCommandSuffix = argvAfterVerifiedPrefix
     .map((value, index) => index === 2 ? `"${value}"` : value)
     .join(" ");
-  return Object.freeze({ operation, argvAfterVerifiedPrefix: Object.freeze(argvAfterVerifiedPrefix), shellCommandSuffix });
+  return Object.freeze({
+    operation,
+    argvAfterVerifiedPrefix: Object.freeze(argvAfterVerifiedPrefix),
+    shellCommand: `${verifiedHelperPrefix} ${shellCommandSuffix}`,
+    shellCommandSuffix,
+  });
 }
 
-function setupLocalAction(policy: JsonObject, sessionId: string, role: V2Role): JsonObject {
+function setupLocalAction(verifiedHelperPrefix: string, policy: JsonObject, sessionId: string, role: V2Role): JsonObject {
   const stateDir = localStateDir(sessionId, role);
   return Object.freeze({
     executor: "pinned_helper",
@@ -197,9 +203,9 @@ function setupLocalAction(policy: JsonObject, sessionId: string, role: V2Role): 
     policyPayload: policy,
     stateDirectoryCommand: `mkdir -p -m 700 "${stateDir}"`,
     helperSteps: Object.freeze([
-      helperStep("init", sessionId, role),
-      helperStep("policy", sessionId, role, policy),
-      helperStep("inspect", sessionId, role),
+      helperStep(verifiedHelperPrefix, "init", sessionId, role),
+      helperStep(verifiedHelperPrefix, "policy", sessionId, role, policy),
+      helperStep(verifiedHelperPrefix, "inspect", sessionId, role),
     ]),
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
@@ -207,7 +213,7 @@ function setupLocalAction(policy: JsonObject, sessionId: string, role: V2Role): 
   });
 }
 
-function signingLocalAction(signingRequest: JsonObject): JsonObject {
+function signingLocalAction(verifiedHelperPrefix: string, signingRequest: JsonObject): JsonObject {
   const role = signingRequest.role as V2Role;
   const sessionId = signingRequest.sessionId as string;
   return Object.freeze({
@@ -215,13 +221,13 @@ function signingLocalAction(signingRequest: JsonObject): JsonObject {
     operation: "sign",
     payloadEncoding: "base64url_utf8_json",
     payload: signingRequest,
-    helperStep: helperStep("sign", sessionId, role, signingRequest),
+    helperStep: helperStep(verifiedHelperPrefix, "sign", sessionId, role, signingRequest),
     stateDir: "reuse_exact_absolute_state_dir",
     afterSuccess: "call_agent_handshake_submit_with_helper_output_and_unchanged_policy_digest",
   });
 }
 
-function certificateLocalAction(input: {
+function certificateLocalAction(verifiedHelperPrefix: string, input: {
   certificate: JsonObject;
   discovery: JsonObject;
   role: V2Role;
@@ -242,7 +248,7 @@ function certificateLocalAction(input: {
     operation: "verify-certificate",
     payloadEncoding: "base64url_utf8_json",
     payload,
-    helperStep: helperStep("verify-certificate", input.sessionId, input.role, payload),
+    helperStep: helperStep(verifiedHelperPrefix, "verify-certificate", input.sessionId, input.role, payload),
     stateDir: "reuse_exact_absolute_state_dir",
     terminalProof: "use_verified_helper_output_only",
   });
@@ -266,6 +272,7 @@ export function createV2Coordinator(options: {
   recoverEip191Address(input: { bytes: Buffer; signatureHex: string }): Promise<string>;
   resolveRegistration(input: { address: string; fromBlock: string }): Promise<JsonObject | null>;
   advanceTransitions(input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]>;
+  verifiedHelperPrefix: string;
 }) {
   const store = options.stateStore ?? createHandshakeStateStore();
   const now = options.now ?? Date.now;
@@ -353,7 +360,7 @@ export function createV2Coordinator(options: {
       });
       await storeInitial(created.initiatorAccess, metadata, "initiator");
       const policy = localPolicy(terms, "initiator") as JsonObject;
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(policy, found.sessionId, "initiator") });
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
     },
 
     async acceptInvitation(invitation: string): Promise<JsonObject> {
@@ -366,7 +373,7 @@ export function createV2Coordinator(options: {
       });
       const policy = localPolicy(accepted.metadata.terms as JsonObject, "responder") as JsonObject;
       const sessionId = (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId as string;
-      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(policy, sessionId, "responder") });
+      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, sessionId, "responder") });
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
@@ -393,7 +400,7 @@ export function createV2Coordinator(options: {
         hostSessionKeyCertificate: auth.current.discovery.hostSessionKeyCertificate,
         repositorySha: auth.current.discovery.repositorySha, sessionDeadlineMs: auth.current.discovery.sessionDeadlineMs,
         signingRequest,
-        localAction: signingLocalAction(signingRequest),
+        localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest),
       });
     },
 
@@ -409,7 +416,7 @@ export function createV2Coordinator(options: {
       if (!current.policyDigest || !current.sessionKeyAddress) fail();
       if (current.pending) {
         const signingRequest = signRequest(current, role, current.pending.operation, current.pending.payload);
-        return Object.freeze({ stage: current.stage, signingRequest, localAction: signingLocalAction(signingRequest) });
+        return Object.freeze({ stage: current.stage, signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
       }
       const entries = (await options.relay.getMessages({ sessionId: auth.keyValue.session })).messages;
       if (!current.party) {
@@ -429,7 +436,7 @@ export function createV2Coordinator(options: {
               executor: "pinned_helper",
               operation: "register",
               stateDir: "reuse_exact_absolute_state_dir",
-              helperStep: helperStep("register", auth.keyValue.session, role),
+              helperStep: helperStep(options.verifiedHelperPrefix, "register", auth.keyValue.session, role),
               afterSuccess: NEXT_ACTION,
             }),
           });
@@ -455,7 +462,7 @@ export function createV2Coordinator(options: {
         }) as JsonObject;
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
         const signingRequest = signRequest(data(updated), role, "proposal", proposal);
-        return Object.freeze({ stage: "sign_proposal", signingRequest, localAction: signingLocalAction(signingRequest) });
+        return Object.freeze({ stage: "sign_proposal", signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
       }
       if (role === "responder" && !current.acceptanceEnvelope) {
         if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
@@ -470,7 +477,7 @@ export function createV2Coordinator(options: {
         }) as JsonObject;
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance }, stage: "sign_acceptance" }));
         const signingRequest = signRequest(data(updated), role, "acceptance", acceptance);
-        return Object.freeze({ stage: "sign_acceptance", signingRequest, localAction: signingLocalAction(signingRequest) });
+        return Object.freeze({ stage: "sign_acceptance", signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
       }
       current = await refresh(auth.keyValue);
       if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });
@@ -491,7 +498,7 @@ export function createV2Coordinator(options: {
       }, current.terms.identityPolicy) as JsonObject;
       const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" }));
       const signingRequest = signRequest(data(updated), role, "evidence", evidence);
-      return Object.freeze({ stage: "sign_evidence", signingRequest, localAction: signingLocalAction(signingRequest) });
+      return Object.freeze({ stage: "sign_evidence", signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
     },
 
     async submit(input: { access: string; policyDigest: string; signatureHex: string }): Promise<JsonObject> {
@@ -541,7 +548,7 @@ export function createV2Coordinator(options: {
       await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { certificateVerified: true, stage: "certificate_available" }));
       return Object.freeze({
         certificate: envelope,
-        localAction: certificateLocalAction({
+        localAction: certificateLocalAction(options.verifiedHelperPrefix, {
           certificate: envelope,
           discovery: auth.current.discovery,
           role: auth.verified.payload.role,
@@ -650,6 +657,7 @@ export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonO
 }
 
 export function createRuntimeV2Coordinator(env: Record<string, string | undefined> = process.env) {
+  const releasePin = readV2ReleasePin(env);
   const activeAccessKey = accessKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE);
   const accessKeys = [activeAccessKey];
   if (env.AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) accessKeys.push(accessKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS));
@@ -681,5 +689,6 @@ export function createRuntimeV2Coordinator(env: Record<string, string | undefine
       }) : null;
     },
     advanceTransitions: (input) => __advanceRuntimeV2(clockchain, input),
+    verifiedHelperPrefix: verifiedV2HelperPrefix(releasePin),
   });
 }

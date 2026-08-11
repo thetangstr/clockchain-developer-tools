@@ -18,6 +18,7 @@ const terms = {
 const sessionId = randomUUID();
 const nowMs = 1786337000000;
 const repositorySha = "d".repeat(40);
+const verifiedHelperPrefix = "node --verified-helper";
 const hostSessionKeyCertificate = {
   certificate: { schema: "clockchain.host-session-key/v1", rootKid: "root-2026-08", sessionId, repositorySha, sessionPublicKey: "ore80hj1AhLMNPybJXCL6XHyJ9OfmaYSXc4SA8Sk2Pw=", validFromMs: String(nowMs), validUntilMs: String(nowMs + 600000) },
   root: { algorithm: "ed25519", keyId: "root-2026-08", publicKey: "6Xgu+IYxQBDx8adVlHHWf9AUYoeo+eqWr8eVQqXrY0Y=", signature: "a".repeat(88) },
@@ -125,6 +126,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
       message: { kind, sessionDigest: v2CanonicalRecord(descriptor).digest },
       onChain: { blockHeight: String(7010 + index), ledgerId: `33333333-4444-4555-8666-77777777777${index}` },
     })),
+    verifiedHelperPrefix,
   });
 
   const invited = await coordinator.invite(terms);
@@ -137,9 +139,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     policyPayload: policy("initiator"),
     stateDirectoryCommand: `mkdir -p -m 700 "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`,
     helperSteps: [
-      { operation: "init", argvAfterVerifiedPrefix: ["init", "--state-dir", initiatorStateDir], shellCommandSuffix: `init --state-dir "${initiatorStateDir}"` },
-      { operation: "policy", argvAfterVerifiedPrefix: ["policy", "--state-dir", initiatorStateDir, "--payload-base64url", Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")], shellCommandSuffix: `policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}` },
-      { operation: "inspect", argvAfterVerifiedPrefix: ["inspect", "--state-dir", initiatorStateDir], shellCommandSuffix: `inspect --state-dir "${initiatorStateDir}"` },
+      { operation: "init", argvAfterVerifiedPrefix: ["init", "--state-dir", initiatorStateDir], shellCommand: `${verifiedHelperPrefix} init --state-dir "${initiatorStateDir}"`, shellCommandSuffix: `init --state-dir "${initiatorStateDir}"` },
+      { operation: "policy", argvAfterVerifiedPrefix: ["policy", "--state-dir", initiatorStateDir, "--payload-base64url", Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")], shellCommand: `${verifiedHelperPrefix} policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}`, shellCommandSuffix: `policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}` },
+      { operation: "inspect", argvAfterVerifiedPrefix: ["inspect", "--state-dir", initiatorStateDir], shellCommand: `${verifiedHelperPrefix} inspect --state-dir "${initiatorStateDir}"`, shellCommandSuffix: `inspect --state-dir "${initiatorStateDir}"` },
     ],
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
@@ -163,6 +165,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
       "sign", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/${role}`, "--payload-base64url",
       Buffer.from(JSON.stringify(joined.signingRequest), "utf8").toString("base64url"),
     ]);
+    assert.equal(joined.localAction.helperStep.shellCommand, `${verifiedHelperPrefix} ${joined.localAction.helperStep.shellCommandSuffix}`);
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   const identityMessages = messages.filter((message) => message.kind === "agent_v2_identity_claim");
@@ -259,6 +262,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
     recoverEip191Address: async () => address,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    verifiedHelperPrefix,
   });
 
   const invited = await coordinator.invite(terms);
@@ -287,7 +291,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
       executor: "pinned_helper",
       operation: "register",
       stateDir: "reuse_exact_absolute_state_dir",
-      helperStep: { operation: "register", argvAfterVerifiedPrefix: ["register", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`], shellCommandSuffix: `register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"` },
+      helperStep: { operation: "register", argvAfterVerifiedPrefix: ["register", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`], shellCommand: `${verifiedHelperPrefix} register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`, shellCommandSuffix: `register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"` },
       afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
     },
   });

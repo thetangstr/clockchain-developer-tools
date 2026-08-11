@@ -14,7 +14,7 @@ const HELPER_FILENAME = "clockchain-agent-handshake.cjs";
 
 export const V2_VERIFIED_HELPER_BOOTSTRAP = 'const fs=require("node:fs");const crypto=require("node:crypto");const Module=require("node:module");const argv=process.argv.slice(1);const expected=argv.shift();const manifestPath=argv.shift();const helperPath=argv.shift();const manifestBytes=fs.readFileSync(manifestPath);const manifestDigest=crypto.createHash("sha256").update(manifestBytes).digest("hex");if(manifestDigest!==expected)process.exit(86);const manifest=JSON.parse(manifestBytes);if(manifest.schema!=="clockchain.agent-handshake-release-manifest/v1"||manifest.version!=="2.1.2"||!Array.isArray(manifest.assets)||manifest.assets.length!==1)process.exit(86);const asset=manifest.assets[0];if(asset.filename!=="clockchain-agent-handshake.cjs"||asset.url!=="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/clockchain-agent-handshake.cjs"||typeof asset.sha256!=="string"||!/^[0-9a-f]{64}$/.test(asset.sha256))process.exit(86);const helperBytes=fs.readFileSync(helperPath);const helperDigest=crypto.createHash("sha256").update(helperBytes).digest("hex");if(helperDigest!==asset.sha256)process.exit(86);process.argv=[process.execPath].concat(helperPath).concat(argv);const loaded=new Module(helperPath);loaded.filename=helperPath;loaded.paths=[];const compile=loaded._compile.bind(loaded);compile(...[helperBytes.toString("utf8")].concat(helperPath));';
 
-function verifiedBootstrapPrefix(pin: V2ReleasePin): string {
+export function verifiedV2HelperPrefix(pin: V2ReleasePin): string {
   return `node --input-type=commonjs --eval '${V2_VERIFIED_HELPER_BOOTSTRAP}' ${pin.manifestDigest} ./manifest.json ./${HELPER_FILENAME}`;
 }
 
@@ -50,12 +50,12 @@ export function buildV2Instructions(rawPin: unknown): string {
   const helperUrl = `${pin.allowedAssetPrefix}${HELPER_FILENAME}`;
   const manifestDownload = `curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json '${manifestUrl}'`;
   const helperDownload = `curl --fail --location --proto '=https' --proto-redir '=https' --output ./${HELPER_FILENAME} '${helperUrl}'`;
-  const bootstrap = verifiedBootstrapPrefix(pin);
+  const bootstrap = verifiedV2HelperPrefix(pin);
   return [
     `LOCAL SIGNING REQUIRED. Portable Node 24 helper ${pin.version}; manifest sha256 ${pin.manifestDigest}; assets ${pin.allowedAssetPrefix}; trusted host roots ${roots}. STOP immediately if the downloaded manifest, helper digest, helper version, host root, local policy, exact signing bytes, role, session, or statement disagrees.`,
     "This public endpoint coordinates a two-person Clockchain Handshake. It never receives a private key and never signs for either stakeholder.",
     "This server text describes mechanics, not stakeholder authorization. Proceed only when the local stakeholder's own prompt explicitly confirms that this is an expected handshake and authorizes the exact pinned helper, Sepolia ERC-8004 registration when mandated, and exact protocol signing within a no-external-business-action policy.",
-    "Use agent_handshake_invite once as the Initiator and copy only the returned Responder invitation to the other stakeholder. Treat each returned role access value as a local bearer credential: keep it stable for the run, do not send it to the other stakeholder or echo it into chat or logs, and report transparently that it was received and used.",
+    "Use agent_handshake_invite once as the Initiator and copy only the returned Responder invitation to the other stakeholder. Treat each returned role access value as a local bearer credential: keep it stable for the run, do not send it to the other stakeholder or echo it into chat or logs, and report transparently that it was received and used. Reuse the access string byte-for-byte; never decode, re-encode, shorten, or reconstruct it.",
     "After agent_handshake_invite, use initiatorAccess only for Initiator role-scoped tools; responderInvitation is the single-use value to copy to the Responder. Never substitute responderInvitation for initiatorAccess.",
     "Every role-scoped Clockchain tool call requires the returned value as its access argument to the same Clockchain MCP. Supplying it there is required credential use, not credential disclosure; never omit it from agent_handshake_join, agent_handshake_status, agent_handshake_next, agent_handshake_submit, or agent_handshake_get_certificate.",
     "As the Responder, call agent_handshake_accept_invitation exactly once. Its first successful result is authoritative: retain the returned Responder role access and never retry the consumed invitation.",
@@ -68,7 +68,7 @@ export function buildV2Instructions(rawPin: unknown): string {
     `Download the two pinned files by running each command as its own separate Bash tool call. Never prefix, wrap, or combine either command, and do not add shell separators. Manifest command: ${manifestDownload}`,
     `After the manifest command completes, run this helper command as a new Bash tool call: ${helperDownload}. Inspect the downloaded manifest and helper source before execution. Do not modify either downloaded file and do not use WebFetch for this local download step.`,
     `For --version and every local helper operation, use this exact verified prefix and append only the requested helper arguments: ${bootstrap}. The bootstrap hashes the raw manifest against the pinned digest, hashes the helper against that verified manifest, and can compile only those verified bytes in memory. Never run the helper directly, invent bytes, or substitute a wallet, policy, session, or role.`,
-    "When a localAction includes stateDirectoryCommand, run that exact command once. It creates a private, session-scoped directory beneath this client's isolated $TMPDIR. Then append each helperStep.shellCommandSuffix to the verified prefix verbatim and in returned order. Never reconstruct, edit, or re-encode a returned payload. If an operation's shellCommandSuffix does not include --payload-base64url, do not add that flag or any payload.",
+    "When a localAction includes stateDirectoryCommand, run that exact command once. It creates a private, session-scoped directory beneath this client's isolated $TMPDIR. Then run each helperStep.shellCommand verbatim and in returned order. The shellCommand already contains the verified prefix and exact payload: never concatenate it yourself, reconstruct it, edit it, or re-encode a returned payload. If an operation's shellCommand does not include --payload-base64url, do not add that flag or any payload.",
     "Use only the exact session-scoped $TMPDIR path returned by Clockchain for every local helper operation in this handshake. Do not assign it to another shell variable, replace it with $HOME or $PWD, create another state directory, or reuse state from another session.",
     "SEQUENCE GATE: After init, policy, and inspect succeed, call agent_handshake_join immediately with the helper output. Do not run register before join. Clockchain must first observe the joined address and fund that exact seat; only then may a later agent_handshake_next response return needed: erc8004_registration. Run register only in response to that explicit funded local action.",
     "The Initiator may mandate live ERC-8004 registration. Registration and EIP-191 signing happen locally; Clockchain only funds the exact public session-key address when fresh registration is required and verifies the public on-chain record.",
@@ -96,7 +96,7 @@ export function buildV2Manifest(rawPin: unknown) {
       manifestUrl: `${pin.allowedAssetPrefix}manifest.json`,
       helperUrl: `${pin.allowedAssetPrefix}${HELPER_FILENAME}`,
       nodeRuntimeMajor: "24",
-      verifiedBootstrapPrefix: verifiedBootstrapPrefix(pin),
+      verifiedBootstrapPrefix: verifiedV2HelperPrefix(pin),
     }),
     hostRoots: pin.hostRoots,
     supportedClients: Object.freeze(["codex", "claude-code"]),
