@@ -111,12 +111,13 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     [addresses.initiator]: { agentId: "9452", chainId: terms.identityPolicy.chainId, registryAddress: terms.identityPolicy.registryAddress, reference: `${terms.identityPolicy.chainId}:${terms.identityPolicy.registryAddress}:9452`, registrationTx: `0x${"a".repeat(64)}`, registrationBlock: "7000" },
     [addresses.responder]: { agentId: "9453", chainId: terms.identityPolicy.chainId, registryAddress: terms.identityPolicy.registryAddress, reference: `${terms.identityPolicy.chainId}:${terms.identityPolicy.registryAddress}:9453`, registrationTx: `0x${"b".repeat(64)}`, registrationBlock: "7001" },
   };
+  const stateStore = createHandshakeStateStore({});
   const coordinator = createV2Coordinator({
     accessKeys: [key],
     activeAccessKey: key,
     invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
     relay,
-    stateStore: createHandshakeStateStore({}),
+    stateStore,
     now: () => nowMs + 1,
     recoverEip191Address: async ({ signatureHex }) => signatureHex.endsWith("1b") ? addresses.initiator : addresses.responder,
     resolveRegistration: async ({ address }) => registrations[address] ?? null,
@@ -236,6 +237,14 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   assert.equal(initiatorCertificate.localAction.payload.role, "initiator");
   assert.deepEqual(initiatorCertificate.localAction.payload.certificate, initiatorCertificate.certificate);
   assert.equal(responderCertificate.localAction.payload.role, "responder");
+  const certificateRecords = await stateStore.list();
+  assert.equal(certificateRecords.length, 2);
+  for (const record of certificateRecords) {
+    assert.equal(record.status, "active");
+    assert.equal(record.data.stage, "certificate_available");
+    assert.equal(record.data.certificateAvailable, true);
+    assert.equal(Object.hasOwn(record.data, "certificateVerified"), false);
+  }
 });
 
 test("fresh identity registration is returned as an executable pinned-helper action", async () => {

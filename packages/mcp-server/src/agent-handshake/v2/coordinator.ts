@@ -50,7 +50,7 @@ type CoordinatorData = JsonObject & {
   sessionDigest?: string;
   transitions?: JsonObject[];
   evidenceUploaded?: boolean;
-  certificateVerified?: boolean;
+  certificateAvailable?: boolean;
   relay?: { senderKey: string };
   stage?: string;
 };
@@ -107,7 +107,7 @@ function merge(current: HandshakeRecord | null, keyValue: HandshakeKey, patch: P
   return {
     ...(current ?? { ...keyValue, status: "active" }),
     data: { ...data(current), ...patch },
-    status: patch.certificateVerified ? "complete" : "active",
+    status: "active",
   };
 }
 
@@ -545,7 +545,7 @@ export function createV2Coordinator(options: {
         result.policyDigests[auth.verified.payload.role] !== auth.current.policyDigest ||
         result.parties[auth.verified.payload.role].sessionKeyAddress !== auth.current.sessionKeyAddress
       ) fail();
-      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { certificateVerified: true, stage: "certificate_available" }));
+      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { certificateAvailable: true, stage: "certificate_available" }));
       return Object.freeze({
         certificate: envelope,
         localAction: certificateLocalAction(options.verifiedHelperPrefix, {

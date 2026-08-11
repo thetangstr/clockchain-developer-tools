@@ -25,6 +25,12 @@ const TERMINAL_ERROR_NAMES = new Set([
   "V2InvitationError",
   "V2RoleAccessError",
 ]);
+const RETRYABLE_ERROR_NAMES = new Set([
+  "HttpRequestError",
+  "RpcRequestError",
+  "TimeoutError",
+  "V2TransientCoordinatorError",
+]);
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 const identityPolicy = z.discriminatedUnion("erc8004", [
   z.object({
@@ -95,7 +101,8 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
           tool: definition.name,
           errorName,
         }));
-        const retryable = !TERMINAL_ERROR_NAMES.has((error as Error)?.name) &&
+        const retryable = RETRYABLE_ERROR_NAMES.has((error as Error)?.name) &&
+          !TERMINAL_ERROR_NAMES.has((error as Error)?.name) &&
           (error as Error)?.message !== "rate_limited";
         const body = retryable
           ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 }
