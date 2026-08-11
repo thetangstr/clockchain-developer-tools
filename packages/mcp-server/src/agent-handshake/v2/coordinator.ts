@@ -171,12 +171,23 @@ function evidenceEnvelope(result: JsonObject, address: string, signatureHex: str
   });
 }
 
+const STATE_DIR_PLACEHOLDER = "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR";
+
+function helperStep(operation: string, payload?: JsonObject): JsonObject {
+  const argvAfterVerifiedPrefix = [operation, "--state-dir", STATE_DIR_PLACEHOLDER];
+  if (payload !== undefined) {
+    argvAfterVerifiedPrefix.push("--payload-base64url", Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"));
+  }
+  return Object.freeze({ operation, argvAfterVerifiedPrefix: Object.freeze(argvAfterVerifiedPrefix) });
+}
+
 function setupLocalAction(policy: JsonObject): JsonObject {
   return Object.freeze({
     executor: "pinned_helper",
     operations: Object.freeze(["init", "policy", "inspect"]),
     payloadEncoding: "base64url_utf8_json",
     policyPayload: policy,
+    helperSteps: Object.freeze([helperStep("init"), helperStep("policy", policy), helperStep("inspect")]),
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
     afterSuccess: "call_agent_handshake_join_with_helper_output",
@@ -189,6 +200,7 @@ function signingLocalAction(signingRequest: JsonObject): JsonObject {
     operation: "sign",
     payloadEncoding: "base64url_utf8_json",
     payload: signingRequest,
+    helperStep: helperStep("sign", signingRequest),
     stateDir: "reuse_exact_absolute_state_dir",
     afterSuccess: "call_agent_handshake_submit_with_helper_output_and_unchanged_policy_digest",
   });
@@ -200,20 +212,22 @@ function certificateLocalAction(input: {
   role: V2Role;
   sessionId: string;
 }): JsonObject {
+  const payload = Object.freeze({
+    schema: "clockchain.agent-handshake-certificate-verification/v1",
+    helperVersion: "2.1.1",
+    role: input.role,
+    sessionId: input.sessionId,
+    repositorySha: input.discovery.repositorySha,
+    sessionDeadlineMs: input.discovery.sessionDeadlineMs,
+    certificate: input.certificate,
+    externalBusinessActionPerformed: false,
+  });
   return Object.freeze({
     executor: "pinned_helper",
     operation: "verify-certificate",
     payloadEncoding: "base64url_utf8_json",
-    payload: Object.freeze({
-      schema: "clockchain.agent-handshake-certificate-verification/v1",
-      helperVersion: "2.1.1",
-      role: input.role,
-      sessionId: input.sessionId,
-      repositorySha: input.discovery.repositorySha,
-      sessionDeadlineMs: input.discovery.sessionDeadlineMs,
-      certificate: input.certificate,
-      externalBusinessActionPerformed: false,
-    }),
+    payload,
+    helperStep: helperStep("verify-certificate", payload),
     stateDir: "reuse_exact_absolute_state_dir",
     terminalProof: "use_verified_helper_output_only",
   });
@@ -399,6 +413,7 @@ export function createV2Coordinator(options: {
               executor: "pinned_helper",
               operation: "register",
               stateDir: "reuse_exact_absolute_state_dir",
+              helperStep: helperStep("register"),
               afterSuccess: NEXT_ACTION,
             }),
           });

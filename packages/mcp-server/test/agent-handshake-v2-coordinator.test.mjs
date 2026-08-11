@@ -134,6 +134,11 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     operations: ["init", "policy", "inspect"],
     payloadEncoding: "base64url_utf8_json",
     policyPayload: policy("initiator"),
+    helperSteps: [
+      { operation: "init", argvAfterVerifiedPrefix: ["init", "--state-dir", "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR"] },
+      { operation: "policy", argvAfterVerifiedPrefix: ["policy", "--state-dir", "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR", "--payload-base64url", Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")] },
+      { operation: "inspect", argvAfterVerifiedPrefix: ["inspect", "--state-dir", "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR"] },
+    ],
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
     afterSuccess: "call_agent_handshake_join_with_helper_output",
@@ -152,6 +157,10 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.equal(joined.signingRequest.operation, "identity_claim");
     assert.deepEqual(joined.localAction.payload, joined.signingRequest);
     assert.equal(joined.localAction.operation, "sign");
+    assert.deepEqual(joined.localAction.helperStep.argvAfterVerifiedPrefix, [
+      "sign", "--state-dir", "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR", "--payload-base64url",
+      Buffer.from(JSON.stringify(joined.signingRequest), "utf8").toString("base64url"),
+    ]);
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   const identityMessages = messages.filter((message) => message.kind === "agent_v2_identity_claim");
@@ -216,6 +225,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   assert.equal(initiatorCertificate.certificate.result.outcome, "VERIFIED");
   assert.equal(responderCertificate.certificate.result.outcome, "VERIFIED");
   assert.equal(initiatorCertificate.localAction.operation, "verify-certificate");
+  assert.deepEqual(initiatorCertificate.localAction.helperStep.argvAfterVerifiedPrefix.slice(0, 4), [
+    "verify-certificate", "--state-dir", "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR", "--payload-base64url",
+  ]);
   assert.equal(initiatorCertificate.localAction.payload.role, "initiator");
   assert.deepEqual(initiatorCertificate.localAction.payload.certificate, initiatorCertificate.certificate);
   assert.equal(responderCertificate.localAction.payload.role, "responder");
@@ -273,6 +285,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
       executor: "pinned_helper",
       operation: "register",
       stateDir: "reuse_exact_absolute_state_dir",
+      helperStep: { operation: "register", argvAfterVerifiedPrefix: ["register", "--state-dir", "REPLACE_WITH_EXACT_ABSOLUTE_STATE_DIR"] },
       afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
     },
   });
