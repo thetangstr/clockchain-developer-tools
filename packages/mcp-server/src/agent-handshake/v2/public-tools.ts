@@ -18,7 +18,7 @@ export const V2_PUBLIC_TOOL_NAMES = Object.freeze([
 export type V2PublicToolName = typeof V2_PUBLIC_TOOL_NAMES[number];
 export type V2PublicInvoke = (name: V2PublicToolName, args: Record<string, unknown>) => Promise<unknown>;
 
-const access = z.string().min(80).max(4096);
+const access = z.string().min(27).max(4096);
 const ROLE_SCOPED_TOOLS = new Set([
   "agent_handshake_join",
   "agent_handshake_status",
@@ -98,16 +98,19 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
       try {
         const result = await invoke(definition.name, args);
         const record = result as Record<string, unknown>;
-        const authoritativeAccess = ROLE_SCOPED_TOOLS.has(definition.name)
-          ? args.access
+        const authoritativeAccess = typeof record.roleAccess === "string"
+          ? record.roleAccess
+          : ROLE_SCOPED_TOOLS.has(definition.name)
+            ? args.access
           : definition.name === "agent_handshake_invite"
             ? record.initiatorAccess
             : definition.name === "agent_handshake_accept_invitation"
               ? record.responderAccess
               : undefined;
+        const { initiatorAccess: _initiator, responderAccess: _responder, ...publicRecord } = record;
         const body = typeof authoritativeAccess === "string"
-          ? { ...record, roleAccess: authoritativeAccess }
-          : record;
+          ? { ...publicRecord, roleAccess: authoritativeAccess }
+          : publicRecord;
         return { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
       } catch (error) {
         const observedName = (error as Error)?.name;
