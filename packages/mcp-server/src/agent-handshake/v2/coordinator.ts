@@ -171,6 +171,53 @@ function evidenceEnvelope(result: JsonObject, address: string, signatureHex: str
   });
 }
 
+function setupLocalAction(policy: JsonObject): JsonObject {
+  return Object.freeze({
+    executor: "pinned_helper",
+    operations: Object.freeze(["init", "policy", "inspect"]),
+    payloadEncoding: "base64url_utf8_json",
+    policyPayload: policy,
+    stateDir: "new_private_absolute_state_dir",
+    afterSuccess: "call_agent_handshake_join_with_helper_output",
+  });
+}
+
+function signingLocalAction(signingRequest: JsonObject): JsonObject {
+  return Object.freeze({
+    executor: "pinned_helper",
+    operation: "sign",
+    payloadEncoding: "base64url_utf8_json",
+    payload: signingRequest,
+    stateDir: "reuse_exact_absolute_state_dir",
+    afterSuccess: "call_agent_handshake_submit_with_helper_output_and_unchanged_policy_digest",
+  });
+}
+
+function certificateLocalAction(input: {
+  certificate: JsonObject;
+  discovery: JsonObject;
+  role: V2Role;
+  sessionId: string;
+}): JsonObject {
+  return Object.freeze({
+    executor: "pinned_helper",
+    operation: "verify-certificate",
+    payloadEncoding: "base64url_utf8_json",
+    payload: Object.freeze({
+      schema: "clockchain.agent-handshake-certificate-verification/v1",
+      helperVersion: "2.1.1",
+      role: input.role,
+      sessionId: input.sessionId,
+      repositorySha: input.discovery.repositorySha,
+      sessionDeadlineMs: input.discovery.sessionDeadlineMs,
+      certificate: input.certificate,
+      externalBusinessActionPerformed: false,
+    }),
+    stateDir: "reuse_exact_absolute_state_dir",
+    terminalProof: "use_verified_helper_output_only",
+  });
+}
+
 function find(entries: readonly JsonObject[], kind: string, role?: string): JsonObject | undefined {
   return [...entries].reverse().find((entry) => entry?.kind === kind && (role === undefined || entry?.role === role));
 }
@@ -275,7 +322,8 @@ export function createV2Coordinator(options: {
         metadata,
       });
       await storeInitial(created.initiatorAccess, metadata, "initiator");
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: localPolicy(terms, "initiator") });
+      const policy = localPolicy(terms, "initiator") as JsonObject;
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(policy) });
     },
 
     async acceptInvitation(invitation: string): Promise<JsonObject> {
@@ -286,7 +334,8 @@ export function createV2Coordinator(options: {
         claimedAtMs: accepted.claimedAtMs,
         externalBusinessActionPerformed: false,
       });
-      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId: (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: localPolicy(accepted.metadata.terms as JsonObject, "responder") });
+      const policy = localPolicy(accepted.metadata.terms as JsonObject, "responder") as JsonObject;
+      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId: (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(policy) });
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
@@ -307,11 +356,13 @@ export function createV2Coordinator(options: {
         policyDigest: input.policyDigest, sessionKeyAddress,
         pending: { operation: "identity_claim", payload: claim }, stage: "sign_identity",
       }));
+      const signingRequest = signRequest(data(updated), auth.verified.payload.role, "identity_claim", claim);
       return Object.freeze({
         role: auth.verified.payload.role, sessionId: auth.keyValue.session,
         hostSessionKeyCertificate: auth.current.discovery.hostSessionKeyCertificate,
         repositorySha: auth.current.discovery.repositorySha, sessionDeadlineMs: auth.current.discovery.sessionDeadlineMs,
-        signingRequest: signRequest(data(updated), auth.verified.payload.role, "identity_claim", claim),
+        signingRequest,
+        localAction: signingLocalAction(signingRequest),
       });
     },
 
@@ -325,7 +376,10 @@ export function createV2Coordinator(options: {
       let current = await refresh(auth.keyValue);
       const role = auth.verified.payload.role;
       if (!current.policyDigest || !current.sessionKeyAddress) fail();
-      if (current.pending) return Object.freeze({ stage: current.stage, signingRequest: signRequest(current, role, current.pending.operation, current.pending.payload) });
+      if (current.pending) {
+        const signingRequest = signRequest(current, role, current.pending.operation, current.pending.payload);
+        return Object.freeze({ stage: current.stage, signingRequest, localAction: signingLocalAction(signingRequest) });
+      }
       const entries = (await options.relay.getMessages({ sessionId: auth.keyValue.session })).messages;
       if (!current.party) {
         if (current.terms.identityPolicy.erc8004 !== "not_required" && !funded(entries, role, current.sessionKeyAddress)) {
@@ -368,7 +422,8 @@ export function createV2Coordinator(options: {
           externalBusinessActionPerformed: false,
         }) as JsonObject;
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
-        return Object.freeze({ stage: "sign_proposal", signingRequest: signRequest(data(updated), role, "proposal", proposal) });
+        const signingRequest = signRequest(data(updated), role, "proposal", proposal);
+        return Object.freeze({ stage: "sign_proposal", signingRequest, localAction: signingLocalAction(signingRequest) });
       }
       if (role === "responder" && !current.acceptanceEnvelope) {
         if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
@@ -382,7 +437,8 @@ export function createV2Coordinator(options: {
           externalBusinessActionPerformed: false,
         }) as JsonObject;
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance }, stage: "sign_acceptance" }));
-        return Object.freeze({ stage: "sign_acceptance", signingRequest: signRequest(data(updated), role, "acceptance", acceptance) });
+        const signingRequest = signRequest(data(updated), role, "acceptance", acceptance);
+        return Object.freeze({ stage: "sign_acceptance", signingRequest, localAction: signingLocalAction(signingRequest) });
       }
       current = await refresh(auth.keyValue);
       if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });
@@ -402,7 +458,8 @@ export function createV2Coordinator(options: {
         transitionDigests: transitions.map((entry) => entry.digest),
       }, current.terms.identityPolicy) as JsonObject;
       const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" }));
-      return Object.freeze({ stage: "sign_evidence", signingRequest: signRequest(data(updated), role, "evidence", evidence) });
+      const signingRequest = signRequest(data(updated), role, "evidence", evidence);
+      return Object.freeze({ stage: "sign_evidence", signingRequest, localAction: signingLocalAction(signingRequest) });
     },
 
     async submit(input: { access: string; policyDigest: string; signatureHex: string }): Promise<JsonObject> {
@@ -450,7 +507,15 @@ export function createV2Coordinator(options: {
         result.parties[auth.verified.payload.role].sessionKeyAddress !== auth.current.sessionKeyAddress
       ) fail();
       await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { certificateVerified: true, stage: "certificate_available" }));
-      return Object.freeze({ certificate: envelope });
+      return Object.freeze({
+        certificate: envelope,
+        localAction: certificateLocalAction({
+          certificate: envelope,
+          discovery: auth.current.discovery,
+          role: auth.verified.payload.role,
+          sessionId: auth.keyValue.session,
+        }),
+      });
     },
 
     async invoke(name: string, args: JsonObject): Promise<unknown> {

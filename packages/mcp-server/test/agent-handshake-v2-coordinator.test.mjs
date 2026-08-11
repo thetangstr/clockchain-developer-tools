@@ -129,8 +129,17 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
 
   const invited = await coordinator.invite(terms);
   assert.deepEqual(invited.localPolicy, policy("initiator"));
+  assert.deepEqual(invited.localAction, {
+    executor: "pinned_helper",
+    operations: ["init", "policy", "inspect"],
+    payloadEncoding: "base64url_utf8_json",
+    policyPayload: policy("initiator"),
+    stateDir: "new_private_absolute_state_dir",
+    afterSuccess: "call_agent_handshake_join_with_helper_output",
+  });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
   assert.deepEqual(accepted.localPolicy, policy("responder"));
+  assert.deepEqual(accepted.localAction.policyPayload, policy("responder"));
   const invitationClaimed = messages.find((message) => message.kind === "agent_v2_invitation_claimed");
   assert.equal(invitationClaimed.role, "responder");
   assert.equal(invitationClaimed.body.claimedAtMs, String(nowMs + 1));
@@ -140,6 +149,8 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     const localPolicy = policy(role);
     const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.1", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
     assert.equal(joined.signingRequest.operation, "identity_claim");
+    assert.deepEqual(joined.localAction.payload, joined.signingRequest);
+    assert.equal(joined.localAction.operation, "sign");
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   const identityMessages = messages.filter((message) => message.kind === "agent_v2_identity_claim");
@@ -157,9 +168,11 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   }
   const proposal = await coordinator.next({ access: accesses.initiator });
   assert.equal(proposal.signingRequest.operation, "proposal");
+  assert.deepEqual(proposal.localAction.payload, proposal.signingRequest);
   await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: `0x${"2".repeat(128)}1b` });
   const acceptance = await coordinator.next({ access: accesses.responder });
   assert.equal(acceptance.signingRequest.operation, "acceptance");
+  assert.deepEqual(acceptance.localAction.payload, acceptance.signingRequest);
   await coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: `0x${"3".repeat(128)}1c` });
 
   const proposalPayload = messages.find((message) => message.kind === "agent_v2_proposal").body.proposalEnvelope.payload;
@@ -186,6 +199,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   for (const role of ["initiator", "responder"]) {
     const evidence = await coordinator.next({ access: accesses[role] });
     assert.equal(evidence.signingRequest.operation, "evidence");
+    assert.deepEqual(evidence.localAction.payload, evidence.signingRequest);
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(policy(role)).digest, signatureHex: `0x${"4".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   result = { result: {
@@ -196,8 +210,14 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     reference: terms.reference, schema: "clockchain.agent-handshake-result/v2", sessionDigest: v2CanonicalRecord(descriptor).digest,
     sessionId, statementDigest: v2CanonicalRecord(terms).digest, subjectRun: "stakeholder",
   }, signer: {}, hostSessionKeyCertificate };
-  assert.equal((await coordinator.getCertificate({ access: accesses.initiator })).certificate.result.outcome, "VERIFIED");
-  assert.equal((await coordinator.getCertificate({ access: accesses.responder })).certificate.result.outcome, "VERIFIED");
+  const initiatorCertificate = await coordinator.getCertificate({ access: accesses.initiator });
+  const responderCertificate = await coordinator.getCertificate({ access: accesses.responder });
+  assert.equal(initiatorCertificate.certificate.result.outcome, "VERIFIED");
+  assert.equal(responderCertificate.certificate.result.outcome, "VERIFIED");
+  assert.equal(initiatorCertificate.localAction.operation, "verify-certificate");
+  assert.equal(initiatorCertificate.localAction.payload.role, "initiator");
+  assert.deepEqual(initiatorCertificate.localAction.payload.certificate, initiatorCertificate.certificate);
+  assert.equal(responderCertificate.localAction.payload.role, "responder");
 });
 
 test("fresh identity registration is returned as an executable pinned-helper action", async () => {
