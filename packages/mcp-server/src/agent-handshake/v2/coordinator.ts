@@ -349,7 +349,7 @@ export function createV2Coordinator(options: {
     async invite(value: unknown): Promise<JsonObject> {
       const terms = normalizeV2Terms(value) as JsonObject;
       const found = discovery(await options.relay.fetchDiscovery());
-      if (now() >= Number(found.invitationExpiresAtMs)) fail();
+      if (now() >= Number(found.invitationExpiresAtMs)) transient();
       const metadata = metadataFrom(found, terms);
       const created = await options.invitationService.create({
         sessionId: found.sessionId,

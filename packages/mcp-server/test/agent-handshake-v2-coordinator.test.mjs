@@ -83,6 +83,37 @@ test("an unanchored Clockchain ledger response is retryable instead of a termina
   );
 });
 
+test("an expired current invitation window is retryable while the host rotates sessions", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({
+      activeKey: key,
+      verificationKeys: [key],
+      store: createV2InvitationStore(),
+      nowMs: () => nowMs + 120000,
+    }),
+    relay: {
+      fetchDiscovery: async () => discovery,
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => ({ ok: true, seq: "1" }),
+    },
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 120000,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite(terms),
+    (error) => error?.name === "V2TransientCoordinatorError",
+  );
+});
+
 test("two distinct role capabilities drive the complete v2 local-signing state machine", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
