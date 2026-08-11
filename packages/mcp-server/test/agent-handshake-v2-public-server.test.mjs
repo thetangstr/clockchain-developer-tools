@@ -119,7 +119,19 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
           })),
         },
       } : {}),
-      ...(name === "agent_handshake_accept_invitation" ? { responderAccess: "r".repeat(80) } : {}),
+      ...(name === "agent_handshake_accept_invitation" ? {
+        responderAccess: "r".repeat(80),
+        localAction: {
+          helperSteps: setupCommands.map((shellCommand, index) => ({
+            operation: ["init", "policy", "inspect"][index],
+            role: "responder",
+            sessionId: "11111111-2222-4333-8444-555555555555",
+            commandLength: Buffer.byteLength(shellCommand),
+            commandSha256: createHash("sha256").update(shellCommand).digest("hex"),
+            shellCommand,
+          })),
+        },
+      } : {}),
       ...(name === "agent_handshake_join" ? {
         signingSummary: { schema: "clockchain.agent-handshake-signing-summary/v1", operation: "identity_claim" },
         localAction: { helperStep: {
@@ -159,13 +171,25 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     assert.match(inviteSchema, /required_fresh/);
     assert.equal(listed.body.result.tools.some((tool) => tool.annotations?.requiresUserInteraction === true), false);
     const invited = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } } });
-    assert.equal(invited.body.result.structuredContent.roleAccess, "i".repeat(80));
-    assert.equal("initiatorAccess" in invited.body.result.structuredContent, false);
     const invitedText = JSON.parse(invited.body.result.content[0].text);
+    assert.equal(invited.body.result.structuredContent, undefined);
+    assert.equal(invitedText.roleAccess, "i".repeat(80));
+    assert.equal("initiatorAccess" in invitedText, false);
     for (const [index, command] of setupCommands.entries()) {
       assert.equal(invitedText.localAction.helperSteps[index].shellCommand, command);
-      assert.equal(Object.hasOwn(invited.body.result.structuredContent.localAction.helperSteps[index], "shellCommand"), false);
       assert.equal(JSON.stringify(invited.body.result).split(command).length - 1, 1);
+    }
+    const accepted = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80) },
+    });
+    const acceptedText = JSON.parse(accepted.body.result.content[0].text);
+    assert.equal(accepted.body.result.structuredContent, undefined);
+    assert.equal(acceptedText.roleAccess, "r".repeat(80));
+    assert.equal("responderAccess" in acceptedText, false);
+    for (const [index, command] of setupCommands.entries()) {
+      assert.equal(acceptedText.localAction.helperSteps[index].shellCommand, command);
+      assert.equal(JSON.stringify(accepted.body.result).split(command).length - 1, 1);
     }
     const roleAccess = "r".repeat(80);
     const status = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess } });
@@ -178,10 +202,11 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     } });
     const serializedJoin = JSON.stringify(joined.body.result);
     assert.equal(serializedJoin.split(signingPayload).length - 1, 1);
-    assert.equal(JSON.parse(joined.body.result.content[0].text).localAction.helperStep.shellCommand, signingCommand);
-    assert.equal(Object.hasOwn(joined.body.result.structuredContent.localAction.helperStep, "shellCommand"), false);
-    assert.equal(joined.body.result.structuredContent.localAction.helperStep.commandLength, Buffer.byteLength(signingCommand));
-    assert.equal(joined.body.result.structuredContent.localAction.helperStep.commandSha256, createHash("sha256").update(signingCommand).digest("hex"));
+    const joinedText = JSON.parse(joined.body.result.content[0].text);
+    assert.equal(joined.body.result.structuredContent, undefined);
+    assert.equal(joinedText.localAction.helperStep.shellCommand, signingCommand);
+    assert.equal(joinedText.localAction.helperStep.commandLength, Buffer.byteLength(signingCommand));
+    assert.equal(joinedText.localAction.helperStep.commandSha256, createHash("sha256").update(signingCommand).digest("hex"));
     assert.equal((await rpc(url, "resources/list")).body.error.code, -32601);
     assert.equal((await rpc(url, "prompts/list")).body.error.code, -32601);
   } finally {

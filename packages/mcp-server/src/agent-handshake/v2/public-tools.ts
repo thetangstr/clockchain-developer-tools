@@ -142,11 +142,11 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
           ? { ...publicRecord, roleAccess: authoritativeAccess }
           : publicRecord;
         const localAction = structuredLocalAction(body.localAction);
-        const structuredBody = localAction.changed ? { ...body, localAction: localAction.value } : body;
-        return {
+        const response: Record<string, unknown> = {
           content: [{ type: "text", text: JSON.stringify(body) }],
-          structuredContent: structuredBody,
         };
+        if (!localAction.changed) response.structuredContent = body;
+        return response;
       } catch (error) {
         const observedName = (error as Error)?.name;
         const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName)
