@@ -79,8 +79,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /HANDSHAKE_TEMPORARILY_UNAVAILABLE.*retryable: true.*retryAfterMs.*retry the same tool.*terminal protocol rejection/is);
   assert.match(instructions, /role-scoped.*access argument.*same Clockchain MCP.*required credential use.*not.*disclosure/is);
   assert.match(instructions, /access.*byte-for-byte.*never.*decode.*re-encode.*shorten.*reconstruct/is);
-  assert.match(instructions, /initiatorAccess.*Initiator.*responderInvitation.*copy.*never substitute/is);
-  assert.match(instructions, /responderAccess.*Responder.*original invitation.*never.*access argument/is);
+  assert.match(instructions, /roleAccess.*same value.*initiatorAccess.*Initiator.*responderInvitation.*copy.*never substitute/is);
+  assert.match(instructions, /roleAccess.*same value.*responderAccess.*Responder.*original invitation.*never.*access argument/is);
   assert.doesNotMatch(instructions, /keep each returned role access value private/i);
   const manifest = buildV2Manifest(pin);
   assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
@@ -94,7 +94,12 @@ test("public initialization leads with the immutable local-authority boundary", 
 
 test("the dedicated MCP server exposes exactly seven tools and no prompts or resources", async () => {
   const httpServer = createServer(async (req, res) => {
-    const server = buildV2PublicServer({ pin, invoke: async (name) => ({ ok: true, name }) });
+    const server = buildV2PublicServer({ pin, invoke: async (name) => ({
+      ok: true,
+      name,
+      ...(name === "agent_handshake_invite" ? { initiatorAccess: "i".repeat(80) } : {}),
+      ...(name === "agent_handshake_accept_invitation" ? { responderAccess: "r".repeat(80) } : {}),
+    }) });
     const { StreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/streamableHttp.js");
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { void transport.close(); void server.close(); });
@@ -121,6 +126,8 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     assert.match(inviteSchema, /0x8004a818bfb912233c491871b3d84c89a494bd9e/);
     assert.match(inviteSchema, /required_fresh/);
     assert.equal(listed.body.result.tools.some((tool) => tool.annotations?.requiresUserInteraction === true), false);
+    const invited = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } } });
+    assert.equal(invited.body.result.structuredContent.roleAccess, "i".repeat(80));
     const roleAccess = "r".repeat(80);
     const status = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess } });
     assert.equal(status.body.result.structuredContent.roleAccess, roleAccess);

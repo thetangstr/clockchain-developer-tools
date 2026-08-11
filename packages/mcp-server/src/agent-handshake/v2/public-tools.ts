@@ -97,9 +97,17 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
     }, async (args: Record<string, unknown>) => {
       try {
         const result = await invoke(definition.name, args);
-        const body = ROLE_SCOPED_TOOLS.has(definition.name)
-          ? { ...(result as Record<string, unknown>), roleAccess: args.access }
-          : result as Record<string, unknown>;
+        const record = result as Record<string, unknown>;
+        const authoritativeAccess = ROLE_SCOPED_TOOLS.has(definition.name)
+          ? args.access
+          : definition.name === "agent_handshake_invite"
+            ? record.initiatorAccess
+            : definition.name === "agent_handshake_accept_invitation"
+              ? record.responderAccess
+              : undefined;
+        const body = typeof authoritativeAccess === "string"
+          ? { ...record, roleAccess: authoritativeAccess }
+          : record;
         return { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
       } catch (error) {
         const observedName = (error as Error)?.name;
