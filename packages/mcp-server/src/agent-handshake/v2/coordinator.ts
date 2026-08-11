@@ -173,7 +173,7 @@ function evidenceEnvelope(result: JsonObject, address: string, signatureHex: str
 
 function localStateDir(sessionId: string, role: V2Role): string {
   if (!UUID.test(sessionId)) fail();
-  return `$HOME/.clockchain/handshakes/${sessionId}/${role}`;
+  return `$PWD/.clockchain/handshakes/${sessionId}/${role}`;
 }
 
 function helperStep(operation: string, sessionId: string, role: V2Role, payload?: JsonObject): JsonObject {
