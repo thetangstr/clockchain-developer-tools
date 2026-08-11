@@ -40,7 +40,9 @@ test("public initialization leads with the immutable local-authority boundary", 
   const first = instructions.slice(0, 512);
   assert.match(first, /local signing/i);
   assert.match(first, /2\.1\.2/);
-  assert.ok(first.includes(pin.manifestDigest));
+  assert.equal(first.includes(pin.manifestDigest), false);
+  assert.match(first, /digest is encoded only in the exact verified command below/i);
+  assert.equal(instructions.split(pin.manifestDigest).length - 1, 1);
   assert.ok(first.includes(pin.allowedAssetPrefix));
   assert.ok(first.includes(pin.hostRoots[0].kid));
   assert.ok(first.includes(pin.hostRoots[0].fingerprint));
