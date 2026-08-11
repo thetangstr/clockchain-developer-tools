@@ -18,6 +18,12 @@ export interface ResolveOwnedAgentIdOptions {
   fromBlock?: string;
 }
 
+export interface ReadEvmBalanceOptions {
+  rpcUrl: string;
+  address: string;
+  fetchImpl?: FetchLike;
+}
+
 interface JsonRpcResponse {
   jsonrpc?: unknown;
   id?: unknown;
@@ -64,6 +70,18 @@ export async function recoverEip191Address(options: RecoverEip191AddressOptions)
     throw new Error("EIP-191 signature recovery failed: ecrecover returned the zero address");
   }
   return normalizeAddress(address, "recovered address");
+}
+
+export async function readEvmBalance(options: ReadEvmBalanceOptions): Promise<bigint> {
+  const fetchImpl = options.fetchImpl ?? globalFetch();
+  const address = normalizeAddress(options.address, "address");
+  return hexQuantity(await rpcString(
+    options.rpcUrl,
+    fetchImpl,
+    "eth_getBalance",
+    [address, "latest"],
+    "read the latest signer balance",
+  ));
 }
 
 export async function resolveOwnedAgentId(options: ResolveOwnedAgentIdOptions): Promise<string | null> {

@@ -178,6 +178,7 @@ test("an expired current invitation window is retryable while the host rotates s
     stateStore: createHandshakeStateStore({}),
     now: () => nowMs + 120000,
     recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
     verifiedHelperPrefix,
@@ -226,6 +227,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     stateStore,
     now: () => nowMs + 1,
     recoverEip191Address: async ({ signatureHex }) => signatureHex.endsWith("1b") ? addresses.initiator : addresses.responder,
+    registrationFundingReady: async () => true,
     resolveRegistration: async ({ address }) => registrations[address] ?? null,
     advanceTransitions: async ({ descriptor }) => ["proposal", "acceptance", "acknowledgment"].map((kind, index) => ({
       blockTimeRaw: `2026-08-09T17:0${index}:00.000Z`,
@@ -343,6 +345,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
   const messages = [];
+  let fundingVisible = false;
   const address = "0x7564105e977516c53be337314c7e53838967bdac";
   const presentedAddress = "0x7564105E977516c53be337314c7e53838967bdac";
   const relay = {
@@ -361,6 +364,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
     stateStore: createHandshakeStateStore({}),
     now: () => nowMs + 1,
     recoverEip191Address: async () => address,
+    registrationFundingReady: async ({ address: requested }) => fundingVisible && requested === address,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
     verifiedHelperPrefix,
@@ -381,6 +385,15 @@ test("fresh identity registration is returned as an executable pinned-helper act
     signatureHex: `0x${"1".repeat(128)}1b`,
   });
   messages.push({ kind: "agent_v2_funding_record", role: "host", body: { role: "initiator", address } });
+
+  assert.deepEqual(await coordinator.next({ access: invited.initiatorAccess }), {
+    needed: "funding_visibility",
+    retryAfterMs: 3000,
+    role: "initiator",
+    sessionId,
+    stage: "awaiting_funding_visibility",
+  });
+  fundingVisible = true;
 
   assert.deepEqual(await coordinator.next({ access: invited.initiatorAccess }), {
     needed: "erc8004_registration",

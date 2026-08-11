@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  readEvmBalance,
   recoverEip191Address,
   resolveOwnedAgentId,
 } from "../dist/handshake/evm.js";
@@ -32,6 +33,27 @@ function rpcFetch(handler) {
   };
   return { calls, fetchImpl };
 }
+
+test("readEvmBalance reads the latest balance as a JSON-RPC quantity", async () => {
+  const { calls, fetchImpl } = rpcFetch((body) => {
+    assert.equal(body.method, "eth_getBalance");
+    return "0x2386f26fc10000";
+  });
+
+  assert.equal(
+    await readEvmBalance({ rpcUrl: RPC_URL, address: ADDRESS, fetchImpl }),
+    10_000_000_000_000_000n,
+  );
+  assert.deepEqual(calls[0].params, [ADDRESS, "latest"]);
+});
+
+test("readEvmBalance rejects malformed JSON-RPC quantities", async () => {
+  const { fetchImpl } = rpcFetch(() => "0x00");
+  await assert.rejects(
+    readEvmBalance({ rpcUrl: RPC_URL, address: ADDRESS, fetchImpl }),
+    /Invalid JSON-RPC block quantity/,
+  );
+});
 
 test("recoverEip191Address hashes the EIP-191 message and recovers through ecrecover", async () => {
   const { calls, fetchImpl } = rpcFetch((body) => {

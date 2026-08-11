@@ -7,7 +7,7 @@ import { generateRelayKeyPair, canonicalBytes, digestHex } from "../../handshake
 import type { HandshakeKey, HandshakeRecord, HandshakeStateStore } from "../../handshake/state.js";
 import { createHandshakeStateStore, createIsolatedHandshakeStateStore } from "../../handshake/state.js";
 import { createHandshakeRelayClient, normalizeRelayBaseUrl } from "../../handshake/relay.js";
-import { recoverEip191Address, resolveOwnedAgentRegistration } from "../../handshake/evm.js";
+import { readEvmBalance, recoverEip191Address, resolveOwnedAgentRegistration } from "../../handshake/evm.js";
 import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
 import type { V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore } from "./invitation-store.js";
@@ -62,6 +62,7 @@ const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SIGNATURE = /^0x[0-9a-f]{130}$/;
 const RETRY_AFTER_MS = 3000;
+const MIN_REGISTRATION_BALANCE_WEI = 5_000_000_000_000_000n;
 const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 
 export class V2CoordinatorError extends Error {
@@ -291,6 +292,7 @@ export function createV2Coordinator(options: {
   stateStore?: HandshakeStateStore;
   now?: () => number;
   recoverEip191Address(input: { bytes: Buffer; signatureHex: string }): Promise<string>;
+  registrationFundingReady(input: { address: string }): Promise<boolean>;
   resolveRegistration(input: { address: string; fromBlock: string }): Promise<JsonObject | null>;
   advanceTransitions(input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]>;
   verifiedHelperPrefix: string;
@@ -446,24 +448,35 @@ export function createV2Coordinator(options: {
         let registration = null;
         if (current.terms.identityPolicy.erc8004 !== "not_required") {
           registration = await options.resolveRegistration({ address: current.sessionKeyAddress, fromBlock: current.discovery.sessionOpenedBlock ?? "0" });
-          if (!registration) return Object.freeze({
-            needed: "erc8004_registration",
-            role,
-            sessionId: auth.keyValue.session,
-            stage: "awaiting_identity_registration",
-            identityPolicy: current.terms.identityPolicy,
-            localAction: Object.freeze({
-              executor: "pinned_helper",
-              operation: "register",
-              stateDir: "reuse_exact_absolute_state_dir",
-              helperStep: compactHelperStep(
-                helperStep(options.verifiedHelperPrefix, "register", auth.keyValue.session, role),
+          if (!registration) {
+            if (!await options.registrationFundingReady({ address: current.sessionKeyAddress })) {
+              return Object.freeze({
+                needed: "funding_visibility",
+                retryAfterMs: RETRY_AFTER_MS,
                 role,
-                auth.keyValue.session,
-              ),
-              afterSuccess: NEXT_ACTION,
-            }),
-          });
+                sessionId: auth.keyValue.session,
+                stage: "awaiting_funding_visibility",
+              });
+            }
+            return Object.freeze({
+              needed: "erc8004_registration",
+              role,
+              sessionId: auth.keyValue.session,
+              stage: "awaiting_identity_registration",
+              identityPolicy: current.terms.identityPolicy,
+              localAction: Object.freeze({
+                executor: "pinned_helper",
+                operation: "register",
+                stateDir: "reuse_exact_absolute_state_dir",
+                helperStep: compactHelperStep(
+                  helperStep(options.verifiedHelperPrefix, "register", auth.keyValue.session, role),
+                  role,
+                  auth.keyValue.session,
+                ),
+                afterSuccess: NEXT_ACTION,
+              }),
+            });
+          }
           if (current.terms.identityPolicy.erc8004 === "required_fresh" && BigInt(registration.registrationBlock) <= BigInt(current.discovery.sessionOpenedBlock ?? "0")) fail();
         }
         const party = normalizeV2Party({ sessionKeyAddress: current.sessionKeyAddress, policyDigest: current.policyDigest, erc8004: registration }, current.terms.identityPolicy) as JsonObject;
@@ -705,6 +718,13 @@ export function createRuntimeV2Coordinator(env: Record<string, string | undefine
     relay,
     stateStore: createIsolatedHandshakeStateStore(env.AGENT_HANDSHAKE_V2_STATE_FILE),
     recoverEip191Address: ({ bytes, signatureHex }) => recoverEip191Address({ bytes, signatureHex, rpcUrl }),
+    registrationFundingReady: async ({ address }) => {
+      try {
+        return await readEvmBalance({ address, rpcUrl }) >= MIN_REGISTRATION_BALANCE_WEI;
+      } catch {
+        return false;
+      }
+    },
     resolveRegistration: async ({ address, fromBlock }) => {
       const found = await resolveOwnedAgentRegistration({
         address, fromBlock, registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e", rpcUrl,
