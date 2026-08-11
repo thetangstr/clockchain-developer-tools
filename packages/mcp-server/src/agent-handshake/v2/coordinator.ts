@@ -222,12 +222,11 @@ function setupLocalAction(verifiedHelperPrefix: string, policy: JsonObject, sess
     executor: "pinned_helper",
     operations: Object.freeze(["init", "policy", "inspect"]),
     payloadEncoding: "base64url_utf8_json",
-    policyPayload: policy,
     stateDirectoryCommand: `mkdir -p -m 700 "${stateDir}"`,
     helperSteps: Object.freeze([
-      helperStep(verifiedHelperPrefix, "init", sessionId, role),
-      helperStep(verifiedHelperPrefix, "policy", sessionId, role, policy),
-      helperStep(verifiedHelperPrefix, "inspect", sessionId, role),
+      compactHelperStep(helperStep(verifiedHelperPrefix, "init", sessionId, role), role, sessionId),
+      compactHelperStep(helperStep(verifiedHelperPrefix, "policy", sessionId, role, policy), role, sessionId),
+      compactHelperStep(helperStep(verifiedHelperPrefix, "inspect", sessionId, role), role, sessionId),
     ]),
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
@@ -455,7 +454,11 @@ export function createV2Coordinator(options: {
               executor: "pinned_helper",
               operation: "register",
               stateDir: "reuse_exact_absolute_state_dir",
-              helperStep: helperStep(options.verifiedHelperPrefix, "register", auth.keyValue.session, role),
+              helperStep: compactHelperStep(
+                helperStep(options.verifiedHelperPrefix, "register", auth.keyValue.session, role),
+                role,
+                auth.keyValue.session,
+              ),
               afterSuccess: NEXT_ACTION,
             }),
           });

@@ -82,6 +82,36 @@ const definitions = Object.freeze([
   { name: "agent_handshake_get_certificate", title: "Get closing certificate", description: "Get the signed closing certificate for local verification.", schema: { access } },
 ] as const);
 
+function withoutShellCommand(value: unknown): { changed: boolean; value: unknown } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return { changed: false, value };
+  const record = value as Record<string, unknown>;
+  if (typeof record.shellCommand !== "string") return { changed: false, value };
+  return {
+    changed: true,
+    value: Object.fromEntries(Object.entries(record).filter(([key]) => key !== "shellCommand")),
+  };
+}
+
+function structuredLocalAction(value: unknown): { changed: boolean; value: unknown } {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return { changed: false, value };
+  const record = value as Record<string, unknown>;
+  let changed = false;
+  const result = { ...record };
+  const helperStep = withoutShellCommand(record.helperStep);
+  if (helperStep.changed) {
+    changed = true;
+    result.helperStep = helperStep.value;
+  }
+  if (Array.isArray(record.helperSteps)) {
+    result.helperSteps = record.helperSteps.map((entry) => {
+      const stripped = withoutShellCommand(entry);
+      if (stripped.changed) changed = true;
+      return stripped.value;
+    });
+  }
+  return { changed, value: changed ? result : value };
+}
+
 export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void {
   for (const definition of definitions) {
     server.registerTool(definition.name, {
@@ -111,23 +141,8 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
         const body = typeof authoritativeAccess === "string"
           ? { ...publicRecord, roleAccess: authoritativeAccess }
           : publicRecord;
-        const localAction = body.localAction;
-        const helperStep = localAction !== null && typeof localAction === "object" && !Array.isArray(localAction)
-          ? (localAction as Record<string, unknown>).helperStep
-          : undefined;
-        const hasAuthoritativeHelperCommand = helperStep !== null && typeof helperStep === "object" && !Array.isArray(helperStep) &&
-          typeof (helperStep as Record<string, unknown>).shellCommand === "string";
-        const structuredBody = hasAuthoritativeHelperCommand
-          ? {
-              ...body,
-              localAction: {
-                ...(localAction as Record<string, unknown>),
-                helperStep: Object.fromEntries(
-                  Object.entries(helperStep as Record<string, unknown>).filter(([key]) => key !== "shellCommand"),
-                ),
-              },
-            }
-          : body;
+        const localAction = structuredLocalAction(body.localAction);
+        const structuredBody = localAction.changed ? { ...body, localAction: localAction.value } : body;
         return {
           content: [{ type: "text", text: JSON.stringify(body) }],
           structuredContent: structuredBody,

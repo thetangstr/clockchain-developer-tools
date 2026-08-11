@@ -52,6 +52,17 @@ function policy(role) {
   };
 }
 
+function compactHelperStep(operation, role, command) {
+  return {
+    operation,
+    role,
+    sessionId,
+    commandLength: Buffer.byteLength(command),
+    commandSha256: createHash("sha256").update(command).digest("hex"),
+    shellCommand: command,
+  };
+}
+
 function compactPayloadFrom(response, operation) {
   assert.equal(Object.hasOwn(response, "signingRequest"), false);
   assert.equal(response.signingSummary.schema, "clockchain.agent-handshake-signing-summary/v1");
@@ -228,12 +239,11 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     executor: "pinned_helper",
     operations: ["init", "policy", "inspect"],
     payloadEncoding: "base64url_utf8_json",
-    policyPayload: policy("initiator"),
     stateDirectoryCommand: `mkdir -p -m 700 "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`,
     helperSteps: [
-      { operation: "init", argvAfterVerifiedPrefix: ["init", "--state-dir", initiatorStateDir], shellCommand: `${verifiedHelperPrefix} init --state-dir "${initiatorStateDir}"`, shellCommandSuffix: `init --state-dir "${initiatorStateDir}"` },
-      { operation: "policy", argvAfterVerifiedPrefix: ["policy", "--state-dir", initiatorStateDir, "--payload-base64url", Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")], shellCommand: `${verifiedHelperPrefix} policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}`, shellCommandSuffix: `policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}` },
-      { operation: "inspect", argvAfterVerifiedPrefix: ["inspect", "--state-dir", initiatorStateDir], shellCommand: `${verifiedHelperPrefix} inspect --state-dir "${initiatorStateDir}"`, shellCommandSuffix: `inspect --state-dir "${initiatorStateDir}"` },
+      compactHelperStep("init", "initiator", `${verifiedHelperPrefix} init --state-dir "${initiatorStateDir}"`),
+      compactHelperStep("policy", "initiator", `${verifiedHelperPrefix} policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}`),
+      compactHelperStep("inspect", "initiator", `${verifiedHelperPrefix} inspect --state-dir "${initiatorStateDir}"`),
     ],
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
@@ -241,7 +251,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
   assert.deepEqual(accepted.localPolicy, policy("responder"));
-  assert.deepEqual(accepted.localAction.policyPayload, policy("responder"));
+  assert.equal(Object.hasOwn(accepted.localAction, "policyPayload"), false);
   const invitationClaimed = messages.find((message) => message.kind === "agent_v2_invitation_claimed");
   assert.equal(invitationClaimed.role, "responder");
   assert.equal(invitationClaimed.body.claimedAtMs, String(nowMs + 1));
@@ -378,7 +388,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
       executor: "pinned_helper",
       operation: "register",
       stateDir: "reuse_exact_absolute_state_dir",
-      helperStep: { operation: "register", argvAfterVerifiedPrefix: ["register", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`], shellCommand: `${verifiedHelperPrefix} register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`, shellCommandSuffix: `register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"` },
+      helperStep: compactHelperStep("register", "initiator", `${verifiedHelperPrefix} register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`),
       afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
     },
   });

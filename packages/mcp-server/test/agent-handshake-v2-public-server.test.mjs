@@ -92,6 +92,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.equal(manifest.helper.nodeRuntimeMajor, "24");
   assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(pin.manifestDigest));
   assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(V2_VERIFIED_HELPER_BOOTSTRAP));
+  assert.ok(V2_VERIFIED_HELPER_BOOTSTRAP.includes('!/^24\\./.test(manifest.nodeRuntime)'));
+  assert.ok(V2_VERIFIED_HELPER_BOOTSTRAP.includes('!/^24\\./.test(process.versions.node)'));
   assert.equal(V2_VERIFIED_HELPER_BOOTSTRAP.includes(","), false);
   assert.equal(V2_VERIFIED_HELPER_BOOTSTRAP.includes("'"), false);
 });
@@ -99,11 +101,24 @@ test("public initialization leads with the immutable local-authority boundary", 
 test("the dedicated MCP server exposes exactly seven tools and no prompts or resources", async () => {
   const signingPayload = Buffer.from(JSON.stringify({ operation: "identity_claim", role: "initiator" }), "utf8").toString("base64url");
   const signingCommand = `verified-helper sign --payload-base64url ${signingPayload}`;
+  const setupCommands = ["init", "policy", "inspect"].map((operation) => `verified-helper ${operation}`);
   const httpServer = createServer(async (req, res) => {
     const server = buildV2PublicServer({ pin, invoke: async (name) => ({
       ok: true,
       name,
-      ...(name === "agent_handshake_invite" ? { initiatorAccess: "i".repeat(80) } : {}),
+      ...(name === "agent_handshake_invite" ? {
+        initiatorAccess: "i".repeat(80),
+        localAction: {
+          helperSteps: setupCommands.map((shellCommand, index) => ({
+            operation: ["init", "policy", "inspect"][index],
+            role: "initiator",
+            sessionId: "11111111-2222-4333-8444-555555555555",
+            commandLength: Buffer.byteLength(shellCommand),
+            commandSha256: createHash("sha256").update(shellCommand).digest("hex"),
+            shellCommand,
+          })),
+        },
+      } : {}),
       ...(name === "agent_handshake_accept_invitation" ? { responderAccess: "r".repeat(80) } : {}),
       ...(name === "agent_handshake_join" ? {
         signingSummary: { schema: "clockchain.agent-handshake-signing-summary/v1", operation: "identity_claim" },
@@ -146,6 +161,12 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     const invited = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } } });
     assert.equal(invited.body.result.structuredContent.roleAccess, "i".repeat(80));
     assert.equal("initiatorAccess" in invited.body.result.structuredContent, false);
+    const invitedText = JSON.parse(invited.body.result.content[0].text);
+    for (const [index, command] of setupCommands.entries()) {
+      assert.equal(invitedText.localAction.helperSteps[index].shellCommand, command);
+      assert.equal(Object.hasOwn(invited.body.result.structuredContent.localAction.helperSteps[index], "shellCommand"), false);
+      assert.equal(JSON.stringify(invited.body.result).split(command).length - 1, 1);
+    }
     const roleAccess = "r".repeat(80);
     const status = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess } });
     assert.equal(status.body.result.structuredContent.roleAccess, roleAccess);
