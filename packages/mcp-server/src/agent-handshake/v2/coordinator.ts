@@ -140,7 +140,7 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
   const bytes = canonicalBytes(payload);
   return Object.freeze({
     schema: "clockchain.agent-handshake-signing-request/v1",
-    helperVersion: "2.1.1",
+    helperVersion: "2.1.2",
     operation,
     role,
     sessionId: current.discovery.sessionId,
@@ -173,7 +173,7 @@ function evidenceEnvelope(result: JsonObject, address: string, signatureHex: str
 
 function localStateDir(sessionId: string, role: V2Role): string {
   if (!UUID.test(sessionId)) fail();
-  return `$PWD/.clockchain/handshakes/${sessionId}/${role}`;
+  return `$TMPDIR/.clockchain/handshakes/${sessionId}/${role}`;
 }
 
 function helperStep(operation: string, sessionId: string, role: V2Role, payload?: JsonObject): JsonObject {
@@ -229,7 +229,7 @@ function certificateLocalAction(input: {
 }): JsonObject {
   const payload = Object.freeze({
     schema: "clockchain.agent-handshake-certificate-verification/v1",
-    helperVersion: "2.1.1",
+    helperVersion: "2.1.2",
     role: input.role,
     sessionId: input.sessionId,
     repositorySha: input.discovery.repositorySha,
@@ -370,7 +370,7 @@ export function createV2Coordinator(options: {
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
-      if (input.helperVersion !== "2.1.1" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
+      if (input.helperVersion !== "2.1.2" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
       const sessionKeyAddress = input.sessionKeyAddress.toLowerCase();
       const auth = await authorize(input.access, "agent_handshake_join");
       const expectedPolicy = localPolicy(auth.current.terms, auth.verified.payload.role);
