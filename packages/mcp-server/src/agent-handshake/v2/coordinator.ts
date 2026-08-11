@@ -196,12 +196,14 @@ function helperStep(verifiedHelperPrefix: string, operation: string, sessionId: 
 
 function compactHelperStep(step: JsonObject, role: V2Role, sessionId: string): JsonObject {
   const shellCommand = step.shellCommand as string;
+  const commandSha256 = createHash("sha256").update(shellCommand, "utf8").digest("hex");
   return Object.freeze({
     operation: step.operation,
     role,
     sessionId,
+    approvalCommand: `clockchain-agent-authorize ${commandSha256}`,
     commandLength: Buffer.byteLength(shellCommand),
-    commandSha256: createHash("sha256").update(shellCommand, "utf8").digest("hex"),
+    commandSha256,
     shellCommand,
   });
 }

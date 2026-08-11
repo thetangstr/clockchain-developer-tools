@@ -53,12 +53,14 @@ function policy(role) {
 }
 
 function compactHelperStep(operation, role, command) {
+  const commandSha256 = createHash("sha256").update(command).digest("hex");
   return {
     operation,
     role,
     sessionId,
+    approvalCommand: `clockchain-agent-authorize ${commandSha256}`,
     commandLength: Buffer.byteLength(command),
-    commandSha256: createHash("sha256").update(command).digest("hex"),
+    commandSha256,
     shellCommand: command,
   };
 }
@@ -72,11 +74,12 @@ function compactPayloadFrom(response, operation) {
   assert.match(response.signingSummary.bytesSha256, /^[0-9a-f]{64}$/);
   assert.equal(response.localAction.operation, "sign");
   assert.deepEqual(Object.keys(response.localAction.helperStep), [
-    "operation", "role", "sessionId", "commandLength", "commandSha256", "shellCommand",
+    "operation", "role", "sessionId", "approvalCommand", "commandLength", "commandSha256", "shellCommand",
   ]);
   const command = response.localAction.helperStep.shellCommand;
   assert.equal(response.localAction.helperStep.commandLength, Buffer.byteLength(command));
   assert.equal(response.localAction.helperStep.commandSha256, createHash("sha256").update(command).digest("hex"));
+  assert.equal(response.localAction.helperStep.approvalCommand, `clockchain-agent-authorize ${response.localAction.helperStep.commandSha256}`);
   const match = command.match(/--payload-base64url\s+([A-Za-z0-9_-]+)$/);
   assert.ok(match);
   const payload = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
@@ -101,7 +104,7 @@ function compactCertificatePayloadFrom(response, role) {
   assert.equal(response.certificateSummary.sessionId, sessionId);
   assert.match(response.certificateSummary.resultDigest, /^[0-9a-f]{64}$/);
   assert.deepEqual(Object.keys(response.localAction.helperStep), [
-    "operation", "role", "sessionId", "commandLength", "commandSha256", "shellCommand",
+    "operation", "role", "sessionId", "approvalCommand", "commandLength", "commandSha256", "shellCommand",
   ]);
   const command = response.localAction.helperStep.shellCommand;
   assert.equal(response.localAction.helperStep.operation, "verify-certificate");
@@ -109,6 +112,7 @@ function compactCertificatePayloadFrom(response, role) {
   assert.equal(response.localAction.helperStep.sessionId, sessionId);
   assert.equal(response.localAction.helperStep.commandLength, Buffer.byteLength(command));
   assert.equal(response.localAction.helperStep.commandSha256, createHash("sha256").update(command).digest("hex"));
+  assert.equal(response.localAction.helperStep.approvalCommand, `clockchain-agent-authorize ${response.localAction.helperStep.commandSha256}`);
   const match = command.match(/--payload-base64url\s+([A-Za-z0-9_-]+)$/);
   assert.ok(match);
   const payload = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
