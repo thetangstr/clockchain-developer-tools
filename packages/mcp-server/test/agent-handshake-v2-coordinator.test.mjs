@@ -135,6 +135,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     payloadEncoding: "base64url_utf8_json",
     policyPayload: policy("initiator"),
     stateDir: "new_private_absolute_state_dir",
+    registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
     afterSuccess: "call_agent_handshake_join_with_helper_output",
   });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);

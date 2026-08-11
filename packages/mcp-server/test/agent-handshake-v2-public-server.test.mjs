@@ -69,6 +69,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /already.*fresh.*disposable.*working directory.*do not create or switch to another working directory/is);
   assert.match(instructions, /never.*shared.*temp.*directory/is);
   assert.match(instructions, /manifest digest.*applies only.*manifest\.json.*helper.*separate.*sha-256.*verified manifest/is);
+  assert.match(instructions, /after.*init.*policy.*inspect.*call agent_handshake_join.*do not.*register.*before.*join.*fund.*agent_handshake_next.*erc8004_registration/is);
   assert.match(instructions, /Never infer that the other stakeholder stopped from a waiting response/is);
   assert.match(instructions, /HANDSHAKE_TEMPORARILY_UNAVAILABLE.*retryable: true.*retryAfterMs.*retry the same tool.*terminal protocol rejection/is);
   assert.match(instructions, /role-scoped.*access argument.*same Clockchain MCP.*required credential use.*not.*disclosure/is);
