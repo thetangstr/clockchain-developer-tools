@@ -283,6 +283,17 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     [["claim", "signature"], ["claim", "signature"]],
   );
   for (const role of ["initiator", "responder"]) {
+    const waitingForFunding = await coordinator.next({ access: accesses[role] });
+    assert.deepEqual(waitingForFunding, {
+      needed: "funding_record",
+      nextAction: "wait_for_clockchain_host_funding_then_call_agent_handshake_next_with_unchanged_role_access",
+      retryAfterMs: 3000,
+      role,
+      selfFundingRequired: false,
+      sessionId,
+      stage: "awaiting_funding",
+      waitingOn: "clockchain_host",
+    });
     messages.push({ kind: "agent_v2_funding_record", role: "host", body: { role, address: addresses[role] } });
     const ready = await coordinator.next({ access: accesses[role] });
     assert.equal(ready.stage, "party_ready");
@@ -395,10 +406,13 @@ test("fresh identity registration is returned as an executable pinned-helper act
 
   assert.deepEqual(await coordinator.next({ access: invited.initiatorAccess }), {
     needed: "funding_visibility",
+    nextAction: "wait_for_clockchain_host_funding_visibility_then_call_agent_handshake_next_with_unchanged_role_access",
     retryAfterMs: 3000,
     role: "initiator",
+    selfFundingRequired: false,
     sessionId,
     stage: "awaiting_funding_visibility",
+    waitingOn: "clockchain_host",
   });
   fundingVisible = true;
 

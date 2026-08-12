@@ -478,7 +478,16 @@ export function createV2Coordinator(options: {
       const entries = (await options.relay.getMessages({ sessionId: auth.keyValue.session })).messages;
       if (!current.party) {
         if (current.terms.identityPolicy.erc8004 !== "not_required" && !funded(entries, role, current.sessionKeyAddress)) {
-          return Object.freeze({ needed: "funding_record", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_funding" });
+          return Object.freeze({
+            needed: "funding_record",
+            nextAction: "wait_for_clockchain_host_funding_then_call_agent_handshake_next_with_unchanged_role_access",
+            retryAfterMs: RETRY_AFTER_MS,
+            role,
+            selfFundingRequired: false,
+            sessionId: auth.keyValue.session,
+            stage: "awaiting_funding",
+            waitingOn: "clockchain_host",
+          });
         }
         let registration = null;
         if (current.terms.identityPolicy.erc8004 !== "not_required") {
@@ -487,10 +496,13 @@ export function createV2Coordinator(options: {
             if (!await options.registrationFundingReady({ address: current.sessionKeyAddress })) {
               return Object.freeze({
                 needed: "funding_visibility",
+                nextAction: "wait_for_clockchain_host_funding_visibility_then_call_agent_handshake_next_with_unchanged_role_access",
                 retryAfterMs: RETRY_AFTER_MS,
                 role,
+                selfFundingRequired: false,
                 sessionId: auth.keyValue.session,
                 stage: "awaiting_funding_visibility",
+                waitingOn: "clockchain_host",
               });
             }
             return Object.freeze({
