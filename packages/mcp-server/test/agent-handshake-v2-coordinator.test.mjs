@@ -162,6 +162,19 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   });
 
   const invited = await coordinator.invite(terms);
+  const invitationCreated = messages.find((message) => message.kind === "agent_v2_invitation_created");
+  assert.equal(invitationCreated.role, "initiator");
+  assert.equal(invitationCreated.sessionId, sessionId);
+  assert.deepEqual(Object.keys(invitationCreated.body).sort(), [
+    "createdAtMs",
+    "externalBusinessActionPerformed",
+  ]);
+  assert.deepEqual(invitationCreated.body, {
+    createdAtMs: String(nowMs + 1),
+    externalBusinessActionPerformed: false,
+  });
+  assert.equal(JSON.stringify(invitationCreated).includes(invited.responderInvitation), false);
+  assert.equal(JSON.stringify(invitationCreated).includes(invited.initiatorAccess), false);
   const initiatorStateDir = `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`;
   assert.deepEqual(invited.localPolicy, policy("initiator"));
   assert.deepEqual(invited.localAction, {
@@ -183,6 +196,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   assert.deepEqual(accepted.localPolicy, policy("responder"));
   assert.deepEqual(accepted.localAction.policyPayload, policy("responder"));
   const invitationClaimed = messages.find((message) => message.kind === "agent_v2_invitation_claimed");
+  assert.ok(messages.indexOf(invitationCreated) < messages.indexOf(invitationClaimed));
   assert.equal(invitationClaimed.role, "responder");
   assert.equal(invitationClaimed.body.claimedAtMs, String(nowMs + 1));
   assert.notEqual(invited.initiatorAccess, accepted.responderAccess);
