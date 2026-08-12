@@ -4,6 +4,7 @@ export const AGENT_HANDSHAKE_ROLE_TOOLS = Object.freeze([
   "agent_handshake_join",
   "agent_handshake_status",
   "agent_handshake_next",
+  "agent_handshake_submit_checkpoint",
   "agent_handshake_submit",
   "agent_handshake_get_certificate",
 ]);

@@ -44,6 +44,7 @@ const ROLE_SCOPED_TOOLS = new Set([
   "agent_handshake_join",
   "agent_handshake_status",
   "agent_handshake_next",
+  "agent_handshake_submit_checkpoint",
   "agent_handshake_submit",
   "agent_handshake_get_certificate",
 ]);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import test from "node:test";
 
 import { createHandshakeStateStore, __resetHandshakeStateStore } from "../dist/handshake/state.js";
@@ -313,11 +314,63 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.equal(ready.nextAction, "call_agent_handshake_next_with_unchanged_role_access");
   }
   const proposal = await coordinator.next({ access: accesses.initiator });
-  assert.equal(compactPayloadFrom(proposal, "proposal").descriptorEnvelope, null);
-  await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: `0x${"2".repeat(128)}1b` });
+  const proposalRequest = compactPayloadFrom(proposal, "proposal");
+  assert.equal(proposalRequest.descriptorEnvelope, null);
+  const proposalSignatureHex = `0x${"2".repeat(128)}1b`;
+  const proposalEnvelope = {
+    payload: JSON.parse(gunzipSync(Buffer.from(proposalRequest.bytesGzipBase64Url, "base64url")).toString("utf8")),
+    schema: "clockchain.agent-handshake-proposal-envelope/v2",
+    signature: { address: addresses.initiator, algorithm: "eip191", value: proposalSignatureHex },
+  };
+  const proposalCheckpoint = {
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: 1,
+    protocol: "clockchain.agent-handshake/v2", sessionId, role: "initiator", artifactType: "proposal",
+    artifactDigest: v2CanonicalRecord(proposalEnvelope).digest, sequence: "1", previousCheckpointDigest: null,
+    issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: addresses.initiator,
+    signature: { address: addresses.initiator, algorithm: "eip191", value: `0x${"6".repeat(128)}1b` },
+  };
+  await assert.rejects(
+    () => coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: proposalSignatureHex }),
+    /coordination failed safely/,
+  );
+  await assert.rejects(
+    () => coordinator.submitCheckpoint({
+      access: accesses.initiator,
+      artifactSignatureHex: proposalSignatureHex,
+      checkpoint: { ...proposalCheckpoint, artifactDigest: "0".repeat(64) },
+    }),
+    /coordination failed safely/,
+  );
+  const submittedProposalCheckpoint = await coordinator.submitCheckpoint({ access: accesses.initiator, artifactSignatureHex: proposalSignatureHex, checkpoint: proposalCheckpoint });
+  assert.match(submittedProposalCheckpoint.checkpointDigest, /^[0-9a-f]{64}$/);
+  await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: proposalSignatureHex });
   const acceptance = await coordinator.next({ access: accesses.responder });
-  assert.equal(compactPayloadFrom(acceptance, "acceptance").descriptorEnvelope, null);
-  await coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: `0x${"3".repeat(128)}1c` });
+  const acceptanceRequest = compactPayloadFrom(acceptance, "acceptance");
+  assert.equal(acceptanceRequest.descriptorEnvelope, null);
+  const acceptanceSignatureHex = `0x${"3".repeat(128)}1c`;
+  const acceptanceEnvelope = {
+    payload: JSON.parse(gunzipSync(Buffer.from(acceptanceRequest.bytesGzipBase64Url, "base64url")).toString("utf8")),
+    schema: "clockchain.agent-handshake-acceptance-envelope/v2",
+    signature: { address: addresses.responder, algorithm: "eip191", value: acceptanceSignatureHex },
+  };
+  const acceptanceCheckpoint = {
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: 1,
+    protocol: "clockchain.agent-handshake/v2", sessionId, role: "responder", artifactType: "acceptance",
+    artifactDigest: v2CanonicalRecord(acceptanceEnvelope).digest, sequence: "2",
+    previousCheckpointDigest: submittedProposalCheckpoint.checkpointDigest,
+    issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: addresses.responder,
+    signature: { address: addresses.responder, algorithm: "eip191", value: `0x${"7".repeat(128)}1c` },
+  };
+  await assert.rejects(
+    () => coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: acceptanceSignatureHex }),
+    /coordination failed safely/,
+  );
+  await coordinator.submitCheckpoint({ access: accesses.responder, artifactSignatureHex: acceptanceSignatureHex, checkpoint: acceptanceCheckpoint });
+  await coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: acceptanceSignatureHex });
+
+  const checkpoints = messages.filter((message) => message.kind === "agent_v2_commitment_checkpoint");
+  assert.deepEqual(checkpoints.map((message) => message.role), ["initiator", "responder"]);
+  assert.deepEqual(checkpoints.map((message) => message.body.checkpoint.sequence), ["1", "2"]);
 
   const proposalPayload = messages.find((message) => message.kind === "agent_v2_proposal").body.proposalEnvelope.payload;
   const parties = { initiator: proposalPayload.initiator, responder: proposalPayload.responder };
