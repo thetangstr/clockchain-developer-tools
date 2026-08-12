@@ -19,7 +19,7 @@ test("compose carries only server-side v2 configuration into persistent services
   ]) assert.match(source, new RegExp(`${name}:`));
   assert.match(source, /AGENT_HANDSHAKE_V2_INVITATION_FILE:\s*\/app\/state\/agent-handshake-v2-invitations\.json/);
   assert.match(source, /AGENT_HANDSHAKE_V2_STATE_FILE:\s*\/app\/state\/agent-handshake-v2-state\.json/);
-  assert.match(source, /AGENT_HANDSHAKE_INVITES_PER_HOUR:\s*"5"/);
+  assert.match(source, /AGENT_HANDSHAKE_INVITES_PER_HOUR:\s*"20"/);
   assert.match(source, /AGENT_HANDSHAKE_CALLS_PER_MINUTE:\s*"120"/);
   assert.match(source, /AGENT_HANDSHAKE_TRUSTED_PROXY:\s*"172\.30\.0\.3"/);
   assert.doesNotMatch(source, /responderAccess|initiatorAccess|rawInvitation|privateKeyPem/);
