@@ -65,6 +65,19 @@ const RETRY_AFTER_MS = 3000;
 const MIN_REGISTRATION_BALANCE_WEI = 5_000_000_000_000_000n;
 const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 
+function joinRequired(role: V2Role, sessionId: string): JsonObject {
+  return Object.freeze({
+    externalBusinessActionPerformed: false,
+    needed: "agent_handshake_join",
+    nextAction: "call_agent_handshake_join_now_with_access_and_exact_init_policy_inspect_outputs",
+    requiredInputs: Object.freeze(["access", "helperVersion", "sessionKeyAddress", "policyDigest"]),
+    role,
+    sessionId,
+    stage: "invited",
+    stageMeaning: "this_role_has_not_joined",
+  });
+}
+
 export class V2CoordinatorError extends Error {
   constructor() { super("Agent handshake coordination failed safely."); this.name = "V2CoordinatorError"; }
 }
@@ -463,6 +476,9 @@ export function createV2Coordinator(options: {
 
     async status(input: { access: string }): Promise<JsonObject> {
       const auth = await authorize(input.access, "agent_handshake_status");
+      if (!auth.current.policyDigest || !auth.current.sessionKeyAddress) {
+        return joinRequired(auth.verified.payload.role, auth.keyValue.session);
+      }
       return Object.freeze({ role: auth.verified.payload.role, sessionId: auth.keyValue.session, stage: auth.current.stage ?? "invited", externalBusinessActionPerformed: false });
     },
 
@@ -470,7 +486,9 @@ export function createV2Coordinator(options: {
       const auth = await authorize(input.access, "agent_handshake_next");
       let current = await refresh(auth.keyValue);
       const role = auth.verified.payload.role;
-      if (!current.policyDigest || !current.sessionKeyAddress) fail();
+      if (!current.policyDigest || !current.sessionKeyAddress) {
+        return joinRequired(role, auth.keyValue.session);
+      }
       if (current.pending) {
         const signingRequest = signRequest(current, role, current.pending.operation, current.pending.payload);
         return Object.freeze({ stage: current.stage, signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });

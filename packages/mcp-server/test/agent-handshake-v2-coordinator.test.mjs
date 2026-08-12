@@ -268,6 +268,18 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   assert.notEqual(invited.initiatorAccess, accepted.responderAccess);
   const accesses = { initiator: invited.initiatorAccess, responder: accepted.responderAccess };
   for (const role of ["initiator", "responder"]) {
+    const joinRequired = {
+      externalBusinessActionPerformed: false,
+      needed: "agent_handshake_join",
+      nextAction: "call_agent_handshake_join_now_with_access_and_exact_init_policy_inspect_outputs",
+      requiredInputs: ["access", "helperVersion", "sessionKeyAddress", "policyDigest"],
+      role,
+      sessionId,
+      stage: "invited",
+      stageMeaning: "this_role_has_not_joined",
+    };
+    assert.deepEqual(await coordinator.status({ access: accesses[role] }), joinRequired);
+    assert.deepEqual(await coordinator.next({ access: accesses[role] }), joinRequired);
     const localPolicy = policy(role);
     const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.2", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
     const identityRequest = compactPayloadFrom(joined, "identity_claim");
