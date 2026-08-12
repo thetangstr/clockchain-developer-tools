@@ -325,6 +325,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     reference: terms.reference, schema: "clockchain.agent-handshake-result/v2", sessionDigest: v2CanonicalRecord(descriptor).digest,
     sessionId, statementDigest: v2CanonicalRecord(terms).digest, subjectRun: "stakeholder",
   }, signer: {}, hostSessionKeyCertificate };
+  const nextCertificate = await coordinator.next({ access: accesses.initiator });
+  const nextCertificatePayload = compactCertificatePayloadFrom(nextCertificate, "initiator");
+  assert.deepEqual(nextCertificatePayload.certificate, result);
   const initiatorCertificate = await coordinator.getCertificate({ access: accesses.initiator });
   const responderCertificate = await coordinator.getCertificate({ access: accesses.responder });
   const initiatorCertificatePayload = compactCertificatePayloadFrom(initiatorCertificate, "initiator");

@@ -368,6 +368,40 @@ export function createV2Coordinator(options: {
     return keyValue;
   }
 
+  async function certificateResponse(
+    keyValue: HandshakeKey,
+    current: CoordinatorData,
+    role: V2Role,
+  ): Promise<JsonObject> {
+    let certificate;
+    try { certificate = await options.relay.getResult({ sessionId: keyValue.session }); }
+    catch { return Object.freeze({ needed: "certificate", retryAfterMs: 5000, sessionId: keyValue.session, stage: "awaiting_certificate" }); }
+    const envelope = exact(certificate, ["hostSessionKeyCertificate", "result", "signer"]);
+    const result = normalizeV2Result(envelope.result);
+    if (
+      result.sessionId !== keyValue.session || result.outcome !== "VERIFIED" ||
+      result.externalBusinessActionPerformed !== false ||
+      result.policyDigests[role] !== current.policyDigest ||
+      result.parties[role].sessionKeyAddress !== current.sessionKeyAddress
+    ) fail();
+    await store.update(keyValue, (value) => merge(value, keyValue, { certificateAvailable: true, stage: "certificate_available" }));
+    return Object.freeze({
+      certificateSummary: Object.freeze({
+        schema: "clockchain.agent-handshake-certificate-summary/v1",
+        outcome: result.outcome,
+        resultDigest: v2CanonicalRecord(result).digest,
+        role,
+        sessionId: keyValue.session,
+      }),
+      localAction: certificateLocalAction(options.verifiedHelperPrefix, {
+        certificate: envelope,
+        discovery: current.discovery,
+        role,
+        sessionId: keyValue.session,
+      }),
+    });
+  }
+
   return Object.freeze({
     async invite(value: unknown): Promise<JsonObject> {
       const terms = normalizeV2Terms(value) as JsonObject;
@@ -525,7 +559,7 @@ export function createV2Coordinator(options: {
         return Object.freeze({ needed: "counterpart_transition", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_anchors" });
       }
       if (role === "initiator") await post(auth.keyValue, "agent_v2_anchor_report", { transitions });
-      if (current.evidenceUploaded) return Object.freeze({ needed: "certificate", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_certificate" });
+      if (current.evidenceUploaded) return certificateResponse(auth.keyValue, current, role);
       const evidence = normalizeV2EvidenceResult({
         externalBusinessActionPerformed: false, party: current.party, policyDigest: current.policyDigest,
         reference: current.terms.reference, repositorySha: current.discovery.repositorySha, role,
@@ -571,33 +605,7 @@ export function createV2Coordinator(options: {
     async getCertificate(input: { access: string }): Promise<JsonObject> {
       const auth = await authorize(input.access, "agent_handshake_get_certificate");
       if (!auth.current.evidenceUploaded) fail();
-      let certificate;
-      try { certificate = await options.relay.getResult({ sessionId: auth.keyValue.session }); }
-      catch { return Object.freeze({ needed: "certificate", retryAfterMs: 5000, sessionId: auth.keyValue.session, stage: "awaiting_certificate" }); }
-      const envelope = exact(certificate, ["hostSessionKeyCertificate", "result", "signer"]);
-      const result = normalizeV2Result(envelope.result);
-      if (
-        result.sessionId !== auth.keyValue.session || result.outcome !== "VERIFIED" ||
-        result.externalBusinessActionPerformed !== false ||
-        result.policyDigests[auth.verified.payload.role] !== auth.current.policyDigest ||
-        result.parties[auth.verified.payload.role].sessionKeyAddress !== auth.current.sessionKeyAddress
-      ) fail();
-      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { certificateAvailable: true, stage: "certificate_available" }));
-      return Object.freeze({
-        certificateSummary: Object.freeze({
-          schema: "clockchain.agent-handshake-certificate-summary/v1",
-          outcome: result.outcome,
-          resultDigest: v2CanonicalRecord(result).digest,
-          role: auth.verified.payload.role,
-          sessionId: auth.keyValue.session,
-        }),
-        localAction: certificateLocalAction(options.verifiedHelperPrefix, {
-          certificate: envelope,
-          discovery: auth.current.discovery,
-          role: auth.verified.payload.role,
-          sessionId: auth.keyValue.session,
-        }),
-      });
+      return certificateResponse(auth.keyValue, auth.current, auth.verified.payload.role);
     },
 
     async invoke(name: string, args: JsonObject): Promise<unknown> {
