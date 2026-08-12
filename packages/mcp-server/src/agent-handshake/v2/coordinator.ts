@@ -13,6 +13,11 @@ import type { V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore } from "./invitation-store.js";
 import { readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
+  commitmentCheckpointDigest,
+  commitmentCheckpointSigningBytes,
+  normalizeV2CommitmentCheckpoint,
+} from "./commitment-checkpoint.js";
+import {
   normalizeV2Acceptance,
   normalizeV2Descriptor,
   normalizeV2EvidenceResult,
@@ -46,6 +51,8 @@ type CoordinatorData = JsonObject & {
   pending?: { operation: "identity_claim" | "proposal" | "acceptance" | "evidence"; payload: JsonObject } | null;
   proposalEnvelope?: JsonObject;
   acceptanceEnvelope?: JsonObject;
+  proposalCheckpoint?: JsonObject;
+  acceptanceCheckpoint?: JsonObject;
   descriptorEnvelope?: JsonObject;
   sessionDigest?: string;
   transitions?: JsonObject[];
@@ -346,8 +353,12 @@ export function createV2Coordinator(options: {
     if (ready?.body) patch.counterpart = normalizeV2Party(ready.body, current.terms.identityPolicy) as JsonObject;
     const proposal = find(entries, "agent_v2_proposal", "initiator");
     if (proposal?.body?.proposalEnvelope) patch.proposalEnvelope = proposal.body.proposalEnvelope;
+    const proposalCheckpoint = find(entries, "agent_v2_commitment_checkpoint", "initiator");
+    if (proposalCheckpoint?.body?.checkpoint) patch.proposalCheckpoint = normalizeV2CommitmentCheckpoint(proposalCheckpoint.body.checkpoint) as JsonObject;
     const acceptance = find(entries, "agent_v2_acceptance", "responder");
     if (acceptance?.body?.acceptanceEnvelope) patch.acceptanceEnvelope = acceptance.body.acceptanceEnvelope;
+    const acceptanceCheckpoint = find(entries, "agent_v2_commitment_checkpoint", "responder");
+    if (acceptanceCheckpoint?.body?.checkpoint) patch.acceptanceCheckpoint = normalizeV2CommitmentCheckpoint(acceptanceCheckpoint.body.checkpoint) as JsonObject;
     const descriptorMessage = find(entries, "agent_v2_handshake_required", "host");
     if (descriptorMessage?.body?.descriptorEnvelope?.descriptor) {
       const descriptor = normalizeV2Descriptor(descriptorMessage.body.descriptorEnvelope.descriptor);
@@ -603,6 +614,54 @@ export function createV2Coordinator(options: {
       return Object.freeze({ stage: "sign_evidence", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
     },
 
+    async submitCheckpoint(input: { access: string; artifactSignatureHex: string; checkpoint: unknown }): Promise<JsonObject> {
+      if (!SIGNATURE.test(input.artifactSignatureHex)) fail();
+      const auth = await authorize(input.access, "agent_handshake_submit_checkpoint");
+      const current = await refresh(auth.keyValue);
+      const operation = current.pending?.operation;
+      if (!current.sessionKeyAddress || (operation !== "proposal" && operation !== "acceptance")) fail();
+      const pending = current.pending;
+      if (!pending) fail();
+      const checkpoint = normalizeV2CommitmentCheckpoint(input.checkpoint) as JsonObject;
+      const expectedRole = auth.verified.payload.role;
+      const expectedSequence = operation === "proposal" ? "1" : "2";
+      const expectedPrevious = operation === "proposal"
+        ? null
+        : current.proposalCheckpoint ? commitmentCheckpointDigest(current.proposalCheckpoint) : fail();
+      const signature = checkpoint.signature as JsonObject;
+      if (
+        checkpoint.sessionId !== auth.keyValue.session || checkpoint.role !== expectedRole ||
+        checkpoint.artifactType !== operation || checkpoint.sequence !== expectedSequence ||
+        checkpoint.previousCheckpointDigest !== expectedPrevious ||
+        checkpoint.signerAddress !== current.sessionKeyAddress ||
+        Number(checkpoint.issuedAtMs) > now() + 1_000 || Number(checkpoint.expiresAtMs) <= now()
+      ) fail();
+      const artifactBytes = canonicalBytes(pending.payload);
+      const artifactSigner = (await options.recoverEip191Address({
+        bytes: artifactBytes,
+        signatureHex: input.artifactSignatureHex,
+      })).toLowerCase();
+      if (artifactSigner !== current.sessionKeyAddress) fail();
+      const envelope = signatureEnvelope(operation, pending.payload, artifactSigner, input.artifactSignatureHex);
+      if (checkpoint.artifactDigest !== v2CanonicalRecord(envelope).digest) fail();
+      const recovered = (await options.recoverEip191Address({
+        bytes: commitmentCheckpointSigningBytes(checkpoint),
+        signatureHex: signature.value,
+      })).toLowerCase();
+      if (recovered !== current.sessionKeyAddress) fail();
+      const field = operation === "proposal" ? "proposalCheckpoint" : "acceptanceCheckpoint";
+      const prior = operation === "proposal" ? current.proposalCheckpoint : current.acceptanceCheckpoint;
+      if (prior && commitmentCheckpointDigest(prior) !== commitmentCheckpointDigest(checkpoint)) fail();
+      await post(auth.keyValue, "agent_v2_commitment_checkpoint", { checkpoint });
+      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { [field]: checkpoint }));
+      return Object.freeze({
+        role: expectedRole,
+        sessionId: auth.keyValue.session,
+        stage: `${operation}_checkpoint_submitted`,
+        checkpointDigest: commitmentCheckpointDigest(checkpoint),
+      });
+    },
+
     async submit(input: { access: string; policyDigest: string; signatureHex: string }): Promise<JsonObject> {
       if (!DIGEST.test(input.policyDigest) || !SIGNATURE.test(input.signatureHex)) fail();
       const auth = await authorize(input.access, "agent_handshake_submit");
@@ -618,10 +677,12 @@ export function createV2Coordinator(options: {
         });
       } else if (current.pending.operation === "proposal") {
         const proposalEnvelope = signatureEnvelope("proposal", current.pending.payload, recovered, input.signatureHex);
+        if (!current.proposalCheckpoint || current.proposalCheckpoint.artifactDigest !== v2CanonicalRecord(proposalEnvelope).digest) fail();
         await post(auth.keyValue, "agent_v2_proposal", { proposalEnvelope });
         await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { proposalEnvelope }));
       } else if (current.pending.operation === "acceptance") {
         const acceptanceEnvelope = signatureEnvelope("acceptance", current.pending.payload, recovered, input.signatureHex);
+        if (!current.acceptanceCheckpoint || current.acceptanceCheckpoint.artifactDigest !== v2CanonicalRecord(acceptanceEnvelope).digest) fail();
         await post(auth.keyValue, "agent_v2_acceptance", { acceptanceEnvelope });
         await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { acceptanceEnvelope }));
       } else {
@@ -645,6 +706,7 @@ export function createV2Coordinator(options: {
       if (name === "agent_handshake_join") return this.join(args as any);
       if (name === "agent_handshake_status") return this.status(args as any);
       if (name === "agent_handshake_next") return this.next(args as any);
+      if (name === "agent_handshake_submit_checkpoint") return this.submitCheckpoint(args as any);
       if (name === "agent_handshake_submit") return this.submit(args as any);
       if (name === "agent_handshake_get_certificate") return this.getCertificate(args as any);
       fail();

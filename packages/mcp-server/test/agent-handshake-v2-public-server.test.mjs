@@ -101,7 +101,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.equal(V2_VERIFIED_HELPER_BOOTSTRAP.includes("'"), false);
 });
 
-test("the dedicated MCP server exposes exactly seven tools and no prompts or resources", async () => {
+test("the dedicated MCP server exposes exactly eight tools and no prompts or resources", async () => {
   const signingPayload = Buffer.from(JSON.stringify({ operation: "identity_claim", role: "initiator" }), "utf8").toString("base64url");
   const signingCommand = `verified-helper sign --payload-base64url ${signingPayload}`;
   const setupCommands = ["init", "policy", "inspect"].map((operation) => `verified-helper ${operation}`);
@@ -170,6 +170,7 @@ test("the dedicated MCP server exposes exactly seven tools and no prompts or res
     assert.equal("prompts" in initialized.body.result.capabilities, false);
     const listed = await rpc(url, "tools/list");
     assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), V2_PUBLIC_TOOL_NAMES);
+    assert.ok(listed.body.result.tools.some((tool) => tool.name === "agent_handshake_submit_checkpoint"));
     const invite = listed.body.result.tools.find((tool) => tool.name === "agent_handshake_invite");
     const inviteSchema = JSON.stringify(invite.inputSchema);
     assert.match(inviteSchema, /eip155:11155111/);

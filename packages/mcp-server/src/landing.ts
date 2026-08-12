@@ -42,7 +42,7 @@ Transport:  streamable HTTP
 TWO-PERSON STAKEHOLDER HANDSHAKE — separate public surface:
   Endpoint: https://mcp.clockchain.network/handshake/mcp
   Manifest: https://mcp.clockchain.network/.well-known/agent-handshake.json
-  This surface has exactly seven handshake tools. It uses single-use invitations
+  This surface has exactly eight handshake tools. It uses single-use invitations
   and role capabilities, not an MCP token or Clockchain API key. Party keys and
   signatures stay local in Codex or Claude Code.
 

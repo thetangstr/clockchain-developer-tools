@@ -11,6 +11,7 @@ export const V2_PUBLIC_TOOL_NAMES = Object.freeze([
   "agent_handshake_join",
   "agent_handshake_status",
   "agent_handshake_next",
+  "agent_handshake_submit_checkpoint",
   "agent_handshake_submit",
   "agent_handshake_get_certificate",
 ]);
@@ -23,6 +24,7 @@ const ROLE_SCOPED_TOOLS = new Set([
   "agent_handshake_join",
   "agent_handshake_status",
   "agent_handshake_next",
+  "agent_handshake_submit_checkpoint",
   "agent_handshake_submit",
   "agent_handshake_get_certificate",
 ]);
@@ -78,6 +80,7 @@ const definitions = Object.freeze([
   { name: "agent_handshake_join", title: "Join handshake", description: "Bind this fresh local agent and its exact local policy to the assigned role.", schema: { access, helperVersion: z.literal("2.1.2"), sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/), policyDigest: z.string().regex(/^[0-9a-f]{64}$/) } },
   { name: "agent_handshake_status", title: "Read handshake status", description: "Read public progress for this role and session.", schema: { access } },
   { name: "agent_handshake_next", title: "Get next handshake operation", description: "Get the next typed local signing or registration operation, or wait safely.", schema: { access } },
+  { name: "agent_handshake_submit_checkpoint", title: "Submit adapter release checkpoint", description: "Submit the signed private adapter checkpoint and exact artifact signature that authorize release of the pending proposal or acceptance.", schema: { access, artifactSignatureHex: z.string().regex(/^0x[0-9a-f]{130}$/), checkpoint: z.record(z.string(), z.unknown()) } },
   { name: "agent_handshake_submit", title: "Submit local signature", description: "Submit only a signature over the exact bytes returned by the coordinator and the unchanged local-policy digest.", schema: { access, policyDigest: z.string().regex(/^[0-9a-f]{64}$/), signatureHex: z.string().regex(/^0x[0-9a-f]{130}$/) } },
   { name: "agent_handshake_get_certificate", title: "Get closing certificate", description: "Get the signed closing certificate for local verification.", schema: { access } },
 ] as const);
