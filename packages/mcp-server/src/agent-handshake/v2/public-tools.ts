@@ -41,6 +41,7 @@ const RETRYABLE_ERROR_NAMES = new Set([
   "V2TransientCoordinatorError",
 ]);
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+const SAFE_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const identityPolicy = z.discriminatedUnion("erc8004", [
   z.object({
     erc8004: z.literal("required_fresh"),
@@ -155,10 +156,15 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
         const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName)
           ? observedName
           : "Error";
+        const observedCode = (error as { code?: unknown })?.code;
+        const errorCode = typeof observedCode === "string" && SAFE_ERROR_CODE.test(observedCode)
+          ? observedCode
+          : undefined;
         console.warn(JSON.stringify({
           event: "agent_handshake_tool_failure",
           tool: definition.name,
           errorName,
+          ...(errorCode === undefined ? {} : { errorCode }),
         }));
         const retryable = RETRYABLE_ERROR_NAMES.has((error as Error)?.name) &&
           !TERMINAL_ERROR_NAMES.has((error as Error)?.name) &&

@@ -332,6 +332,7 @@ test("public tools distinguish retryable infrastructure failures from terminal p
       { error: Object.assign(new Error("ledger is not durable yet"), { name: "V2TransientCoordinatorError" }), retryable: true },
       { error: Object.assign(new Error("secret invalid role state"), { name: "V2CoordinatorError" }), retryable: false },
       { error: new Error("unexpected internal state"), retryable: false },
+      { error: Object.assign(new Error("filesystem failure"), { code: "EIO" }), retryable: false },
     ]) {
       const handler = createV2PublicHttpHandler({ pin, invoke: async () => { throw candidate.error; } });
       const httpServer = createServer((req, res) => handler(req, res));
@@ -358,6 +359,7 @@ test("public tools distinguish retryable infrastructure failures from terminal p
     { event: "agent_handshake_tool_failure", tool: "agent_handshake_status", errorName: "V2TransientCoordinatorError" },
     { event: "agent_handshake_tool_failure", tool: "agent_handshake_status", errorName: "V2CoordinatorError" },
     { event: "agent_handshake_tool_failure", tool: "agent_handshake_status", errorName: "Error" },
+    { event: "agent_handshake_tool_failure", tool: "agent_handshake_status", errorName: "Error", errorCode: "EIO" },
   ]);
   assert.equal(warnings.join("\n").includes("secret invalid role state"), false);
   assert.equal(warnings.join("\n").includes("unexpected internal state"), false);
