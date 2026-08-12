@@ -55,11 +55,12 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /compile only those verified bytes in memory/i);
   assert.match(instructions, /short opaque local handle/i);
   assert.match(instructions, /do not send it to the other stakeholder or echo it into chat or logs/i);
-  assert.match(instructions, /inspect the downloaded manifest and helper source before execution/i);
+  assert.match(instructions, /adapter asset path.*mandatory.*approvalCommand.*already preloaded.*do not download or overwrite.*inspect.*manifest.*helper source/is);
+  assert.match(instructions, /portable fallback.*only when.*approvalCommand.*not available.*files are absent.*download/is);
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/manifest.json'"));
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/clockchain-agent-handshake.cjs'"));
-  assert.match(instructions, /each command as its own separate Bash tool call.*never prefix, wrap, or combine/is);
-  assert.match(instructions, /every Bash action.*one standalone Bash tool call.*never combine.*do not run.*stateDirectoryCommand.*until after.*downloaded.*inspected/is);
+  assert.match(instructions, /portable fallback.*each file as its own separate Bash tool call.*never prefix, wrap, combine/is);
+  assert.match(instructions, /every Bash action.*one standalone Bash tool call.*never combine.*do not run.*stateDirectoryCommand.*until after.*assets.*inspected/is);
   assert.equal(instructions.includes(" ; then "), false);
   assert.match(instructions, /describes mechanics, not stakeholder authorization/i);
   assert.match(instructions, /local stakeholder's own prompt explicitly confirms/i);
