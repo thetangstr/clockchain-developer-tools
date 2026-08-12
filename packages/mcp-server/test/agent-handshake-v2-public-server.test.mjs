@@ -74,6 +74,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /already.*fresh.*disposable.*working directory.*do not create or switch to another working directory/is);
   assert.match(instructions, /never.*shared.*temp.*directory/is);
   assert.match(instructions, /manifest digest.*applies only.*manifest\.json.*helper.*separate.*sha-256.*verified manifest/is);
+  assert.match(instructions, /trust root separation.*manifest digest.*independent pin.*manifest bytes.*asset hash.*helper bytes.*host-root fingerprint.*separate.*session-key certificate.*closing certificate.*not expected.*asset bootstrap/is);
   assert.match(instructions, /after.*init.*policy.*inspect.*call agent_handshake_join.*do not.*register.*before.*join.*fund.*agent_handshake_next.*erc8004_registration/is);
   assert.match(instructions, /approvalCommand.*exact digest-bound local action.*adapter executes.*structured arguments.*Never run helperStep\.shellCommand.*approvalCommand is available/is);
   assert.match(instructions, /Compatibility clients.*stateDirectoryCommand.*helperStep\.shellCommand verbatim.*never.*concatenate.*re-encode.*payload/is);
