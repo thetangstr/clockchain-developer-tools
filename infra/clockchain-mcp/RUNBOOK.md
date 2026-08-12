@@ -57,11 +57,13 @@ stakeholder capabilities are never stored in SSM.
 
 The v2 host reserves both fresh-registration seats before either transfer. Its
 private ledger survives restarts at `/app/runs/private/v2-funding-ledger.jsonl`.
-The hard limits are 0.01 Sepolia ETH per address, 0.02 per session, 0.20 per
-rolling hour, and 1.00 per UTC day. Address-free warnings begin at 0.16 per hour
-and 0.80 per day. Queue capacity is 16 reservations. These limits apply only to
-public v2 identity registration; generic v1 and bilateral funding behavior is
-unchanged.
+New reservations use 0.02 Sepolia ETH per address and 0.04 per required-fresh
+session, providing enough testnet gas margin for ERC-8004 registration and
+metadata finalization during ordinary fee spikes. The restart-safe ledger still
+accepts historical 0.01 entries. Rolling-hour and UTC-day limits remain 0.20 and
+1.00; address-free warnings remain 0.16 and 0.80. Queue capacity is 16
+reservations. This is gas-only infrastructure funding for public v2 identity
+registration, never stakeholder payment or external business action; generic v1 and bilateral funding behavior is unchanged.
 
 ## Production canaries
 
