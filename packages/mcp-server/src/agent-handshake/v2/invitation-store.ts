@@ -197,7 +197,8 @@ export function createV2InvitationService(options: {
   const nowMs = options.nowMs ?? Date.now;
   const nextId = options.randomUUID ?? systemRandomUUID;
   return Object.freeze({
-    async create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; metadata?: V2InvitationMetadata }) {
+    async create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; invitationExpMs?: string | number; metadata?: V2InvitationMetadata }) {
+      const invitationExpMs = input.invitationExpMs ?? input.expMs;
       const initiatorAccess = mintV2RoleAccess({
         key: options.activeKey, jti: nextId(), sessionId: input.sessionId, role: "initiator",
         statementDigest: input.statementDigest, allowedTools: AGENT_HANDSHAKE_ROLE_TOOLS,
@@ -207,12 +208,12 @@ export function createV2InvitationService(options: {
       const responderInvitation = mintV2RoleAccess({
         key: options.activeKey, jti: invitationJti, sessionId: input.sessionId, role: "responder",
         statementDigest: input.statementDigest, allowedTools: AGENT_HANDSHAKE_INVITATION_TOOLS,
-        nbfMs: input.nbfMs, expMs: input.expMs,
+        nbfMs: input.nbfMs, expMs: invitationExpMs,
       });
       await options.store.put({
         invitationDigest: digest(responderInvitation), jti: invitationJti,
         sessionId: input.sessionId, statementDigest: input.statementDigest,
-        expMs: String(input.expMs), claimedAtMs: null, metadata: input.metadata ?? null,
+        expMs: String(invitationExpMs), claimedAtMs: null, metadata: input.metadata ?? null,
       });
       return Object.freeze({ initiatorAccess, responderInvitation });
     },
@@ -234,7 +235,7 @@ export function createV2InvitationService(options: {
       const responderAccess = mintV2RoleAccess({
         key: options.activeKey, jti: nextId(), sessionId: stored.sessionId, role: "responder",
         statementDigest: stored.statementDigest, allowedTools: AGENT_HANDSHAKE_ROLE_TOOLS,
-        nbfMs: verified.payload.nbfMs, expMs: stored.expMs,
+        nbfMs: verified.payload.nbfMs, expMs: stored.metadata?.sessionDeadlineMs ?? stored.expMs,
       });
       return Object.freeze({
         claimedAtMs: claimed.claimedAtMs,

@@ -27,7 +27,7 @@ import {
 
 type JsonObject = Record<string, any>;
 type InvitationService = Readonly<{
-  create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; metadata?: V2InvitationMetadata }): Promise<{ initiatorAccess: string; responderInvitation: string }>;
+  create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; invitationExpMs?: string | number; metadata?: V2InvitationMetadata }): Promise<{ initiatorAccess: string; responderInvitation: string }>;
   accept(input: { invitation: string }): Promise<{ claimedAtMs: string | null; responderAccess: string; metadata: V2InvitationMetadata | null }>;
 }>;
 type Relay = Readonly<{
@@ -413,6 +413,7 @@ export function createV2Coordinator(options: {
         statementDigest: v2CanonicalRecord(terms).digest,
         nbfMs: found.createdAtMs,
         expMs: found.sessionDeadlineMs,
+        invitationExpMs: found.invitationExpiresAtMs,
         metadata,
       });
       await storeInitial(created.initiatorAccess, metadata, "initiator");

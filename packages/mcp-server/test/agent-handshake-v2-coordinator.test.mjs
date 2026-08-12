@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { createHandshakeStateStore, __resetHandshakeStateStore } from "../dist/handshake/state.js";
 import { createV2InvitationService, createV2InvitationStore } from "../dist/agent-handshake/v2/invitation-store.js";
+import { readV2RoleAccessPayload } from "../dist/agent-handshake/v2/access.js";
 import * as v2CoordinatorModule from "../dist/agent-handshake/v2/coordinator.js";
 import { v2CanonicalRecord } from "../dist/agent-handshake/v2/protocol.js";
 
@@ -256,6 +257,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     afterSuccess: "call_agent_handshake_join_with_helper_output",
   });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
+  assert.equal(readV2RoleAccessPayload(invited.initiatorAccess).expMs, discovery.sessionDeadlineMs);
+  assert.equal(readV2RoleAccessPayload(invited.responderInvitation).expMs, discovery.invitationExpiresAtMs);
+  assert.equal(readV2RoleAccessPayload(accepted.responderAccess).expMs, discovery.sessionDeadlineMs);
   assert.deepEqual(accepted.localPolicy, policy("responder"));
   assert.equal(Object.hasOwn(accepted.localAction, "policyPayload"), false);
   const invitationClaimed = messages.find((message) => message.kind === "agent_v2_invitation_claimed");
