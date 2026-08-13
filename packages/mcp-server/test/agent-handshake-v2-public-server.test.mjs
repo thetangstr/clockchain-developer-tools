@@ -99,6 +99,9 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.ok(V2_VERIFIED_HELPER_BOOTSTRAP.includes('!/^24\\./.test(process.versions.node)'));
   assert.equal(V2_VERIFIED_HELPER_BOOTSTRAP.includes(","), false);
   assert.equal(V2_VERIFIED_HELPER_BOOTSTRAP.includes("'"), false);
+  assert.match(V2_VERIFIED_HELPER_BOOTSTRAP, /manifest\.nodeRuntime/);
+  assert.match(V2_VERIFIED_HELPER_BOOTSTRAP, /process\.versions\.node/);
+  assert.match(V2_VERIFIED_HELPER_BOOTSTRAP, /\^24/);
 });
 
 test("the dedicated MCP server exposes exactly eight tools and no prompts or resources", async () => {
