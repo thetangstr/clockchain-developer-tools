@@ -37,6 +37,26 @@ function limiter(limit: number, windowMs: number, now: () => number) {
   };
 }
 
+function quota(limit: number, windowMs: number, now: () => number) {
+  const hits = new Map<string, { count: number; resetAt: number }>();
+  return (key: string): (() => void) | null => {
+    const current = now();
+    let entry = hits.get(key);
+    if (!entry || current >= entry.resetAt) {
+      entry = { count: 0, resetAt: current + windowMs };
+      hits.set(key, entry);
+    }
+    if (entry.count >= limit) return null;
+    entry.count += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (hits.get(key) === entry && entry.count > 0) entry.count -= 1;
+    };
+  };
+}
+
 const ROLE_ACCESS_HANDLE = /^ccra_[A-Za-z0-9_-]{22}$/;
 const ROLE_ACCESS_HANDLE_TTL_MS = 60 * 60_000;
 const ROLE_ACCESS_HANDLE_LIMIT = 10_000;
@@ -123,7 +143,7 @@ export function createV2PublicHttpHandler(options: {
   now?: () => number;
 }) {
   const now = options.now ?? Date.now;
-  const allowInvite = limiter(options.invitePerHour ?? 5, 60 * 60_000, now);
+  const reserveInvite = quota(options.invitePerHour ?? 5, 60 * 60_000, now);
   const allowCall = limiter(options.callsPerMinute ?? 120, 60_000, now);
   const invoke = createRoleAccessBroker(options.invoke, now);
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -141,8 +161,14 @@ export function createV2PublicHttpHandler(options: {
     const server = buildV2PublicServer({
       pin: options.pin,
       invoke: async (name, args) => {
-        if (name === "agent_handshake_invite" && !allowInvite(`invite:${ip}`)) throw new Error("rate_limited");
-        return invoke(name, args);
+        const releaseInvite = name === "agent_handshake_invite" ? reserveInvite(`invite:${ip}`) : undefined;
+        if (releaseInvite === null) throw new Error("rate_limited");
+        try {
+          return await invoke(name, args);
+        } catch (error) {
+          releaseInvite?.();
+          throw error;
+        }
       },
     });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
