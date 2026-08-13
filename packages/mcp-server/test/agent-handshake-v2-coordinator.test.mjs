@@ -281,8 +281,9 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.deepEqual(await coordinator.status({ access: accesses[role] }), joinRequired);
     assert.deepEqual(await coordinator.next({ access: accesses[role] }), joinRequired);
     const localPolicy = policy(role);
-    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.2", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
+    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.3", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
     const identityRequest = compactPayloadFrom(joined, "identity_claim");
+    assert.equal(identityRequest.descriptorEnvelope, null);
     assert.equal(identityRequest.policyDigest, v2CanonicalRecord(localPolicy).digest);
     assert.equal(Object.hasOwn(joined, "hostSessionKeyCertificate"), false);
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
@@ -312,10 +313,10 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.equal(ready.nextAction, "call_agent_handshake_next_with_unchanged_role_access");
   }
   const proposal = await coordinator.next({ access: accesses.initiator });
-  compactPayloadFrom(proposal, "proposal");
+  assert.equal(compactPayloadFrom(proposal, "proposal").descriptorEnvelope, null);
   await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: `0x${"2".repeat(128)}1b` });
   const acceptance = await coordinator.next({ access: accesses.responder });
-  compactPayloadFrom(acceptance, "acceptance");
+  assert.equal(compactPayloadFrom(acceptance, "acceptance").descriptorEnvelope, null);
   await coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: `0x${"3".repeat(128)}1c` });
 
   const proposalPayload = messages.find((message) => message.kind === "agent_v2_proposal").body.proposalEnvelope.payload;
@@ -341,7 +342,10 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
 
   for (const role of ["initiator", "responder"]) {
     const evidence = await coordinator.next({ access: accesses[role] });
-    compactPayloadFrom(evidence, "evidence");
+    assert.deepEqual(
+      compactPayloadFrom(evidence, "evidence").descriptorEnvelope,
+      { descriptor, operator: {} },
+    );
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(policy(role)).digest, signatureHex: `0x${"4".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   result = { result: {
@@ -405,7 +409,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
   const digest = v2CanonicalRecord(localPolicy).digest;
   await coordinator.join({
     access: invited.initiatorAccess,
-    helperVersion: "2.1.2",
+    helperVersion: "2.1.3",
     sessionKeyAddress: presentedAddress,
     policyDigest: digest,
   });

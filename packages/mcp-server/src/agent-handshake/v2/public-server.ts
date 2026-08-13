@@ -106,7 +106,7 @@ function createRoleAccessBroker(invoke: V2PublicInvoke, now: () => number): V2Pu
 }
 
 export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2PublicInvoke }): McpServer {
-  const server = new McpServer({ name: "clockchain-agent-handshake", version: "2.1.2" }, {
+  const server = new McpServer({ name: "clockchain-agent-handshake", version: "2.1.3" }, {
     instructions: buildV2Instructions(options.pin),
   });
   registerV2PublicTools(server, options.invoke);

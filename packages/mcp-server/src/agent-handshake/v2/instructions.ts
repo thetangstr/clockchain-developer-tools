@@ -1,5 +1,5 @@
 export type V2ReleasePin = Readonly<{
-  version: "2.1.2";
+  version: "2.1.3";
   sourceCommit: string;
   manifestDigest: string;
   allowedAssetPrefix: string;
@@ -9,10 +9,10 @@ export type V2ReleasePin = Readonly<{
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const KID = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const PREFIX = "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/";
+const PREFIX = "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/";
 const HELPER_FILENAME = "clockchain-agent-handshake.cjs";
 
-export const V2_VERIFIED_HELPER_BOOTSTRAP = 'const fs=require("node:fs");const crypto=require("node:crypto");const Module=require("node:module");const argv=process.argv.slice(1);const expected=argv.shift();const manifestPath=argv.shift();const helperPath=argv.shift();const manifestBytes=fs.readFileSync(manifestPath);const manifestDigest=crypto.createHash("sha256").update(manifestBytes).digest("hex");if(manifestDigest!==expected)process.exit(86);const manifest=JSON.parse(manifestBytes);if(manifest.schema!=="clockchain.agent-handshake-release-manifest/v1"||manifest.version!=="2.1.2"||!/^24\\./.test(manifest.nodeRuntime)||!/^24\\./.test(process.versions.node)||!Array.isArray(manifest.assets)||manifest.assets.length!==1)process.exit(86);const asset=manifest.assets[0];if(asset.filename!=="clockchain-agent-handshake.cjs"||asset.url!=="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/clockchain-agent-handshake.cjs"||typeof asset.sha256!=="string"||!/^[0-9a-f]{64}$/.test(asset.sha256))process.exit(86);const helperBytes=fs.readFileSync(helperPath);const helperDigest=crypto.createHash("sha256").update(helperBytes).digest("hex");if(helperDigest!==asset.sha256)process.exit(86);process.argv=[process.execPath].concat(helperPath).concat(argv);const loaded=new Module(helperPath);loaded.filename=helperPath;loaded.paths=[];const compile=loaded._compile.bind(loaded);compile(...[helperBytes.toString("utf8")].concat(helperPath));';
+export const V2_VERIFIED_HELPER_BOOTSTRAP = 'const fs=require("node:fs");const crypto=require("node:crypto");const Module=require("node:module");const argv=process.argv.slice(1);const expected=argv.shift();const manifestPath=argv.shift();const helperPath=argv.shift();const manifestBytes=fs.readFileSync(manifestPath);const manifestDigest=crypto.createHash("sha256").update(manifestBytes).digest("hex");if(manifestDigest!==expected)process.exit(86);const manifest=JSON.parse(manifestBytes);if(manifest.schema!=="clockchain.agent-handshake-release-manifest/v1"||manifest.version!=="2.1.3"||!/^24\\./.test(manifest.nodeRuntime)||!/^24\\./.test(process.versions.node)||!Array.isArray(manifest.assets)||manifest.assets.length!==1)process.exit(86);const asset=manifest.assets[0];if(asset.filename!=="clockchain-agent-handshake.cjs"||asset.url!=="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/clockchain-agent-handshake.cjs"||typeof asset.sha256!=="string"||!/^[0-9a-f]{64}$/.test(asset.sha256))process.exit(86);const helperBytes=fs.readFileSync(helperPath);const helperDigest=crypto.createHash("sha256").update(helperBytes).digest("hex");if(helperDigest!==asset.sha256)process.exit(86);process.argv=[process.execPath].concat(helperPath).concat(argv);const loaded=new Module(helperPath);loaded.filename=helperPath;loaded.paths=[];const compile=loaded._compile.bind(loaded);compile(...[helperBytes.toString("utf8")].concat(helperPath));';
 
 export function verifiedV2HelperPrefix(pin: V2ReleasePin): string {
   return `node --input-type=commonjs --eval '${V2_VERIFIED_HELPER_BOOTSTRAP}' ${pin.manifestDigest} ./manifest.json ./${HELPER_FILENAME}`;
@@ -23,7 +23,7 @@ export function validateV2ReleasePin(value: unknown): V2ReleasePin {
   const item = value as Record<string, any>;
   if (Object.keys(item).sort().join(",") !== "allowedAssetPrefix,hostRoots,manifestDigest,sourceCommit,version") throw new Error("Agent handshake release pin is unavailable.");
   if (
-    item.version !== "2.1.2" || !SHA.test(item.sourceCommit) || !DIGEST.test(item.manifestDigest) ||
+    item.version !== "2.1.3" || !SHA.test(item.sourceCommit) || !DIGEST.test(item.manifestDigest) ||
     item.allowedAssetPrefix !== PREFIX || !Array.isArray(item.hostRoots) ||
     item.hostRoots.length < 1 || item.hostRoots.length > 2
   ) throw new Error("Agent handshake release pin is unavailable.");

@@ -148,7 +148,7 @@ validate_mcp_runtime_config() {
 
 validate_v2_server_config() {
   local release_filter access_filter active_kid previous_kid
-  release_filter='type == "object" and (keys | sort) == ["allowedAssetPrefix","hostRoots","manifestDigest","sourceCommit","version"] and .version == "2.1.2" and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.manifestDigest | test("^[0-9a-f]{64}$")) and .allowedAssetPrefix == "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/" and (.hostRoots | type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.fingerprint | test("^[0-9a-f]{64}$"))))'
+  release_filter='type == "object" and (keys | sort) == ["allowedAssetPrefix","hostRoots","manifestDigest","sourceCommit","version"] and .version == "2.1.3" and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.manifestDigest | test("^[0-9a-f]{64}$")) and .allowedAssetPrefix == "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/" and (.hostRoots | type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.fingerprint | test("^[0-9a-f]{64}$"))))'
   access_filter='type == "object" and (keys | sort) == ["kid","secretBase64"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.secretBase64 | @base64d | length >= 32)'
 
   if ! jq -e "$release_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_RELEASE_PIN"; then
