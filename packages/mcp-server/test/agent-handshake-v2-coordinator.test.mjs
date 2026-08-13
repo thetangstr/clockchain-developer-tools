@@ -241,6 +241,14 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   });
 
   const invited = await coordinator.invite(terms);
+  const invitationCreated = messages.find(
+    (message) => message.kind === "agent_v2_invitation_created",
+  );
+  assert.equal(invitationCreated.role, "initiator");
+  assert.deepEqual(invitationCreated.body, {
+    createdAtMs: String(nowMs + 1),
+    externalBusinessActionPerformed: false,
+  });
   const initiatorStateDir = `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`;
   assert.deepEqual(invited.localPolicy, policy("initiator"));
   assert.deepEqual(invited.localAction, {
