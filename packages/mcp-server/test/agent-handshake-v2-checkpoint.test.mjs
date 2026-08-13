@@ -9,7 +9,7 @@ import {
 
 const checkpoint = {
   schema: "clockchain.agent-handshake-commitment-checkpoint/v1",
-  version: 1,
+  version: "1",
   protocol: "clockchain.agent-handshake/v2",
   sessionId: "11111111-2222-4333-8444-555555555555",
   role: "initiator",
@@ -31,8 +31,12 @@ test("v2 commitment checkpoint has exact canonical bytes and digest", () => {
   const normalized = normalizeV2CommitmentCheckpoint(checkpoint);
   assert.deepEqual(normalized, checkpoint);
   assert.equal(commitmentCheckpointSigningBytes(normalized).includes(Buffer.from("signature")), false);
-  assert.equal(commitmentCheckpointDigest(normalized), "d349a99aca4cd9f444ef802cb9b0506b1772e62dd8153bed133dc78a115b473d");
+  assert.equal(commitmentCheckpointDigest(normalized), "3b9926e75208be65a71ba62bf1a8486f638d5d47fbe50472ffcd2a29b20c7ded");
   assert.equal(commitmentCheckpointDigest({ ...normalized }), commitmentCheckpointDigest(normalized));
+});
+
+test("v2 commitment checkpoint rejects a numeric version before relay publication", () => {
+  assert.throws(() => normalizeV2CommitmentCheckpoint({ ...checkpoint, version: 1 }), /commitment checkpoint/i);
 });
 
 test("v2 commitment checkpoint rejects schema, role, chain, signer, time, and extra-key drift", () => {

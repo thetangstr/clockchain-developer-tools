@@ -323,7 +323,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     signature: { address: addresses.initiator, algorithm: "eip191", value: proposalSignatureHex },
   };
   const proposalCheckpoint = {
-    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: 1,
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: "1",
     protocol: "clockchain.agent-handshake/v2", sessionId, role: "initiator", artifactType: "proposal",
     artifactDigest: v2CanonicalRecord(proposalEnvelope).digest, sequence: "1", previousCheckpointDigest: null,
     issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: addresses.initiator,
@@ -354,7 +354,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     signature: { address: addresses.responder, algorithm: "eip191", value: acceptanceSignatureHex },
   };
   const acceptanceCheckpoint = {
-    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: 1,
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: "1",
     protocol: "clockchain.agent-handshake/v2", sessionId, role: "responder", artifactType: "acceptance",
     artifactDigest: v2CanonicalRecord(acceptanceEnvelope).digest, sequence: "2",
     previousCheckpointDigest: submittedProposalCheckpoint.checkpointDigest,
