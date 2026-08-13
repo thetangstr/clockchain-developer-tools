@@ -374,7 +374,10 @@ function toHexQuantity(value: bigint): string {
 }
 
 function resolveEarliestBlock(registryAddress: string, fromBlock?: string): bigint {
-  if (fromBlock !== undefined) return hexQuantity(fromBlock);
+  if (fromBlock !== undefined) {
+    if (/^(?:0|[1-9][0-9]*)$/.test(fromBlock)) return BigInt(fromBlock);
+    return hexQuantity(fromBlock);
+  }
   return registryAddress === SEPOLIA_ERC8004_REGISTRY_ADDRESS
     ? SEPOLIA_ERC8004_REGISTRY_CREATION_BLOCK
     : 0n;

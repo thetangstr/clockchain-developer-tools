@@ -39,7 +39,7 @@ const expectedEnv = {
   CLOCKCHAIN_API_KEY: "api-key-line-1\napi-key-line-2\n",
   MCP_AUTH_TOKENS: "token-a,token-b\n",
   MCP_TOKEN_SIGNING_SECRET: "signing-secret\nwith-newline\n",
-  AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.0","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
+  AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.2","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: '{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: '{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\n',
 };
@@ -187,7 +187,7 @@ case "$name" in
   /clockchain/mcp/CLOCKCHAIN_API_KEY) value=$'api-key-line-1\\napi-key-line-2\\n' ;;
   /clockchain/mcp/MCP_AUTH_TOKENS) value=$'token-a,token-b\\n' ;;
   /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET) value=$'signing-secret\\nwith-newline\\n' ;;
-  /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.0","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.2","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE) value=$'{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) value=$'{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\\n' ;;
   /clockchain/host/FUNDING_WALLET_JSON) value=$'{"wallet":"line-1\\\\nline-2"}\\n' ;;
@@ -297,10 +297,10 @@ async function resolvedComposeConfig() {
       MCP_AUTH_TOKENS: "dummy-token",
       MCP_TOKEN_SIGNING_SECRET: "dummy-signing",
       AGENT_HANDSHAKE_RELEASE_PIN: JSON.stringify({
-        version: "2.1.0",
+        version: "2.1.2",
         sourceCommit: expectedHandshakeSha,
         manifestDigest: "a".repeat(64),
-        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.0/",
+        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.2/",
         hostRoots: [{ kid: "root-2026-08", fingerprint: "b".repeat(64) }],
       }),
       AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: "dummy-role-active",
@@ -751,6 +751,20 @@ test("installer enables and restarts the systemd unit", async () => {
   assert.match(install, /systemctl daemon-reload/);
   assert.match(install, /systemctl enable clockchain-mcp\.service/);
   assert.match(install, /systemctl restart clockchain-mcp\.service/);
+});
+
+test("release runbook reinstalls deploy assets before every MCP restart", async () => {
+  const runbook = await readFile(path.join(deployDir, "RUNBOOK.md"), "utf8");
+  assert.match(
+    runbook,
+    /infra\/scripts\/install-clockchain-mcp-deploy-assets\.sh/,
+    "deploys must refresh the out-of-checkout systemd wrapper before restart",
+  );
+  assert.doesNotMatch(
+    runbook,
+    /then run `compose-up\.sh`/,
+    "the copied wrapper must not be invoked without first reinstalling it",
+  );
 });
 
 test("provisioning IAM policy is limited to MCP and host SSM prefixes", async () => {

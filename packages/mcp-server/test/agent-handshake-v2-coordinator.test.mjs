@@ -4,8 +4,10 @@ import test from "node:test";
 
 import { createHandshakeStateStore, __resetHandshakeStateStore } from "../dist/handshake/state.js";
 import { createV2InvitationService, createV2InvitationStore } from "../dist/agent-handshake/v2/invitation-store.js";
-import { createV2Coordinator } from "../dist/agent-handshake/v2/coordinator.js";
+import * as v2CoordinatorModule from "../dist/agent-handshake/v2/coordinator.js";
 import { v2CanonicalRecord } from "../dist/agent-handshake/v2/protocol.js";
+
+const { createV2Coordinator } = v2CoordinatorModule;
 
 const terms = {
   reference: "NS-1847",
@@ -16,6 +18,7 @@ const terms = {
 const sessionId = randomUUID();
 const nowMs = 1786337000000;
 const repositorySha = "d".repeat(40);
+const verifiedHelperPrefix = "node --verified-helper";
 const hostSessionKeyCertificate = {
   certificate: { schema: "clockchain.host-session-key/v1", rootKid: "root-2026-08", sessionId, repositorySha, sessionPublicKey: "ore80hj1AhLMNPybJXCL6XHyJ9OfmaYSXc4SA8Sk2Pw=", validFromMs: String(nowMs), validUntilMs: String(nowMs + 600000) },
   root: { algorithm: "ed25519", keyId: "root-2026-08", publicKey: "6Xgu+IYxQBDx8adVlHHWf9AUYoeo+eqWr8eVQqXrY0Y=", signature: "a".repeat(88) },
@@ -49,6 +52,68 @@ function policy(role) {
   };
 }
 
+test("an unanchored Clockchain ledger response is retryable instead of a terminal protocol rejection", async () => {
+  assert.equal(typeof v2CoordinatorModule.__advanceRuntimeV2, "function");
+  const descriptor = {
+    agreementExpiresAtMs: String(nowMs + 90_000),
+    externalBusinessActionPerformed: false,
+    initiator: { sessionKeyAddress: "0x7564105e977516c53be337314c7e53838967bdac" },
+    protocol: "clockchain.agent-handshake/v2",
+    reference: terms.reference,
+    responder: { sessionKeyAddress: "0xe1fae9b4fab2f5726677ecfa912d96b0b683e6a9" },
+    schema: "clockchain.agent-handshake-descriptor/v2",
+    statementDigest: v2CanonicalRecord(terms).digest,
+  };
+  const clockchain = {
+    searchAsset: async () => [],
+    log: async () => ({ ledgerId: "33333333-4444-4555-8666-777777777770" }),
+    getLedgerEntry: async () => ({
+      ledgerId: "33333333-4444-4555-8666-777777777770",
+      blockHeight: null,
+      assetHash: "pending",
+      assetReferenceId: "pending",
+    }),
+    getChainRecord: async () => null,
+    getBlock: async () => ({}),
+  };
+
+  await assert.rejects(
+    () => v2CoordinatorModule.__advanceRuntimeV2(clockchain, { descriptor, role: "initiator", existing: [] }),
+    (error) => error?.name === "V2TransientCoordinatorError",
+  );
+});
+
+test("an expired current invitation window is retryable while the host rotates sessions", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({
+      activeKey: key,
+      verificationKeys: [key],
+      store: createV2InvitationStore(),
+      nowMs: () => nowMs + 120000,
+    }),
+    relay: {
+      fetchDiscovery: async () => discovery,
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => ({ ok: true, seq: "1" }),
+    },
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 120000,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite(terms),
+    (error) => error?.name === "V2TransientCoordinatorError",
+  );
+});
+
 test("two distinct role capabilities drive the complete v2 local-signing state machine", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
@@ -77,12 +142,13 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     [addresses.initiator]: { agentId: "9452", chainId: terms.identityPolicy.chainId, registryAddress: terms.identityPolicy.registryAddress, reference: `${terms.identityPolicy.chainId}:${terms.identityPolicy.registryAddress}:9452`, registrationTx: `0x${"a".repeat(64)}`, registrationBlock: "7000" },
     [addresses.responder]: { agentId: "9453", chainId: terms.identityPolicy.chainId, registryAddress: terms.identityPolicy.registryAddress, reference: `${terms.identityPolicy.chainId}:${terms.identityPolicy.registryAddress}:9453`, registrationTx: `0x${"b".repeat(64)}`, registrationBlock: "7001" },
   };
+  const stateStore = createHandshakeStateStore({});
   const coordinator = createV2Coordinator({
     accessKeys: [key],
     activeAccessKey: key,
     invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
     relay,
-    stateStore: createHandshakeStateStore({}),
+    stateStore,
     now: () => nowMs + 1,
     recoverEip191Address: async ({ signatureHex }) => signatureHex.endsWith("1b") ? addresses.initiator : addresses.responder,
     resolveRegistration: async ({ address }) => registrations[address] ?? null,
@@ -92,19 +158,60 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
       message: { kind, sessionDigest: v2CanonicalRecord(descriptor).digest },
       onChain: { blockHeight: String(7010 + index), ledgerId: `33333333-4444-4555-8666-77777777777${index}` },
     })),
+    verifiedHelperPrefix,
   });
 
   const invited = await coordinator.invite(terms);
+  const invitationCreated = messages.find((message) => message.kind === "agent_v2_invitation_created");
+  assert.equal(invitationCreated.role, "initiator");
+  assert.equal(invitationCreated.sessionId, sessionId);
+  assert.deepEqual(Object.keys(invitationCreated.body).sort(), [
+    "createdAtMs",
+    "externalBusinessActionPerformed",
+  ]);
+  assert.deepEqual(invitationCreated.body, {
+    createdAtMs: String(nowMs + 1),
+    externalBusinessActionPerformed: false,
+  });
+  assert.equal(JSON.stringify(invitationCreated).includes(invited.responderInvitation), false);
+  assert.equal(JSON.stringify(invitationCreated).includes(invited.initiatorAccess), false);
+  const initiatorStateDir = `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`;
+  assert.deepEqual(invited.localPolicy, policy("initiator"));
+  assert.deepEqual(invited.localAction, {
+    executor: "pinned_helper",
+    operations: ["init", "policy", "inspect"],
+    payloadEncoding: "base64url_utf8_json",
+    policyPayload: policy("initiator"),
+    stateDirectoryCommand: `mkdir -p -m 700 "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`,
+    helperSteps: [
+      { operation: "init", argvAfterVerifiedPrefix: ["init", "--state-dir", initiatorStateDir], shellCommand: `${verifiedHelperPrefix} init --state-dir "${initiatorStateDir}"`, shellCommandSuffix: `init --state-dir "${initiatorStateDir}"` },
+      { operation: "policy", argvAfterVerifiedPrefix: ["policy", "--state-dir", initiatorStateDir, "--payload-base64url", Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")], shellCommand: `${verifiedHelperPrefix} policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}`, shellCommandSuffix: `policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}` },
+      { operation: "inspect", argvAfterVerifiedPrefix: ["inspect", "--state-dir", initiatorStateDir], shellCommand: `${verifiedHelperPrefix} inspect --state-dir "${initiatorStateDir}"`, shellCommandSuffix: `inspect --state-dir "${initiatorStateDir}"` },
+    ],
+    stateDir: "new_private_absolute_state_dir",
+    registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
+    afterSuccess: "call_agent_handshake_join_with_helper_output",
+  });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
+  assert.deepEqual(accepted.localPolicy, policy("responder"));
+  assert.deepEqual(accepted.localAction.policyPayload, policy("responder"));
   const invitationClaimed = messages.find((message) => message.kind === "agent_v2_invitation_claimed");
+  assert.ok(messages.indexOf(invitationCreated) < messages.indexOf(invitationClaimed));
   assert.equal(invitationClaimed.role, "responder");
   assert.equal(invitationClaimed.body.claimedAtMs, String(nowMs + 1));
   assert.notEqual(invited.initiatorAccess, accepted.responderAccess);
   const accesses = { initiator: invited.initiatorAccess, responder: accepted.responderAccess };
   for (const role of ["initiator", "responder"]) {
     const localPolicy = policy(role);
-    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.0", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
+    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.2", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
     assert.equal(joined.signingRequest.operation, "identity_claim");
+    assert.deepEqual(joined.localAction.payload, joined.signingRequest);
+    assert.equal(joined.localAction.operation, "sign");
+    assert.deepEqual(joined.localAction.helperStep.argvAfterVerifiedPrefix, [
+      "sign", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/${role}`, "--payload-base64url",
+      Buffer.from(JSON.stringify(joined.signingRequest), "utf8").toString("base64url"),
+    ]);
+    assert.equal(joined.localAction.helperStep.shellCommand, `${verifiedHelperPrefix} ${joined.localAction.helperStep.shellCommandSuffix}`);
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   const identityMessages = messages.filter((message) => message.kind === "agent_v2_identity_claim");
@@ -118,12 +225,15 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     messages.push({ kind: "agent_v2_funding_record", role: "host", body: { role, address: addresses[role] } });
     const ready = await coordinator.next({ access: accesses[role] });
     assert.equal(ready.stage, "party_ready");
+    assert.equal(ready.nextAction, "call_agent_handshake_next_with_unchanged_role_access");
   }
   const proposal = await coordinator.next({ access: accesses.initiator });
   assert.equal(proposal.signingRequest.operation, "proposal");
+  assert.deepEqual(proposal.localAction.payload, proposal.signingRequest);
   await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: `0x${"2".repeat(128)}1b` });
   const acceptance = await coordinator.next({ access: accesses.responder });
   assert.equal(acceptance.signingRequest.operation, "acceptance");
+  assert.deepEqual(acceptance.localAction.payload, acceptance.signingRequest);
   await coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: `0x${"3".repeat(128)}1c` });
 
   const proposalPayload = messages.find((message) => message.kind === "agent_v2_proposal").body.proposalEnvelope.payload;
@@ -150,6 +260,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   for (const role of ["initiator", "responder"]) {
     const evidence = await coordinator.next({ access: accesses[role] });
     assert.equal(evidence.signingRequest.operation, "evidence");
+    assert.deepEqual(evidence.localAction.payload, evidence.signingRequest);
     await coordinator.submit({ access: accesses[role], policyDigest: v2CanonicalRecord(policy(role)).digest, signatureHex: `0x${"4".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
   }
   result = { result: {
@@ -160,6 +271,82 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     reference: terms.reference, schema: "clockchain.agent-handshake-result/v2", sessionDigest: v2CanonicalRecord(descriptor).digest,
     sessionId, statementDigest: v2CanonicalRecord(terms).digest, subjectRun: "stakeholder",
   }, signer: {}, hostSessionKeyCertificate };
-  assert.equal((await coordinator.getCertificate({ access: accesses.initiator })).certificate.result.outcome, "VERIFIED");
-  assert.equal((await coordinator.getCertificate({ access: accesses.responder })).certificate.result.outcome, "VERIFIED");
+  const initiatorCertificate = await coordinator.getCertificate({ access: accesses.initiator });
+  const responderCertificate = await coordinator.getCertificate({ access: accesses.responder });
+  assert.equal(initiatorCertificate.certificate.result.outcome, "VERIFIED");
+  assert.equal(responderCertificate.certificate.result.outcome, "VERIFIED");
+  assert.equal(initiatorCertificate.localAction.operation, "verify-certificate");
+  assert.deepEqual(initiatorCertificate.localAction.helperStep.argvAfterVerifiedPrefix.slice(0, 4), [
+    "verify-certificate", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`, "--payload-base64url",
+  ]);
+  assert.equal(initiatorCertificate.localAction.payload.role, "initiator");
+  assert.deepEqual(initiatorCertificate.localAction.payload.certificate, initiatorCertificate.certificate);
+  assert.equal(responderCertificate.localAction.payload.role, "responder");
+  const certificateRecords = await stateStore.list();
+  assert.equal(certificateRecords.length, 2);
+  for (const record of certificateRecords) {
+    assert.equal(record.status, "active");
+    assert.equal(record.data.stage, "certificate_available");
+    assert.equal(record.data.certificateAvailable, true);
+    assert.equal(Object.hasOwn(record.data, "certificateVerified"), false);
+  }
+});
+
+test("fresh identity registration is returned as an executable pinned-helper action", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const messages = [];
+  const address = "0x7564105e977516c53be337314c7e53838967bdac";
+  const presentedAddress = "0x7564105E977516c53be337314c7e53838967bdac";
+  const relay = {
+    fetchDiscovery: async () => discovery,
+    getMessages: async () => ({ messages }),
+    postMessage: async (input) => {
+      messages.push({ ...input, body: input.body, senderKey: input.senderKey });
+      return { ok: true, seq: String(messages.length) };
+    },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay,
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => address,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  const invited = await coordinator.invite(terms);
+  const localPolicy = policy("initiator");
+  const digest = v2CanonicalRecord(localPolicy).digest;
+  await coordinator.join({
+    access: invited.initiatorAccess,
+    helperVersion: "2.1.2",
+    sessionKeyAddress: presentedAddress,
+    policyDigest: digest,
+  });
+  await coordinator.submit({
+    access: invited.initiatorAccess,
+    policyDigest: digest,
+    signatureHex: `0x${"1".repeat(128)}1b`,
+  });
+  messages.push({ kind: "agent_v2_funding_record", role: "host", body: { role: "initiator", address } });
+
+  assert.deepEqual(await coordinator.next({ access: invited.initiatorAccess }), {
+    needed: "erc8004_registration",
+    role: "initiator",
+    sessionId,
+    stage: "awaiting_identity_registration",
+    identityPolicy: terms.identityPolicy,
+    localAction: {
+      executor: "pinned_helper",
+      operation: "register",
+      stateDir: "reuse_exact_absolute_state_dir",
+      helperStep: { operation: "register", argvAfterVerifiedPrefix: ["register", "--state-dir", `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`], shellCommand: `${verifiedHelperPrefix} register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`, shellCommandSuffix: `register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"` },
+      afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
+    },
+  });
 });

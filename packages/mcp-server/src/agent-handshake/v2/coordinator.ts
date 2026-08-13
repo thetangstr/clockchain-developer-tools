@@ -11,6 +11,7 @@ import { recoverEip191Address, resolveOwnedAgentRegistration } from "../../hands
 import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
 import type { V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore } from "./invitation-store.js";
+import { readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
   normalizeV2Acceptance,
   normalizeV2Descriptor,
@@ -49,7 +50,7 @@ type CoordinatorData = JsonObject & {
   sessionDigest?: string;
   transitions?: JsonObject[];
   evidenceUploaded?: boolean;
-  certificateVerified?: boolean;
+  certificateAvailable?: boolean;
   relay?: { senderKey: string };
   stage?: string;
 };
@@ -58,13 +59,19 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
-const ADDRESS = /^0x[0-9a-f]{40}$/;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SIGNATURE = /^0x[0-9a-f]{130}$/;
+const RETRY_AFTER_MS = 3000;
+const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 
 export class V2CoordinatorError extends Error {
   constructor() { super("Agent handshake coordination failed safely."); this.name = "V2CoordinatorError"; }
 }
+export class V2TransientCoordinatorError extends Error {
+  constructor() { super("Agent handshake coordination is waiting for durable infrastructure state."); this.name = "V2TransientCoordinatorError"; }
+}
 function fail(): never { throw new V2CoordinatorError(); }
+function transient(): never { throw new V2TransientCoordinatorError(); }
 
 function exact(value: unknown, keys: readonly string[]): JsonObject {
   if (value === null || typeof value !== "object" || Array.isArray(value)) fail();
@@ -100,7 +107,7 @@ function merge(current: HandshakeRecord | null, keyValue: HandshakeKey, patch: P
   return {
     ...(current ?? { ...keyValue, status: "active" }),
     data: { ...data(current), ...patch },
-    status: patch.certificateVerified ? "complete" : "active",
+    status: "active",
   };
 }
 
@@ -134,7 +141,7 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
   const bytes = canonicalBytes(payload);
   return Object.freeze({
     schema: "clockchain.agent-handshake-signing-request/v1",
-    helperVersion: "2.1.0",
+    helperVersion: "2.1.2",
     operation,
     role,
     sessionId: current.discovery.sessionId,
@@ -165,6 +172,88 @@ function evidenceEnvelope(result: JsonObject, address: string, signatureHex: str
   });
 }
 
+function localStateDir(sessionId: string, role: V2Role): string {
+  if (!UUID.test(sessionId)) fail();
+  return `$TMPDIR/.clockchain/handshakes/${sessionId}/${role}`;
+}
+
+function helperStep(verifiedHelperPrefix: string, operation: string, sessionId: string, role: V2Role, payload?: JsonObject): JsonObject {
+  const stateDir = localStateDir(sessionId, role);
+  const argvAfterVerifiedPrefix = [operation, "--state-dir", stateDir];
+  if (payload !== undefined) {
+    argvAfterVerifiedPrefix.push("--payload-base64url", Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"));
+  }
+  const shellCommandSuffix = argvAfterVerifiedPrefix
+    .map((value, index) => index === 2 ? `"${value}"` : value)
+    .join(" ");
+  return Object.freeze({
+    operation,
+    argvAfterVerifiedPrefix: Object.freeze(argvAfterVerifiedPrefix),
+    shellCommand: `${verifiedHelperPrefix} ${shellCommandSuffix}`,
+    shellCommandSuffix,
+  });
+}
+
+function setupLocalAction(verifiedHelperPrefix: string, policy: JsonObject, sessionId: string, role: V2Role): JsonObject {
+  const stateDir = localStateDir(sessionId, role);
+  return Object.freeze({
+    executor: "pinned_helper",
+    operations: Object.freeze(["init", "policy", "inspect"]),
+    payloadEncoding: "base64url_utf8_json",
+    policyPayload: policy,
+    stateDirectoryCommand: `mkdir -p -m 700 "${stateDir}"`,
+    helperSteps: Object.freeze([
+      helperStep(verifiedHelperPrefix, "init", sessionId, role),
+      helperStep(verifiedHelperPrefix, "policy", sessionId, role, policy),
+      helperStep(verifiedHelperPrefix, "inspect", sessionId, role),
+    ]),
+    stateDir: "new_private_absolute_state_dir",
+    registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
+    afterSuccess: "call_agent_handshake_join_with_helper_output",
+  });
+}
+
+function signingLocalAction(verifiedHelperPrefix: string, signingRequest: JsonObject): JsonObject {
+  const role = signingRequest.role as V2Role;
+  const sessionId = signingRequest.sessionId as string;
+  return Object.freeze({
+    executor: "pinned_helper",
+    operation: "sign",
+    payloadEncoding: "base64url_utf8_json",
+    payload: signingRequest,
+    helperStep: helperStep(verifiedHelperPrefix, "sign", sessionId, role, signingRequest),
+    stateDir: "reuse_exact_absolute_state_dir",
+    afterSuccess: "call_agent_handshake_submit_with_helper_output_and_unchanged_policy_digest",
+  });
+}
+
+function certificateLocalAction(verifiedHelperPrefix: string, input: {
+  certificate: JsonObject;
+  discovery: JsonObject;
+  role: V2Role;
+  sessionId: string;
+}): JsonObject {
+  const payload = Object.freeze({
+    schema: "clockchain.agent-handshake-certificate-verification/v1",
+    helperVersion: "2.1.2",
+    role: input.role,
+    sessionId: input.sessionId,
+    repositorySha: input.discovery.repositorySha,
+    sessionDeadlineMs: input.discovery.sessionDeadlineMs,
+    certificate: input.certificate,
+    externalBusinessActionPerformed: false,
+  });
+  return Object.freeze({
+    executor: "pinned_helper",
+    operation: "verify-certificate",
+    payloadEncoding: "base64url_utf8_json",
+    payload,
+    helperStep: helperStep(verifiedHelperPrefix, "verify-certificate", input.sessionId, input.role, payload),
+    stateDir: "reuse_exact_absolute_state_dir",
+    terminalProof: "use_verified_helper_output_only",
+  });
+}
+
 function find(entries: readonly JsonObject[], kind: string, role?: string): JsonObject | undefined {
   return [...entries].reverse().find((entry) => entry?.kind === kind && (role === undefined || entry?.role === role));
 }
@@ -183,6 +272,7 @@ export function createV2Coordinator(options: {
   recoverEip191Address(input: { bytes: Buffer; signatureHex: string }): Promise<string>;
   resolveRegistration(input: { address: string; fromBlock: string }): Promise<JsonObject | null>;
   advanceTransitions(input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]>;
+  verifiedHelperPrefix: string;
 }) {
   const store = options.stateStore ?? createHandshakeStateStore();
   const now = options.now ?? Date.now;
@@ -259,7 +349,7 @@ export function createV2Coordinator(options: {
     async invite(value: unknown): Promise<JsonObject> {
       const terms = normalizeV2Terms(value) as JsonObject;
       const found = discovery(await options.relay.fetchDiscovery());
-      if (now() >= Number(found.invitationExpiresAtMs)) fail();
+      if (now() >= Number(found.invitationExpiresAtMs)) transient();
       const metadata = metadataFrom(found, terms);
       const created = await options.invitationService.create({
         sessionId: found.sessionId,
@@ -268,8 +358,13 @@ export function createV2Coordinator(options: {
         expMs: found.sessionDeadlineMs,
         metadata,
       });
-      await storeInitial(created.initiatorAccess, metadata, "initiator");
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms });
+      const keyValue = await storeInitial(created.initiatorAccess, metadata, "initiator");
+      await post(keyValue, "agent_v2_invitation_created", {
+        createdAtMs: String(now()),
+        externalBusinessActionPerformed: false,
+      });
+      const policy = localPolicy(terms, "initiator") as JsonObject;
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
     },
 
     async acceptInvitation(invitation: string): Promise<JsonObject> {
@@ -280,31 +375,36 @@ export function createV2Coordinator(options: {
         claimedAtMs: accepted.claimedAtMs,
         externalBusinessActionPerformed: false,
       });
-      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId: (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs });
+      const policy = localPolicy(accepted.metadata.terms as JsonObject, "responder") as JsonObject;
+      const sessionId = (accepted.metadata.hostSessionKeyCertificate as JsonObject).certificate?.sessionId as string;
+      return Object.freeze({ responderAccess: accepted.responderAccess, sessionId, terms: accepted.metadata.terms, sessionDeadlineMs: accepted.metadata.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, sessionId, "responder") });
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
-      if (input.helperVersion !== "2.1.0" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
+      if (input.helperVersion !== "2.1.2" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
+      const sessionKeyAddress = input.sessionKeyAddress.toLowerCase();
       const auth = await authorize(input.access, "agent_handshake_join");
       const expectedPolicy = localPolicy(auth.current.terms, auth.verified.payload.role);
       if (v2CanonicalRecord(expectedPolicy).digest !== input.policyDigest) fail();
-      if (auth.current.policyDigest && (auth.current.policyDigest !== input.policyDigest || auth.current.sessionKeyAddress !== input.sessionKeyAddress)) fail();
+      if (auth.current.policyDigest && (auth.current.policyDigest !== input.policyDigest || auth.current.sessionKeyAddress !== sessionKeyAddress)) fail();
       const claim = normalizeV2IdentityClaim({
         schema: "clockchain.agent-handshake-identity-claim/v2", protocol: "clockchain.agent-handshake/v2",
         sessionId: auth.keyValue.session, repositorySha: auth.current.discovery.repositorySha,
-        role: auth.verified.payload.role, sessionKeyAddress: input.sessionKeyAddress,
+        role: auth.verified.payload.role, sessionKeyAddress,
         policyDigest: input.policyDigest, statementDigest: v2CanonicalRecord(auth.current.terms).digest,
         externalBusinessActionPerformed: false,
       }) as JsonObject;
       const updated = await store.update(auth.keyValue, (current) => merge(current, auth.keyValue, {
-        policyDigest: input.policyDigest, sessionKeyAddress: input.sessionKeyAddress,
+        policyDigest: input.policyDigest, sessionKeyAddress,
         pending: { operation: "identity_claim", payload: claim }, stage: "sign_identity",
       }));
+      const signingRequest = signRequest(data(updated), auth.verified.payload.role, "identity_claim", claim);
       return Object.freeze({
         role: auth.verified.payload.role, sessionId: auth.keyValue.session,
         hostSessionKeyCertificate: auth.current.discovery.hostSessionKeyCertificate,
         repositorySha: auth.current.discovery.repositorySha, sessionDeadlineMs: auth.current.discovery.sessionDeadlineMs,
-        signingRequest: signRequest(data(updated), auth.verified.payload.role, "identity_claim", claim),
+        signingRequest,
+        localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest),
       });
     },
 
@@ -318,25 +418,41 @@ export function createV2Coordinator(options: {
       let current = await refresh(auth.keyValue);
       const role = auth.verified.payload.role;
       if (!current.policyDigest || !current.sessionKeyAddress) fail();
-      if (current.pending) return Object.freeze({ stage: current.stage, signingRequest: signRequest(current, role, current.pending.operation, current.pending.payload) });
+      if (current.pending) {
+        const signingRequest = signRequest(current, role, current.pending.operation, current.pending.payload);
+        return Object.freeze({ stage: current.stage, signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
+      }
       const entries = (await options.relay.getMessages({ sessionId: auth.keyValue.session })).messages;
       if (!current.party) {
         if (current.terms.identityPolicy.erc8004 !== "not_required" && !funded(entries, role, current.sessionKeyAddress)) {
-          return Object.freeze({ needed: "funding_record", role, sessionId: auth.keyValue.session, stage: "awaiting_funding" });
+          return Object.freeze({ needed: "funding_record", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_funding" });
         }
         let registration = null;
         if (current.terms.identityPolicy.erc8004 !== "not_required") {
           registration = await options.resolveRegistration({ address: current.sessionKeyAddress, fromBlock: current.discovery.sessionOpenedBlock ?? "0" });
-          if (!registration) return Object.freeze({ needed: "erc8004_registration", role, sessionId: auth.keyValue.session, stage: "awaiting_identity_registration", identityPolicy: current.terms.identityPolicy });
+          if (!registration) return Object.freeze({
+            needed: "erc8004_registration",
+            role,
+            sessionId: auth.keyValue.session,
+            stage: "awaiting_identity_registration",
+            identityPolicy: current.terms.identityPolicy,
+            localAction: Object.freeze({
+              executor: "pinned_helper",
+              operation: "register",
+              stateDir: "reuse_exact_absolute_state_dir",
+              helperStep: helperStep(options.verifiedHelperPrefix, "register", auth.keyValue.session, role),
+              afterSuccess: NEXT_ACTION,
+            }),
+          });
           if (current.terms.identityPolicy.erc8004 === "required_fresh" && BigInt(registration.registrationBlock) <= BigInt(current.discovery.sessionOpenedBlock ?? "0")) fail();
         }
         const party = normalizeV2Party({ sessionKeyAddress: current.sessionKeyAddress, policyDigest: current.policyDigest, erc8004: registration }, current.terms.identityPolicy) as JsonObject;
         await post(auth.keyValue, "agent_v2_party_ready", party);
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { party, stage: "party_ready" }));
-        return Object.freeze({ needed: null, role, sessionId: auth.keyValue.session, stage: "party_ready", identity: party });
+        return Object.freeze({ needed: null, role, sessionId: auth.keyValue.session, stage: "party_ready", identity: party, nextAction: NEXT_ACTION });
       }
       current = await refresh(auth.keyValue);
-      if (!current.counterpart) return Object.freeze({ needed: "counterpart_identity", role, sessionId: auth.keyValue.session, stage: "awaiting_counterpart" });
+      if (!current.counterpart) return Object.freeze({ needed: "counterpart_identity", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_counterpart" });
       const parties = role === "initiator" ? { initiator: current.party, responder: current.counterpart } : { initiator: current.counterpart, responder: current.party };
       if (role === "initiator" && !current.proposalEnvelope) {
         const issuedAtMs = String(now());
@@ -349,10 +465,11 @@ export function createV2Coordinator(options: {
           externalBusinessActionPerformed: false,
         }) as JsonObject;
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
-        return Object.freeze({ stage: "sign_proposal", signingRequest: signRequest(data(updated), role, "proposal", proposal) });
+        const signingRequest = signRequest(data(updated), role, "proposal", proposal);
+        return Object.freeze({ stage: "sign_proposal", signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
       }
       if (role === "responder" && !current.acceptanceEnvelope) {
-        if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
+        if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
         const proposal = normalizeV2Proposal(current.proposalEnvelope.payload) as JsonObject;
         const acceptance = normalizeV2Acceptance({
           schema: "clockchain.agent-handshake-acceptance/v2", protocol: "clockchain.agent-handshake/v2",
@@ -363,18 +480,19 @@ export function createV2Coordinator(options: {
           externalBusinessActionPerformed: false,
         }) as JsonObject;
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance }, stage: "sign_acceptance" }));
-        return Object.freeze({ stage: "sign_acceptance", signingRequest: signRequest(data(updated), role, "acceptance", acceptance) });
+        const signingRequest = signRequest(data(updated), role, "acceptance", acceptance);
+        return Object.freeze({ stage: "sign_acceptance", signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
       }
       current = await refresh(auth.keyValue);
-      if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });
+      if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });
       const descriptor = normalizeV2Descriptor(current.descriptorEnvelope.descriptor) as JsonObject;
       const transitions = await options.advanceTransitions({ descriptor, role, existing: current.transitions ?? [] });
       if (transitions.length !== 3) {
         await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, stage: "awaiting_anchors" }));
-        return Object.freeze({ needed: "counterpart_transition", role, sessionId: auth.keyValue.session, stage: "awaiting_anchors" });
+        return Object.freeze({ needed: "counterpart_transition", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_anchors" });
       }
       if (role === "initiator") await post(auth.keyValue, "agent_v2_anchor_report", { transitions });
-      if (current.evidenceUploaded) return Object.freeze({ needed: "certificate", role, sessionId: auth.keyValue.session, stage: "awaiting_certificate" });
+      if (current.evidenceUploaded) return Object.freeze({ needed: "certificate", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_certificate" });
       const evidence = normalizeV2EvidenceResult({
         externalBusinessActionPerformed: false, party: current.party, policyDigest: current.policyDigest,
         reference: current.terms.reference, repositorySha: current.discovery.repositorySha, role,
@@ -383,7 +501,8 @@ export function createV2Coordinator(options: {
         transitionDigests: transitions.map((entry) => entry.digest),
       }, current.terms.identityPolicy) as JsonObject;
       const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" }));
-      return Object.freeze({ stage: "sign_evidence", signingRequest: signRequest(data(updated), role, "evidence", evidence) });
+      const signingRequest = signRequest(data(updated), role, "evidence", evidence);
+      return Object.freeze({ stage: "sign_evidence", signingRequest, localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
     },
 
     async submit(input: { access: string; policyDigest: string; signatureHex: string }): Promise<JsonObject> {
@@ -430,8 +549,16 @@ export function createV2Coordinator(options: {
         result.policyDigests[auth.verified.payload.role] !== auth.current.policyDigest ||
         result.parties[auth.verified.payload.role].sessionKeyAddress !== auth.current.sessionKeyAddress
       ) fail();
-      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { certificateVerified: true, stage: "certificate_available" }));
-      return Object.freeze({ certificate: envelope });
+      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { certificateAvailable: true, stage: "certificate_available" }));
+      return Object.freeze({
+        certificate: envelope,
+        localAction: certificateLocalAction(options.verifiedHelperPrefix, {
+          certificate: envelope,
+          discovery: auth.current.discovery,
+          role: auth.verified.payload.role,
+          sessionId: auth.keyValue.session,
+        }),
+      });
     },
 
     async invoke(name: string, args: JsonObject): Promise<unknown> {
@@ -482,17 +609,27 @@ async function anchorV2(client: any, transition: JsonObject, canWrite: boolean):
   const ledgerId = String(record.ledgerId ?? "");
   if (!UUID.test(ledgerId)) fail();
   const ledger = await client.getLedgerEntry(ledgerId);
+  if (
+    !ledger || typeof ledger !== "object" || ledger.blockHeight === undefined || ledger.blockHeight === null ||
+    ledger.ledgerId === undefined || ledger.ledgerId === null || ledger.assetHash === undefined ||
+    ledger.assetHash === null || ledger.assetReferenceId === undefined || ledger.assetReferenceId === null
+  ) transient();
   const blockHeight = String(ledger.blockHeight ?? "");
   if (!DECIMAL.test(blockHeight) || ledger.ledgerId !== ledgerId || ledger.assetHash !== digest || ledger.assetReferenceId !== reference) fail();
   const chain = await client.getChainRecord(blockHeight, ledgerId);
+  if (
+    !chain || typeof chain !== "object" || chain.blockHeight === undefined || chain.blockHeight === null ||
+    chain.assetHash === undefined || chain.assetHash === null ||
+    chain.assetReferenceId === undefined || chain.assetReferenceId === null
+  ) transient();
   if (!chain || chain.assetHash !== digest || chain.assetReferenceId !== reference || String(chain.blockHeight) !== blockHeight) fail();
   const block = await client.getBlock(blockHeight);
   const blockTimeRaw = String(block.blockTime ?? block.madMarzulloTime ?? "");
-  if (!blockTimeRaw) fail();
+  if (!blockTimeRaw) transient();
   return Object.freeze({ blockTimeRaw, digest, message: transition, onChain: Object.freeze({ blockHeight, ledgerId }) });
 }
 
-async function advanceRuntimeV2(client: any, input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]> {
+export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]> {
   const descriptor = input.descriptor;
   const sessionDigest = v2CanonicalRecord(descriptor).digest;
   const base = {
@@ -524,6 +661,7 @@ async function advanceRuntimeV2(client: any, input: { descriptor: JsonObject; ro
 }
 
 export function createRuntimeV2Coordinator(env: Record<string, string | undefined> = process.env) {
+  const releasePin = readV2ReleasePin(env);
   const activeAccessKey = accessKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE);
   const accessKeys = [activeAccessKey];
   if (env.AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) accessKeys.push(accessKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS));
@@ -554,6 +692,7 @@ export function createRuntimeV2Coordinator(env: Record<string, string | undefine
         registrationBlock: found.registrationBlock,
       }) : null;
     },
-    advanceTransitions: (input) => advanceRuntimeV2(clockchain, input),
+    advanceTransitions: (input) => __advanceRuntimeV2(clockchain, input),
+    verifiedHelperPrefix: verifiedV2HelperPrefix(releasePin),
   });
 }
