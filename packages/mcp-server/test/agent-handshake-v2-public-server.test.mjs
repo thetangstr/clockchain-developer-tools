@@ -256,6 +256,49 @@ test("public HTTP routing ignores full-surface credentials, trusts only configur
   }
 });
 
+test("temporary invitation failures do not consume the successful-invitation quota", async () => {
+  let attempts = 0;
+  const handler = createV2PublicHttpHandler({
+    pin,
+    invitePerHour: 1,
+    callsPerMinute: 120,
+    invoke: async (name) => {
+      if (name !== "agent_handshake_invite") return { ok: true, name };
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error("host session is rotating"), { name: "V2TransientCoordinatorError" });
+      }
+      return { initiatorAccess: `${"a".repeat(160)}.${"b".repeat(43)}` };
+    },
+  });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  const args = {
+    reference: "NS-1847",
+    statement: "test",
+    validForSeconds: "90",
+    identityPolicy: {
+      erc8004: "required_fresh",
+      chainId: "eip155:11155111",
+      registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+    },
+  };
+  try {
+    const transient = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: args });
+    assert.equal(JSON.parse(transient.body.result.content[0].text).retryable, true);
+
+    const created = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: args });
+    assert.equal(created.body.result.isError, undefined);
+
+    const limited = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: args });
+    assert.equal(limited.body.result.isError, true);
+    assert.equal(attempts, 2);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
 test("public HTTP keeps signed role capabilities behind short opaque handles", async () => {
   const initiatorCapability = `${"a".repeat(160)}.${"b".repeat(43)}`;
   const responderCapability = `${"c".repeat(160)}.${"d".repeat(43)}`;
