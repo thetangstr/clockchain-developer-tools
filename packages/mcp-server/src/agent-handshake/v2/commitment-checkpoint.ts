@@ -46,7 +46,7 @@ export function normalizeV2CommitmentCheckpoint(value: unknown): Readonly<JsonRe
   const signature = exact(item.signature, SIGNATURE_KEYS);
   if (
     item.schema !== "clockchain.agent-handshake-commitment-checkpoint/v1" ||
-    item.version !== 1 || item.protocol !== "clockchain.agent-handshake/v2" ||
+    item.version !== "1" || item.protocol !== "clockchain.agent-handshake/v2" ||
     !UUID.test(item.sessionId) || !ROLES.has(item.role) ||
     !ARTIFACT_TYPES.has(item.artifactType) || !DIGEST.test(item.artifactDigest) ||
     typeof item.sequence !== "string" || !DECIMAL.test(item.sequence) || BigInt(item.sequence) < 1n ||
