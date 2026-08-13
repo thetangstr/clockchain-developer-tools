@@ -60,8 +60,11 @@ private ledger survives restarts at `/app/runs/private/v2-funding-ledger.jsonl`.
 New reservations use 0.02 Sepolia ETH per address and 0.04 per required-fresh
 session, providing enough testnet gas margin for ERC-8004 registration and
 metadata finalization during ordinary fee spikes. The restart-safe ledger still
-accepts historical 0.01 entries. Rolling-hour and UTC-day limits remain 0.20 and
-1.00; address-free warnings remain 0.16 and 0.80. Queue capacity is 16
+accepts historical 0.01 entries. The rolling-hour limit defaults to 0.20 ETH and
+may be raised only for a controlled test through
+`AGENT_HANDSHAKE_V2_FUNDING_MAX_HOURLY_ETH` (the host rejects values above
+0.40); the UTC-day limit remains 1.00. Address-free warnings remain 0.16 and
+0.80. Queue capacity is 16
 reservations. This is gas-only infrastructure funding for public v2 identity
 registration, never stakeholder payment or external business action; generic v1 and bilateral funding behavior is unchanged.
 
