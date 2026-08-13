@@ -2,7 +2,7 @@
 
 This deployment keeps the existing EC2, Docker Compose, and Caddy edge. Caddy is
 the only public ingress. The authenticated MCP remains at `/mcp`; the isolated
-seven-tool stakeholder handshake is at `/handshake/mcp`; `/health` stays public.
+eight-tool stakeholder handshake is at `/handshake/mcp`; `/health` stays public.
 
 ## Required SSM parameters
 
