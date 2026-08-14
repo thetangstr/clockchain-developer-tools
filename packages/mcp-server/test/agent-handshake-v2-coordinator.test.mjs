@@ -248,6 +248,8 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   assert.deepEqual(invitationCreated.body, {
     createdAtMs: String(nowMs + 1),
     externalBusinessActionPerformed: false,
+    statementDigest: v2CanonicalRecord(terms).digest,
+    terms,
   });
   const initiatorStateDir = `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`;
   assert.deepEqual(invited.localPolicy, policy("initiator"));

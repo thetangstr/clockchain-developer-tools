@@ -451,6 +451,8 @@ export function createV2Coordinator(options: {
       await post(keyValue, "agent_v2_invitation_created", {
         createdAtMs: String(createdAtMs),
         externalBusinessActionPerformed: false,
+        statementDigest: v2CanonicalRecord(terms).digest,
+        terms,
       });
       const policy = localPolicy(terms, "initiator") as JsonObject;
       return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
