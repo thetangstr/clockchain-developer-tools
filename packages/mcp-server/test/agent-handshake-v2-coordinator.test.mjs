@@ -100,6 +100,8 @@ function compactPayloadFrom(response, operation) {
 
 function compactCertificatePayloadFrom(response, role) {
   assert.equal(Object.hasOwn(response, "certificate"), false);
+  assert.equal(response.role, role);
+  assert.equal(response.sessionId, sessionId);
   assert.equal(response.certificateSummary.schema, "clockchain.agent-handshake-certificate-summary/v1");
   assert.equal(response.certificateSummary.outcome, "VERIFIED");
   assert.equal(response.certificateSummary.role, role);

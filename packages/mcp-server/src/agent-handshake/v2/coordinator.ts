@@ -415,6 +415,8 @@ export function createV2Coordinator(options: {
     ) fail();
     await store.update(keyValue, (value) => merge(value, keyValue, { certificateAvailable: true, stage: "certificate_available" }));
     return Object.freeze({
+      role,
+      sessionId: keyValue.session,
       certificateSummary: Object.freeze({
         schema: "clockchain.agent-handshake-certificate-summary/v1",
         outcome: result.outcome,
