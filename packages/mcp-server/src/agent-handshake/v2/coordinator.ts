@@ -603,7 +603,12 @@ export function createV2Coordinator(options: {
         }) as JsonObject;
         const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance }, stage: "sign_acceptance" }));
         const signingRequest = signRequest(data(updated), role, "acceptance", acceptance);
-        return Object.freeze({ stage: "sign_acceptance", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
+        return Object.freeze({
+          stage: "sign_acceptance",
+          signingSummary: signingSummary(signingRequest),
+          localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest),
+          previousCheckpoint: current.proposalCheckpoint,
+        });
       }
       current = await refresh(auth.keyValue);
       if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });

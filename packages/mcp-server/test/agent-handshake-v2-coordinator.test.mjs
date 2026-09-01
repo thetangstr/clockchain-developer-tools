@@ -357,6 +357,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   const acceptance = await coordinator.next({ access: accesses.responder });
   const acceptanceRequest = compactPayloadFrom(acceptance, "acceptance");
   assert.equal(acceptanceRequest.descriptorEnvelope, null);
+  assert.deepEqual(acceptance.previousCheckpoint, proposalCheckpoint);
   const acceptanceSignatureHex = `0x${"3".repeat(128)}1c`;
   const acceptanceEnvelope = {
     payload: JSON.parse(gunzipSync(Buffer.from(acceptanceRequest.bytesGzipBase64Url, "base64url")).toString("utf8")),
