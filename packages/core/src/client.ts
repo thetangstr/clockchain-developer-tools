@@ -42,6 +42,7 @@ import { canonicalize } from "./receipt.js";
 import { computeHash } from "./hash.js";
 import { resolveAgent } from "./erc8004.js";
 import { resilientFetch } from "./resilience.js";
+import { buildGatewaySignatureHeaders } from "./gateway-signing.js";
 
 /** Standard {success, data, meta} envelope used by some endpoints. */
 interface SuccessEnvelope<T> {
@@ -229,6 +230,19 @@ export class ClockchainClient {
   constructor(config: ClockchainConfig) {
     this.config = config;
     this.baseUrl = (config.endpoint || DEFAULT_ENDPOINT).replace(/\/+$/, "");
+    // Request signing binds the exact `path` the gateway sees as req.url; that holds only when the endpoint is a
+    // bare origin. Fail fast on a path-prefixed endpoint instead of emitting requests the gateway would 401.
+    if (config.signingSecret) {
+      let pathname = "/";
+      try {
+        pathname = new URL(this.baseUrl).pathname;
+      } catch {
+        throw new Error("CLOCKCHAIN_ENDPOINT must be a valid absolute URL when request signing is enabled");
+      }
+      if (pathname !== "/" && pathname !== "") {
+        throw new Error("CLOCKCHAIN_ENDPOINT must be an origin with no path prefix when request signing is enabled");
+      }
+    }
   }
 
   /**
@@ -1204,14 +1218,17 @@ export class ClockchainClient {
       headers["content-type"] = "application/json";
     }
     const method = opts.method ?? "GET";
+    const bodyString = opts.body !== undefined ? JSON.stringify(opts.body) : "";
+    // Still NO x-api-key (keyless is the point) — but the owned gateway authenticates every route by payload-bound
+    // signature, so carry the x-cc-* signature (re-signed per attempt) when a signing secret is configured.
     const res = await resilientFetch(
       `${this.baseUrl}${path}`,
       {
         method,
-        headers, // NO x-api-key — that is the point
-        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        headers,
+        body: opts.body !== undefined ? bodyString : undefined,
       },
-      { method },
+      { method, reSignHeaders: this.reSignHeaders(method, path, bodyString) },
     );
     if (!res.ok) {
       throw new ApiError(
@@ -1333,11 +1350,34 @@ export class ClockchainClient {
   }
 
   /**
+   * A per-ATTEMPT signed-header provider for {@link resilientFetch} (or undefined when signing is disabled — the
+   * legacy/upstream path stays unsigned and unchanged). resilientFetch calls it before every attempt, so each
+   * retry carries a FRESH nonce/timestamp — reusing one nonce across retries would be rejected by the gateway as a
+   * replay. The signed string and HMAC MUST match anchoring-gateway/gateway.mjs verifySignature byte-for-byte:
+   *   canonical = METHOD "\n" PATH+QUERY "\n" TIMESTAMP "\n" NONCE "\n" sha256hex(body)
+   *   signature = base64( HMAC_SHA256(secret, canonical) )
+   * `path` is the exact request target the gateway sees as `req.url` (the constructor enforces an origin-only
+   * endpoint). The body hash + method + path give tamper protection; the per-attempt nonce gives replay protection.
+   */
+  private reSignHeaders(
+    method: string,
+    path: string,
+    bodyString: string,
+  ): (() => Record<string, string>) | undefined {
+    const secret = this.config.signingSecret;
+    if (!secret) return undefined;
+    const keyId = this.config.signingKeyId ?? "default";
+    return () => buildGatewaySignatureHeaders(secret, keyId, method, path, bodyString);
+  }
+
+  /**
    * Single HTTP entry point: sets the x-api-key header, parses JSON, and maps
    * known failure shapes to typed errors. Uses Node 18+ built-in fetch.
    */
   private async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     const url = `${this.baseUrl}${path}`;
+    const method = opts.method ?? "GET";
+    const bodyString = opts.body !== undefined ? JSON.stringify(opts.body) : "";
     const headers: Record<string, string> = {
       "x-api-key": this.config.apiKey,
       accept: "application/json",
@@ -1346,15 +1386,14 @@ export class ClockchainClient {
       headers["content-type"] = "application/json";
     }
 
-    const method = opts.method ?? "GET";
     const res = await resilientFetch(
       url,
       {
         method,
         headers,
-        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+        body: opts.body !== undefined ? bodyString : undefined,
       },
-      { method },
+      { method, reSignHeaders: this.reSignHeaders(method, path, bodyString) },
     );
 
     const raw = await res.text();

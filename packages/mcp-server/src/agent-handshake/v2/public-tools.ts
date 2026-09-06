@@ -39,6 +39,10 @@ const RETRYABLE_ERROR_NAMES = new Set([
   "RpcRequestError",
   "TimeoutError",
   "V2TransientCoordinatorError",
+  // A tripped per-dependency breaker (e.g. the anchoring gateway briefly unavailable) is a bounded, transient
+  // condition — surface HANDSHAKE_TEMPORARILY_UNAVAILABLE (retryable, session-deadline bounded) instead of a
+  // fatal abort that pins the session. Pairs with the per-host breaker in packages/core/resilience.ts.
+  "CircuitOpenError",
 ]);
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 const identityPolicy = z.discriminatedUnion("erc8004", [

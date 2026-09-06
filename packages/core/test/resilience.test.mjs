@@ -196,3 +196,45 @@ test("circuit-breaker goes half-open after cooldown and closes on success", asyn
   assert.equal(res2.status, 200);
   assert.equal(calls, 7);
 });
+
+// Regression guard (do not delete): the breaker is PER-HOST. A dependency outage on one host must never
+// fail-fast calls to a different host. If this ever fails, the per-host bulkhead has silently reverted to a
+// single shared breaker — the outage-amplifying behavior the runtime patch was created to fix.
+test("circuit-breaker is per-host: one host tripping does NOT block another host", async () => {
+  __resetBreaker();
+  const calls = { a: 0, b: 0 };
+  const fetchImpl = async (url) => {
+    if (url.includes("host-a")) { calls.a += 1; throw new Error("host-a down"); }
+    calls.b += 1; return resp(200);
+  };
+  const opts = { method: "POST", fetchImpl, sleep: noopSleep, now: () => 1000, breakerThreshold: 5, breakerCooldownMs: 30_000 };
+
+  // Trip host-a's breaker open (5 consecutive failures) and confirm it now fails fast.
+  for (let i = 0; i < 5; i += 1) await assert.rejects(resilientFetch("https://host-a.example/log", {}, opts));
+  await assert.rejects(resilientFetch("https://host-a.example/log", {}, opts), CircuitOpenError);
+  assert.equal(calls.a, 5, "host-a breaker open: no further fetch");
+
+  // host-b must be completely unaffected — its breaker is closed, the call reaches fetchImpl and succeeds.
+  const res = await resilientFetch("https://host-b.example/getTime", {}, opts);
+  assert.equal(res.status, 200);
+  assert.equal(calls.b, 1, "host-b is isolated from host-a's open breaker");
+});
+
+// Regression guard for the signed-retry bug: reSignHeaders must be called PER ATTEMPT so each retry carries a
+// fresh nonce. Reusing one nonce across GET retries makes the gateway reject the retry as a replay (401).
+test("reSignHeaders is applied per attempt so retries carry a fresh nonce", async () => {
+  __resetBreaker();
+  const nonces = [];
+  const fetchImpl = async (_url, init) => {
+    nonces.push(init.headers["x-cc-nonce"]);
+    return nonces.length < 3 ? resp(503) : resp(200); // transient 5xx twice, then succeed on the 3rd attempt
+  };
+  let n = 0;
+  const res = await resilientFetch(
+    "https://gw.example/getTime",
+    { headers: { "x-cc-nonce": "PLACEHOLDER", accept: "application/json" } },
+    { method: "GET", fetchImpl, sleep: noopSleep, now: () => 1000, reSignHeaders: () => ({ "x-cc-nonce": `nonce-${n++}` }) },
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(nonces, ["nonce-0", "nonce-1", "nonce-2"]); // fresh per attempt; base placeholder overridden
+});
