@@ -2,7 +2,7 @@
 
 This deployment keeps the existing EC2, Docker Compose, and Caddy edge. Caddy is
 the only public ingress. The authenticated MCP remains at `/mcp`; the isolated
-seven-tool stakeholder handshake is at `/handshake/mcp`; `/health` stays public.
+eight-tool stakeholder handshake is at `/handshake/mcp`; `/health` stays public.
 
 ## Required SSM parameters
 
@@ -44,19 +44,26 @@ stakeholder capabilities are never stored in SSM.
 2. Install the matching Handshake commit in the host checkout, keep the checkout
    clean, load the active host-root private key from SSM, and record its public
    fingerprint in the release pin.
-3. Install the matching MCP commit, rotate the active/previous role-access key
-   pair if required, then run `compose-up.sh`. It verifies the exact Handshake
-   SHA before Docker starts and atomically replaces the private host files.
+3. Install the matching MCP commit and rotate the active/previous role-access
+   key pair if required. From that exact checkout, run
+   `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`. The installer
+   first refreshes the out-of-checkout `compose-up.sh` and systemd unit, then
+   restarts the service. The refreshed wrapper verifies the exact Handshake SHA
+   before Docker starts and atomically replaces the private host files. Never
+   restart the service directly after changing the checkout: systemd deliberately
+   executes `/opt/clockchain-mcp/compose-up.sh`, not the copy inside the repo.
 4. Deploy Research only after the production MCP manifest reports the same
    helper digest and host-root ring that Research pins.
 
 The v2 host reserves both fresh-registration seats before either transfer. Its
 private ledger survives restarts at `/app/runs/private/v2-funding-ledger.jsonl`.
-The hard limits are 0.01 Sepolia ETH per address, 0.02 per session, 0.20 per
-rolling hour, and 1.00 per UTC day. Address-free warnings begin at 0.16 per hour
-and 0.80 per day. Queue capacity is 16 reservations. These limits apply only to
-public v2 identity registration; generic v1 and bilateral funding behavior is
-unchanged.
+New reservations use 0.02 Sepolia ETH per address and 0.04 per required-fresh
+session, providing enough testnet gas margin for ERC-8004 registration and
+metadata finalization during ordinary fee spikes. The restart-safe ledger still
+accepts historical 0.01 entries. Rolling-hour and UTC-day limits remain 0.20 and
+1.00; address-free warnings remain 0.16 and 0.80. Queue capacity is 16
+reservations. This is gas-only infrastructure funding for public v2 identity
+registration, never stakeholder payment or external business action; generic v1 and bilateral funding behavior is unchanged.
 
 ## Production canaries
 

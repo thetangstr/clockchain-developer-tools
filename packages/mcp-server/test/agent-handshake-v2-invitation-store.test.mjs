@@ -9,12 +9,33 @@ import {
   createV2InvitationService,
   createV2InvitationStore,
 } from "../dist/agent-handshake/v2/invitation-store.js";
+import { readV2RoleAccessPayload } from "../dist/agent-handshake/v2/access.js";
 
 const key = { kid: "role-2026-08", secret: randomBytes(32) };
 const sessionId = randomUUID();
 const statementDigest = "c".repeat(64);
 const nbfMs = 1786337000000;
 const expMs = 1786337600000;
+
+test("copied invitation expires at rendezvous close", async () => {
+  const invitationExpMs = nbfMs + 120000;
+  let currentMs = nbfMs + 1;
+  const service = createV2InvitationService({
+    activeKey: key,
+    verificationKeys: [key],
+    store: createV2InvitationStore(),
+    nowMs: () => currentMs,
+  });
+  const acceptedInvite = await service.create({ sessionId, statementDigest, nbfMs, expMs, invitationExpMs });
+
+  assert.equal(readV2RoleAccessPayload(acceptedInvite.initiatorAccess).expMs, String(expMs));
+  assert.equal(readV2RoleAccessPayload(acceptedInvite.responderInvitation).expMs, String(invitationExpMs));
+  await service.accept({ invitation: acceptedInvite.responderInvitation });
+
+  const expiredInvite = await service.create({ sessionId, statementDigest, nbfMs, expMs, invitationExpMs });
+  currentMs = invitationExpMs;
+  await assert.rejects(() => service.accept({ invitation: expiredInvite.responderInvitation }));
+});
 
 test("one copied invitation creates distinct, role-scoped principals and is claimed once", async () => {
   const store = createV2InvitationStore();

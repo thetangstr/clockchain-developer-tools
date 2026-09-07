@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  readEvmBalance,
   recoverEip191Address,
   resolveOwnedAgentId,
 } from "../dist/handshake/evm.js";
@@ -32,6 +33,27 @@ function rpcFetch(handler) {
   };
   return { calls, fetchImpl };
 }
+
+test("readEvmBalance reads the latest balance as a JSON-RPC quantity", async () => {
+  const { calls, fetchImpl } = rpcFetch((body) => {
+    assert.equal(body.method, "eth_getBalance");
+    return "0x2386f26fc10000";
+  });
+
+  assert.equal(
+    await readEvmBalance({ rpcUrl: RPC_URL, address: ADDRESS, fetchImpl }),
+    10_000_000_000_000_000n,
+  );
+  assert.deepEqual(calls[0].params, [ADDRESS, "latest"]);
+});
+
+test("readEvmBalance rejects malformed JSON-RPC quantities", async () => {
+  const { fetchImpl } = rpcFetch(() => "0x00");
+  await assert.rejects(
+    readEvmBalance({ rpcUrl: RPC_URL, address: ADDRESS, fetchImpl }),
+    /Invalid JSON-RPC block quantity/,
+  );
+});
 
 test("recoverEip191Address hashes the EIP-191 message and recovers through ecrecover", async () => {
   const { calls, fetchImpl } = rpcFetch((body) => {
@@ -279,6 +301,32 @@ test("resolveOwnedAgentId honors explicit fromBlock over canonical registry defa
 
   const filter = calls.find((call) => call.method === "eth_getLogs").params[0];
   assert.equal(filter.fromBlock, "0x10");
+});
+
+test("resolveOwnedAgentId accepts the canonical decimal block carried by v2 discovery", async () => {
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push(body);
+    const result = body.method === "eth_blockNumber" ? "0xaee226" : [];
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ jsonrpc: "2.0", id: body.id, result }),
+    };
+  };
+
+  assert.equal(await resolveOwnedAgentId({
+    rpcUrl: RPC_URL,
+    registryAddress: SEPOLIA_ERC8004_REGISTRY,
+    address: ADDRESS,
+    fromBlock: "11461142",
+    fetchImpl,
+  }), null);
+
+  const filter = calls.find((call) => call.method === "eth_getLogs").params[0];
+  assert.equal(filter.fromBlock, "0xaee216");
+  assert.equal(filter.toBlock, "0xaee226");
 });
 
 test("resolveOwnedAgentId fails clearly when the reverse scan range exceeds the cap", async () => {

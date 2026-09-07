@@ -11,6 +11,14 @@ export interface ClockchainConfig {
   erc8004Chain?: string;
   /** Optional ERC-8004 registry contract address. */
   erc8004RegistryAddress?: string;
+  /**
+   * Optional payload-bound request signing for the owned anchoring gateway. When {@link signingSecret} is set,
+   * every gateway request carries `x-cc-key-id/-timestamp/-nonce/-signature` (HMAC-SHA256 over
+   * METHOD\nPATH\nTIMESTAMP\nNONCE\nsha256(body)); the gateway verifies and rejects forged/tampered/replayed
+   * requests. See ClockchainClient.signRequestHeaders and anchoring-gateway/gateway.mjs verifySignature.
+   */
+  signingKeyId?: string;
+  signingSecret?: string;
 }
 
 export const DEFAULT_ENDPOINT = "https://node.clockchain.network";
@@ -40,5 +48,7 @@ export function readConfigFromEnv(
     evmRpcUrl: env.EVM_RPC_URL ?? DEFAULT_EVM_RPC_URL,
     erc8004Chain: env.ERC8004_CHAIN ?? DEFAULT_ERC8004_CHAIN,
     erc8004RegistryAddress: env.ERC8004_REGISTRY_ADDRESS ?? DEFAULT_ERC8004_REGISTRY,
+    signingKeyId: env.CLOCKCHAIN_SIGNING_KEY_ID ?? "default",
+    signingSecret: env.CLOCKCHAIN_SIGNING_SECRET ?? undefined,
   };
 }

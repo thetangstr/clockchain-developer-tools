@@ -72,21 +72,45 @@ export interface ResilientFetchOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Clock. Defaults to Date.now. */
   now?: () => number;
+  /**
+   * Optional per-ATTEMPT header provider. Called before every attempt (including the first); its headers are
+   * merged over `init.headers`. Required for payload-bound request signing so that each retry carries a FRESH
+   * nonce/timestamp — reusing one nonce across retries would be rejected by the gateway as a replay.
+   */
+  reSignHeaders?: () => Record<string, string>;
 }
 
-/** Module-level (per-process) circuit-breaker state. */
+/** Per-dependency circuit-breaker state. */
 interface BreakerState {
   consecutiveFailures: number;
   /** Epoch ms when the breaker may probe again; 0 means closed. */
   openUntil: number;
 }
 
-const breaker: BreakerState = { consecutiveFailures: 0, openUntil: 0 };
+// Per-HOST breakers (a bulkhead), not one shared process-wide breaker. A slow or failing dependency — e.g. the
+// anchoring gateway — trips only its own host's breaker and can never fail-fast MCP tools that call a different
+// host. (Previously a single module-level breaker meant one dependency's outage tripped every tool.)
+const breakers = new Map<string, BreakerState>();
+function breakerHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "invalid-url"; // collapse unparseable URLs to one bucket so the map stays bounded
+  }
+}
+function breakerFor(url: string): BreakerState {
+  const host = breakerHost(url);
+  let b = breakers.get(host);
+  if (!b) {
+    b = { consecutiveFailures: 0, openUntil: 0 };
+    breakers.set(host, b);
+  }
+  return b;
+}
 
-/** Test hook: reset the per-process breaker to its closed/initial state. */
+/** Test hook: reset all per-host breakers to their closed/initial state. */
 export function __resetBreaker(): void {
-  breaker.consecutiveFailures = 0;
-  breaker.openUntil = 0;
+  breakers.clear();
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -146,6 +170,9 @@ export async function resilientFetch(
   const sleep = opts.sleep ?? defaultSleep;
   const now = opts.now ?? Date.now;
 
+  // Per-dependency breaker for THIS host — isolates a failing dependency so it cannot trip tools calling others.
+  const breaker = breakerFor(url);
+
   // Circuit-breaker gate: fail fast while open (before the cooldown elapses).
   if (breaker.openUntil > 0 && now() < breaker.openUntil) {
     throw new CircuitOpenError();
@@ -168,7 +195,11 @@ export async function resilientFetch(
   let lastError: unknown;
   for (let i = 0; i <= retriesAllowed; i += 1) {
     try {
-      const res = await attempt(url, init, timeoutMs, fetchImpl);
+      // Re-sign per attempt so each retry carries a fresh nonce/timestamp (a reused nonce is a gateway replay).
+      const attemptInit = opts.reSignHeaders
+        ? { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...opts.reSignHeaders() } }
+        : init;
+      const res = await attempt(url, attemptInit, timeoutMs, fetchImpl);
       // Retry idempotent reads on transient server errors (5xx).
       if (res.status >= 500 && i < retriesAllowed) {
         onFailure();
