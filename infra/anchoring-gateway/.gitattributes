@@ -1,0 +1,6 @@
+# Security-critical, reviewable source — keep line-diffable in git (some files carry em-dash/arrow UTF-8 in
+# comments which can trip git's binary heuristic).
+*.mjs text diff
+*.py  text diff
+*.md  text diff
+*.sh  text diff
