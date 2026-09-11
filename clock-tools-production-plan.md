@@ -44,6 +44,7 @@ Three root causes, three different owners:
 | Operable | ✅ deploy-box.sh, nightly gates, bounds | ✅ | ✅ |
 | Driven by Clark (Hermes + Nova, its own box) | ✅ 4734 ms verified | ✅ fired, block 636 | ✅ set → listed → cancelled |
 | Fresh Claude Code (Opus/Sonnet/Haiku) + Codex on a demo token, no account | ✅ 4 agents verified | ✅ 4 fires, blocks 718–740 | ✅ 4 cancels |
+| The developer's own Hermes on this Mac (full 24-task suite) | ✅ | ✅ | ✅ 24 / 24 |
 
 Clark's full-surface run (2026-09-11 05:28 UTC): **24 / 24 tasks, all 40 single-agent-testable
 tools exercised, verdict PASS** — `eval/reports/2026-09-11T05-27-49-287Z-hermes:clockchain-eval@…md`.
