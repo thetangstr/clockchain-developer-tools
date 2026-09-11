@@ -181,6 +181,8 @@ export interface AgentReceipt {
     validators: number;
     trustPct: number | null;
     status: "single-validator-testnet" | "multi-validator";
+    /** Where the anchor lives: the public network, or the owned anchoring gateway. */
+    substrate: "clockchain-network" | "anchoring-gateway";
     note: string;
   };
   identity: {

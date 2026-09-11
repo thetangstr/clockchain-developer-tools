@@ -43,7 +43,9 @@ test("landing page lists the verified time tools module (stopwatch / timer / ala
   assert.match(LANDING_HTML, /Stopwatch, timer, alarm/);
   // The hosted tools are named, and the claim stays honest about the substrate.
   assert.match(LANDING_HTML, /timer_set \/ alarm_set/);
-  assert.match(LANDING_HTML, /Testnet, single validator/);
+  // D7: the page names the real substrate (network or owned gateway), never implies more.
+  assert.match(LANDING_HTML, /anchoring gateway \(testnet, single operator\)|single-validator Clockchain testnet/);
+  assert.match(LANDING_HTML, /not yet attested by an independent validator set/);
 });
 
 test("landing page points agents at the real endpoint + key headers, not a fake", () => {

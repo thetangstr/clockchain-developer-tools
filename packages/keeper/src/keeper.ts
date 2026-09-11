@@ -32,6 +32,12 @@ export interface KeeperConfig {
   agentId: string;
   /** Standard-Webhooks signing secret (raw or whsec_...). */
   webhookSecret: string;
+  /**
+   * Per-owner signing secret. When set, fires for `sub` are signed with
+   * `webhookSecretFor(sub)` (e.g. derived from `webhookSecret` via
+   * {@link deriveOwnerSecret}) so each owner verifies with a secret only they saw.
+   */
+  webhookSecretFor?: (sub: string) => string;
   /** SSRF guard policy for webhook targets. */
   ssrf?: SsrfOptions;
   /** Max delivery attempts before dead-lettering. Default 5. */
@@ -274,10 +280,11 @@ export class Keeper {
         const res = await deliverWebhook({
           target,
           body: deliveryBody(trigger, fire),
-          secret: cfg.webhookSecret,
+          secret: cfg.webhookSecretFor?.(trigger.sub) ?? cfg.webhookSecret,
           idempotencyKey: fire.fireId, // stable across retries + restart re-fire
           nowSec: Math.floor(now / 1000),
           fetchFn: this.d.fetchFn,
+          ssrf: cfg.ssrf,
         });
         fire.delivery.attempts++;
         fire.delivery.lastStatusCode = res.status;

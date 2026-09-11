@@ -215,6 +215,9 @@ read_secret MCP_TOKEN_SIGNING_SECRET /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET
 # Payload-bound request signing towards the owned anchoring gateway (infra/anchoring-gateway); the gateway
 # fails closed without it. Same secret the gateway container is started with (GATEWAY_SIGNING_KEYS).
 read_secret CLOCKCHAIN_SIGNING_SECRET /clockchain/mcp/GATEWAY_SIGNING_SECRET
+# Timer/alarm webhook delivery: Standard-Webhooks server secret (per-owner secrets are derived
+# from it and shown to each owner at registration; this value is never disclosed).
+read_secret KEEPER_WEBHOOK_SECRET /clockchain/mcp/KEEPER_WEBHOOK_SECRET
 read_secret AGENT_HANDSHAKE_RELEASE_PIN "$AGENT_HANDSHAKE_RELEASE_PIN_PARAM"
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE "$AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE_PARAM"
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS "$AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM"
@@ -235,8 +238,12 @@ export CLOCKCHAIN_WALLET_ID=thetangstr@gmail.com
 export CLOCKCHAIN_ENDPOINT=http://clockchain-anchor-gateway:8090
 export CLOCKCHAIN_SIGNING_KEY_ID=default
 # Timer/alarm keeper: durable trigger store on the mcp_state volume (survives restarts; re-armed on boot).
-# Webhook delivery stays off (no KEEPER_WEBHOOK_SECRET) — poll via timer_status — until the allow-list lands.
 export KEEPER_STORE_PATH=/app/state/keeper-store.json
+# Webhook egress is deny-by-default in HTTP mode: only these host suffixes may be targeted, and every
+# delivery is DNS-pinned (resolved, range-checked, connected to the vetted address). Extend deliberately.
+export KEEPER_WEBHOOK_ALLOWLIST=hooks.slack.com,webhook.site
+# Receipts and the page name the substrate honestly: this box anchors on the owned gateway.
+export CLOCKCHAIN_SUBSTRATE=anchoring-gateway
 export ERC8004_REGISTRY_ADDRESS=0x8004A818BFB912233c491871b3d84c89A494BD9e
 
 cd "$DEPLOY_DIR"

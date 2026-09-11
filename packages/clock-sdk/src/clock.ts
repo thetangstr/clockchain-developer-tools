@@ -8,8 +8,12 @@
  *   4. rttMs = t1 - t0; the request's midpoint is at monotonic (t0 + t1) / 2.
  *   5. offsetMs = consensusEpochMs - monotonicMid  (add to a monotonic reading
  *      to get the disciplined wall-clock epoch).
- *   6. uncertaintyMs = rttMs / 2 + AbsTimeDifference  (one-way network delay
- *      bound plus the gateway's own reported time spread).
+ *   6. uncertaintyMs = rttMs / 2 + AbsTimeDifference + skewMs, where skewMs is
+ *      how far the consensus reading sits from this host's wall clock at sync.
+ *      The wall clock is never TRUSTED for time — but a disagreement is something
+ *      we cannot rule out either way (a stale consensus reading on a quiet ledger
+ *      looks exactly like this), so it widens the band instead of being hidden.
+ *      No false precision: a reading minutes stale cannot claim ±20 ms.
  *
  * `now()` is offline: monotonic reading + offset. No network call, so it is
  * cheap and safe to poll. An optional auto-resync interval re-runs `sync()`.
@@ -37,6 +41,11 @@ export interface IntervalScheduler {
 export interface ClockOptions {
   /** Monotonic clock source. Defaults to `performance.now()` (epoch-agnostic). */
   monotonic?: MonotonicNow;
+  /**
+   * Wall-clock epoch-ms source used ONLY to measure skew for the uncertainty band
+   * (never to tell time). Defaults to `Date.now`. Tests inject one.
+   */
+  wallClock?: () => number;
   /** Auto-resync period in ms. <= 0 or omitted disables auto-resync. */
   autoResyncMs?: number;
   /** Interval scheduler used for auto-resync. Defaults to global setInterval. */
@@ -59,8 +68,13 @@ export interface SyncResult {
   offsetMs: number;
   /** Round-trip time of the getTimestamp call, ms. */
   rttMs: number;
-  /** Uncertainty half-width: rttMs/2 + AbsTimeDifference. */
+  /** Uncertainty half-width: rttMs/2 + AbsTimeDifference + skewMs. */
   uncertaintyMs: number;
+  /**
+   * |wall clock − consensus| at sync, ms. Large values mean the consensus reading
+   * is stale (or this host's clock is wrong) — either way the band must cover it.
+   */
+  skewMs: number;
   /** Monotonic midpoint of the getTimestamp call. */
   monotonicMidMs: number;
   /** The gateway's reported AbsTimeDifference, ms. */
@@ -84,6 +98,7 @@ const defaultIntervalScheduler: IntervalScheduler = {
 export class ClockchainClock {
   private readonly source: TimestampSource;
   private readonly monotonic: MonotonicNow;
+  private readonly wallClock: () => number;
   private readonly intervalScheduler: IntervalScheduler;
   private readonly autoResyncMs: number;
 
@@ -95,6 +110,7 @@ export class ClockchainClock {
   constructor(source: TimestampSource, options: ClockOptions = {}) {
     this.source = source;
     this.monotonic = options.monotonic ?? defaultMonotonic;
+    this.wallClock = options.wallClock ?? (() => Date.now());
     this.intervalScheduler = options.intervalScheduler ?? defaultIntervalScheduler;
     this.autoResyncMs = options.autoResyncMs ?? 0;
     if (this.autoResyncMs > 0) this.startAutoResync();
@@ -118,15 +134,20 @@ export class ClockchainClock {
       );
     }
     const absTimeDifferenceMs = Math.abs(Number(ts.AbsTimeDifference) || 0);
+    // Skew: the consensus reading vs this host's wall clock, both taken at the
+    // request midpoint (the wall reading is shifted back by the half round-trip).
+    const wallMidMs = this.wallClock() - rttMs / 2;
+    const skewMs = Math.abs(wallMidMs - consensusEpochMs);
 
     this.offsetMs = consensusEpochMs - monotonicMidMs;
-    this.uncertaintyAtSyncMs = rttMs / 2 + absTimeDifferenceMs;
+    this.uncertaintyAtSyncMs = rttMs / 2 + absTimeDifferenceMs + skewMs;
 
     const result: SyncResult = {
       epochMs: consensusEpochMs,
       offsetMs: this.offsetMs,
       rttMs,
       uncertaintyMs: this.uncertaintyAtSyncMs,
+      skewMs,
       monotonicMidMs,
       absTimeDifferenceMs,
       madMarzulloTime: String(ts.madMarzulloTime),

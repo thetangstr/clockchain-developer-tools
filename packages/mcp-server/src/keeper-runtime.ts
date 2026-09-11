@@ -23,18 +23,26 @@ import {
   FileStore,
   Keeper,
   createDisciplinedClock,
+  deriveOwnerSecret,
   ssrfOptionsFromEnv,
   type Anchorer,
   type KeeperConfig,
 } from "@clockchain/keeper";
 import { getSharedLogBudget } from "./budget.js";
 
-/** Hosted defaults: tighter than the standalone worker's (a public endpoint). */
+/**
+ * Hosted defaults: tighter than the standalone worker's, because a public endpoint
+ * lets self-serve demo tokens register triggers that spend OUR credits unattended.
+ * Bounds that follow: ≤ 20 live triggers per owner, intervals ≥ 60 s, ≤ 10 fires per
+ * 1 s tick globally (≤ 600 credits/min worst case), and the shared MCP_LOG_BUDGET as
+ * the hard stop. Per-owner billing (gateway sub-keys) is the real fix and is deferred.
+ */
 const DEFAULTS = Object.freeze({
   storePath: "./data/keeper-store.json",
   tickMs: 1000,
   resyncMs: 60_000,
-  maxTriggersPerSub: 100,
+  maxTriggersPerSub: 20,
+  maxPerTick: 10,
   maxRetainedFires: 20,
 });
 
@@ -43,6 +51,16 @@ let runtime: { keeper: Keeper; clock: ReturnType<typeof createDisciplinedClock>;
 /** True when webhook delivery is configured on this deployment (signing secret present). */
 export function keeperWebhooksEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.KEEPER_WEBHOOK_SECRET ?? "").length > 0;
+}
+
+/**
+ * The Standard-Webhooks secret an owner verifies their fires with: derived per owner
+ * from the server secret, so it can be shown to that owner at registration and the
+ * server secret itself is never disclosed. Null when webhooks are not configured.
+ */
+export function keeperOwnerWebhookSecret(owner: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const server = env.KEEPER_WEBHOOK_SECRET ?? "";
+  return server ? deriveOwnerSecret(server, owner) : null;
 }
 
 /** Wrap an anchorer so each chargeable anchor write respects the shared log budget. */
@@ -67,9 +85,11 @@ function build(env: NodeJS.ProcessEnv): NonNullable<typeof runtime> {
   const config: KeeperConfig = {
     agentId: env.KEEPER_AGENT_ID ?? "agent:clockchain-mcp-keeper",
     webhookSecret: env.KEEPER_WEBHOOK_SECRET ?? "",
+    webhookSecretFor: (sub) => keeperOwnerWebhookSecret(sub, env) ?? "",
     ssrf: ssrfOptionsFromEnv(env),
     maxAttempts: Number(env.KEEPER_MAX_ATTEMPTS ?? 5),
     maxTriggersPerSub: Number(env.KEEPER_MAX_TRIGGERS_PER_SUB ?? DEFAULTS.maxTriggersPerSub),
+    maxPerTick: Number(env.KEEPER_MAX_PER_TICK ?? DEFAULTS.maxPerTick),
     maxRetainedFires: Number(env.KEEPER_MAX_RETAINED_FIRES ?? DEFAULTS.maxRetainedFires),
   };
   const state = { disciplined: false };

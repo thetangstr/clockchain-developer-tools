@@ -39,10 +39,12 @@ test("sync computes offset from consensus midpoint and monotonic mid", async () 
   const source = fakeSource(TIME, 30);
   const clock = new ClockchainClock(source, {
     monotonic: fakeMonotonic([1000, 1200, /* now() */ 1100]),
+    wallClock: () => TIME_MS + 100, // agrees with consensus at the midpoint -> skew 0
   });
   const r = await clock.sync();
 
   assert.equal(r.rttMs, 200);
+  assert.equal(r.skewMs, 0);
   assert.equal(r.monotonicMidMs, 1100);
   assert.equal(r.epochMs, TIME_MS);
   assert.equal(r.offsetMs, TIME_MS - 1100);
@@ -71,9 +73,28 @@ test("uncertainty band = rtt/2 + AbsTimeDifference is exposed on now()", async (
   const source = fakeSource(TIME, 12);
   const clock = new ClockchainClock(source, {
     monotonic: fakeMonotonic([100, 140, 200]), // rtt=40 -> rtt/2=20; +12 = 32
+    wallClock: () => TIME_MS + 20,
   });
   await clock.sync();
   assert.equal(clock.now().uncertaintyMs, 32);
+});
+
+test("D5 no false precision: a consensus reading far from the wall clock widens the band by the skew", async () => {
+  // A quiet ledger serving a 90 s-old block looks exactly like this: consensus says
+  // TIME, the host wall clock says TIME + 90 s. Neither is trusted outright, so the
+  // band must cover the gap instead of reporting ±20 ms.
+  const source = fakeSource(TIME, 0);
+  const clock = new ClockchainClock(source, {
+    monotonic: fakeMonotonic([100, 140, 200]), // rtt 40 -> 20
+    wallClock: () => TIME_MS + 20 + 90_000,
+  });
+  const r = await clock.sync();
+  assert.equal(r.skewMs, 90_000);
+  assert.equal(r.uncertaintyMs, 20 + 90_000);
+  assert.equal(clock.now().uncertaintyMs, 90_020);
+  // Time itself still comes from consensus, never from the wall clock:
+  // monotonic mid 120 -> offset TIME_MS - 120; now() reads 200 -> TIME_MS + 80.
+  assert.equal(clock.now().epochMs, TIME_MS + 80);
 });
 
 test("now() throws before the first sync; isSynced/lastSync track state", () => {

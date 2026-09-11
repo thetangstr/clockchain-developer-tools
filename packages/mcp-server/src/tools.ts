@@ -34,7 +34,7 @@ import { idempotent } from "./idempotency.js";
 import type { KeeperGate } from "./entitlement.js";
 import { assertToolClassified } from "./entitlement.js";
 import type { Keeper, Trigger } from "@clockchain/keeper";
-import { getRuntimeKeeper, keeperWebhooksEnabled } from "./keeper-runtime.js";
+import { getRuntimeKeeper, keeperOwnerWebhookSecret, keeperWebhooksEnabled } from "./keeper-runtime.js";
 
 /** Shared schema fragment: optional idempotency key for write tools. */
 const idempotencyKeySchema = z
@@ -316,6 +316,8 @@ export function registerTools(
     keeper?: Keeper;
     /** Whether webhook delivery is configured (defaults to KEEPER_WEBHOOK_SECRET presence). */
     keeperWebhooks?: boolean;
+    /** Per-owner webhook verification secret (defaults to the runtime derivation). */
+    keeperWebhookSecretFor?: (owner: string) => string | null;
   } = {},
 ): void {
   // Fail-closed classification guard (CLO-48 review FIX 2). We intercept
@@ -884,6 +886,7 @@ export function registerTools(
 
   const keeperOf = (): Keeper => opts.keeper ?? getRuntimeKeeper();
   const webhooksOn = opts.keeperWebhooks ?? keeperWebhooksEnabled();
+  const ownerSecretFor = opts.keeperWebhookSecretFor ?? ((o: string) => keeperOwnerWebhookSecret(o));
   const owner = opts.principalId ?? "stdio";
   const MIN_DELAY_MS = 1_000;
   const MAX_HORIZON_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -929,8 +932,16 @@ export function registerTools(
     fireAtIso: new Date(t.fireAtMs).toISOString(),
     mode: t.mode,
     delivery: t.target ? "webhook" : "poll",
+    ...(t.target
+      ? {
+          // Shown once per registration; derived per owner so the server secret stays private.
+          webhookSecret: ownerSecretFor(t.sub),
+          webhookVerify:
+            "Verify each POST's `webhook-signature` (Standard Webhooks: HMAC-SHA256 over `${webhook-id}.${webhook-timestamp}.${body}`) with webhookSecret; `webhook-id` is the fire id and is reused on retries.",
+        }
+      : {}),
     next: t.target
-      ? "Armed. Fires on verified time even if you disconnect; the fire is POSTed to your webhook and anchored. Poll timer_status { id } for the receipt."
+      ? "Armed. Fires on verified time even if you disconnect; the fire is POSTed to your webhook (signed) and anchored. Poll timer_status { id } for the receipt."
       : `Armed. Fires on verified time even if you disconnect. Poll timer_status { id: "${t.id}" } after ${new Date(t.fireAtMs).toISOString()}; the fire's receipt (ledgerId + blockHeight) verifies keylessly with verify_cross_party.`,
   });
   const webhookSchema = z

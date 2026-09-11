@@ -58,3 +58,17 @@ test("buildReceipt marks pending when no blockHeight", () => {
   assert.equal(r.anchor.blockHeight, null);
   assert.equal(r.anchor.consensusTime, null);
 });
+
+test("receipt names the anchor substrate honestly (D7): network vs owned anchoring gateway", () => {
+  const input = { agentId: "a", action: "x" };
+  const eventHash = eventHashOf(input);
+  const log = { ledgerId: "L", assetReferenceId: "a:x:1", assetHash: eventHash, blockHeight: "9", createdTimestamp: "t" };
+  const net = buildReceipt({ input, eventHash, network: "testnet", log });
+  assert.equal(net.attestation.substrate, "clockchain-network", "default wording is the public network");
+  assert.match(net.attestation.note, /Clockchain testnet/);
+  const gw = buildReceipt({ input, eventHash, network: "testnet", log, substrate: "anchoring-gateway" });
+  assert.equal(gw.attestation.substrate, "anchoring-gateway");
+  assert.match(gw.attestation.note, /anchoring gateway.*single-operator/);
+  assert.match(gw.disclaimer, /not yet attested by an independent validator set/);
+  assert.equal(gw.attestation.status, "single-validator-testnet", "status enum unchanged for existing consumers");
+});

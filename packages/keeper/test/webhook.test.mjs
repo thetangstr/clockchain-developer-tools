@@ -141,3 +141,61 @@ test("dead-letter: exhausting all attempts flags deadLettered", async () => {
   assert.equal(res.deadLettered, true);
   assert.equal(res.lastStatus, 500);
 });
+
+// ---- DNS-pinned delivery (C6) ----
+import { createServer } from "node:http";
+import { pinnedFetch, deriveOwnerSecret, resolvePinnedAddress, SsrfError } from "../dist/index.js";
+
+test("resolvePinnedAddress refuses a hostname that resolves to ANY private/metadata address (rebinding)", async () => {
+  const resolver = async () => [{ address: "93.184.216.34", family: 4 }, { address: "169.254.169.254", family: 4 }];
+  await assert.rejects(() => resolvePinnedAddress("hooks.example.com", { resolver }), SsrfError);
+  const loop = async () => [{ address: "127.0.0.1", family: 4 }];
+  await assert.rejects(() => resolvePinnedAddress("evil.example.com", { resolver: loop }), /private\/loopback\/metadata/);
+  const ok = await resolvePinnedAddress("hooks.example.com", { resolver: async () => [{ address: "93.184.216.34", family: 4 }] });
+  assert.deepEqual(ok, { address: "93.184.216.34", family: 4 });
+  await assert.rejects(() => resolvePinnedAddress("nowhere.example.com", { resolver: async () => [] }), /did not resolve/);
+});
+
+test("pinnedFetch connects to the vetted address only, keeps the Host header, never follows redirects", async () => {
+  // A local receiver on 127.0.0.1; the "public" hostname resolves to it via a fake
+  // resolver, and the request must reach the server through the pinned lookup.
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push({ host: req.headers.host, id: req.headers["webhook-id"], body });
+      if (req.url === "/redirect") { res.writeHead(302, { location: "http://127.0.0.1:1/private" }); res.end(); return; }
+      res.writeHead(204); res.end();
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  const resolver = async () => [{ address: "127.0.0.1", family: 4 }];
+  const fetchFn = pinnedFetch({ allowLoopback: true, resolver });
+  const r1 = await fetchFn(`http://hooks.example.test:${port}/fire`, { method: "POST", headers: { "webhook-id": "t#1" }, body: '{"a":1}' });
+  assert.equal(r1.status, 204);
+  assert.equal(seen[0].host, `hooks.example.test:${port}`, "Host header is the hostname, not the pinned IP");
+  assert.equal(seen[0].body, '{"a":1}');
+  const r2 = await fetchFn(`http://hooks.example.test:${port}/redirect`, { method: "POST", headers: {}, body: "{}" });
+  assert.equal(r2.status, 302, "a redirect is returned as-is (non-2xx), never followed");
+  assert.equal(seen.length, 2);
+  server.close();
+});
+
+test("pinnedFetch refuses to connect when the resolved address is private (no allowLoopback)", async () => {
+  const fetchFn = pinnedFetch({ resolver: async () => [{ address: "10.0.0.5", family: 4 }] });
+  await assert.rejects(() => fetchFn("https://internal.example.com/x", { method: "POST", headers: {}, body: "{}" }), SsrfError);
+});
+
+test("deriveOwnerSecret: per-owner, deterministic, whsec_-formatted, verifies the fire signature", () => {
+  const server = "whsec_c2VydmVyLXNlY3JldA=="; // "server-secret"
+  const a = deriveOwnerSecret(server, "owner-a");
+  const b = deriveOwnerSecret(server, "owner-b");
+  assert.match(a, /^whsec_[A-Za-z0-9+/=]+$/);
+  assert.notEqual(a, b);
+  assert.equal(a, deriveOwnerSecret(server, "owner-a"), "deterministic per owner");
+  const sig = signWebhook({ id: "t#1", timestampSec: 1700000000, body: '{"x":1}', secret: a });
+  assert.ok(verifyWebhook({ id: "t#1", timestampSec: 1700000000, body: '{"x":1}', secret: a, signatureHeader: sig }), "owner verifies with the derived secret");
+  assert.ok(!verifyWebhook({ id: "t#1", timestampSec: 1700000000, body: '{"x":1}', secret: b, signatureHeader: sig }), "another owner's secret does not verify");
+});

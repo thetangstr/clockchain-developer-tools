@@ -16,16 +16,17 @@
  *     empty list refuses everything (forces operators to configure egress).
  *   - `allowLoopback` opt-in so local dev / tests can target 127.0.0.1.
  *
- * TODO (deferred, important for prod):
- *   - DNS resolution + re-check at connect time to defeat DNS-rebinding (a public
- *     hostname that resolves to a private IP, or flips between the registration
- *     check and the delivery connect — a TOCTOU). Today only LITERAL IP hosts are
- *     range-checked; hostnames are checked only against the allow-list. Production
- *     should resolve, pin the resolved IP, and connect to that pinned IP. Until
- *     then, set `requireAllowlist` so only known hosts are reachable.
- *   - Block redirects to private ranges. The deliverer sends `redirect: "manual"`,
- *     so a 30x is treated as a non-2xx failure rather than being followed.
+ * DNS rebinding: {@link resolvePinnedAddress} resolves the hostname at DELIVERY
+ * time, range-checks EVERY returned address, and hands back one vetted address that
+ * the deliverer connects to directly (`pinnedFetch` in webhook.ts) while keeping the
+ * hostname for TLS/SNI and the Host header. A hostname that resolves to a private
+ * address, or flips between the registration check and the connect, is refused —
+ * the connection can only ever go to the address that passed the check.
+ *
+ * Redirects are never followed (the deliverer treats a 30x as a non-2xx failure),
+ * so a redirect to a private range cannot be used to bypass the check either.
  */
+import { lookup as dnsLookup } from "node:dns/promises";
 
 export interface SsrfOptions {
   /** Allow loopback / private targets (local dev, tests). Default false. */
@@ -110,6 +111,47 @@ export function assertSafeWebhookUrl(target: string, opts: SsrfOptions = {}): UR
     );
   }
   return url;
+}
+
+/** A resolved, range-checked address the deliverer may connect to. */
+export interface PinnedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+/** Injectable resolver (tests substitute a fake). Returns every address for the host. */
+export type Resolver = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+
+const defaultResolver: Resolver = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
+
+/**
+ * Resolve `hostname` and return ONE address that passed the private-range check,
+ * refusing the whole target if ANY resolved address is blocked (an attacker who
+ * controls DNS can return a public and a private address and hope for the wrong
+ * pick). Literal IP hosts are checked directly. With `allowLoopback` the range
+ * check is skipped (local dev / tests) but resolution still happens.
+ */
+export async function resolvePinnedAddress(
+  hostname: string,
+  opts: SsrfOptions & { resolver?: Resolver } = {},
+): Promise<PinnedAddress> {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const literal = /^(\d{1,3}\.){3}\d{1,3}$/.test(host) ? 4 : host.includes(":") ? 6 : 0;
+  const results = literal
+    ? [{ address: host, family: literal }]
+    : await (opts.resolver ?? defaultResolver)(host);
+  if (results.length === 0) throw new SsrfError(`Webhook host "${host}" did not resolve.`);
+  if (!opts.allowLoopback) {
+    for (const r of results) {
+      if (isBlockedHost(r.address)) {
+        throw new SsrfError(
+          `Webhook host "${host}" resolves to a private/loopback/metadata address (${r.address}) and is blocked.`,
+        );
+      }
+    }
+  }
+  const pick = results[0];
+  return { address: pick.address, family: pick.family === 6 ? 6 : 4 };
 }
 
 /** True if a host literal is a loopback / private / link-local / metadata address. */

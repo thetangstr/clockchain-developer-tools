@@ -411,3 +411,16 @@ test("completeReceipt obtains consensusTime from the immutable public block afte
   assert.equal(done.anchor.blockHeight, "1742929");
   assert.equal(done.anchor.consensusTime, "2026-07-23T08:08:56.672021941Z");
 });
+
+test("substrate: explicit CLOCKCHAIN_SUBSTRATE wins, else derived from the endpoint host", async () => {
+  const { readConfigFromEnv, substrateForEndpoint, ClockchainClient } = await import("../dist/index.js");
+  assert.equal(substrateForEndpoint("https://node.clockchain.network"), "clockchain-network");
+  assert.equal(substrateForEndpoint("http://clockchain-anchor-gateway:8090"), "anchoring-gateway");
+  assert.equal(substrateForEndpoint("http://127.0.0.1:8097"), "anchoring-gateway");
+  assert.equal(readConfigFromEnv({ CLOCKCHAIN_SUBSTRATE: "anchoring-gateway" }).substrate, "anchoring-gateway");
+  assert.equal(readConfigFromEnv({ CLOCKCHAIN_SUBSTRATE: "bogus" }).substrate, undefined);
+  const c = new ClockchainClient({ apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://clockchain-anchor-gateway:8090" });
+  assert.equal(c.substrate(), "anchoring-gateway");
+  const d = new ClockchainClient({ apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://x.internal", substrate: "clockchain-network" });
+  assert.equal(d.substrate(), "clockchain-network", "explicit config overrides the heuristic");
+});

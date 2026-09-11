@@ -21,6 +21,9 @@ Provisioning does not report success until the exact new instance is SSM
 - `/clockchain/mcp/MCP_TOKEN_SIGNING_SECRET`
 - `/clockchain/mcp/GATEWAY_SIGNING_SECRET` — payload-bound request signing between the MCP and the
   owned anchoring gateway (both sides read the same value)
+- `/clockchain/mcp/KEEPER_WEBHOOK_SECRET` — Standard-Webhooks server secret for timer/alarm
+  deliveries; per-owner secrets are derived from it and shown to each owner at registration,
+  the value itself is never disclosed
 - `/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS`
@@ -49,6 +52,15 @@ network, the `anchor_gateway_data` volume, the read-only bind mount, and
 `GATEWAY_SIGNING_KEYS` from SSM. Check it from inside the network:
 `docker run --rm --network clockchain-mcp_clockchain_edge node:24-alpine wget -qO- http://clockchain-anchor-gateway:8090/healthz`.
 Rollback: the on-box `gateway.mjs.*-backup` copies + the same recreate.
+
+## Timer / alarm webhooks
+
+`timer_set` / `alarm_set` deliver a signed POST only to hosts on `KEEPER_WEBHOOK_ALLOWLIST`
+(set in `compose-up.sh`; deny-by-default in HTTP mode). Every delivery is DNS-pinned: the
+host is resolved at delivery time, every address is range-checked, and the connection goes
+to that vetted address with the hostname kept for TLS. Redirects are never followed. To let a
+new receiver host through, extend the allow-list in `compose-up.sh`, deploy, and confirm with
+a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works.
 
 ## Release and deploy order
 

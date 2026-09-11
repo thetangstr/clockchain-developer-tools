@@ -22,6 +22,7 @@ const expectedSecretNames = [
   "/clockchain/mcp/MCP_AUTH_TOKENS",
   "/clockchain/mcp/MCP_TOKEN_SIGNING_SECRET",
   "/clockchain/mcp/GATEWAY_SIGNING_SECRET",
+  "/clockchain/mcp/KEEPER_WEBHOOK_SECRET",
   "/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN",
   "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE",
   "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS",
@@ -41,6 +42,7 @@ const expectedEnv = {
   MCP_AUTH_TOKENS: "token-a,token-b\n",
   MCP_TOKEN_SIGNING_SECRET: "signing-secret\nwith-newline\n",
   CLOCKCHAIN_SIGNING_SECRET: "gateway-signing-secret\n",
+  KEEPER_WEBHOOK_SECRET: "whsec_a2VlcGVy\n",
   AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.3","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: '{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: '{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\n',
@@ -161,6 +163,8 @@ assert.equal(process.env.CLOCKCHAIN_WALLET_ID, "thetangstr@gmail.com");
 assert.equal(process.env.CLOCKCHAIN_ENDPOINT, "http://clockchain-anchor-gateway:8090");
 assert.equal(process.env.CLOCKCHAIN_SIGNING_KEY_ID, "default");
 assert.equal(process.env.KEEPER_STORE_PATH, "/app/state/keeper-store.json");
+assert.equal(process.env.KEEPER_WEBHOOK_ALLOWLIST, "hooks.slack.com,webhook.site");
+assert.equal(process.env.CLOCKCHAIN_SUBSTRATE, "anchoring-gateway");
 assert.equal(process.env.ERC8004_REGISTRY_ADDRESS, "0x8004A818BFB912233c491871b3d84c89A494BD9e");
 await writeFile(process.env.DOCKER_OK_FILE, "ok\\n");
 `.trimStart(),
@@ -192,6 +196,7 @@ case "$name" in
   /clockchain/mcp/MCP_AUTH_TOKENS) value=$'token-a,token-b\\n' ;;
   /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET) value=$'signing-secret\\nwith-newline\\n' ;;
   /clockchain/mcp/GATEWAY_SIGNING_SECRET) value=$'gateway-signing-secret\\n' ;;
+  /clockchain/mcp/KEEPER_WEBHOOK_SECRET) value=$'whsec_a2VlcGVy\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.3","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE) value=$'{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) value=$'{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\\n' ;;
@@ -299,6 +304,9 @@ async function resolvedComposeConfig() {
       CLOCKCHAIN_ENDPOINT: "http://clockchain-anchor-gateway:8090",
       CLOCKCHAIN_SIGNING_KEY_ID: "default",
       KEEPER_STORE_PATH: "/app/state/keeper-store.json",
+      KEEPER_WEBHOOK_SECRET: "dummy-webhook",
+      KEEPER_WEBHOOK_ALLOWLIST: "hooks.slack.com,webhook.site",
+      CLOCKCHAIN_SUBSTRATE: "anchoring-gateway",
       ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
       CLOCKCHAIN_API_KEY: "dummy-api",
       MCP_AUTH_TOKENS: "dummy-token",
@@ -382,6 +390,9 @@ test("deployment assets define the locked EC2 compose target", async () => {
   assert.match(compose, /CLOCKCHAIN_SIGNING_KEY_ID:\s*"\$\{CLOCKCHAIN_SIGNING_KEY_ID\}"/);
   // Timer/alarm keeper store lives on the persistent mcp_state volume.
   assert.match(compose, /KEEPER_STORE_PATH:\s*"\$\{KEEPER_STORE_PATH\}"/);
+  assert.match(compose, /KEEPER_WEBHOOK_SECRET:\s*"\$\{KEEPER_WEBHOOK_SECRET\}"/);
+  assert.match(compose, /KEEPER_WEBHOOK_ALLOWLIST:\s*"\$\{KEEPER_WEBHOOK_ALLOWLIST\}"/);
+  assert.match(compose, /CLOCKCHAIN_SUBSTRATE:\s*"\$\{CLOCKCHAIN_SUBSTRATE\}"/);
   const wrapperSource = await readFile(wrapper, "utf8");
   assert.match(wrapperSource, /read_secret CLOCKCHAIN_SIGNING_SECRET \/clockchain\/mcp\/GATEWAY_SIGNING_SECRET/);
   assert.match(wrapperSource, /CLOCKCHAIN_ENDPOINT=http:\/\/clockchain-anchor-gateway:8090/);
@@ -444,6 +455,8 @@ test("resolved compose config gives mcp durable handshake state and relay defaul
   assert.equal(mcp.environment.CLOCKCHAIN_SIGNING_KEY_ID, "default");
   assert.equal(mcp.environment.CLOCKCHAIN_SIGNING_SECRET, "dummy-gateway-signing");
   assert.equal(mcp.environment.KEEPER_STORE_PATH, "/app/state/keeper-store.json");
+  assert.equal(mcp.environment.KEEPER_WEBHOOK_ALLOWLIST, "hooks.slack.com,webhook.site");
+  assert.equal(mcp.environment.CLOCKCHAIN_SUBSTRATE, "anchoring-gateway");
   assert.equal(mcp.environment.AGENT_HANDSHAKE_V2_INVITATION_FILE, "/app/state/agent-handshake-v2-invitations.json");
   assert.equal(mcp.environment.AGENT_HANDSHAKE_V2_STATE_FILE, "/app/state/agent-handshake-v2-state.json");
   assert.equal(mcp.environment.AGENT_HANDSHAKE_TRUSTED_PROXY, "172.30.0.3");

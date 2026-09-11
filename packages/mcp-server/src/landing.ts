@@ -15,6 +15,14 @@ const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 // full-surface tool count; the module count is the MODULES list below. The
 // page used to hard-code these in seven places and drifted (31/42, six/seven).
 export const TOOL_COUNT = CLASSIFIED_TOOLS.size;
+// Where anchors live on THIS deployment, stated honestly on the page (D7). Same rule as
+// core's receipts: CLOCKCHAIN_SUBSTRATE wins, else derived from the endpoint host.
+const SUBSTRATE = process.env.CLOCKCHAIN_SUBSTRATE === "clockchain-network" || process.env.CLOCKCHAIN_SUBSTRATE === "anchoring-gateway"
+  ? process.env.CLOCKCHAIN_SUBSTRATE
+  : (() => { try { const h = new URL(process.env.CLOCKCHAIN_ENDPOINT || "https://node.clockchain.network").hostname; return h === "clockchain.network" || h.endsWith(".clockchain.network") ? "clockchain-network" : "anchoring-gateway"; } catch { return "anchoring-gateway"; } })();
+export const SUBSTRATE_LABEL = SUBSTRATE === "clockchain-network"
+  ? "single-validator Clockchain testnet"
+  : "Clockchain anchoring gateway (testnet, single operator)";
 
 const CMD_CLAUDE =
   'claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp --header "x-api-key: <YOUR_TOKEN>"';
@@ -158,7 +166,7 @@ const MODULES = [
   { i: "04", name: "Audit", body: "Audit trails, compliance reports (EU AI Act Art. 12, SEC 17a-4, ISO 27001), and portable evidence packages." },
   { i: "05", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
   { i: "06", name: "Commitments", body: "Issue, checkpoint, attest, settle — every commitment's outcome, kept or broken, on the record." },
-  { i: "07", name: "Verified time tools", wide: true, body: "Stopwatch, timer, alarm on consensus time — hosted. stopwatch_start / stop / verify: elapsed time between two anchored markers, re-verifiable from the blocks. timer_set / alarm_set: fire on verified time while your client is offline, never early; poll timer_status for the receipt. Every fire is a keyless-verifiable anchor. Testnet, single validator." },
+  { i: "07", name: "Verified time tools", wide: true, body: `Stopwatch, timer, alarm on consensus time — hosted. stopwatch_start / stop / verify: elapsed time between two anchored markers, re-verifiable from the blocks. timer_set / alarm_set: fire on verified time while your client is offline, never early; poll timer_status for the receipt, or receive a signed webhook. Every fire is a keyless-verifiable anchor on the ${SUBSTRATE_LABEL}.` },
 ];
 export const MODULE_COUNT = MODULES.length;
 const MODULE_WORD = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][MODULE_COUNT] ?? String(MODULE_COUNT);
@@ -428,7 +436,7 @@ export const LANDING_HTML = `<!doctype html>
       <a href="https://mcp.clockchain.network/health">Health</a>
     </div>
   </div>
-  <p class="disclaimer">Presently recorded on a single-validator testnet: the event hash, on-chain anchor, and consensus timestamp are real and independently verifiable. Multi-validator supermajority attestation activates at mainnet. Not yet a court-of-law evidentiary claim.</p>
+  <p class="disclaimer">Presently anchored on the ${SUBSTRATE_LABEL}: the event hash, block anchor, and block time are real and keyless-verifiable against the sealed block, but not yet attested by an independent validator set. Multi-validator supermajority attestation activates at mainnet. Not yet a court-of-law evidentiary claim.</p>
 </div></footer>
 
 <div class="toast" id="toast"></div>
