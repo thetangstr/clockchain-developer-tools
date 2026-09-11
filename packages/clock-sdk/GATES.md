@@ -303,6 +303,22 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
   preserved on the box as local branch `host/pre-main-2026-09-11`.
 
+## Run results — 2026-09-11 03:50 UTC, production after the finishing set (PR #106) — 12 / 12
+
+`scripts/deploy-box.sh 461999b` then the full suite — **12 pass / 0 fail, 118 s.** What changed
+underneath: receipts now carry `attestation.substrate: "anchoring-gateway"` with the honest note
+(D7); the SDK's uncertainty band includes the consensus-vs-wall skew (D5) — G2's sync reported
+**±204 ms** instead of ±20 ms; webhook delivery is on with DNS pinning (C6).
+
+**Webhook proof (same deploy):** `timer_set { delay_ms: 5000, webhook_url: https://webhook.site/… }`
+→ `delivery: webhook`, per-owner `webhookSecret` returned → fire delivered on attempt 1 (HTTP 204),
+anchored at block 372 → the receiver's `webhook-signature` verified with that owner secret
+(`v1,` HMAC-SHA256 over `id.timestamp.body`), `webhook-id` = the fire id.
+
+**Try-it script** (`examples/try-clock-tools-mcp.sh`) against production: tester token — stopwatch
+3190 ms verified, hosted timer +87 ms verified (block 338); self-serve demo token — stopwatch
+3181 ms verified, hosted timer +807 ms verified (block 343).
+
 ## Run results — 2026-09-11 01:59 UTC, production with the hosted timer/alarm (PR #104) — 12 / 12
 
 `CC_LIVE_GATES=1 node --test test/gates-live.test.mjs` against `mcp.clockchain.network` after

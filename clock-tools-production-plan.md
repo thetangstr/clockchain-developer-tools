@@ -33,6 +33,20 @@ Three root causes, three different owners:
    `gateway.mjs`, not a network-team dependency. (The June live-oracle fields came from the
    real network; the key rename is ours too.)
 
+## Status — 2026-09-11: production ready on the stated definition
+
+| Criterion | Stopwatch | Timer | Alarm |
+|---|---|---|---|
+| Gates green in prod | ✅ G1, G1b | ✅ G2, G2b | ✅ G3a, G3b, G3c |
+| Offered as MCP tools | ✅ `stopwatch_*` | ✅ `timer_set` | ✅ `alarm_set` |
+| Honest claims | ✅ substrate in receipts + page | ✅ | ✅ |
+| Truthful anchoring | ✅ | ✅ | ✅ |
+| Operable | ✅ deploy-box.sh, nightly gates, bounds | ✅ | ✅ |
+
+Still open, by choice: per-owner billing (needs gateway sub-keys); a `confirmed`-mode variant of
+the hosted alarm; the real network (`node.clockchain.network`) coming back — re-run G0–G4 against
+it before repointing production.
+
 ## 2. What "production ready" means here
 
 A tool is production-ready when all of the following hold on the deployed endpoint:
@@ -127,6 +141,7 @@ Thu Sep 10  gates drafted + run (done)            ── GATES.md
 Thu Sep 11  #98 #99 #100 merged + deployed (done)  ── guard fix, stopwatch tools, page, heartbeat gateway; prod gates 10/10
 Thu Sep 11  #102 D8 (done)                          ── main == production; box checkout clean; deploy-box.sh (36 s restart); nightly gates armed
 Thu Sep 11  #104 WS-C (done)                        ── hosted timer/alarm live (timer_set / alarm_set / timer_status); prod gates 12/12
+Thu Sep 11  #106 finish (done)                      ── D5 skew-aware uncertainty, D7 honest substrate, C6 DNS-pinned webhooks + per-owner secrets, try-it script; prod 12/12 + webhook proof
 Mon Sep 14  Monday meeting: results, D1–D6, N1–N4  ── WS-A landed on main (G0.4 green after deploy)
 Wed Sep 17  handshake demo target (unchanged)       ── stopwatch tools + page v1 live (WS-B, in the same PR as WS-A)
 Fri Sep 19  keeper worker deployed w/ heartbeat     ── C1–C4; G3b/G4 green; page update v2 (timer/alarm live, beta)
