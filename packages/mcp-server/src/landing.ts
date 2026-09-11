@@ -158,7 +158,7 @@ const MODULES = [
   { i: "04", name: "Audit", body: "Audit trails, compliance reports (EU AI Act Art. 12, SEC 17a-4, ISO 27001), and portable evidence packages." },
   { i: "05", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
   { i: "06", name: "Commitments", body: "Issue, checkpoint, attest, settle — every commitment's outcome, kept or broken, on the record." },
-  { i: "07", name: "Verified time tools", wide: true, body: "Stopwatch, timer, alarm on consensus time — elapsed time between two anchored markers, and fires that land on verified time, never early, each anchored as a keyless-verifiable receipt. Open clock SDK today; hosted tools in beta next." },
+  { i: "07", name: "Verified time tools", wide: true, body: "Stopwatch, timer, alarm on consensus time — hosted. stopwatch_start / stop / verify: elapsed time between two anchored markers, re-verifiable from the blocks. timer_set / alarm_set: fire on verified time while your client is offline, never early; poll timer_status for the receipt. Every fire is a keyless-verifiable anchor. Testnet, single validator." },
 ];
 export const MODULE_COUNT = MODULES.length;
 const MODULE_WORD = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][MODULE_COUNT] ?? String(MODULE_COUNT);

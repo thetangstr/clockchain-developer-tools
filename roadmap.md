@@ -4,12 +4,12 @@ A single, accurate "what works / what's limited / what's next" for the hosted
 Clockchain MCP server. Last updated 2026-09-10.
 
 > Supersedes the earlier v1/v2/v3 (local → Mac mini → AWS) plan — all of which has
-> shipped past: the server is hosted on **GCP Cloud Run** with 45 tools and a public
+> shipped past: the server is hosted on **GCP Cloud Run** with 50 tools and a public
 > HTTP endpoint, well beyond the original v2 bar.
 
 ## Status
 
-- **Live:** `https://mcp.clockchain.network/mcp` (GCP Cloud Run), **45 tools** across
+- **Live:** `https://mcp.clockchain.network/mcp` (GCP Cloud Run), **50 tools** across
   seven modules. Browser visitors to `mcp.clockchain.network` get a landing page; agents
   `POST /mcp`. Keyless CI/CD (WIF) with a test gate; Cloud Armor + LB + managed TLS.
 - **Status dashboard:** `status.clockchain.network` (pending one DNS record) /
@@ -32,8 +32,10 @@ Clockchain MCP server. Last updated 2026-09-10.
 - **Independent verification + tamper detection** — recompute the hash, compare to the
   immutable on-chain block; a changed byte fails verification.
 - **Verified time tools** — `stopwatch_start/stop/verify` (anchored elapsed time, duration
-  re-verified from block times). Timer and alarm run client-side via `@clockchain/clock-sdk`;
-  gates and live results in [`packages/clock-sdk/GATES.md`](packages/clock-sdk/GATES.md).
+  re-verified from block times); `timer_set` / `alarm_set` / `timer_status` / `timer_cancel` /
+  `timer_list` (hosted keeper: fires while the client is offline, poll for the receipt;
+  account-gated; webhooks off until the allow-list ships). Gates and live results in
+  [`packages/clock-sdk/GATES.md`](packages/clock-sdk/GATES.md).
 
 ## Known limitations
 

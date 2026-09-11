@@ -1,5 +1,6 @@
 import { runHttp } from "./http.js";
 import { buildServer } from "./server.js";
+import { startKeeperRuntime } from "./keeper-runtime.js";
 
 export { buildServer } from "./server.js";
 export { registerTools } from "./tools.js";
@@ -12,6 +13,9 @@ export * from "./promote.js";
 
 /** Dispatch on MCP_TRANSPORT: "http" runs the HTTP server, else stdio. */
 async function main(): Promise<void> {
+  // Timer/alarm data plane: one loop per process, re-armed from the durable store.
+  // Non-blocking — the server must come up even if the gateway is slow at boot.
+  startKeeperRuntime();
   if ((process.env.MCP_TRANSPORT ?? "stdio").toLowerCase() === "http") {
     await runHttp();
     return;

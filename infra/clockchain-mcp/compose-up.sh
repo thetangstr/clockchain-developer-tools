@@ -234,6 +234,9 @@ export CLOCKCHAIN_WALLET_ID=thetangstr@gmail.com
 # (currently down) node.clockchain.network. See infra/anchoring-gateway/README.md.
 export CLOCKCHAIN_ENDPOINT=http://clockchain-anchor-gateway:8090
 export CLOCKCHAIN_SIGNING_KEY_ID=default
+# Timer/alarm keeper: durable trigger store on the mcp_state volume (survives restarts; re-armed on boot).
+# Webhook delivery stays off (no KEEPER_WEBHOOK_SECRET) — poll via timer_status — until the allow-list lands.
+export KEEPER_STORE_PATH=/app/state/keeper-store.json
 export ERC8004_REGISTRY_ADDRESS=0x8004A818BFB912233c491871b3d84c89A494BD9e
 
 cd "$DEPLOY_DIR"

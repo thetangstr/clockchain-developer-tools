@@ -41,8 +41,9 @@ test("every tool/module count on the page is derived from the registered surface
 test("landing page lists the verified time tools module (stopwatch / timer / alarm)", () => {
   assert.match(LANDING_HTML, /Verified time tools/);
   assert.match(LANDING_HTML, /Stopwatch, timer, alarm/);
-  // Honest claim: hosted timer/alarm are not live yet.
-  assert.match(LANDING_HTML, /hosted tools in beta next/);
+  // The hosted tools are named, and the claim stays honest about the substrate.
+  assert.match(LANDING_HTML, /timer_set \/ alarm_set/);
+  assert.match(LANDING_HTML, /Testnet, single validator/);
 });
 
 test("landing page points agents at the real endpoint + key headers, not a fake", () => {

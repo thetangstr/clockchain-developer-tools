@@ -33,6 +33,8 @@ import type { HandshakeSessionTokenPayload } from "./token.js";
 import { idempotent } from "./idempotency.js";
 import type { KeeperGate } from "./entitlement.js";
 import { assertToolClassified } from "./entitlement.js";
+import type { Keeper, Trigger } from "@clockchain/keeper";
+import { getRuntimeKeeper, keeperWebhooksEnabled } from "./keeper-runtime.js";
 
 /** Shared schema fragment: optional idempotency key for write tools. */
 const idempotencyKeySchema = z
@@ -310,6 +312,10 @@ export function registerTools(
     agentHandshakeCoordinator?: AgentHandshakeCoordinator;
     agentHandshakeInvitationService?: AgentHandshakeInvitationService;
     agentHandshakeScope?: HandshakeSessionTokenPayload;
+    /** Verified-time timer/alarm data plane. Defaults to the process-wide runtime; tests inject a fake. */
+    keeper?: Keeper;
+    /** Whether webhook delivery is configured (defaults to KEEPER_WEBHOOK_SECRET presence). */
+    keeperWebhooks?: boolean;
   } = {},
 ): void {
   // Fail-closed classification guard (CLO-48 review FIX 2). We intercept
@@ -863,6 +869,229 @@ export function registerTools(
             ? "Both markers resolve to immutable on-chain blocks in causal order; elapsedOnChainMs is the difference of the two block times."
             : "Not verified: a marker is missing from its block, the blocks are out of order, or a block time could not be read. Do not treat elapsedRecordedMs as proof.",
         };
+      }),
+  );
+
+  // ----- Verified-time tools: timer + alarm (hosted keeper) -----
+  //
+  // Server-side one-shots on Clockchain-disciplined time that fire while the
+  // caller is offline; each fire is anchored as a keyless-verifiable receipt.
+  // Control plane here; the dispatch loop is keeper-runtime.ts. Owner scoping
+  // uses the transport-resolved caller identity (never a client-supplied value).
+  // Delivery: poll (timer_status) always; a Standard-Webhooks POST only when the
+  // deployment has webhook delivery configured — server-side POSTs to arbitrary
+  // URLs are the abuse surface, so they stay off until the allow-list is in place.
+
+  const keeperOf = (): Keeper => opts.keeper ?? getRuntimeKeeper();
+  const webhooksOn = opts.keeperWebhooks ?? keeperWebhooksEnabled();
+  const owner = opts.principalId ?? "stdio";
+  const MIN_DELAY_MS = 1_000;
+  const MAX_HORIZON_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  const MIN_INTERVAL_MS = 60_000; // an interval fire spends a credit each time
+
+  const fireOf = (t: Trigger) =>
+    t.fires.map((f) => ({
+      fireId: f.fireId,
+      scheduledForMs: f.scheduledForMs,
+      scheduledForIso: new Date(f.scheduledForMs).toISOString(),
+      firedAtMs: f.firedAtMs,
+      firedAtIso: new Date(f.firedAtMs).toISOString(),
+      firedAtUncertaintyMs: f.firedAtUncertaintyMs,
+      delivery: f.delivery,
+      anchor: {
+        status: f.anchor.status,
+        ledgerId: f.anchor.ledgerId,
+        blockHeight: f.anchor.blockHeight,
+        eventHash: f.anchor.eventHash,
+      },
+      // The persisted Agent Attested Receipt (null until the anchor write succeeds):
+      // pass anchor.ledgerId + blockHeight to verify_cross_party for the keyless check.
+      receipt: f.anchor.receipt ?? null,
+    }));
+  const triggerView = (t: Trigger) => ({
+    id: t.id,
+    label: t.label ?? null,
+    status: t.status,
+    mode: t.mode,
+    intervalMs: t.intervalMs ?? null,
+    fireAtMs: t.fireAtMs,
+    fireAtIso: new Date(t.fireAtMs).toISOString(),
+    delivery: t.target ? "webhook" : "poll",
+    target: t.target,
+    lastError: t.lastError,
+    fires: fireOf(t),
+  });
+  const armed = (t: Trigger, kind: "timer" | "alarm") => ({
+    id: t.id,
+    kind,
+    status: t.status,
+    fireAtMs: t.fireAtMs,
+    fireAtIso: new Date(t.fireAtMs).toISOString(),
+    mode: t.mode,
+    delivery: t.target ? "webhook" : "poll",
+    next: t.target
+      ? "Armed. Fires on verified time even if you disconnect; the fire is POSTed to your webhook and anchored. Poll timer_status { id } for the receipt."
+      : `Armed. Fires on verified time even if you disconnect. Poll timer_status { id: "${t.id}" } after ${new Date(t.fireAtMs).toISOString()}; the fire's receipt (ledgerId + blockHeight) verifies keylessly with verify_cross_party.`,
+  });
+  const webhookSchema = z
+    .string()
+    .url()
+    .optional()
+    .describe(
+      "Optional HTTPS URL to POST when it fires (Standard-Webhooks signed). Omit to poll with timer_status instead." +
+        (webhooksOn ? "" : " Webhook delivery is not enabled on this deployment; omit it."),
+    );
+  const requireWebhooksOn = (url: string | undefined) => {
+    if (url && !webhooksOn) {
+      throw new ApiError(
+        "Webhook delivery is not enabled on this deployment. Omit webhook_url and poll timer_status { id } instead.",
+        400,
+      );
+    }
+  };
+  const parseFireAt = (v: string | number): number => {
+    const ms = typeof v === "number" ? v : Date.parse(v);
+    if (!Number.isFinite(ms)) throw new ApiError(`fire_at "${v}" is not epoch milliseconds or ISO-8601.`, 400);
+    return ms;
+  };
+  const checkHorizon = (fireAtMs: number, nowMs: number) => {
+    if (fireAtMs - nowMs > MAX_HORIZON_MS) {
+      throw new ApiError(`fire time is more than 30 days out (${new Date(fireAtMs).toISOString()}); the hosted keeper holds triggers for at most 30 days.`, 400);
+    }
+  };
+
+  server.registerTool(
+    "timer_set",
+    {
+      title: "Set a verified timer",
+      description:
+        "Start a one-shot timer of `delay_ms` on Clockchain consensus time. The hosted keeper " +
+        "fires it even if you disconnect, never early, and anchors the fire as a keyless-verifiable " +
+        "receipt. Returns the timer id; poll timer_status { id } for the fire and its receipt. " +
+        "Testnet; each fire spends one log credit.",
+      inputSchema: {
+        delay_ms: z
+          .number()
+          .int()
+          .min(MIN_DELAY_MS)
+          .max(MAX_HORIZON_MS)
+          .describe("Duration until it fires, in ms (1 s .. 30 days)."),
+        label: z.string().max(128).optional().describe("What this timer is for (plain text)."),
+        payload: z.unknown().optional().describe("Optional JSON hashed into the anchor (and delivered if a webhook is set)."),
+        webhook_url: webhookSchema,
+      },
+    },
+    async ({ delay_ms, label, payload, webhook_url }) =>
+      run("timer_set", async () => {
+        requireWebhooksOn(webhook_url);
+        const k = keeperOf();
+        const now = k.now(); // disciplined consensus time, not the host clock
+        const t = await k.schedule({
+          sub: owner,
+          fireAtMs: now + delay_ms,
+          target: webhook_url ?? null,
+          label,
+          payload,
+        });
+        return { ...armed(t, "timer"), armedAtMs: now, armedAtIso: new Date(now).toISOString(), delayMs: delay_ms };
+      }),
+  );
+
+  server.registerTool(
+    "alarm_set",
+    {
+      title: "Set a verified alarm",
+      description:
+        "Fire at an absolute time `fire_at` (epoch ms or ISO-8601) on Clockchain consensus time. " +
+        "The hosted keeper fires it even if you disconnect, never early, and anchors the fire as a " +
+        "keyless-verifiable receipt. `every_ms` makes it recurring (re-arms after each anchored " +
+        "fire; cancel to stop). Returns the alarm id; poll timer_status { id }. Testnet; each fire " +
+        "spends one log credit.",
+      inputSchema: {
+        fire_at: z.union([z.string(), z.number()]).describe("When to fire: epoch milliseconds or an ISO-8601 timestamp (UTC)."),
+        every_ms: z
+          .number()
+          .int()
+          .min(MIN_INTERVAL_MS)
+          .optional()
+          .describe("Optional: re-fire every this many ms (minimum 60000). Each fire spends a credit."),
+        label: z.string().max(128).optional().describe("What this alarm is for (plain text)."),
+        payload: z.unknown().optional().describe("Optional JSON hashed into the anchor (and delivered if a webhook is set)."),
+        webhook_url: webhookSchema,
+      },
+    },
+    async ({ fire_at, every_ms, label, payload, webhook_url }) =>
+      run("alarm_set", async () => {
+        requireWebhooksOn(webhook_url);
+        const k = keeperOf();
+        const now = k.now();
+        const fireAtMs = parseFireAt(fire_at);
+        checkHorizon(fireAtMs, now);
+        const t = await k.schedule({
+          sub: owner,
+          fireAtMs,
+          target: webhook_url ?? null,
+          label,
+          payload,
+          mode: every_ms ? "interval" : "once",
+          intervalMs: every_ms,
+        });
+        const late = fireAtMs < now;
+        return {
+          ...armed(t, "alarm"),
+          armedAtMs: now,
+          armedAtIso: new Date(now).toISOString(),
+          ...(late
+            ? { warning: `fire_at is already in the past on consensus time (${new Date(now).toISOString()}); it fires on the next tick, once, and the receipt records the original target.` }
+            : {}),
+        };
+      }),
+  );
+
+  server.registerTool(
+    "timer_status",
+    {
+      title: "Read a timer or alarm",
+      description:
+        "Status of one of your timers/alarms: scheduled | firing | done | cancelled | dead, its " +
+        "fire time, and every fire with its anchor (ledgerId, blockHeight) and receipt. A fire is " +
+        "'done' only once anchored. Read-only.",
+      inputSchema: { id: z.string().describe("The id returned by timer_set / alarm_set.") },
+    },
+    async ({ id }) =>
+      run("timer_status", async () => {
+        const t = await keeperOf().get(id, owner);
+        if (!t) throw new ApiError(`No timer/alarm "${id}" for this caller.`, 404);
+        return triggerView(t);
+      }),
+  );
+
+  server.registerTool(
+    "timer_cancel",
+    {
+      title: "Cancel a timer or alarm",
+      description: "Cancel one of your timers/alarms so it no longer fires. Idempotent on an already-finished one.",
+      inputSchema: { id: z.string().describe("The id returned by timer_set / alarm_set.") },
+    },
+    async ({ id }) =>
+      run("timer_cancel", async () => {
+        const t = await keeperOf().cancel(id, owner);
+        if (!t) throw new ApiError(`No timer/alarm "${id}" for this caller.`, 404);
+        return { id: t.id, status: t.status, cancelled: t.status === "cancelled" };
+      }),
+  );
+
+  server.registerTool(
+    "timer_list",
+    {
+      title: "List your timers and alarms",
+      description: "Every timer/alarm registered by this caller, soonest first, with status and fires. Read-only.",
+      inputSchema: {},
+    },
+    async () =>
+      run("timer_list", async () => {
+        const all = await keeperOf().list(owner);
+        return { count: all.length, triggers: all.map(triggerView) };
       }),
   );
 

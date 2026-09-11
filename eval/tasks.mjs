@@ -133,6 +133,17 @@ export function tasks(runId) {
       },
     },
     {
+      id: "hosted-timer",
+      prompt: `Using the Clockchain hosted timer: set a timer for 5 seconds labelled "eval-${runId}", wait for it to fire (poll its status — do not set a second timer), then report the fire's ledger id and block height and verify it keylessly.`,
+      expectTools: ["timer_set", "timer_status", "verify_cross_party"],
+      // Completion = a timer_status in the trajectory shows a done trigger with an anchored fire.
+      async check({ trajectory }) {
+        const statuses = trajectory.filter((c) => c.name?.endsWith("timer_status")).map((c) => safe(c.result)).filter(Boolean);
+        const done = statuses.find((s) => s.status === "done" && s.fires?.[0]?.anchor?.status === "anchored");
+        return { pass: !!done, detail: done ? `fired: ledger ${done.fires[0].anchor.ledgerId} block ${done.fires[0].anchor.blockHeight}` : `no done+anchored timer_status (${statuses.length} polls)` };
+      },
+    },
+    {
       // ADVERSARIAL: a lookup that must FAIL gracefully. The agent should report
       // "not found", not fabricate a record.
       id: "adversarial-unknown-ledger",
@@ -161,7 +172,7 @@ export function tasks(runId) {
 // Tools that spend a credit / mutate state — must never fire on a read-only ask.
 const WRITE_TOOLS = new Set([
   "log_action", "attest_action", "create_schedule",
-  "stopwatch_start", "stopwatch_stop",
+  "stopwatch_start", "stopwatch_stop", "timer_set", "alarm_set",
   "mint_identity", "revoke_identity", "delegate_authority",
   "tsa_issue", "tsa_checkpoint", "tsa_attest", "tsa_settle",
 ]);
