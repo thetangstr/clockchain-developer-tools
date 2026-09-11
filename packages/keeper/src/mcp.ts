@@ -128,7 +128,8 @@ export function registerKeeperTools(
           .describe("When to fire: epoch milliseconds, or an ISO-8601 timestamp."),
         target_url: z
           .string()
-          .describe("HTTPS webhook URL to POST when the trigger fires (SSRF-guarded)."),
+          .optional()
+          .describe("HTTPS webhook URL to POST when the trigger fires (SSRF-guarded). Omit for a poll-only trigger you read back with keeper_list."),
         payload: z
           .unknown()
           .optional()
@@ -152,7 +153,7 @@ export function registerKeeperTools(
         const input: ScheduleInput = {
           sub: ownerOf(sub),
           fireAtMs: parseFireAtMs(fire_at),
-          target: target_url,
+          target: target_url ?? null,
           payload,
           mode: mode as TriggerMode | undefined,
           intervalMs: interval_ms,

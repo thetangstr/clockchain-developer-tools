@@ -10,9 +10,16 @@ off-chain worker with two planes:
 
 - **Control plane** — MCP tools `keeper_schedule`, `keeper_list`, `keeper_cancel`
   (named to avoid colliding with the mcp-server's contract-deploy
-  `create_schedule` / `list_schedules`).
+  `create_schedule` / `list_schedules`). The hosted MCP exposes the same keeper as
+  `timer_set` / `alarm_set` / `timer_status` / `timer_cancel` / `timer_list`
+  (`packages/mcp-server/src/keeper-runtime.ts` runs the loop **in the MCP process**,
+  one per box, store on the `mcp_state` volume — no second service).
 - **Data plane** — an always-on dispatch loop, disciplined to Clockchain
   consensus time, that fires due triggers.
+- **Poll-only triggers** — a trigger without a target has nothing to deliver
+  (`delivery.status: "skipped"`); the fire is still anchored and the owner reads it
+  back. This is the hosted default until webhook delivery is enabled with
+  `KEEPER_WEBHOOK_SECRET` + an allow-list.
 
 > This is the first shippable increment. See **Deferred scope** below for the
 > honest TODO list (multi-tenant scale, full OAuth, per-`sub` gateway sub-key

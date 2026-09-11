@@ -46,7 +46,7 @@ claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
   --header "x-api-key: <YOUR_TOKEN>"
 ```
 
-Then run `/mcp` (or your client's equivalent), confirm `clockchain` (45 tools), and
+Then run `/mcp` (or your client's equivalent), confirm `clockchain` (50 tools), and
 ask: *"use clockchain to get the current consensus time."* Self-host (local stdio),
 bring-your-own-key, and chat-connector setup are in [`INSTALL.md`](INSTALL.md).
 
@@ -72,17 +72,19 @@ client. Chat-connector clients (claude.ai chat, Cowork) are different — see
 
 ## What you get
 
-**45 tools across seven modules:**
+**50 tools across seven modules:**
 
 - **Time:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
 - **Logging (notarization):** `log_action`, `get_log_entry`, `search_actions`,
   `verify_asset`.
 - **Verified time tools:** `stopwatch_start`, `stopwatch_stop`, `stopwatch_verify` —
   a tamper-evident elapsed time between two anchored markers; `stopwatch_verify`
-  recomputes the duration from the two immutable block times, keylessly. Timer and
-  alarm run client-side today via [`@clockchain/clock-sdk`](packages/clock-sdk)
-  (hosted firing is the keeper, in beta next — see
-  [`clock-tools-production-plan.md`](clock-tools-production-plan.md)).
+  recomputes the duration from the two immutable block times, keylessly.
+  `timer_set`, `alarm_set`, `timer_status`, `timer_cancel`, `timer_list` — hosted
+  one-shots (and recurring alarms) on consensus time that fire while your client is
+  offline; poll `timer_status` for the fire and its receipt. Account-gated (server-side
+  firing spends credits unattended); webhook delivery is off until the allow-list ships.
+  The same primitives run client-side via [`@clockchain/clock-sdk`](packages/clock-sdk).
 - **Scheduler (smart-contract):** `get_contract_types`, `estimate_schedule`,
   `create_schedule`, `list_schedules`. Types/estimate/list are live;
   `create_schedule` is a preview — it's blocked on the backend signing-message
@@ -241,7 +243,7 @@ anchored); multi-validator (Phase 3) addresses pool participation. The
 ## Status
 
 Working against the live gateway. The MCP server is **verified working** —
-`initialize` + `tools/list` returns 45 tools and live calls succeed. Verified
+`initialize` + `tools/list` returns 50 tools and live calls succeed. Verified
 surface (updated 2026-06-11):
 
 - **Time:** read consensus time from the **public `/getTime`** (no key scope). The

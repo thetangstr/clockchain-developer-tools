@@ -1,7 +1,7 @@
 # Install the Clockchain MCP server
 
 Add Clockchain's tools (consensus time, notarization, smart-contract scheduling,
-audit trails, agent identity verification, commitment lifecycle, verified time tools — 45 tools across
+audit trails, agent identity verification, commitment lifecycle, verified time tools — 50 tools across
 six modules) to **any MCP client**. Two ways: **hosted** (recommended — connect to
 the live endpoint, nothing to run) or **self-host** (run the server locally over stdio).
 
@@ -39,7 +39,7 @@ credentials as headers — `x-clockchain-api-key`, `x-clockchain-client-id`,
 `x-clockchain-wallet-id` (no MCP token needed).
 
 Then run `/mcp` (or your client's equivalent) — you should see `clockchain` with
-all 45 tools — and ask: *"use clockchain to get the current consensus time."*
+all 50 tools — and ask: *"use clockchain to get the current consensus time."*
 
 ---
 
@@ -190,13 +190,14 @@ connector-compatible auth layer remain.
 | Non-custodial | yes - no private keys in the server | yes - key custodied on the host, not shared |
 
 ## The tools you get
-**45 tools across seven modules** (`/mcp` should list `clockchain` with all 45):
+**50 tools across seven modules** (`/mcp` should list `clockchain` with all 50):
 
 - **Time oracle:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
 - **Notarization:** `log_action`, `get_log_entry`, `search_actions`, `verify_asset`.
 - **Verified time tools:** `stopwatch_start`, `stopwatch_stop`, `stopwatch_verify`
-  (anchored elapsed time, keyless duration verification). Timer/alarm: client-side
-  `@clockchain/clock-sdk` today; hosted keeper in beta next.
+  (anchored elapsed time, keyless duration verification); `timer_set`, `alarm_set`,
+  `timer_status`, `timer_cancel`, `timer_list` (hosted timer/alarm that fire while you
+  are offline — poll `timer_status`; account-gated).
 - **Scheduler:** `get_contract_types`, `estimate_schedule`, `create_schedule`,
   `list_schedules` (types/estimate/list live; `create_schedule` is a preview,
   blocked on the backend signing-message spec — non-custodial, the caller's EVM

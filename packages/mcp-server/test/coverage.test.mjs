@@ -1,7 +1,7 @@
 // All-tools coverage + adversarial error-path eval (AGE-185), run offline as a
 // CI gate (it's part of `npm test`, which the deploy is gated on).
 //
-// Two guarantees across the ENTIRE 45-tool surface:
+// Two guarantees across the ENTIRE 50-tool surface:
 //   1. Completeness — the set of tools we assert on equals the set the server
 //      registers. Add a tool without covering it here and CI fails.
 //   2. Resilience — every tool, when the upstream gateway fails on every call,
@@ -38,6 +38,11 @@ const ARGS = {
   stopwatch_start: { label: "task" },
   stopwatch_stop: { label: "task", start_ledger_id: "L1" },
   stopwatch_verify: { start_ledger_id: "L1", stop_ledger_id: "L2" },
+  timer_set: { delay_ms: 5000 },
+  alarm_set: { fire_at: "2030-01-01T00:00:00Z" },
+  timer_status: { id: "t1" },
+  timer_cancel: { id: "t1" },
+  timer_list: {},
   resolve_agent: { agent_id: "a1" },
   attest_action: { agent_id: "agent:bot", action: "act", inputs: { a: 1 } },
   verify_receipt: { receipt: { anchor: { ledgerId: "L1", blockHeight: "5" }, agentId: "a", action: "x", payload: { inputs: null, outputs: null }, eventHash: HEX, network: "testnet" } },
@@ -94,6 +99,7 @@ const ARGS = {
 //   - verify_identity_at → not-found/unverified rather than a hard error
 //   - get_identity_history → empty history (searchAsset swallowed → [])
 //   - list_schedules     → empty list (client.listScheduled swallows → [])
+//   - timer_list         → the keeper's local store, no gateway call (empty list)
 // All must still return a well-formed, non-throwing MCP result.
 const GRACEFUL_OK = new Set([
   "resolve_agent",
@@ -102,6 +108,7 @@ const GRACEFUL_OK = new Set([
   "verify_identity_at",
   "get_identity_history",
   "list_schedules",
+  "timer_list",
   "agent_handshake_status",
 ]);
 
@@ -120,7 +127,7 @@ test("coverage completeness: every registered tool is in the ARGS matrix", () =>
   const covered = Object.keys(ARGS).sort();
   assert.deepEqual(registered, covered,
     "ARGS must list exactly the registered tools — add new tools here so they get coverage");
-  assert.equal(registered.length, 45, `expected 45 tools, got ${registered.length}`);
+  assert.equal(registered.length, 50, `expected 50 tools, got ${registered.length}`);
 });
 
 test("resilience: no tool throws on upstream failure; gateway tools surface isError", async () => {

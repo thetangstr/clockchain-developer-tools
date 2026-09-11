@@ -51,6 +51,13 @@ export const KEEPER_TOOLS: ReadonlySet<string> = new Set([
   // Continuity primitives
   "create_schedule",
   "delegate_authority",
+  // Verified-time timer/alarm: server-side firing while the caller is offline
+  // (spends our credits later, unattended) — never free-tier.
+  "timer_set",
+  "alarm_set",
+  "timer_status",
+  "timer_cancel",
+  "timer_list",
 ]);
 
 /**

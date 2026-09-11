@@ -13,9 +13,10 @@ a test file so "the gate passed" is a test run, not a judgement call:
 |---|---|---|---|
 | **G0 — MCP surface** | the deployment still exposes what the primitives need, and time/pool signals parse | `test/gates-live.test.mjs` | 1 log credit (guard probe) |
 | **G1 / G1b — Stopwatch** | tamper-evident *elapsed* time between two anchored markers, keyless-verifiable — via the SDK (G1) and via the `stopwatch_*` MCP tools (G1b) | `test/gates-live.test.mjs` + `test/stopwatch.test.mjs` + `mcp-server/test/stopwatch-tools.test.mjs` | 2 + 2 log credits |
-| **G2 — Timer** | a one-shot fires after duration *D* on the disciplined clock, never early, anchored | `test/gates-live.test.mjs` + `test/timer.test.mjs` | 1 log credit |
+| **G2 / G2b — Timer** | a one-shot fires after duration *D* on the disciplined clock, never early, anchored — via the SDK (G2) and via the hosted `timer_set` tool while the client only polls (G2b) | `test/gates-live.test.mjs` + `test/timer.test.mjs` + `mcp-server/test/timer-tools.test.mjs` | 1 + 1 log credits |
 | **G3a — Alarm (soft)** | a one-shot fires at absolute time *T* on the disciplined clock, once, anchored | `test/gates-live.test.mjs` + `test/timer.test.mjs` (alarm semantics) | 1 log credit |
 | **G3b — Alarm (confirmed)** | same, but fires only once consensus itself has crossed *T* | `test/gates-live.test.mjs` | 1 log credit |
+| **G3c — Alarm (hosted)** | `alarm_set` at absolute *T* fires once after *T* on consensus time while the client only polls, anchored | `test/gates-live.test.mjs` + `mcp-server/test/timer-tools.test.mjs` | 1 log credit |
 | **G4 — Consensus freshness** | after an idle window, the disciplined clock's fire time still agrees with the block that anchored it (no false precision) | `test/gates-live.test.mjs` | 1 log credit |
 
 Two layers, on purpose:
@@ -162,6 +163,18 @@ up to `D + CC_CONFIRM_MS`.
 fire; options (`id`, `agentId`, `mode`) pass through; `confirmed` timers hold until consensus
 crosses; the receipt is attached to status.
 
+### G2b — the same claim through the hosted `timer_set` tool
+
+The hosted keeper (`packages/keeper`, run inside the MCP process) holds the schedule and fires
+while the caller is offline; the caller only polls `timer_status`. Criteria: **G2b.1** exactly
+one fire, trigger `done`; **G2b.2** `fireAtMs === armedAtMs + D` on the keeper's disciplined
+clock; **G2b.3** never early, lateness `≤ CC_TOLERANCE_MS` (the keeper ticks every 1 s);
+**G2b.4** `delivery.status === "skipped"` (poll-only), `anchor.status === "anchored"`, the
+persisted receipt rides along and `verify_cross_party` resolves it to the immutable block with
+`anchoredHash === receipt.eventHash`; **G2b.5** the anchoring block's time is not before the
+armed instant. Skipped (not failed) when the deployment lacks the tools or the token is
+account-gated.
+
 ---
 
 ## G3 — Alarm
@@ -207,6 +220,16 @@ hold-timeout the gate fails with the measured staleness of the last consensus re
 boundary reads; one-shot never re-fires; a *missed* alarm (T already past at arm time) fires
 once on the next tick and reports the original target so lateness is observable; a cancelled
 alarm never fires and anchors nothing; an action error is captured, not retried, not attested.
+
+### G3c — hosted alarm (`alarm_set`)
+
+As G2b with an absolute `fire_at` = consensus-now + `CC_ALARM_MS`. Criteria mirror G2b plus
+**G3c.2** `fireAtMs === T` exactly. The hosted keeper fires on its disciplined clock (the SDK's
+"soft" semantics, 1 s tick); with the gateway's read-triggered heartbeat the consensus time at
+fire is within the heartbeat of real time, and the anchoring block is sealed at/after T.
+Unit coverage (`mcp-server/test/timer-tools.test.mjs`): never early, once, past-T warning and
+once-only catch-up, cancel anchors nothing, owner scoping (another caller gets 404), webhook
+refused while delivery is not configured, clear error before the clock is disciplined.
 
 **Known risk — confirmed-mode hold on a quiet chain.** Consensus time is the *latest
 block's* time. If the testnet only mints a block when something is written, a confirmed

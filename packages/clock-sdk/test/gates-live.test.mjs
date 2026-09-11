@@ -461,6 +461,95 @@ describe(
       }
     });
 
+    // ------------------------------------------- G2b / G3c: hosted timer + alarm (keeper)
+
+    /**
+     * Drive a hosted one-shot through the timer/alarm tools: arm, poll timer_status
+     * until it settles, keyless-verify the fire's anchor. Skips (not fails) when the
+     * deployment lacks the tools or the token is account-gated (402).
+     */
+    async function runHostedOneShot(t, gate, { arm, waitMs }) {
+      const tools = await mcp.listTools();
+      if (!["timer_set", "alarm_set", "timer_status"].every((n) => tools.includes(n))) {
+        t.skip("deployment does not expose the hosted timer/alarm tools yet (WS-C)");
+        return null;
+      }
+      let armedRes;
+      try {
+        armedRes = await arm();
+      } catch (err) {
+        if (err instanceof adapterMod.McpToolError && /account_required|keeper_action/.test(err.text)) {
+          t.skip("token is account-gated for server-side firing (402); use a tester token");
+          return null;
+        }
+        throw err;
+      }
+      const deadline = Date.now() + waitMs;
+      let st = null;
+      while (Date.now() < deadline) {
+        st = await mcp.call("timer_status", { id: armedRes.id });
+        if (["done", "dead", "cancelled"].includes(st.status)) break;
+        await sleep(3000); // 30 req/min per token
+      }
+      const fire = st?.fires?.[0] ?? null;
+      const receipt = fire?.receipt ?? null;
+      const v = fire?.anchor?.ledgerId
+        ? await mcp.verifyCrossParty({ ledgerId: fire.anchor.ledgerId, blockHeight: fire.anchor.blockHeight })
+        : null;
+      const block = fire?.anchor?.blockHeight ? await mcp.call("get_block", { height: Number(fire.anchor.blockHeight) }).catch(() => null) : null;
+      const blockTimeMs = parseGatewayTime(block?.blockTime);
+      await evidence(t, gate, {
+        armed: armedRes,
+        status: st,
+        verify: v?.onChain ?? v,
+        anchoringBlockTime: block?.blockTime ?? null,
+        driftMs: fire && Number.isFinite(blockTimeMs) ? blockTimeMs - fire.firedAtMs : null,
+      });
+      return { armed: armedRes, st, fire, receipt, v, blockTimeMs };
+    }
+
+    function assertHostedFiredOnce(r, g) {
+      const { armed, st, fire, receipt, v } = r;
+      assert.ok(st, `${g}.1 no status`);
+      assert.equal(st.status, "done", `${g}.1 ended in "${st.status}"${st.lastError ? `: ${st.lastError}` : ""}`);
+      assert.equal(st.fires.length, 1, `${g}.1 exactly one fire`);
+      assert.equal(fire.scheduledForMs, armed.fireAtMs, `${g} fire is for the armed instant`);
+      assert.ok(fire.firedAtMs >= armed.fireAtMs, `${g}.2 fired EARLY by ${armed.fireAtMs - fire.firedAtMs}ms`);
+      assert.ok(fire.firedAtMs - armed.fireAtMs <= CFG.toleranceMs, `${g} fired ${fire.firedAtMs - armed.fireAtMs}ms late (> ${CFG.toleranceMs}ms; keeper tick is 1 s)`);
+      assert.equal(fire.delivery.status, "skipped", `${g} poll-only delivery`);
+      assert.equal(fire.anchor.status, "anchored", `${g} anchor ${fire.anchor.status}`);
+      assert.notEqual(fire.anchor.blockHeight, null, `${g} anchor blockHeight null`);
+      assert.ok(receipt && receipt.eventHash, `${g} receipt missing from timer_status`);
+      assertVerified(v, { hash: receipt.eventHash }, `${g} verify`);
+      if (Number.isFinite(r.blockTimeMs)) {
+        assert.ok(r.blockTimeMs >= armed.fireAtMs - CFG.toleranceMs, `${g} anchoring block ${iso(r.blockTimeMs)} precedes the armed instant ${iso(armed.fireAtMs)}`);
+      }
+    }
+
+    test("G2b hosted timer: timer_set fires after D while the client only polls, anchored + verified", { timeout: CFG.timerMs + CFG.confirmMs + SLACK_MS }, async (t) => {
+      const r = await runHostedOneShot(t, "G2b", {
+        waitMs: CFG.timerMs + CFG.confirmMs + 10_000,
+        arm: () => mcp.call("timer_set", { delay_ms: CFG.timerMs, label: `gate-${Date.now().toString(36)}` }),
+      });
+      if (!r) return;
+      assert.equal(r.armed.kind, "timer");
+      assert.equal(r.armed.fireAtMs, r.armed.armedAtMs + CFG.timerMs, "G2b.2 fireAt = disciplined now + D");
+      assertHostedFiredOnce(r, "G2b");
+    });
+
+    test("G3c hosted alarm: alarm_set at absolute T fires once after T on consensus time, anchored + verified", { timeout: CFG.alarmMs + CFG.confirmMs + SLACK_MS }, async (t) => {
+      const ts = await mcp.getTimestamp();
+      const T = parseGatewayTime(ts.madMarzulloTime) + CFG.alarmMs;
+      const r = await runHostedOneShot(t, "G3c", {
+        waitMs: CFG.alarmMs + CFG.confirmMs + 10_000,
+        arm: () => mcp.call("alarm_set", { fire_at: new Date(T).toISOString(), label: `gate-${Date.now().toString(36)}` }),
+      });
+      if (!r) return;
+      assert.equal(r.armed.kind, "alarm");
+      assert.equal(r.armed.fireAtMs, T, "G3c armed at the requested absolute T");
+      assertHostedFiredOnce(r, "G3c");
+    });
+
     // ------------------------------------------------------------------ G4
 
     test("G4 consensus freshness: after an idle window, the disciplined clock still agrees with the block that anchors its fire", { timeout: CFG.idleMs + 2000 + CFG.confirmMs + SLACK_MS }, async (t) => {

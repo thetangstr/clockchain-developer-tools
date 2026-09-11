@@ -160,6 +160,7 @@ assert.equal(process.env.CLOCKCHAIN_CLIENT_ID, "thetangstr@gmail.com");
 assert.equal(process.env.CLOCKCHAIN_WALLET_ID, "thetangstr@gmail.com");
 assert.equal(process.env.CLOCKCHAIN_ENDPOINT, "http://clockchain-anchor-gateway:8090");
 assert.equal(process.env.CLOCKCHAIN_SIGNING_KEY_ID, "default");
+assert.equal(process.env.KEEPER_STORE_PATH, "/app/state/keeper-store.json");
 assert.equal(process.env.ERC8004_REGISTRY_ADDRESS, "0x8004A818BFB912233c491871b3d84c89A494BD9e");
 await writeFile(process.env.DOCKER_OK_FILE, "ok\\n");
 `.trimStart(),
@@ -297,6 +298,7 @@ async function resolvedComposeConfig() {
       CLOCKCHAIN_WALLET_ID: "thetangstr@gmail.com",
       CLOCKCHAIN_ENDPOINT: "http://clockchain-anchor-gateway:8090",
       CLOCKCHAIN_SIGNING_KEY_ID: "default",
+      KEEPER_STORE_PATH: "/app/state/keeper-store.json",
       ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
       CLOCKCHAIN_API_KEY: "dummy-api",
       MCP_AUTH_TOKENS: "dummy-token",
@@ -378,6 +380,8 @@ test("deployment assets define the locked EC2 compose target", async () => {
   // The MCP anchors to the owned gateway with payload-bound signing: both halves of the pair reach the container.
   assert.match(compose, /CLOCKCHAIN_SIGNING_SECRET:\s*"\$\{CLOCKCHAIN_SIGNING_SECRET\}"/);
   assert.match(compose, /CLOCKCHAIN_SIGNING_KEY_ID:\s*"\$\{CLOCKCHAIN_SIGNING_KEY_ID\}"/);
+  // Timer/alarm keeper store lives on the persistent mcp_state volume.
+  assert.match(compose, /KEEPER_STORE_PATH:\s*"\$\{KEEPER_STORE_PATH\}"/);
   const wrapperSource = await readFile(wrapper, "utf8");
   assert.match(wrapperSource, /read_secret CLOCKCHAIN_SIGNING_SECRET \/clockchain\/mcp\/GATEWAY_SIGNING_SECRET/);
   assert.match(wrapperSource, /CLOCKCHAIN_ENDPOINT=http:\/\/clockchain-anchor-gateway:8090/);
@@ -439,6 +443,7 @@ test("resolved compose config gives mcp durable handshake state and relay defaul
   assert.equal(mcp.environment.CLOCKCHAIN_ENDPOINT, "http://clockchain-anchor-gateway:8090");
   assert.equal(mcp.environment.CLOCKCHAIN_SIGNING_KEY_ID, "default");
   assert.equal(mcp.environment.CLOCKCHAIN_SIGNING_SECRET, "dummy-gateway-signing");
+  assert.equal(mcp.environment.KEEPER_STORE_PATH, "/app/state/keeper-store.json");
   assert.equal(mcp.environment.AGENT_HANDSHAKE_V2_INVITATION_FILE, "/app/state/agent-handshake-v2-invitations.json");
   assert.equal(mcp.environment.AGENT_HANDSHAKE_V2_STATE_FILE, "/app/state/agent-handshake-v2-state.json");
   assert.equal(mcp.environment.AGENT_HANDSHAKE_TRUSTED_PROXY, "172.30.0.3");
