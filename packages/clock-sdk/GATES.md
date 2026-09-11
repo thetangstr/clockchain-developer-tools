@@ -280,6 +280,21 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
   preserved on the box as local branch `host/pre-main-2026-09-11`.
 
+## Run results — 2026-09-11 00:57 UTC, local MCP + gateway with read-triggered heartbeat
+
+`CC_LIVE_GATES=1 CC_MCP_URL=http://127.0.0.1:3210/mcp …` against a local `mcp-server` pointed at
+`infra/anchoring-gateway/gateway.mjs` with `GATEWAY_HEARTBEAT_MS=2000` — **10 pass / 0 fail, 64 s.**
+
+| Gate | Result | Evidence |
+|---|---|---|
+| G3b alarm (confirmed) | **PASS** (was FAIL) | fired 19 ms after T on the disciplined clock after **one** boundary read; consensus `00:57:29.956Z` ≥ T `00:57:29.417Z`; anchored + verified |
+| G4 freshness | **PASS** (was FAIL) | post-idle probe drift **21 ms** (was 86 s); G2 40 ms, G3a 533 ms, G3b 539 ms |
+| everything else | **PASS** | unchanged |
+
+The fix: a `/getTime` read that finds the last seal older than the heartbeat seals an empty block first, so
+consensus advances for whoever is reading it — the confirmed alarm's boundary poll now sees time cross T, and a
+sync never inherits idle time. No background cadence, no credits.
+
 ## Run results — 2026-09-11 00:40 UTC, production after PR #98 (AWS box, 45 tools)
 
 `CC_LIVE_GATES=1 node --test test/gates-live.test.mjs`, defaults — **8 pass / 2 fail, 121 s.**

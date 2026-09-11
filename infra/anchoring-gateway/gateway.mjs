@@ -16,6 +16,11 @@
 //
 // Durability: append-only event log (fsync'd) + full in-memory index rebuilt on start (restart recovery).
 // Honest pending: an entry is pending (blockHeight null) until a block seal makes it durable, then anchored.
+// Fresh time: consensus time IS the last sealed block's time. Blocks are otherwise sealed only when something is
+// written, so an idle ledger would report a stale "now" (observed 86 s behind; clock-sdk gates G3b/G4). A /getTime
+// read that finds the last seal older than GATEWAY_HEARTBEAT_MS first seals an empty heartbeat block, so every
+// reading is still a real durable block, readers never see time staler than the heartbeat, and a ledger nobody
+// reads stays quiet (no background cadence; growth is bounded by the read rate). 0 disables.
 // Idempotency: (clientId|assetReferenceId|assetHash) collapses duplicate submissions to one ledgerId.
 // Fail-closed: strict validation; malformed writes are rejected; the process never mutates trust material.
 // Authenticated: every route above except /healthz and /metrics requires a payload-bound HMAC signature from the
@@ -36,6 +41,8 @@ const SEAL_INTERVAL_MS = Number(process.env.GATEWAY_SEAL_INTERVAL_MS || 750);
 // block is fsync'd before the response — it just removes the async pending window. Set 0 for async pending
 // (paired with the coordinator's pending-tolerant patch). Default on for compatibility with today's coordinator.
 const SYNC_SEAL = (process.env.GATEWAY_SYNC_SEAL ?? "1") === "1";
+// Read-triggered heartbeat: max age of the last seal a /getTime reader may be served (ms). 0 = off.
+const HEARTBEAT_MS = Number(process.env.GATEWAY_HEARTBEAT_MS ?? 2000);
 // A stable, owned proposer identity for sealed blocks. mapPublicBlock only requires a non-empty printable
 // string; a 0x-address keeps it shaped like the upstream gateway. Overridable, never a secret.
 const PROPOSER = process.env.GATEWAY_PROPOSER_ADDRESS || "0xACE00000000000000000000000000000A11C0DE0";
@@ -137,7 +144,8 @@ const byReference = new Map();       // clientId|assetReferenceId -> Set(ledgerI
 const blocks = new Map();            // blockHeight(number) -> {blockHeight, blockTime, proposerAddress, ledgerIds:[]}
 let latestBlockHeight = 0;           // 0 = genesis / none sealed yet
 let latestBlockTime = null;
-const metrics = { logs: 0, idempotentHits: 0, seals: 0, sealedEntries: 0, notFound: 0, badRequests: 0, authOk: 0, authFailures: 0 };
+let latestSealMs = 0;                // epoch ms of the latest seal (drives the read-triggered heartbeat)
+const metrics = { logs: 0, idempotentHits: 0, seals: 0, sealedEntries: 0, heartbeats: 0, notFound: 0, badRequests: 0, authOk: 0, authFailures: 0 };
 
 function idemKey(clientId, assetReferenceId, assetHash) {
   return `${clientId} ${assetReferenceId} ${assetHash}`;
@@ -164,6 +172,8 @@ function applySeal(seal) {
   if (seal.blockHeight > latestBlockHeight) {
     latestBlockHeight = seal.blockHeight;
     latestBlockTime = seal.blockTime;
+    const ms = Date.parse(seal.blockTime);
+    if (Number.isFinite(ms)) latestSealMs = ms;
   }
 }
 
@@ -194,9 +204,7 @@ function pendingLedgerIds() {
   for (const [id, e] of byLedgerId) if (e.blockHeight === null) ids.push(id);
   return ids;
 }
-function sealPending() {
-  const ids = pendingLedgerIds();
-  if (ids.length === 0) return;
+function sealBlock(ids) {
   const height = latestBlockHeight + 1;
   const blockTime = new Date().toISOString();
   const seal = { blockHeight: height, blockTime, proposerAddress: PROPOSER, ledgerIds: ids };
@@ -204,6 +212,23 @@ function sealPending() {
   applySeal(seal);
   metrics.seals += 1;
   metrics.sealedEntries += ids.length;
+}
+function sealPending() {
+  const ids = pendingLedgerIds();
+  if (ids.length === 0) return;
+  sealBlock(ids);
+}
+// Read-triggered heartbeat (see header): called on /getTime. Pending entries, if any, get sealed instead of an
+// empty block (same effect for the reader, and they anchor sooner). Synchronous like every seal, so it cannot
+// interleave with a /log seal. No-op while the last seal is fresh, so a polling reader costs at most one empty
+// block per HEARTBEAT_MS.
+function sealHeartbeatIfStale() {
+  if (!(HEARTBEAT_MS > 0)) return;
+  if (Date.now() - latestSealMs < HEARTBEAT_MS) return;
+  const ids = pendingLedgerIds();
+  if (ids.length > 0) { sealBlock(ids); return; }
+  sealBlock([]);
+  metrics.heartbeats += 1;
 }
 
 // ---- request helpers ---------------------------------------------------------------------------------
@@ -231,6 +256,7 @@ function readBody(req) {
 
 // ---- handlers ----------------------------------------------------------------------------------------
 function handleGetTime(res) {
+  sealHeartbeatIfStale();
   sendJson(res, 200, {
     success: true,
     data: {
@@ -302,7 +328,7 @@ function handleHealthz(res) {
   sendJson(res, 200, {
     ok: true, service: "clockchain-anchoring-gateway", proposer: PROPOSER,
     entries: byLedgerId.size, blocks: blocks.size, pending: pendingLedgerIds().length,
-    latestBlockHeight, latestBlockTime, sealIntervalMs: SEAL_INTERVAL_MS,
+    latestBlockHeight, latestBlockTime, sealIntervalMs: SEAL_INTERVAL_MS, heartbeatMs: HEARTBEAT_MS,
     signingConfigured: SIGNING_KEYS.size > 0,
   });
 }
@@ -316,6 +342,7 @@ function handleMetrics(res) {
     `anchor_gateway_idempotent_hits_total ${metrics.idempotentHits}`,
     `anchor_gateway_seals_total ${metrics.seals}`,
     `anchor_gateway_sealed_entries_total ${metrics.sealedEntries}`,
+    `anchor_gateway_heartbeat_seals_total ${metrics.heartbeats}`,
     `anchor_gateway_not_found_total ${metrics.notFound}`,
     `anchor_gateway_bad_requests_total ${metrics.badRequests}`,
     `anchor_gateway_auth_ok_total ${metrics.authOk}`,

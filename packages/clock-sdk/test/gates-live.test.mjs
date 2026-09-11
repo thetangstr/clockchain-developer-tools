@@ -338,7 +338,8 @@ describe(
         sch.clearAll();
       }
 
-      const boundaryReads = mcp.readings.slice(readingsBefore + 1); // exclude the sync read
+      // readingsBefore was captured after clock.sync(), so everything from there on is a boundary read.
+      const boundaryReads = mcp.readings.slice(readingsBefore);
       const lastBeforeFire = fireWall
         ? [...boundaryReads].reverse().find((r) => r.wallMs <= fireWall) ?? null
         : mcp.lastReading;

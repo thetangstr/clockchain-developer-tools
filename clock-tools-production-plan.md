@@ -107,7 +107,7 @@ Corrected 2026-09-11: N1–N3 turned out to be properties of our own anchoring g
 
 | Item | What | Owner |
 |---|---|---|
-| N1 | `gateway.mjs` `/getTime`: live `madMarzulloTime` (never before the last seal) and/or heartbeat seals every N s; `selftest.mjs` case; G3b + G4 green | MCP/SDK |
+| N1 | **Done on branch.** `gateway.mjs`: read-triggered heartbeat — a `/getTime` older than `GATEWAY_HEARTBEAT_MS` (2 s) seals an empty block first; `selftest.mjs` cases; **G3b + G4 green locally (10/10)**; deploy to the box next | MCP/SDK |
 | N2 | `gateway.mjs` response shape: keep `nodeParticipation`, also emit `nodeParticipation%` for one release, and version the payload so the next rename doesn't refuse writes again | MCP/SDK |
 | N3 | Commit the on-box wiring; retire/repoint Cloud Run deploy (D8) | MCP/SDK |
 | N4 | The real network: when `node.clockchain.network` returns, re-run G0–G4 against it before pointing production back; multi-validator timeline gates "court-grade" wording | network team via Rakesh |
