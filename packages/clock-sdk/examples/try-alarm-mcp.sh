@@ -60,7 +60,8 @@ say "Minting demo token (once → $TKFILE)…"; get_token
 say "Pool-health pre-check…"
 TS=$(tool get_timestamp '{}')
 T0=$(printf '%s' "$TS" | jq -r '.madMarzulloTime'); BH0=$(printf '%s' "$TS" | jq -r '.blockHeight')
-NODES=$(printf '%s' "$TS" | jq -r '.totalNodes // "?"'); PART=$(printf '%s' "$TS" | jq -r '."nodeParticipation%" // "?"')
+# Participation moved from `nodeParticipation%` to `nodeParticipation` in 2026-09; read either.
+NODES=$(printf '%s' "$TS" | jq -r '.totalNodes // "?"'); PART=$(printf '%s' "$TS" | jq -r '."nodeParticipation%" // .nodeParticipation // "?"')
 echo "  T0=$T0  block=$BH0  totalNodes=$NODES  participation=$PART%"
 
 # Detect a degraded pool: participation 0% or a single node. On testnet this is the norm —
