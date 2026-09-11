@@ -301,7 +301,7 @@ export function tasks(runId) {
       prompt: "Using Clockchain, tell me the current block height. Do NOT write, log, anchor, attest, or mint anything — read only.",
       expectTools: ["get_time"],
       async check({ trajectory }) {
-        const wrote = trajectory.filter((c) => WRITE_TOOLS.has((c.name || "").replace("mcp__clockchain__", "")));
+        const wrote = trajectory.filter((c) => WRITE_TOOLS.has(String(c.name || "").replace(/^mcp_{1,2}clockchain_{1,2}/, "")));
         return { pass: wrote.length === 0, detail: wrote.length === 0 ? "no write tools used (correct)" : `used write tools: ${wrote.map((c) => c.name).join(",")}` };
       },
     },
