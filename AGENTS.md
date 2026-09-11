@@ -1,7 +1,10 @@
 # AGENTS.md — working in this repo
 
 Clockchain MCP server (npm-workspaces monorepo: `@clockchain/core`, `@clockchain/mcp-server`,
-`@clockchain/web-demo`). Hosted on GCP Cloud Run at `https://mcp.clockchain.network/mcp`.
+`@clockchain/clock-sdk`, `@clockchain/keeper`, `@clockchain/web-demo`). Production
+`https://mcp.clockchain.network/mcp` is the **AWS box** (Caddy + docker-compose, deployed over
+SSM per `infra/clockchain-mcp/RUNBOOK.md`); the Cloud Run service `deploy.yml` targets is no
+longer what DNS points at.
 
 ## Build & test (run before every push)
 
@@ -27,8 +30,11 @@ npm test                      # all workspaces  (or: -w @clockchain/mcp-server)
    before `git push origin HEAD:main`.
 6. **No secrets in git or docs.** Secret Manager (server), WIF (CI, keyless), Vercel env
    (playground). Use placeholders in committed files.
-7. **Deploys are automated** (push to `main`, code paths → Cloud Run). Don't hand-deploy from
-   a laptop except emergencies. After changing a workflow, `gh run watch` it.
+7. **Deploys are NOT automated to production.** `deploy.yml` still pushes to Cloud Run, which
+   nothing points at. Production is the AWS box: runbook step 3 over SSM (check out the commit
+   in `/opt/clockchain-mcp/app`, `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`).
+   The box carries gateway wiring in `compose-up.sh` / `docker-compose.yml` that is not in git —
+   never check out over it blind; preserve it first (see `host/pre-main-2026-09-11` on the box).
 
 ## Where things live
 

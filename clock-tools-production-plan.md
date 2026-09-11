@@ -24,12 +24,14 @@ Three root causes, three different owners:
    schedule and fire. The hosted MCP has no scheduler; `packages/keeper` is that component
    (control-plane tools `keeper_schedule/list/cancel` + a dispatch worker) and is built and
    unit-tested but **not mounted on the deployment**.
-3. **Network (external):** the testnet mints a block **only when something is written**, and
-   `/getTime` now returns the last block's time as "consensus now" (in June it carried live
-   oracle fields — `AbsTimeDifference`, `systemTime`, `consentedOffset`; today
-   `madMarzulloTime === latestBlockTime`). So "now" is as stale as the last write: 86 s
-   observed after an idle window, reported as ±51 ms. Confirmed-mode alarms wait for a block
-   that nothing will mint.
+3. **Time source (ours — corrected 2026-09-11):** production's `CLOCKCHAIN_ENDPOINT` is the
+   owned anchoring gateway container (`infra/anchoring-gateway/gateway.mjs`), because
+   `node.clockchain.network` is unowned and down. `gateway.mjs` seals a block synchronously
+   inside each `/log` and reports the last sealed block's time as `madMarzulloTime`. So "now"
+   is as stale as the last write: 86 s observed after an idle window, reported as ±51 ms.
+   Confirmed-mode alarms wait for a block that nothing will seal. This is a change to
+   `gateway.mjs`, not a network-team dependency. (The June live-oracle fields came from the
+   real network; the key rename is ours too.)
 
 ## 2. What "production ready" means here
 
@@ -51,10 +53,12 @@ A tool is production-ready when all of the following hold on the deployed endpoi
 |---|---|---|---|
 | D1 | Ship timer/alarm as MCP tools via the **keeper** (server-side firing) vs. SDK-only | **Keeper.** It is exactly the meeting's split: keeper = timing + notification, harness = job. SDK stays for users who want firing inside their own boundary. | "Offered via the MCP" is not true while the user must build an npm workspace. |
 | D2 | Fire notification: webhook, poll, or both | **Both.** `keeper_schedule` takes an optional `webhook_url`; without one, the fire still anchors and `keeper_list` / `timer_status` returns the receipt. | Most agent harnesses can poll; few have an inbound URL. |
-| D3 | How to keep consensus time fresh on a mint-on-write chain | **Interim (ours): keeper heartbeat** — the always-on worker anchors one heartbeat every N s (N = 10 s proposed), which mints a block and keeps `/getTime` within N s of real time for everyone. **Real fix (network):** periodic block production or a live time oracle in `/getTime`. | Unblocks G3b and bounds G4 to ≤ N s without waiting on the network team; cost ≈ 8.6 k credits/day on the ops key (Clark is unlimited). |
+| D3 | How to keep consensus time fresh on a mint-on-write gateway | **Fix `gateway.mjs` (ours, small):** `/getTime` returns a live `madMarzulloTime` (the gateway's clock, monotonic-guarded so it never precedes the last seal) while `latestBlockTime` stays the last seal — and/or seal a heartbeat block every N s. No keeper heartbeat, no credits. Re-run G3b/G4 to prove it. | The oracle is our own service; the "network" fix is a PR. Decide whether a live oracle is honest to call "consensus" while the real network is down — see D7. |
 | D4 | Default alarm mode offered on the MCP | **`confirmed`** once D3 heartbeat lands; `soft` until then, labelled. | Confirmed is the product claim ("fires only after consensus crossed T"); it just needs cadence. |
 | D5 | Uncertainty reporting | Widen `uncertaintyMs` by measured consensus staleness (`|wall − consensus|` at sync, and time since last block) and surface it in receipts. | "No false precision" is a README promise; G4 shows we break it today. |
-| D6 | Page positioning | Add a seventh module **"Verified time tools"** (stopwatch / timer / alarm) with beta labels until Phase 2 ships; copy in §6. | Meta tag already says seven modules; the page says six. |
+| D6 | Page positioning | Add a seventh module **"Verified time tools"** (stopwatch / timer / alarm) with beta labels until Phase 2 ships; copy in §6. **Done, live.** | Meta tag already says seven modules; the page says six. |
+| D7 | Honesty of "anchored on Clockchain" while the network is down | Receipts and the page say `single-validator-testnet`; today the anchor is the owned gateway's append-only ledger. Decide the wording (e.g. "anchored on the Clockchain anchoring gateway (testnet)") and whether `network` in receipts should say so. | The gates proved the mechanics; the claim should match the substrate. |
+| D8 | Make `main` == production | Commit the on-box gateway wiring (`compose-up.sh`, `docker-compose.yml`: anchoring-gateway endpoint + signing secret) and update `infra/test/deploy-assets.test.mjs`; retire or repoint the Cloud Run `deploy.yml` (it goes green without touching prod); fix AGENTS.md's "push to main deploys". | The 2026-09-11 deploy nearly reverted production's gateway wiring because it lived only on the box. |
 
 ## 4. Workstreams and steps
 
@@ -97,14 +101,16 @@ the trust model (the server holds no state between calls).
 | C7 | SDK: `ClockchainClock.sync()` widens `uncertaintyMs` by measured staleness (D5); receipts carry it | unit test: stale reading → band grows; G4 evidence shows the claimed band covers the drift |
 | C8 | Retire the `clark-slack-alarm.mjs` daemon example in favour of `alarm_set` + webhook; keep `alarm-live.mjs` as the SDK reference | skill drift check passes |
 
-### WS-D — Network dependencies (raise Monday, track weekly)
+### WS-D — Time-source work (ours) and the real network
 
-| Item | Ask | Owner |
+Corrected 2026-09-11: N1–N3 turned out to be properties of our own anchoring gateway.
+
+| Item | What | Owner |
 |---|---|---|
-| N1 | Did `/getTime` change from live Marzullo time to last-block time? If intentional, expose a live consensus clock field; if not, restore | gateway team via Rakesh |
-| N2 | Periodic block production (or accept our heartbeat as the interim) | network team |
-| N3 | Key rename policy: field renames (`nodeParticipation%`) broke every client silently — ask for versioned responses or a changelog | gateway team |
-| N4 | Multi-validator testnet timeline (gates "court-grade" wording; unchanged from `roadmap.md`) | network team |
+| N1 | `gateway.mjs` `/getTime`: live `madMarzulloTime` (never before the last seal) and/or heartbeat seals every N s; `selftest.mjs` case; G3b + G4 green | MCP/SDK |
+| N2 | `gateway.mjs` response shape: keep `nodeParticipation`, also emit `nodeParticipation%` for one release, and version the payload so the next rename doesn't refuse writes again | MCP/SDK |
+| N3 | Commit the on-box wiring; retire/repoint Cloud Run deploy (D8) | MCP/SDK |
+| N4 | The real network: when `node.clockchain.network` returns, re-run G0–G4 against it before pointing production back; multi-validator timeline gates "court-grade" wording | network team via Rakesh |
 
 ### WS-E — Operate it (with WS-B, hardened in WS-C)
 
@@ -157,9 +163,9 @@ replaces `try-alarm-mcp.sh` as the 30-second first experience.
 
 ## 7. Risks
 
-- **Heartbeat credits and noise:** 8.6 k heartbeat anchors/day on the ops key inflate log
-  counts (the team tracks "1,295 events" as a KPI). Tag them `keeper:heartbeat` and exclude in
-  dashboards; drop when N2 lands.
+- **Deploy pipeline is misleading:** `deploy.yml` deploys to Cloud Run, which nothing points
+  at; production is the AWS box via SSM and its wiring is not in git (D8). Until fixed, every
+  deploy is a manual runbook step and a green Action means nothing.
 - **Rate limit (30 req/min/token)** is too low for a confirmed alarm that polls at the
   boundary plus an agent doing other work; move the keeper's own reads to an internal path
   (no token limit) and give scheduled-tool users a higher tier.

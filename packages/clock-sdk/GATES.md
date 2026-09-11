@@ -273,8 +273,36 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   the action item asked for anyway.
 - **2026-09-10** — the per-token rate limit (30 req/min) is real: a confirmed alarm polling
   every 3 s plus confirmation polls trips it; the adapter backs off 10 s on 429 and continues.
+- **2026-09-11** — production is the AWS box (Caddy + docker-compose, deployed via SSM per
+  `infra/clockchain-mcp/RUNBOOK.md`), not Cloud Run; the GitHub `deploy.yml` still deploys to
+  Cloud Run and goes green without touching production. The box's gateway wiring
+  (`CLOCKCHAIN_ENDPOINT=http://clockchain-anchor-gateway:8090`, `CLOCKCHAIN_SIGNING_SECRET`)
+  exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
+  preserved on the box as local branch `host/pre-main-2026-09-11`.
 
-## Run results — 2026-09-10, hosted MCP (Cloud Run, 42 tools)
+## Run results — 2026-09-11 00:40 UTC, production after PR #98 (AWS box, 45 tools)
+
+`CC_LIVE_GATES=1 node --test test/gates-live.test.mjs`, defaults — **8 pass / 2 fail, 121 s.**
+
+| Gate | Result | Evidence |
+|---|---|---|
+| G0.1–G0.3, G0.5 | **PASS** | 45 tools; `nodeParticipation: 100`; probe anchored, height advanced |
+| G0.4 pool guard | **PASS** (was FAIL) | default `log_action` accepted — the `getPoolHealth()` key fix is live |
+| G1 stopwatch (SDK) | **PASS** | elapsed vs wall within tolerance, both markers verified |
+| G1b stopwatch (MCP tools) | **PASS** (new) | blocks 162/163; `elapsedMs` 6138 vs wall 6001; `stopwatch_verify` → `verified: true`, `elapsedOnChainMs` 6138 |
+| G2 timer, G3a alarm (soft) | **PASS** | sub-ms lateness, anchored, verified |
+| G3b alarm (confirmed) | **FAIL** | held 65 s, 14 identical boundary reads — unchanged |
+| G4 freshness | **FAIL** | 86 s behind the anchoring block after idle, claimed ±53 ms — unchanged |
+
+**Where the time actually comes from (learned during the deploy).** Production's
+`CLOCKCHAIN_ENDPOINT` is not `node.clockchain.network` (unowned, down) but the owned
+anchoring gateway container `clockchain-anchor-gateway` (`infra/anchoring-gateway/gateway.mjs`).
+That service *is* the `/getTime` oracle: `madMarzulloTime` is the time of the last block it
+sealed, and it seals a block synchronously inside each `/log`. So G3b and G4 are properties of
+our own gateway, fixable in `gateway.mjs` (a live clock in `/getTime`, or heartbeat seals) —
+not a network-team dependency. Likewise the `nodeParticipation` key shape is ours.
+
+## Run results — 2026-09-10, hosted MCP before PR #98 (42 tools)
 
 Suite: `CC_LIVE_GATES=1 node --test test/gates-live.test.mjs`, defaults, run at 2026-09-10T23:31:54.816Z —
 **6 pass / 3 fail, 114 s, 7 log credits.** Full evidence JSON per gate is in the run's
