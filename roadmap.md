@@ -1,22 +1,22 @@
 # Clockchain MCP — Roadmap & Limitations
 
 A single, accurate "what works / what's limited / what's next" for the hosted
-Clockchain MCP server. Last updated 2026-06-15.
+Clockchain MCP server. Last updated 2026-09-10.
 
 > Supersedes the earlier v1/v2/v3 (local → Mac mini → AWS) plan — all of which has
-> shipped past: the server is hosted on **GCP Cloud Run** with 31 tools and a public
+> shipped past: the server is hosted on **GCP Cloud Run** with 45 tools and a public
 > HTTP endpoint, well beyond the original v2 bar.
 
 ## Status
 
-- **Live:** `https://mcp.clockchain.network/mcp` (GCP Cloud Run), **31 tools** across
-  six modules. Browser visitors to `mcp.clockchain.network` get a landing page; agents
+- **Live:** `https://mcp.clockchain.network/mcp` (GCP Cloud Run), **45 tools** across
+  seven modules. Browser visitors to `mcp.clockchain.network` get a landing page; agents
   `POST /mcp`. Keyless CI/CD (WIF) with a test gate; Cloud Armor + LB + managed TLS.
 - **Status dashboard:** `status.clockchain.network` (pending one DNS record) /
   `clockchain-research.vercel.app/dashboard` — live availability, tool catalog, demos.
 - **Tier-1 hardening complete** (epic AGE-181): MCP protocol conformance tests,
   idempotency keys on write tools, async attest (submit→poll via `complete_attestation`),
-  upstream resilience (timeout / GET-retry / circuit-breaker), and an all-31-tool eval
+  upstream resilience (timeout / GET-retry / circuit-breaker), and an all-tools eval
   coverage gate in CI.
 
 ## What works today
@@ -31,11 +31,15 @@ Clockchain MCP server. Last updated 2026-06-15.
 - **Scheduler** — contract types, estimates, list (reads); `create_schedule` is a preview (see below).
 - **Independent verification + tamper detection** — recompute the hash, compare to the
   immutable on-chain block; a changed byte fails verification.
+- **Verified time tools** — `stopwatch_start/stop/verify` (anchored elapsed time, duration
+  re-verified from block times). Timer and alarm run client-side via `@clockchain/clock-sdk`;
+  gates and live results in [`packages/clock-sdk/GATES.md`](packages/clock-sdk/GATES.md).
 
 ## Known limitations
 
 | Limitation | Detail | Tracked / owner |
 |---|---|---|
+| **Blocks mint only on writes** | Consensus "now" (`/getTime`) is the last block's time, so it goes stale on an idle chain (86 s observed). Confirmed-mode alarms hold until something writes; absolute alarms inherit the idle gap. Plan: keeper heartbeat (ours) or periodic blocks / live oracle (network) — [`clock-tools-production-plan.md`](clock-tools-production-plan.md). | **network team** (N1/N2) |
 | **Single-validator testnet** | Receipts are `single-validator-testnet`; multi-validator supermajority ("court-grade") attestation is mainnet-gated. | AGE-152 · **D4 / network** |
 | **Consensus-time scope for BYO logging-only keys** | `get_time` uses the public `/getTime` (works), but the gated `/api/time/*` family 401s for logging-scope keys, so a receipt's per-block `consensusTime` falls back to gateway record time until that scope is provisioned. | AGE-150 · **D4 / gateway** |
 | **ERC-8004 RPC dependency** | `resolve_agent` defaults to the official registry on Ethereum Sepolia through a public RPC. Hosted production should override `EVM_RPC_URL` with an operationally owned endpoint; RPC failures return `status: "unknown"`. | AGE-151 · hosted ops |

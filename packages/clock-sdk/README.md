@@ -24,7 +24,7 @@ fire. This is the same separation regulated buyers expect from a notary: the not
 
 | Primitive | What it proves | Built on |
 |---|---|---|
-| **Stopwatch** | tamper-evident **elapsed** time between two points | `log_action` ×2 + `verify_cross_party` — works through the MCP alone |
+| **Stopwatch** | tamper-evident **elapsed** time between two points | `log_action` ×2 + `verify_cross_party` — or the hosted `stopwatch_start` / `stopwatch_stop` / `stopwatch_verify` tools, no SDK needed |
 | **Timer** | a verifiable **duration** (`now + D`) elapsed | scheduler + anchored markers |
 | **Alarm** | fired at a future time **T**, provably on verified time | disciplined clock + scheduler + `attest_action` |
 
@@ -173,7 +173,8 @@ Measured on testnet (2026-06-29 dogfood):
   **target, not a present claim** — multi-validator consensus gates that. Receipts are real
   and independently verifiable today; the validator-signature attestation is mainnet-gated.
 
-**Pool health (testnet).** The gateway may report `participation 0%` (`totalNodes:1`). If
+**Pool health (testnet).** The gateway may report `participation 0%` (`totalNodes:1`) — read from
+`nodeParticipation` (or the pre-2026-09 `nodeParticipation%`). If
 blocks are still advancing, **anchoring works** — but the default pool-health guard refuses to
 fire. Pass `allow_degraded:true` (or let [`examples/try-alarm-mcp.sh`](examples/try-alarm-mcp.sh)
 take its automatic fallback) to proceed, understanding the resulting receipts are

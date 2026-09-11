@@ -20,14 +20,20 @@ No account, no API key, no secrets — it spends one log credit on a **shared de
 
 ## Invariants (do not violate)
 1. **Client-side.** The chain can't wake your client; schedule + actions stay in your trust boundary.
-2. **Never fire early.** Poll `get_timestamp.madMarzulloTime` (format `DD-MM-YYYY_HH:MM:SS:mmm`) until it is ≥ your target time T.
+2. **Never fire early.** Poll `get_timestamp.madMarzulloTime` (ISO 8601 since 2026-09; older gateways used `DD-MM-YYYY_HH:MM:SS:mmm` — parse both) until it is ≥ your target time T. Know that on today's testnet consensus time only advances when a block is minted, and blocks mint on writes — an idle chain reports a stale "now" (see `packages/clock-sdk/GATES.md`, G3b/G4).
 3. **Fire with confirmation.** Use `log_action` (or `attest_action` for receipts) with `wait:true, wait_ms ≥ 30000` — the reply carries `blockHeight` directly; don't chase a null.
-4. **`blockHeight == null` = FAILURE, not "pending"** (a degraded pool dropped the fire). If blocks are advancing but `nodeParticipation%` reads 0, pass `allow_degraded:true` (single-validator testnet — anchored, NOT court-grade). Never claim success on a null blockHeight.
+4. **`blockHeight == null` = FAILURE, not "pending"** (a degraded pool dropped the fire). Participation is `get_timestamp.nodeParticipation` (pre-2026-09 gateways: `nodeParticipation%`). If blocks are advancing but the server refuses the write as degraded, pass `allow_degraded:true` (single-validator testnet — anchored, NOT court-grade). Never claim success on a null blockHeight.
 5. **Keyless verify:** `verify_cross_party {ledger_id, block_height:<number>}` → expect `.onChain.verifiedAgainst == "on-chain block"` and `.onChain.keyless == true`. The authoritative fields live under `.onChain`.
 6. **"Keyless" ≠ trustless.** It's a cryptographic integrity check against the immutable on-chain block, but the block is still served by a single gateway operator (multi-validator is on the roadmap). Don't say "trustless" or "court-grade" to a compliance buyer.
 
+## Stopwatch (hosted tools, no SDK)
+`stopwatch_start {label}` → `stopwatch_stop {label, start_ledger_id}` → `stopwatch_verify {start_ledger_id, stop_ledger_id}`. Elapsed is the difference of the two markers' consensus timestamps; `stopwatch_verify` recomputes it from the two immutable block times keylessly (`verified:true`). Two log credits.
+
+## Run the SDK through the hosted MCP (demo token, no gateway creds)
+`packages/clock-sdk/examples/mcp-adapter.mjs` implements the SDK's client surface over MCP tool calls; `packages/clock-sdk/test/gates-live.test.mjs` is the acceptance suite (`CC_LIVE_GATES=1 CC_MCP_TOKEN=<token>`).
+
 ## Measured (2026-06)
-Clock read ≈0.12s; **fire→anchored ≈1.4s (< 3s)**; 35 unit tests. Single-validator testnet.
+Clock read ≈0.12s; **fire→anchored ≈1.4s (< 3s)**; 35 unit tests. Single-validator testnet. 2026-09-10 re-run on the hosted MCP: stopwatch and soft timer/alarm pass, confirmed-mode alarm holds on an idle chain — full results in `packages/clock-sdk/GATES.md`.
 Note: `arm→fire` is the delay you schedule (`fireAt` / `CC_WAIT_S`), not SDK overhead — the 1.4s is **fire→anchored** only. Total wall-clock = your scheduled wait + ~1.4s.
 
 ## Env knobs (try-alarm-mcp.sh)

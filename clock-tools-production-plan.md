@@ -67,8 +67,8 @@ Sep 10 notes); **product/demo** = Mimmo. Dates assume the Sep 14 decisions.
 |---|---|---|
 | A1 | **Done on branch.** `core.getPoolHealth()` reads `nodeParticipation%` **or** `nodeParticipation`; *neither* present → throws "not reported", so the MCP guard fails open and receipts stay `pending` (never a silent 0 %) | core + MCP-layer tests with both payload shapes (5 guard tests); **G0.4 green** on the next deploy |
 | A2 | **Done on branch.** Same fallback in `examples/try-alarm-mcp.sh` | script runs without the degraded banner on a 100 % pool |
-| A3 | Doc truth: `time.ts` header, `clock-sdk/README.md`, `skills/clockchain-verified-alarm/SKILL.md` (still says `DD-MM-YYYY_HH:MM:SS:mmm` and `nodeParticipation%`), `roadmap.md` (says 31 tools, June 15) | `npm run check:skill`; grep for the old key returns only the fallback |
-| A4 | Land the gate suite (`GATES.md`, `timer.test.mjs`, `gates-live.test.mjs`, `mcp-adapter.mjs`) on `main` behind the existing test gate; live suite stays opt-in | `npm test` green; `deploy.yml` unchanged |
+| A3 | **Done on branch.** Doc truth: `time.ts` header, `clock-sdk/README.md`, the alarm skill (format, key, mint-on-write note, stopwatch tools, adapter), `README.md` / `INSTALL.md` / `QUICKSTART.md` / `roadmap.md` (31 → 45 tools, seven modules, new limitation row) | `npm run check:skill` passes; old key appears only as the documented fallback |
+| A4 | Land the gate suite (`GATES.md`, `timer.test.mjs`, `gates-live.test.mjs`, `mcp-adapter.mjs`) on `main` behind the existing test gate; live suite stays opt-in. **PR open from `claude/clock-primitive-gates`.** | `npm test` green; `deploy.yml` unchanged |
 | A5 | Present gate results + D1–D6 at Monday's timer/alarm agenda | this doc + `GATES.md` run table |
 
 ### WS-B — Stopwatch as MCP tools (week of Sep 14)
@@ -78,11 +78,11 @@ the trust model (the server holds no state between calls).
 
 | Step | What | Verify |
 |---|---|---|
-| B1 | `stopwatch_start {label, allow_degraded?}` → anchors `stopwatch:<label>:start` (wait for block) and returns the marker `{ledgerId, blockHeight, createdTimestamp, assetHash}` | tool test with a fake gateway; classified in the free/keeper map (boot asserts it) |
-| B2 | `stopwatch_stop {label, start: <marker>}` → anchors the stop marker, returns `{start, stop, elapsedMs, verificationRefs}` computed with the SDK's `elapsed()` (server imports `@clockchain/clock-sdk`) | unit: elapsed from two known timestamps; live: G1 re-pointed at the tools |
-| B3 | `stopwatch_verify {measurement}` → runs `verify_cross_party` on both markers, returns the two on-chain checks | G1.5 via the tool |
-| B4 | Add to `MODULES` on the page, `llms.txt`, `MCP_MANIFEST.description`, `server.json`, dashboard catalog; tool count moves from 42 → 45 (single source: derive the count from the registered tool list instead of the six hard-coded "42"s in `landing.ts` — and `INSTALL.md`/`roadmap.md` still say 31; `landing.test.mjs` currently asserts `\b42\b`). Stopwatch tools go in `FREE_TOOLS` (generation-class, like `log_action`) | landing tests updated; `/mcp` `tools/list` count matches the page |
-| B5 | Eval task in `eval/tasks.mjs` so the all-tools coverage gate includes the three | eval green in CI |
+| B1 | **Done on branch.** `stopwatch_start {label}` → anchors `stopwatch:<label>:start`, waits for the block, returns the marker; `status` is truthful (`pending` + warning if no block) | `mcp-server/test/stopwatch-tools.test.mjs`; classified `FREE_TOOLS` |
+| B2 | **Done on branch.** `stopwatch_stop {label, start_ledger_id}` — the server **re-reads the start marker from the ledger** (a caller cannot hand in a fabricated start time) and checks its reference id; returns both markers + `elapsedMs`; `anchored` only when both markers have a block. Implemented on `ClockchainClient` directly because the container image ships only core + mcp-server | unit: elapsed 6159 ms from two known timestamps, wrong-ledger rejection, pending-start handling; live: **G1b** (skips until deployed) |
+| B3 | **Done on branch.** `stopwatch_verify {start_ledger_id, stop_ledger_id}` → both markers against the immutable blocks (keyless) **and `elapsedOnChainMs` recomputed from the two block times**, plus the advisory ledger-recorded elapsed for comparison | unit: verified + 6159 ms from block times, no api key on chain reads, unverified when a marker is missing |
+| B4 | **Done on branch** except the research dashboard catalog (separate repo, `clockchain-research-ws5/src/lib/dashboard-tools.ts`). Page counts derive from the registered surface (42 → 45 automatically); README / INSTALL / QUICKSTART list the tools | landing tests assert page = `tools/list`; coverage + surface tests at 45 |
+| B5 | **Done on branch.** `stopwatch` eval task (start → wait → stop → verify; pass = `stopwatch_verify.verified === true`); `stopwatch_start/stop` added to the eval's write-tool set | runs in the existing nightly eval |
 
 ### WS-C — Timer & alarm via the hosted keeper (weeks of Sep 14 – Sep 28)
 
@@ -110,7 +110,7 @@ the trust model (the server holds no state between calls).
 
 | Step | What |
 |---|---|
-| E1 | Scheduled GitHub workflow runs the live gates nightly against production with a dedicated ops token (secret), uploads the evidence JSON as an artifact, opens/updates an issue on red |
+| E1 | Add a job to the existing `eval-nightly.yml` (it already has `MCP_EVAL_TOKEN`) that runs the live gates with `CC_MCP_TOKEN=${{ secrets.MCP_EVAL_TOKEN }}`, uploads the evidence JSON as an artifact, opens/updates an issue on red |
 | E2 | Post-deploy smoke: `G0.1`–`G0.5` only (≈1 credit) as the last step of `deploy.yml` after Cloud Run goes healthy; full suite stays scheduled to keep the deploy gate credit-free |
 | E3 | Status dashboard shows stopwatch/timer/alarm availability from E1's last run |
 
@@ -119,7 +119,7 @@ the trust model (the server holds no state between calls).
 ```
 Thu Sep 10  gates drafted + run (done)            ── GATES.md
 Mon Sep 14  Monday meeting: results, D1–D6, N1–N4  ── WS-A landed on main (G0.4 green after deploy)
-Wed Sep 17  handshake demo target (unchanged)       ── stopwatch tools + page update v1 (WS-B) ship
+Wed Sep 17  handshake demo target (unchanged)       ── stopwatch tools + page v1 live (WS-B, in the same PR as WS-A)
 Fri Sep 19  keeper worker deployed w/ heartbeat     ── C1–C4; G3b/G4 green; page update v2 (timer/alarm live, beta)
 Fri Sep 26  budgets, SSRF pinning, nightly canary   ── C5–C7, WS-E; drop beta labels
 Sep 28+     network items (N1–N4) as they land      ── remove heartbeat when cadence is native
