@@ -35,6 +35,38 @@ MCP_TOKEN=<tester token> node eval/run.mjs
 (`x-api-key`), allow-lists the `mcp__clockchain__*` tools, and runs each task headless
 (`--output-format stream-json`).
 
+### Fresh agents: "can anyone with Claude Code or Codex use this?"
+
+`EVAL_AGENT=claude` and `EVAL_AGENT=codex` are **fresh** agents: no prior session, none
+of this machine's MCP servers (`--strict-mcp-config` / a temporary `CODEX_HOME`), an empty
+working directory, and whatever token you give them. Give them a self-serve demo token
+(`curl -X POST https://mcp.clockchain.network/token`, no signup) and label it, and the
+report records that the run needed no account at all:
+
+```bash
+MCP_TOKEN=<demo token> EVAL_TOKEN_LABEL="self-serve demo token (POST /token)" \
+  EVAL_AGENT=claude CLAUDE_MODEL=claude-haiku-4-5-20251001 \
+  TASK=time-read,stopwatch,hosted-timer,hosted-alarm-cancel node eval/run.mjs
+
+MCP_TOKEN=<demo token> EVAL_TOKEN_LABEL="self-serve demo token (POST /token)" \
+  EVAL_AGENT=codex TASK=time-read,stopwatch,hosted-timer,hosted-alarm-cancel node eval/run.mjs
+```
+
+Codex: `codex exec --json` from a generated `CODEX_HOME` that holds only the hosted MCP
+(auth copied from `~/.codex/auth.json`; `CODEX_BIN`, `CODEX_MODEL`, `CODEX_CONFIG_EXTRA` —
+a TOML fragment, e.g. a model provider — and `CODEX_ARGS` customize it). Headless Codex
+needs `default_tools_approval_mode = "approve"` on the server or every call comes back
+"user cancelled MCP tool call"; the generated config sets it.
+
+Fan out: run several in parallel with **one demo token each** (rate limits are per token)
+and different `CLAUDE_MODEL`s; each run writes its own report.
+
+What the fresh agents taught us (2026-09-11): the per-token rate limit used to count
+`initialize` + `tools/list`, so a fresh Claude Code session that started right after a
+poll-heavy one attached with **zero tools** ("failed to connect, HTTP 429"). The handshake
+and discovery methods are now exempt; only `tools/call` spends the budget. And Codex is
+configured in TOML (`http_headers`), not the JSON block — the landing page says so now.
+
 ### Running it with Clark (or any Hermes profile)
 
 Clark — the AWS-hosted Hermes agent — is the reference *user* of the MCP, so the eval

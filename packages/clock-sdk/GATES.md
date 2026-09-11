@@ -303,6 +303,32 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
   preserved on the box as local branch `host/pre-main-2026-09-11`.
 
+## Run results — 2026-09-11 06:09 UTC, fresh agents on a demo token (anyone with Claude Code / Codex) — 5 × 4 / 4
+
+The "can anyone do this?" check: **fresh** agents (no prior session, none of the machine's MCP
+servers, an empty working directory) given only a **self-serve demo token** — one unauthenticated
+`POST https://mcp.clockchain.network/token`, no account — ran the four clock tasks
+(`time-read`, `stopwatch`, `hosted-timer`, `hosted-alarm-cancel`) against production, four of
+them in parallel with one token each. Reports in `eval/reports/2026-09-11T06-0*`.
+
+| Agent | Stopwatch | Timer | Alarm | Tasks |
+|---|---|---|---|---|
+| Claude Code, default model (Opus 5) | 6937 ms verified | fired, block 738 | set → listed → cancelled | 4 / 4 |
+| Claude Code, `claude-sonnet-5` | 5957 ms verified | fired, block 735 | cancelled | 4 / 4 |
+| Claude Code, `claude-haiku-4-5` | 6733 ms verified | fired, block 740 | cancelled | 4 / 4 |
+| Codex CLI 0.142 (local provider, kimi) | 11089 ms verified | fired, block 718 | cancelled | 4 / 4 |
+| Hermes (local profile, kimi k3; tester token) | 9151 ms verified | fired, block 742 | cancelled | 4 / 4 |
+
+Two things the fresh agents found, both fixed and deployed before the passing runs (PR #111,
+`13326a5c`): (1) the per-token rate limit counted `initialize` + `tools/list`, so one Claude Code
+session in four started right after a poll-heavy one and attached with **zero tools** ("failed to
+connect, HTTP 429") — the MCP handshake and discovery methods are now exempt, only `tools/call`
+spends the budget; (2) the page said the JSON block was "identical everywhere", but Codex reads
+`config.toml` with `http_headers` (and headless `codex exec` needs
+`default_tools_approval_mode = "approve"`) — the verified TOML is now on the page and in
+`/llms.txt`. Codex's ChatGPT quota on this machine was exhausted, so its run used the local model
+provider Codex is configured with here; the MCP transport path is the one under test.
+
 ## Run results — 2026-09-11 05:28 UTC, production driven by Clark (agent layer) — 24 / 24, PASS
 
 Not a gate run — the agent-level check on top of G0–G4: **Clark** (the AWS-hosted Hermes 0.17

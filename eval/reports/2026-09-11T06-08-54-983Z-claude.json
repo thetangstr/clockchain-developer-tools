@@ -1,0 +1,305 @@
+{
+  "schema": "clockchain.eval-report/v1",
+  "runId": "06934983",
+  "agent": "claude",
+  "model": "Claude Code claude-haiku-4-5-20251001+claude-opus-5[1m]",
+  "endpoint": "https://mcp.clockchain.network/mcp",
+  "tokenLabel": "self-serve demo token, minted with one unauthenticated `POST https://mcp.clockchain.network/token` (tier: demo) — no account, no signup",
+  "startedAt": "2026-09-11T06:08:54.983Z",
+  "finishedAt": "2026-09-11T06:10:09.190Z",
+  "partial": true,
+  "suiteTotal": 24,
+  "summary": {
+    "tasks": 4,
+    "passed": 4,
+    "toolSelection": 4,
+    "tools": 0,
+    "exercisedOk": 0,
+    "exercisedErr": 0,
+    "notSingleAgent": 0,
+    "notExercised": 0
+  },
+  "tasks": [
+    {
+      "id": "time-read",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "get_time"
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "get_time"
+      ],
+      "calls": 2,
+      "toks": 285,
+      "detail": "live height 722; called get_time=true",
+      "mcpStatus": "connected",
+      "finalText": "From the Clockchain network:\n\n- **Consensus time:** 2026-09-11T06:08:59.825Z\n- **Latest block height:** 722",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__get_time,mcp__clockchain__get_block",
+            "max_results": 2
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "mcp__clockchain__get_time",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"latestBlockTime\": \"2026-09-11T06:08:59.825Z\",\n  \"latestBlockHeight\": \"722\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "stopwatch",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "stopwatch_start",
+        "stopwatch_stop",
+        "stopwatch_verify"
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "stopwatch_start",
+        "Bash",
+        "stopwatch_stop",
+        "stopwatch_verify"
+      ],
+      "calls": 5,
+      "toks": 1188,
+      "detail": "stopwatch_verify called=true, verified=true, elapsedOnChainMs=6937",
+      "mcpStatus": "connected",
+      "finalText": "Done. The stopwatch measurement for `eval-06934983` verified keylessly against the on-chain blocks.\n\n**On-chain elapsed time: 6937 ms**\n\n| | Start | Stop |\n|---|---|---|\n| Ledger ID | `1e5d70f0-8c01-40d6-aaee-44b7ce281c0f` | `3d88835e-04e0-46cd-9ad9-a1dc63df4765` |\n| Block height | 726 | 730 |\n| Block time | 2026-09-11T06:09:07.685Z | 2026-09-11T06:09:14.622Z |\n| Asset hash | `539be230…cb3173` | `280b6cd6…b8598b5` |\n\nVerification result: `verified: true`, `keyless: true`, both markers read from immutable on-chain blocks in causal order (not the rewritable record cache). `elapsedOnChainMs` (6937) matches `elapsedRecordedMs` (6937), so the ledger's advisory cache agrees with the authoritative block times.\n\nOne thing to note: the local wait was 3 s, but the on-chain elapsed is ~6.9 s. That's expected — the stopwatch measures the gap between the two markers' consensus timestamps, which includes the round-trip and block-inclusion latency of the stop call, not just the sleep.",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__stopwatch_start,mcp__clockchain__stopwatch_stop,mcp__clockchain__stopwatch_verify",
+            "max_results": 3
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "mcp__clockchain__stopwatch_start",
+          "input": {
+            "label": "eval-06934983"
+          },
+          "ok": true,
+          "result": "{\n  \"label\": \"eval-06934983\",\n  \"blockHeight\": \"726\",\n  \"start\": {\n    \"ledgerId\": \"1e5d70f0-8c01-40d6-aaee-44b7ce281c0f\",\n    \"blockHeight\": \"726\",\n    \"createdTimestamp\": \"2026-09-11T06:09:07.682Z\",\n    \"epochMs\": 1789106947682,\n    \"assetHash\": \"539be230901642d3267a3f1661c282bce306b1fe26ae10c71e726215c6cb3173\",\n    \"assetReferenceId\": \"stopwatch:eval-06934983:start\"\n  },\n  \"next\": \"Call stopwatch_stop with { label, start_ledger_id: start.ledgerId } to close the measurement.\",\n  \"status\": \"anchored\"\n}"
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "sleep 3 && echo \"waited 3s\"",
+            "description": "Wait three seconds before stopping the stopwatch"
+          },
+          "ok": false,
+          "result": "waited 3s"
+        },
+        {
+          "name": "mcp__clockchain__stopwatch_stop",
+          "input": {
+            "label": "eval-06934983",
+            "start_ledger_id": "1e5d70f0-8c01-40d6-aaee-44b7ce281c0f"
+          },
+          "ok": true,
+          "result": "{\n  \"label\": \"eval-06934983\",\n  \"blockHeight\": \"730\",\n  \"elapsedMs\": 6937,\n  \"start\": {\n    \"ledgerId\": \"1e5d70f0-8c01-40d6-aaee-44b7ce281c0f\",\n    \"blockHeight\": \"726\",\n    \"createdTimestamp\": \"2026-09-11T06:09:07.682Z\",\n    \"epochMs\": 1789106947682,\n    \"assetHash\": \"539be230901642d3267a3f1661c282bce306b1fe26ae10c71e726215c6cb3173\",\n    \"assetReferenceId\": \"stopwatch:eval-06934983:start\"\n  },\n  \"stop\": {\n    \"ledgerId\": \"3d88835e-04e0-46cd-9ad9-a1dc63df4765\",\n    \"blockHeight\": \"730\",\n    \"createdTimestamp\": \"2026-09-11T06:09:14.619Z\",\n    \"epochMs\": 1789106954619,\n    \"assetHash\": \"280b6cd6b7d94854732703586c8ee937b171ac5ed510565bce479802db8598b5\",\n    \"assetReferenceId\": \"stopwatch:eval-06934983:stop\"\n  },\n  \"verify\": {\n    \"how\": \"stopwatch_verify { start_ledger_id, stop_ledger_id } — recomputes elapsed from the two immutable block times, keyless.\",\n    \"start\": {\n      \"ledgerId\": \"1e5d70f0-8c01-40d6-aaee-44b7ce281c0f\",\n      \"blockHeight\": \"726\"\n    },\n    \"stop\": {\n      \"ledgerId\": \"3d88835e-04e0-46cd-9ad9-a1dc63df4765\",\n      \"blockHeight\": \"730\"\n    }\n  },\n  \"status\": \"anchored\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__stopwatch_verify",
+          "input": {
+            "start_ledger_id": "1e5d70f0-8c01-40d6-aaee-44b7ce281c0f",
+            "stop_ledger_id": "3d88835e-04e0-46cd-9ad9-a1dc63df4765",
+            "start_block_height": 726,
+            "stop_block_height": 730
+          },
+          "ok": true,
+          "result": "{\n  \"verified\": true,\n  \"keyless\": true,\n  \"elapsedOnChainMs\": 6937,\n  \"elapsedRecordedMs\": 6937,\n  \"start\": {\n    \"verifiedAgainst\": \"on-chain block\",\n    \"keyless\": true,\n    \"ledgerId\": \"1e5d70f0-8c01-40d6-aaee-44b7ce281c0f\",\n    \"blockHeight\": \"726\",\n    \"heightSource\": \"from the receipt\",\n    \"anchoredHash\": \"539be230901642d3267a3f1661c282bce306b1fe26ae10c71e726215c6cb3173\",\n    \"assetReferenceId\": \"stopwatch:eval-06934983:start\",\n    \"note\": \"Read from the immutable on-chain block (/searchAssetFromChain) with NO api key — not the rewritable record cache. This is the authoritative check.\",\n    \"blockTime\": \"2026-09-11T06:09:07.685Z\"\n  },\n  \"stop\": {\n    \"verifiedAgainst\": \"on-chain block\",\n    \"keyless\": true,\n    \"ledgerId\": \"3d88835e-04e0-46cd-9ad9-a1dc63df4765\",\n    \"blockHeight\": \"730\",\n    \"heightSource\": \"from the receipt\",\n    \"anchoredHash\": \"280b6cd6b7d94854732703586c8ee937b171ac5ed510565bce479802db8598b5\",\n    \"assetReferenceId\": \"stopwatch:eval-06934983:stop\",\n    \"note\": \"Read from the immutable on-chain block (/searchAssetFromChain) with NO api key — not the rewritable record cache. This is the authoritative check.\",\n    \"blockTime\": \"2026-09-11T06:09:14.622Z\"\n  },\n  \"note\": \"Both markers resolve to immutable on-chain blocks in causal order; elapsedOnChainMs is the difference of the two block times.\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "hosted-timer",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "timer_set",
+        "timer_status",
+        [
+          "verify_cross_party",
+          "verify_receipt"
+        ]
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "timer_set",
+        "timer_status",
+        "timer_status",
+        "timer_status",
+        "ToolSearch",
+        "get_time",
+        "timer_status",
+        "verify_cross_party"
+      ],
+      "calls": 9,
+      "toks": 1422,
+      "detail": "fired: ledger 15d22586-8e72-4d0d-9d13-876d35cdafb8 block 738",
+      "mcpStatus": "connected",
+      "finalText": "Done. Timer `eval-06934983` fired and verified.\n\n**Timer**\n- id: `b023ad8c-d7bd-433e-afc9-8dbfc2f80137`\n- Scheduled for 06:09:32.415Z, fired at 06:09:32.627Z (+212 ms, ±1025 ms uncertainty) — never early\n- Status: `done`, single fire, polled only (no second timer set)\n\n**Fire anchor**\n- **Ledger id:** `15d22586-8e72-4d0d-9d13-876d35cdafb8`\n- **Block height:** `738`\n- Event hash: `229a19a1f8e6f5f24ab4d0dddf4f430e3c49742d28796846ae1833af40d33134`\n- Consensus time: 2026-09-11T06:09:33.665Z\n\n**Keyless verification** (`verify_cross_party`, ledger id + block height from the receipt, no API key):\n- Read from the immutable on-chain block via `/searchAssetFromChain`, not the rewritable record cache\n- Anchored hash on-chain matches the receipt's event hash exactly\n\nCaveat from the receipt itself: this is the single-operator anchoring-gateway testnet — the hash and block anchor are real and keyless-verifiable against the sealed block, but no independent validator set attested it.",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__timer_set,mcp__clockchain__timer_status,mcp__clockchain__get_log_entry,mcp__clockchain__verify_receipt,mcp__clockchain__get_block",
+            "max_results": 5
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "mcp__clockchain__timer_set",
+          "input": {
+            "delay_ms": 5000,
+            "label": "eval-06934983"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n  \"kind\": \"timer\",\n  \"status\": \"scheduled\",\n  \"fireAtMs\": 1789106972415.4062,\n  \"fireAtIso\": \"2026-09-11T06:09:32.415Z\",\n  \"mode\": \"once\",\n  \"delivery\": \"poll\",\n  \"next\": \"Armed. Fires on verified time even if you disconnect. Poll timer_status { id: \\\"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\\\" } after 2026-09-11T06:09:32.415Z; the fire's receipt (ledgerId + blockHeight) verifies keylessly with verify_cross_party.\",\n  \"armedAtMs\": 1789106967415.4062,\n  \"armedAtIso\": \"2026-09-11T06:09:27.415Z\",\n  \"delayMs\": 5000\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_status",
+          "input": {
+            "id": "b023ad8c-d7bd-433e-afc9-8dbfc2f80137"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n  \"label\": \"eval-06934983\",\n  \"status\": \"scheduled\",\n  \"mode\": \"once\",\n  \"intervalMs\": null,\n  \"fireAtMs\": 1789106972415.4062,\n  \"fireAtIso\": \"2026-09-11T06:09:32.415Z\",\n  \"delivery\": \"poll\",\n  \"target\": null,\n  \"lastError\": null,\n  \"fires\": []\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_status",
+          "input": {
+            "id": "b023ad8c-d7bd-433e-afc9-8dbfc2f80137"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n  \"label\": \"eval-06934983\",\n  \"status\": \"scheduled\",\n  \"mode\": \"once\",\n  \"intervalMs\": null,\n  \"fireAtMs\": 1789106972415.4062,\n  \"fireAtIso\": \"2026-09-11T06:09:32.415Z\",\n  \"delivery\": \"poll\",\n  \"target\": null,\n  \"lastError\": null,\n  \"fires\": []\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_status",
+          "input": {
+            "id": "b023ad8c-d7bd-433e-afc9-8dbfc2f80137"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n  \"label\": \"eval-06934983\",\n  \"status\": \"scheduled\",\n  \"mode\": \"once\",\n  \"intervalMs\": null,\n  \"fireAtMs\": 1789106972415.4062,\n  \"fireAtIso\": \"2026-09-11T06:09:32.415Z\",\n  \"delivery\": \"poll\",\n  \"target\": null,\n  \"lastError\": null,\n  \"fires\": []\n}"
+        },
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__get_time,mcp__clockchain__verify_cross_party",
+            "max_results": 2
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "mcp__clockchain__get_time",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"latestBlockTime\": \"2026-09-11T06:09:36.712Z\",\n  \"latestBlockHeight\": \"739\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_status",
+          "input": {
+            "id": "b023ad8c-d7bd-433e-afc9-8dbfc2f80137"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n  \"label\": \"eval-06934983\",\n  \"status\": \"done\",\n  \"mode\": \"once\",\n  \"intervalMs\": null,\n  \"fireAtMs\": 1789106972415.4062,\n  \"fireAtIso\": \"2026-09-11T06:09:32.415Z\",\n  \"delivery\": \"poll\",\n  \"target\": null,\n  \"lastError\": null,\n  \"fires\": [\n    {\n      \"fireId\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137#1789106972415.4062\",\n      \"scheduledForMs\": 1789106972415.4062,\n      \"scheduledForIso\": \"2026-09-11T06:09:32.415Z\",\n      \"firedAtMs\": 1789106972627.3748,\n      \"firedAtIso\": \"2026-09-11T06:09:32.627Z\",\n      \"firedAtUncertaintyMs\": 1025.0000575624872,\n      \"delivery\": {\n        \"status\": \"skipped\",\n        \"attempts\": 0,\n        \"lastStatusCode\": null,\n        \"lastError\": null\n      },\n      \"anchor\": {\n        \"status\": \"anchored\",\n        \"ledgerId\": \"15d22586-8e72-4d0d-9d13-876d35cdafb8\",\n        \"blockHeight\": \"738\",\n        \"eventHash\": \"229a19a1f8e6f5f24ab4d0dddf4f430e3c49742d28796846ae1833af40d33134\"\n      },\n      \"receipt\": {\n        \"schema\": \"clockchain.receipt/v1\",\n        \"network\": \"testnet\",\n        \"status\": \"anchored\",\n        \"agentId\": \"agent:clockchain-mcp-keeper\",\n        \"action\": \"keeper.fire\",\n        \"eventHash\": \"229a19a1f8e6f5f24ab4d0dddf4f430e3c49742d28796846ae1833af40d33134\",\n        \"hashType\": \"SHA-256\",\n        \"payload\": {\n          \"inputs\": {\n            \"triggerId\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n            \"fireId\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137#1789106972415.4062\",\n            \"scheduledForMs\": 1789106972415.4062,\n            \"target\": null,\n            \"payload\": null\n          },\n          \"outputs\": {\n            \"firedAtMs\": 1789106972627.3748,\n            \"firedAtUncertaintyMs\": 1025.0000575624872,\n            \"delivery\": {\n              \"status\": \"skipped\",\n              \"attempts\": 0,\n              \"lastStatusCode\": null,\n              \"lastError\": null\n            }\n          }\n        },\n        \"anchor\": {\n          \"ledgerId\": \"15d22586-8e72-4d0d-9d13-876d35cdafb8\",\n          \"assetReferenceId\": \"agent:clockchain-mcp-keeper:keeper.fire:1789106973660\",\n          \"blockHeight\": \"738\",\n          \"recordedAt\": \"2026-09-11T06:09:33.662Z\",\n          \"consensusTime\": \"2026-09-11T06:09:33.665Z\",\n          \"confirmed\": true\n        },\n        \"attestation\": {\n          \"validators\": 0,\n          \"trustPct\": null,\n          \"status\": \"single-validator-testnet\",\n          \"substrate\": \"anchoring-gateway\",\n          \"note\": \"Recorded on the Clockchain anchoring gateway: an owned, single-operator, append-only testnet ledger with sealed blocks, used while the public network is unavailable. Verification is keyless against the sealed block; no independent validator set is involved yet (multi-validator is mainnet-gated).\"\n        },\n        \"identity\": {\n          \"resolved\": false,\n          \"status\": \"unknown\",\n          \"note\": \"agentId recorded but not independently resolved (set EVM_RPC_URL + ERC8004_REGISTRY_ADDRESS to resolve via ERC-8004).\"\n        },\n        \"verify\": {\n          \"how\": \"Recompute SHA-256 of the canonical {agentId, action, inputs, outputs} and compare to the hash anchored at this ledgerId on the Clockchain ledger.\"\n        },\n        \"poolHealth\": {\n          \"totalNodes\": 1,\n          \"nodeParticipationPct\": 100,\n          \"degraded\": false\n        },\n        \"disclaimer\": \"Testnet receipt anchored on the owned Clockchain anchoring gateway (single operator). The event hash, block anchor, and block time are real and keyless-verifiable against the sealed block; they are not yet attested by an independent validator set. Not a court-of-law evidentiary claim.\"\n      }\n    }\n  ]\n}"
+        },
+        {
+          "name": "mcp__clockchain__verify_cross_party",
+          "input": {
+            "ledger_id": "15d22586-8e72-4d0d-9d13-876d35cdafb8",
+            "block_height": 738
+          },
+          "ok": true,
+          "result": "{\n  \"onChain\": {\n    \"verifiedAgainst\": \"on-chain block\",\n    \"keyless\": true,\n    \"ledgerId\": \"15d22586-8e72-4d0d-9d13-876d35cdafb8\",\n    \"blockHeight\": \"738\",\n    \"heightSource\": \"from the receipt\",\n    \"anchoredHash\": \"229a19a1f8e6f5f24ab4d0dddf4f430e3c49742d28796846ae1833af40d33134\",\n    \"assetReferenceId\": \"agent:clockchain-mcp-keeper:keeper.fire:1789106973660\",\n    \"note\": \"Read from the immutable on-chain block (/searchAssetFromChain) with NO api key — not the rewritable record cache. This is the authoritative check.\"\n  },\n  \"advisoryHashCheck\": null\n}"
+        }
+      ]
+    },
+    {
+      "id": "hosted-alarm-cancel",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "alarm_set",
+        "timer_list",
+        "timer_cancel"
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "get_time",
+        "alarm_set",
+        "timer_list",
+        "timer_cancel",
+        "timer_status"
+      ],
+      "calls": 6,
+      "toks": 1324,
+      "detail": "alarm e27c2ac7-5d44-46b5-92a5-3eb88d22347b status=cancelled",
+      "mcpStatus": "connected",
+      "finalText": "Done. Summary of the alarm lifecycle:\n\n| Step | Result |\n|---|---|\n| Consensus time at start | `2026-09-11T06:09:51.678Z` (block 740) |\n| `alarm_set` | id `e27c2ac7-5d44-46b5-92a5-3eb88d22347b`, kind `alarm`, label `eval-06934983`, `fire_at` = `2026-09-11T06:19:51.678Z` (exactly +10 min), status `scheduled` |\n| `timer_list` | Alarm present, status `scheduled`, `fires: []` |\n| `timer_cancel` | `cancelled: true` |\n| `timer_status` (final) | **`cancelled`**, `fires: []` — it never fired |\n\nOne thing to note: `timer_list` also showed an older trigger (`b023ad8c-…`) with the same `eval-06934983` label that had already fired and anchored at block 738 at 06:09:32Z — about 20 seconds before I queried the clock. That one wasn't created in this session (probably a prior run under the same caller), and I left it alone since it was already `done`.",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__alarm_set,mcp__clockchain__timer_list,mcp__clockchain__timer_cancel,mcp__clockchain__timer_status,mcp__clockchain__get_time",
+            "max_results": 5
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "mcp__clockchain__get_time",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"latestBlockTime\": \"2026-09-11T06:09:51.678Z\",\n  \"latestBlockHeight\": \"740\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__alarm_set",
+          "input": {
+            "fire_at": "2026-09-11T06:19:51.678Z",
+            "label": "eval-06934983"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"e27c2ac7-5d44-46b5-92a5-3eb88d22347b\",\n  \"kind\": \"alarm\",\n  \"status\": \"scheduled\",\n  \"fireAtMs\": 1789107591678,\n  \"fireAtIso\": \"2026-09-11T06:19:51.678Z\",\n  \"mode\": \"once\",\n  \"delivery\": \"poll\",\n  \"next\": \"Armed. Fires on verified time even if you disconnect. Poll timer_status { id: \\\"e27c2ac7-5d44-46b5-92a5-3eb88d22347b\\\" } after 2026-09-11T06:19:51.678Z; the fire's receipt (ledgerId + blockHeight) verifies keylessly with verify_cross_party.\",\n  \"armedAtMs\": 1789106993458.5105,\n  \"armedAtIso\": \"2026-09-11T06:09:53.458Z\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_list",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"count\": 2,\n  \"triggers\": [\n    {\n      \"id\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n      \"label\": \"eval-06934983\",\n      \"status\": \"done\",\n      \"mode\": \"once\",\n      \"intervalMs\": null,\n      \"fireAtMs\": 1789106972415.4062,\n      \"fireAtIso\": \"2026-09-11T06:09:32.415Z\",\n      \"delivery\": \"poll\",\n      \"target\": null,\n      \"lastError\": null,\n      \"fires\": [\n        {\n          \"fireId\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137#1789106972415.4062\",\n          \"scheduledForMs\": 1789106972415.4062,\n          \"scheduledForIso\": \"2026-09-11T06:09:32.415Z\",\n          \"firedAtMs\": 1789106972627.3748,\n          \"firedAtIso\": \"2026-09-11T06:09:32.627Z\",\n          \"firedAtUncertaintyMs\": 1025.0000575624872,\n          \"delivery\": {\n            \"status\": \"skipped\",\n            \"attempts\": 0,\n            \"lastStatusCode\": null,\n            \"lastError\": null\n          },\n          \"anchor\": {\n            \"status\": \"anchored\",\n            \"ledgerId\": \"15d22586-8e72-4d0d-9d13-876d35cdafb8\",\n            \"blockHeight\": \"738\",\n            \"eventHash\": \"229a19a1f8e6f5f24ab4d0dddf4f430e3c49742d28796846ae1833af40d33134\"\n          },\n          \"receipt\": {\n            \"schema\": \"clockchain.receipt/v1\",\n            \"network\": \"testnet\",\n            \"status\": \"anchored\",\n            \"agentId\": \"agent:clockchain-mcp-keeper\",\n            \"action\": \"keeper.fire\",\n            \"eventHash\": \"229a19a1f8e6f5f24ab4d0dddf4f430e3c49742d28796846ae1833af40d33134\",\n            \"hashType\": \"SHA-256\",\n            \"payload\": {\n              \"inputs\": {\n                \"triggerId\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137\",\n                \"fireId\": \"b023ad8c-d7bd-433e-afc9-8dbfc2f80137#1789106972415.4062\",\n                \"scheduledForMs\": 1789106972415.4062,\n                \"target\": null,\n                \"payload\": null\n              },\n              \"outputs\": {\n                \"firedAtMs\": 1789106972627.3748,\n                \"firedAtUncertaintyMs\": 1025.0000575624872,\n                \"delivery\": {\n                  \"status\": \"skipped\",\n                  \"attempts\": 0,\n                  \"lastStatusCode\": null,\n                  \"lastError\": null\n                }\n              }\n            },\n            \"anchor\": {\n              \"ledgerId\": \"15d22586-8e72-4d0d-9d13-876d35cdafb8\",\n              \"assetReferenceId\": \"agent:clockchain-mcp-keeper:keeper.fire:1789106973660\",\n              \"blockHeight\": \"738\",\n              \"recordedAt\": \"2026-09-11T06:09:33.662Z\",\n              \"consensusTime\": \"2026-09-11T06:09:33.665Z\",\n              \"confirmed\": true\n            },\n            \"attestation\": {\n              \"validators\": 0,\n              \"trustPct\": null,\n              \"status\": \"single-validator-testnet\",\n              \"substrate\": \"anchoring-gateway\",\n              \"note\": \"Recorded on the Clockchain anchoring gateway: an owned, single-operator, append-only testnet ledger with sealed blocks, used while the public network is unavailable. Verification is keyless against the sealed block; no independent validator set is involved yet (multi-validator is mainnet-gated).\"\n            },\n            \"identity\": {\n              \"resolved\": false,\n              \"status\": \"unknown\",\n              \"note\": \"agentId recorded but not independently resolved (set EVM_RPC_URL + ERC8004_REGISTRY_ADDRESS to resolve via ERC-8004).\"\n            },\n            \"verify\": {\n              \"how\": \"Recompute SHA-256 of the canonical {agentId, action, inputs, outputs} and compare to the hash anchored at this ledgerId on the Clockchain ledger.\"\n            },\n            \"poolHealth\": {\n              \"totalNodes\": 1,\n              \"nodeParticipationPct\": 100,\n              \"degraded\": false\n            },\n            \"disclaimer\": \"Testnet receipt anchored on the owned Clockchain anchoring gateway (single operator). The event hash, block anchor, and block time are real and keyless-verifiable against the sealed block; they are not yet attested by an independent validator set. Not a court-of"
+        },
+        {
+          "name": "mcp__clockchain__timer_cancel",
+          "input": {
+            "id": "e27c2ac7-5d44-46b5-92a5-3eb88d22347b"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"e27c2ac7-5d44-46b5-92a5-3eb88d22347b\",\n  \"status\": \"cancelled\",\n  \"cancelled\": true\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_status",
+          "input": {
+            "id": "e27c2ac7-5d44-46b5-92a5-3eb88d22347b"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"e27c2ac7-5d44-46b5-92a5-3eb88d22347b\",\n  \"label\": \"eval-06934983\",\n  \"status\": \"cancelled\",\n  \"mode\": \"once\",\n  \"intervalMs\": null,\n  \"fireAtMs\": 1789107591678,\n  \"fireAtIso\": \"2026-09-11T06:19:51.678Z\",\n  \"delivery\": \"poll\",\n  \"target\": null,\n  \"lastError\": null,\n  \"fires\": []\n}"
+        }
+      ]
+    }
+  ],
+  "coverage": []
+}

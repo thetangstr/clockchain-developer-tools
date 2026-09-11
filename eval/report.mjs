@@ -62,7 +62,10 @@ export function coverage(toolNames, rows) {
   });
 }
 
-export function writeReport({ dir, runId, agent, model, endpoint, tokenLabel = "", toolNames, rows, startedAt, finishedAt }) {
+export function writeReport({ dir, runId, agent, model, endpoint, tokenLabel = "", toolNames, rows, startedAt, finishedAt, suiteTotal = rows.length }) {
+  // A filtered run (TASK=…) is judged on its tasks only: the coverage matrix is still
+  // printed, but "not exercised" cannot fail a run that never tried to cover everything.
+  const partial = rows.length < suiteTotal;
   mkdirSync(dir, { recursive: true });
   const cov = coverage(toolNames, rows);
   const passed = rows.filter((r) => r.pass).length;
@@ -72,12 +75,12 @@ export function writeReport({ dir, runId, agent, model, endpoint, tokenLabel = "
   const notSingle = cov.filter((c) => c.status === "not-single-agent").length;
   const notExercised = cov.filter((c) => c.status === "not-exercised");
   const stem = `${startedAt.replace(/[:.]/g, "-")}-${agent}`;
-  const json = { schema: "clockchain.eval-report/v1", runId, agent, model, endpoint, tokenLabel, startedAt, finishedAt,
+  const json = { schema: "clockchain.eval-report/v1", runId, agent, model, endpoint, tokenLabel, startedAt, finishedAt, partial, suiteTotal,
     summary: { tasks: rows.length, passed, toolSelection: selected, tools: toolNames.length, exercisedOk, exercisedErr, notSingleAgent: notSingle, notExercised: notExercised.length },
     tasks: rows, coverage: cov };
   writeFileSync(path.join(dir, `${stem}.json`), JSON.stringify(json, null, 2));
 
-  const verdict = passed === rows.length && notExercised.length === 0 ? "PASS" : "FAIL";
+  const verdict = passed === rows.length && (partial || notExercised.length === 0) ? "PASS" : "FAIL";
   const md = [];
   md.push(`# Clockchain MCP — agent test report: ${verdict}`);
   md.push("");
@@ -86,7 +89,7 @@ export function writeReport({ dir, runId, agent, model, endpoint, tokenLabel = "
   md.push(`| Endpoint | ${endpoint} |`);
   if (tokenLabel) md.push(`| Credentials | ${tokenLabel} |`);
   md.push(`| Run | \`${runId}\` · ${startedAt} → ${finishedAt} |`);
-  md.push(`| Tasks | **${passed} / ${rows.length} passed** (on-chain checks, no LLM judge); tool selection ${selected} / ${rows.length} |`);
+  md.push(`| Tasks | **${passed} / ${rows.length} passed** (on-chain checks, no LLM judge); tool selection ${selected} / ${rows.length}${partial ? ` — partial suite: ${rows.length} of ${suiteTotal} tasks (\`TASK=${rows.map((r) => r.id).join(",")}\`)` : ""} |`);
   md.push(`| Tools | ${toolNames.length} on the live surface: **${exercisedOk} exercised OK**, ${exercisedErr} exercised with an error result, ${notSingle} not single-agent testable (covered elsewhere), ${notExercised.length} not exercised |`);
   md.push("");
   md.push("## Tasks");
@@ -94,7 +97,9 @@ export function writeReport({ dir, runId, agent, model, endpoint, tokenLabel = "
   md.push("| Task | Result | Tools | Calls | Evidence |");
   md.push("|---|---|---|---|---|");
   for (const r of rows) {
-    md.push(`| \`${r.id}\` | ${r.pass ? "✅ PASS" : "❌ FAIL"} | ${r.selOk ? "as expected" : "missed: " + r.expectTools.filter((t) => !r.usedTools.includes(t)).join(", ")} | ${r.calls} | ${String(r.detail).replace(/\|/g, "\\|")} |`);
+    const missed = r.expectTools.filter((t) => (Array.isArray(t) ? !t.some((x) => r.usedTools.includes(x)) : !r.usedTools.includes(t)))
+      .map((t) => (Array.isArray(t) ? t.join(" or ") : t));
+    md.push(`| \`${r.id}\` | ${r.pass ? "✅ PASS" : "❌ FAIL"} | ${r.selOk ? "as expected" : "missed: " + missed.join(", ")} | ${r.calls} | ${String(r.detail).replace(/\|/g, "\\|")} |`);
   }
   md.push("");
   md.push("## Tool coverage (live `tools/list`)");
@@ -106,7 +111,9 @@ export function writeReport({ dir, runId, agent, model, endpoint, tokenLabel = "
   md.push("");
   md.push("Legend: ✅ called and returned the server's JSON success payload · ⚠️ called, returned an error/text result (see the task's evidence — expected where the substrate lacks the API) · ◻️ cannot be completed by one agent; covered by the named suites · ❌ not exercised in this run.");
   md.push("");
-  md.push("Verdict rule: PASS = every task's on-chain check passed AND every single-agent-testable tool was exercised.");
+  md.push(partial
+    ? "Verdict rule (partial suite): PASS = every selected task's on-chain check passed. The coverage matrix is informational — tools outside the selected tasks are not expected."
+    : "Verdict rule: PASS = every task's on-chain check passed AND every single-agent-testable tool was exercised.");
   writeFileSync(path.join(dir, `${stem}.md`), md.join("\n") + "\n");
   return { json: path.join(dir, `${stem}.json`), md: path.join(dir, `${stem}.md`), verdict, passed, exercisedOk, exercisedErr, notExercised: notExercised.map((c) => c.tool) };
 }

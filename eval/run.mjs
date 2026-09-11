@@ -307,8 +307,11 @@ async function main() {
   const allowed = toolNames.map((t) => `mcp__clockchain__${t}`).join(",");
   const runId = String(Date.now()).slice(-8);
   let suite = tasks(runId);
+  const suiteTotal = suite.length;
   if (FILTER.length) suite = suite.filter((t) => FILTER.some((f) => t.id.includes(f)));
-  const agentLabel = AGENT === "hermes" ? `hermes:${HERMES_PROFILE}${HERMES_SSM_INSTANCE ? "@" + HERMES_SSM_INSTANCE : ""}` : AGENT;
+  const agentLabel = AGENT === "hermes" ? `hermes:${HERMES_PROFILE}${HERMES_SSM_INSTANCE ? "@" + HERMES_SSM_INSTANCE : ""}`
+    : AGENT === "claude" && process.env.CLAUDE_MODEL ? `claude:${process.env.CLAUDE_MODEL}`
+    : AGENT === "codex" && process.env.CODEX_MODEL ? `codex:${process.env.CODEX_MODEL}` : AGENT;
   const startedAt = new Date().toISOString();
 
   console.log(`# Clockchain MCP — agent eval\nagent: ${agentLabel} | endpoint: ${MCP_URL} | tools: ${tools.length} | tasks: ${suite.length} | runId: ${runId}\n`);
@@ -323,8 +326,9 @@ async function main() {
     try { ({ pass, detail } = await task.check({ callTool, trajectory, finalText })); }
     catch (e) { detail = "check error: " + e.message; }
     const usedTools = trajectory.map((c) => bareTool(c.name));
-    const expected = task.expectTools.filter((t) => usedTools.includes(t));
-    const selOk = expected.length === task.expectTools.length;
+    // An expectTools entry may be a list of acceptable alternatives (any one satisfies it).
+    const hit = (t) => (Array.isArray(t) ? t.some((x) => usedTools.includes(x)) : usedTools.includes(t));
+    const selOk = task.expectTools.every(hit);
     const toks = (usage.input_tokens ?? usage.prompt_tokens ?? 0) + (usage.output_tokens ?? usage.completion_tokens ?? 0);
     rows.push({ id: task.id, pass, selOk, expectTools: task.expectTools, usedTools, calls: trajectory.length, toks, detail, mcpStatus: r.mcpStatus ?? null, finalText: String(finalText).slice(0, 2000), trajectory: trajectory.map((c) => ({ name: c.name, input: c.input, ok: parses(c.result), result: typeof c.result === "string" ? c.result.slice(0, 4000) : c.result })) });
     console.log(`${pass ? "PASS" : "FAIL"}  [tools ${selOk ? "ok" : "miss"}, ${trajectory.length} calls, ~${toks} tok]  ${detail}`);
@@ -338,8 +342,8 @@ async function main() {
   }
   const p = rows.filter((r) => r.pass).length, s = rows.filter((r) => r.selOk).length;
   console.log(`\n==== completion ${p}/${rows.length} | tool-selection ${s}/${rows.length} | avg ${round(rows.reduce((a, r) => a + r.calls, 0) / rows.length)} calls, ~${Math.round(rows.reduce((a, r) => a + r.toks, 0) / rows.length)} tok/task ====`);
-  const rep = writeReport({ dir: REPORT_DIR, runId, agent: agentLabel, model, endpoint: MCP_URL, tokenLabel: TOKEN_LABEL, toolNames, rows, startedAt, finishedAt: new Date().toISOString() });
-  console.log(`report: ${rep.md} (${rep.verdict}; ${rep.exercisedOk} tools exercised OK, ${rep.exercisedErr} with error results${rep.notExercised.length ? `; not exercised: ${rep.notExercised.join(", ")}` : ""})`);
+  const rep = writeReport({ dir: REPORT_DIR, runId, agent: agentLabel, model, endpoint: MCP_URL, tokenLabel: TOKEN_LABEL, toolNames, rows, startedAt, finishedAt: new Date().toISOString(), suiteTotal });
+  console.log(`report: ${rep.md} (${rep.verdict}; ${rep.exercisedOk} tools exercised OK, ${rep.exercisedErr} with error results${rep.notExercised.length && suite.length === suiteTotal ? `; not exercised: ${rep.notExercised.join(", ")}` : ""})`);
   process.exit(rep.verdict === "PASS" ? 0 : 1);
 }
 main().catch((e) => { console.error("eval failed:", e.message); process.exit(1); });

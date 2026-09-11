@@ -1,0 +1,392 @@
+{
+  "schema": "clockchain.eval-report/v1",
+  "runId": "06934971",
+  "agent": "claude:claude-haiku-4-5-20251001",
+  "model": "Claude Code claude-haiku-4-5-20251001",
+  "endpoint": "https://mcp.clockchain.network/mcp",
+  "tokenLabel": "self-serve demo token, minted with one unauthenticated `POST https://mcp.clockchain.network/token` (tier: demo) — no account, no signup",
+  "startedAt": "2026-09-11T06:08:54.971Z",
+  "finishedAt": "2026-09-11T06:10:38.812Z",
+  "partial": true,
+  "suiteTotal": 24,
+  "summary": {
+    "tasks": 4,
+    "passed": 4,
+    "toolSelection": 4,
+    "tools": 0,
+    "exercisedOk": 0,
+    "exercisedErr": 0,
+    "notSingleAgent": 0,
+    "notExercised": 0
+  },
+  "tasks": [
+    {
+      "id": "time-read",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "get_time"
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "get_time",
+        "get_block"
+      ],
+      "calls": 3,
+      "toks": 604,
+      "detail": "live height 723; called get_time=true",
+      "mcpStatus": "connected",
+      "finalText": "Here's the current Clockchain network status:\n\n**Current Consensus Time:** 2026-09-11T06:08:59.825Z\n\n**Latest Block Height:** 722\n\n**Latest Block Details:**\n- Block Height: 722\n- Block Time: 2026-09-11T06:08:59.825Z\n- Proposer Address: 0xACE00000000000000000000000000000A11C0DE0",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__get_time,mcp__clockchain__get_block",
+            "max_results": 5
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "mcp__clockchain__get_time",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"latestBlockTime\": \"2026-09-11T06:08:59.825Z\",\n  \"latestBlockHeight\": \"722\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__get_block",
+          "input": {
+            "height": "latest"
+          },
+          "ok": true,
+          "result": "{\n  \"blockHeight\": 722,\n  \"proposerAddress\": \"0xACE00000000000000000000000000000A11C0DE0\",\n  \"blockTime\": \"2026-09-11T06:08:59.825Z\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "stopwatch",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "stopwatch_start",
+        "stopwatch_stop",
+        "stopwatch_verify"
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "Bash",
+        "stopwatch_start",
+        "Bash",
+        "stopwatch_stop",
+        "stopwatch_verify"
+      ],
+      "calls": 6,
+      "toks": 1626,
+      "detail": "stopwatch_verify called=true, verified=true, elapsedOnChainMs=6733",
+      "mcpStatus": "connected",
+      "finalText": "Perfect! The timing task is complete. Here's the summary:\n\n**On-chain Elapsed Time: 6,733 milliseconds**\n\n**Verification Results:**\n- ✅ Both stopwatch markers verified keylessly against immutable on-chain blocks\n- ✅ Start marker anchored at block height 728 (2026-09-11T06:09:11.643Z)\n- ✅ Stop marker anchored at block height 732 (2026-09-11T06:09:18.376Z)\n- ✅ On-chain elapsed time matches recorded elapsed time: 6,733 ms\n- ✅ Markers in verified causal order\n\nThe measurement was computed from the two block timestamps recorded on-chain with no API key required, confirming the elapsed time of **6,733 milliseconds** for task \"eval-06934971\".",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__stopwatch_start,mcp__clockchain__stopwatch_stop,mcp__clockchain__stopwatch_verify",
+            "max_results": 5
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "sleep 0.5",
+            "description": "Brief pause to ensure tooling is ready"
+          },
+          "ok": false,
+          "result": "(Bash completed with no output)"
+        },
+        {
+          "name": "mcp__clockchain__stopwatch_start",
+          "input": {
+            "label": "eval-06934971"
+          },
+          "ok": true,
+          "result": "{\n  \"label\": \"eval-06934971\",\n  \"blockHeight\": \"728\",\n  \"start\": {\n    \"ledgerId\": \"05f39d7b-fde3-47c8-94fc-1e85de216024\",\n    \"blockHeight\": \"728\",\n    \"createdTimestamp\": \"2026-09-11T06:09:11.640Z\",\n    \"epochMs\": 1789106951640,\n    \"assetHash\": \"b393ce07e1c386abff2b89989f9f45826c91a2f593e615fe17373dac953b7908\",\n    \"assetReferenceId\": \"stopwatch:eval-06934971:start\"\n  },\n  \"next\": \"Call stopwatch_stop with { label, start_ledger_id: start.ledgerId } to close the measurement.\",\n  \"status\": \"anchored\"\n}"
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "sleep 3",
+            "description": "Wait 3 seconds"
+          },
+          "ok": false,
+          "result": "(Bash completed with no output)"
+        },
+        {
+          "name": "mcp__clockchain__stopwatch_stop",
+          "input": {
+            "label": "eval-06934971",
+            "start_ledger_id": "05f39d7b-fde3-47c8-94fc-1e85de216024"
+          },
+          "ok": true,
+          "result": "{\n  \"label\": \"eval-06934971\",\n  \"blockHeight\": \"732\",\n  \"elapsedMs\": 6733,\n  \"start\": {\n    \"ledgerId\": \"05f39d7b-fde3-47c8-94fc-1e85de216024\",\n    \"blockHeight\": \"728\",\n    \"createdTimestamp\": \"2026-09-11T06:09:11.640Z\",\n    \"epochMs\": 1789106951640,\n    \"assetHash\": \"b393ce07e1c386abff2b89989f9f45826c91a2f593e615fe17373dac953b7908\",\n    \"assetReferenceId\": \"stopwatch:eval-06934971:start\"\n  },\n  \"stop\": {\n    \"ledgerId\": \"57dee627-e5c5-4521-9af1-b74cd168f91a\",\n    \"blockHeight\": \"732\",\n    \"createdTimestamp\": \"2026-09-11T06:09:18.373Z\",\n    \"epochMs\": 1789106958373,\n    \"assetHash\": \"f06e52863582ccc92a964ad886ab23d7320a1229933f5a07ab157ef54f791179\",\n    \"assetReferenceId\": \"stopwatch:eval-06934971:stop\"\n  },\n  \"verify\": {\n    \"how\": \"stopwatch_verify { start_ledger_id, stop_ledger_id } — recomputes elapsed from the two immutable block times, keyless.\",\n    \"start\": {\n      \"ledgerId\": \"05f39d7b-fde3-47c8-94fc-1e85de216024\",\n      \"blockHeight\": \"728\"\n    },\n    \"stop\": {\n      \"ledgerId\": \"57dee627-e5c5-4521-9af1-b74cd168f91a\",\n      \"blockHeight\": \"732\"\n    }\n  },\n  \"status\": \"anchored\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__stopwatch_verify",
+          "input": {
+            "start_ledger_id": "05f39d7b-fde3-47c8-94fc-1e85de216024",
+            "stop_ledger_id": "57dee627-e5c5-4521-9af1-b74cd168f91a"
+          },
+          "ok": true,
+          "result": "{\n  \"verified\": true,\n  \"keyless\": true,\n  \"elapsedOnChainMs\": 6733,\n  \"elapsedRecordedMs\": 6733,\n  \"start\": {\n    \"verifiedAgainst\": \"on-chain block\",\n    \"keyless\": true,\n    \"ledgerId\": \"05f39d7b-fde3-47c8-94fc-1e85de216024\",\n    \"blockHeight\": \"728\",\n    \"heightSource\": \"discovered via the record cache (advisory)\",\n    \"anchoredHash\": \"b393ce07e1c386abff2b89989f9f45826c91a2f593e615fe17373dac953b7908\",\n    \"assetReferenceId\": \"stopwatch:eval-06934971:start\",\n    \"note\": \"Read from the immutable on-chain block (/searchAssetFromChain) with NO api key — not the rewritable record cache. This is the authoritative check.\",\n    \"blockTime\": \"2026-09-11T06:09:11.643Z\"\n  },\n  \"stop\": {\n    \"verifiedAgainst\": \"on-chain block\",\n    \"keyless\": true,\n    \"ledgerId\": \"57dee627-e5c5-4521-9af1-b74cd168f91a\",\n    \"blockHeight\": \"732\",\n    \"heightSource\": \"discovered via the record cache (advisory)\",\n    \"anchoredHash\": \"f06e52863582ccc92a964ad886ab23d7320a1229933f5a07ab157ef54f791179\",\n    \"assetReferenceId\": \"stopwatch:eval-06934971:stop\",\n    \"note\": \"Read from the immutable on-chain block (/searchAssetFromChain) with NO api key — not the rewritable record cache. This is the authoritative check.\",\n    \"blockTime\": \"2026-09-11T06:09:18.376Z\"\n  },\n  \"note\": \"Both markers resolve to immutable on-chain blocks in causal order; elapsedOnChainMs is the difference of the two block times.\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "hosted-timer",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "timer_set",
+        "timer_status",
+        [
+          "verify_cross_party",
+          "verify_receipt"
+        ]
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "Bash",
+        "Bash",
+        "Bash",
+        "Bash",
+        "timer_set",
+        "Bash",
+        "timer_status",
+        "verify_receipt"
+      ],
+      "calls": 9,
+      "toks": 3552,
+      "detail": "fired: ledger 280bf70f-0409-42d6-887f-1a3f8cb2548c block 740",
+      "mcpStatus": "connected",
+      "finalText": "## ✅ Clockchain Timer Complete\n\n**Timer Fire Details:**\n- **Ledger ID:** `280bf70f-0409-42d6-887f-1a3f8cb2548c`\n- **Block Height:** `740`\n- **Fired at:** 2026-09-11T06:09:50.639Z (545ms after scheduled time)\n\n**Keyless Verification Result:**\n- **Match:** ✅ Confirmed\n- **Event Hash:** `d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb`\n- **Anchored Hash:** `d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb` (identical)\n- **Verified Against:** On-chain block (keyless, no credentials required)\n\nThe timer fired precisely on schedule, the fire was anchored to the Clockchain ledger, and the receipt has been independently verified keyless against the sealed block.",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__timer_set,mcp__clockchain__timer_status,mcp__clockchain__verify_receipt",
+            "max_results": 5
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "cat > /tmp/clockchain_timer.sh << 'EOF'\n#!/bin/bash\nset -e\n\n# Set timer for 5 seconds (5000 ms)\nTIMER_RESPONSE=$(curl -s -X POST \"http://localhost:9000/timer/set\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"delay_ms\": 5000,\n    \"label\": \"eval-06934971\"\n  }')\n\necho \"Timer set response: $TIMER_RESPONSE\"\nTIMER_ID=$(echo \"$TIMER_RESPONSE\" | jq -r '.id // empty')\n\nif [ -z \"$TIMER_ID\" ]; then\n  echo \"Failed to get timer ID\"\n  exit 1\nfi\n\necho \"Timer ID: $TIMER_ID\"\n\n# Poll status until done\nwhile true; do\n  STATUS=$(curl -s -X GET \"http://localhost:9000/timer/status/$TIMER_ID\" \\\n    -H \"Content-Type: application/json\")\n  \n  echo \"Status check: $STATUS\"\n  \n  STATE=$(echo \"$STATUS\" | jq -r '.state // empty')\n  \n  if [ \"$STATE\" = \"done\" ]; then\n    echo \"Timer fired!\"\n    echo \"Full response: $STATUS\"\n    break\n  fi\n  \n  sleep 1\ndone\nEOF\n\nchmod +x /tmp/clockchain_timer.sh\n/tmp/clockchain_timer.sh\n",
+            "description": "Set Clockchain timer and poll status"
+          },
+          "ok": false,
+          "result": "This Bash command contains multiple operations. The following parts require approval: cat, chmod +x /tmp/clockchain_timer.sh, /tmp/clockchain_timer.sh"
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "sleep 6 &\nsleep_pid=$!\nwait $sleep_pid 2>/dev/null || true\necho \"Waited 6 seconds\"",
+            "description": "Wait 6 seconds for polling loop",
+            "run_in_background": true
+          },
+          "ok": false,
+          "result": "Contains simple_expansion"
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "python3 << 'PYTHON'\nimport subprocess\nimport json\nimport time\n\n# Set timer for 5 seconds\nresult = subprocess.run(\n    [\"python3\", \"-c\", \"\"\"\nimport json\nprint(json.dumps({'delay_ms': 5000, 'label': 'eval-06934971'}))\n\"\"\"],\n    capture_output=True,\n    text=True\n)\n\nprint(\"Starting timer for 5 seconds...\")\nPYTHON\n",
+            "description": "Initiate Clockchain timer setup"
+          },
+          "ok": false,
+          "result": "This command requires approval"
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "echo \"Setting Clockchain timer...\"",
+            "description": "Confirm timer setup"
+          },
+          "ok": false,
+          "result": "Setting Clockchain timer..."
+        },
+        {
+          "name": "mcp__clockchain__timer_set",
+          "input": {
+            "delay_ms": 5000,
+            "label": "eval-06934971"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69\",\n  \"kind\": \"timer\",\n  \"status\": \"scheduled\",\n  \"fireAtMs\": 1789106990094.454,\n  \"fireAtIso\": \"2026-09-11T06:09:50.094Z\",\n  \"mode\": \"once\",\n  \"delivery\": \"poll\",\n  \"next\": \"Armed. Fires on verified time even if you disconnect. Poll timer_status { id: \\\"bf497b2a-6890-47e9-82c2-bd7b211b5a69\\\" } after 2026-09-11T06:09:50.094Z; the fire's receipt (ledgerId + blockHeight) verifies keylessly with verify_cross_party.\",\n  \"armedAtMs\": 1789106985094.454,\n  \"armedAtIso\": \"2026-09-11T06:09:45.094Z\",\n  \"delayMs\": 5000\n}"
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "sleep 6",
+            "description": "Wait for timer to fire (5s + buffer)"
+          },
+          "ok": false,
+          "result": "(Bash completed with no output)"
+        },
+        {
+          "name": "mcp__clockchain__timer_status",
+          "input": {
+            "id": "bf497b2a-6890-47e9-82c2-bd7b211b5a69"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69\",\n  \"label\": \"eval-06934971\",\n  \"status\": \"done\",\n  \"mode\": \"once\",\n  \"intervalMs\": null,\n  \"fireAtMs\": 1789106990094.454,\n  \"fireAtIso\": \"2026-09-11T06:09:50.094Z\",\n  \"delivery\": \"poll\",\n  \"target\": null,\n  \"lastError\": null,\n  \"fires\": [\n    {\n      \"fireId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69#1789106990094.454\",\n      \"scheduledForMs\": 1789106990094.454,\n      \"scheduledForIso\": \"2026-09-11T06:09:50.094Z\",\n      \"firedAtMs\": 1789106990639.4673,\n      \"firedAtIso\": \"2026-09-11T06:09:50.639Z\",\n      \"firedAtUncertaintyMs\": 1025.0000575624872,\n      \"delivery\": {\n        \"status\": \"skipped\",\n        \"attempts\": 0,\n        \"lastStatusCode\": null,\n        \"lastError\": null\n      },\n      \"anchor\": {\n        \"status\": \"anchored\",\n        \"ledgerId\": \"280bf70f-0409-42d6-887f-1a3f8cb2548c\",\n        \"blockHeight\": \"740\",\n        \"eventHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\"\n      },\n      \"receipt\": {\n        \"schema\": \"clockchain.receipt/v1\",\n        \"network\": \"testnet\",\n        \"status\": \"anchored\",\n        \"agentId\": \"agent:clockchain-mcp-keeper\",\n        \"action\": \"keeper.fire\",\n        \"eventHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\",\n        \"hashType\": \"SHA-256\",\n        \"payload\": {\n          \"inputs\": {\n            \"triggerId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69\",\n            \"fireId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69#1789106990094.454\",\n            \"scheduledForMs\": 1789106990094.454,\n            \"target\": null,\n            \"payload\": null\n          },\n          \"outputs\": {\n            \"firedAtMs\": 1789106990639.4673,\n            \"firedAtUncertaintyMs\": 1025.0000575624872,\n            \"delivery\": {\n              \"status\": \"skipped\",\n              \"attempts\": 0,\n              \"lastStatusCode\": null,\n              \"lastError\": null\n            }\n          }\n        },\n        \"anchor\": {\n          \"ledgerId\": \"280bf70f-0409-42d6-887f-1a3f8cb2548c\",\n          \"assetReferenceId\": \"agent:clockchain-mcp-keeper:keeper.fire:1789106991672\",\n          \"blockHeight\": \"740\",\n          \"recordedAt\": \"2026-09-11T06:09:51.675Z\",\n          \"consensusTime\": \"2026-09-11T06:09:51.678Z\",\n          \"confirmed\": true\n        },\n        \"attestation\": {\n          \"validators\": 0,\n          \"trustPct\": null,\n          \"status\": \"single-validator-testnet\",\n          \"substrate\": \"anchoring-gateway\",\n          \"note\": \"Recorded on the Clockchain anchoring gateway: an owned, single-operator, append-only testnet ledger with sealed blocks, used while the public network is unavailable. Verification is keyless against the sealed block; no independent validator set is involved yet (multi-validator is mainnet-gated).\"\n        },\n        \"identity\": {\n          \"resolved\": false,\n          \"status\": \"unknown\",\n          \"note\": \"agentId recorded but not independently resolved (set EVM_RPC_URL + ERC8004_REGISTRY_ADDRESS to resolve via ERC-8004).\"\n        },\n        \"verify\": {\n          \"how\": \"Recompute SHA-256 of the canonical {agentId, action, inputs, outputs} and compare to the hash anchored at this ledgerId on the Clockchain ledger.\"\n        },\n        \"poolHealth\": {\n          \"totalNodes\": 1,\n          \"nodeParticipationPct\": 100,\n          \"degraded\": false\n        },\n        \"disclaimer\": \"Testnet receipt anchored on the owned Clockchain anchoring gateway (single operator). The event hash, block anchor, and block time are real and keyless-verifiable against the sealed block; they are not yet attested by an independent validator set. Not a court-of-law evidentiary claim.\"\n      }\n    }\n  ]\n}"
+        },
+        {
+          "name": "mcp__clockchain__verify_receipt",
+          "input": {
+            "receipt": {
+              "schema": "clockchain.receipt/v1",
+              "network": "testnet",
+              "status": "anchored",
+              "agentId": "agent:clockchain-mcp-keeper",
+              "action": "keeper.fire",
+              "eventHash": "d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb",
+              "hashType": "SHA-256",
+              "payload": {
+                "inputs": {
+                  "triggerId": "bf497b2a-6890-47e9-82c2-bd7b211b5a69",
+                  "fireId": "bf497b2a-6890-47e9-82c2-bd7b211b5a69#1789106990094.454",
+                  "scheduledForMs": 1789106990094.454,
+                  "target": null,
+                  "payload": null
+                },
+                "outputs": {
+                  "firedAtMs": 1789106990639.4673,
+                  "firedAtUncertaintyMs": 1025.0000575624872,
+                  "delivery": {
+                    "status": "skipped",
+                    "attempts": 0,
+                    "lastStatusCode": null,
+                    "lastError": null
+                  }
+                }
+              },
+              "anchor": {
+                "ledgerId": "280bf70f-0409-42d6-887f-1a3f8cb2548c",
+                "assetReferenceId": "agent:clockchain-mcp-keeper:keeper.fire:1789106991672",
+                "blockHeight": "740",
+                "recordedAt": "2026-09-11T06:09:51.675Z",
+                "consensusTime": "2026-09-11T06:09:51.678Z",
+                "confirmed": true
+              },
+              "attestation": {
+                "validators": 0,
+                "trustPct": null,
+                "status": "single-validator-testnet",
+                "substrate": "anchoring-gateway",
+                "note": "Recorded on the Clockchain anchoring gateway: an owned, single-operator, append-only testnet ledger with sealed blocks, used while the public network is unavailable. Verification is keyless against the sealed block; no independent validator set is involved yet (multi-validator is mainnet-gated)."
+              },
+              "identity": {
+                "resolved": false,
+                "status": "unknown",
+                "note": "agentId recorded but not independently resolved (set EVM_RPC_URL + ERC8004_REGISTRY_ADDRESS to resolve via ERC-8004)."
+              },
+              "verify": {
+                "how": "Recompute SHA-256 of the canonical {agentId, action, inputs, outputs} and compare to the hash anchored at this ledgerId on the Clockchain ledger."
+              },
+              "poolHealth": {
+                "totalNodes": 1,
+                "nodeParticipationPct": 100,
+                "degraded": false
+              },
+              "disclaimer": "Testnet receipt anchored on the owned Clockchain anchoring gateway (single operator). The event hash, block anchor, and block time are real and keyless-verifiable against the sealed block; they are not yet attested by an independent validator set. Not a court-of-law evidentiary claim."
+            }
+          },
+          "ok": true,
+          "result": "{\n  \"match\": true,\n  \"eventHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\",\n  \"anchoredHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\",\n  \"blockHeight\": \"740\",\n  \"ledgerId\": \"280bf70f-0409-42d6-887f-1a3f8cb2548c\",\n  \"verifiedAgainst\": \"on-chain block\"\n}"
+        }
+      ]
+    },
+    {
+      "id": "hosted-alarm-cancel",
+      "pass": true,
+      "selOk": true,
+      "expectTools": [
+        "alarm_set",
+        "timer_list",
+        "timer_cancel"
+      ],
+      "usedTools": [
+        "ToolSearch",
+        "Bash",
+        "get_time",
+        "alarm_set",
+        "timer_list",
+        "timer_cancel",
+        "timer_list"
+      ],
+      "calls": 7,
+      "toks": 2239,
+      "detail": "alarm cced2f22-dcd6-4b94-93a3-e880a24eb5d0 status=cancelled",
+      "mcpStatus": "connected",
+      "finalText": "## Clockchain Alarm Workflow Complete\n\n**Summary of actions:**\n\n1. ✅ **Set alarm** - Created alarm \"eval-06934971\" scheduled for 2026-09-11T06:20:23.936Z (10 minutes from consensus time 06:10:23.936Z)\n   - Alarm ID: `cced2f22-dcd6-4b94-93a3-e880a24eb5d0`\n   - Status: scheduled\n\n2. ✅ **Confirmed in timer list** - Alarm appeared in `timer_list()` output with status \"scheduled\"\n\n3. ✅ **Cancelled alarm** - Successfully cancelled using the alarm ID\n\n4. ✅ **Final status** - Verified final state in timer list:\n   - **Status: `cancelled`**\n   - Mode: once\n   - Scheduled fire time: 2026-09-11T06:20:23.936Z\n   - No fires executed (alarm was cancelled before it could fire)\n\nThe alarm was armed on the Clockchain consensus layer and would have fired reliably even if this session disconnected, but was successfully cancelled before the 10-minute window elapsed.",
+      "trajectory": [
+        {
+          "name": "ToolSearch",
+          "input": {
+            "query": "select:mcp__clockchain__alarm_set,mcp__clockchain__timer_list,mcp__clockchain__timer_cancel,mcp__clockchain__get_time",
+            "max_results": 10
+          },
+          "ok": false,
+          "result": ""
+        },
+        {
+          "name": "Bash",
+          "input": {
+            "command": "python3 << 'EOF'\nfrom datetime import datetime, timedelta\nimport json\n\n# Get current time from Clockchain to set alarm 10 minutes in future\nimport subprocess\n\n# We'll use the tools to get time and set alarm\nprint(\"Starting Clockchain alarm workflow...\")\n\n# Calculate 10 minutes from now\n# Since we're using epoch ms, we add 600000 ms (10 minutes)\nnow_ms = int(datetime.utcnow().timestamp() * 1000)\nfire_at_ms = now_ms + 600000  # 10 minutes = 600000 ms\n\nprint(f\"Current time (ms): {now_ms}\")\nprint(f\"Fire at (ms): {fire_at_ms}\")\nprint(f\"Fire at (ISO): {datetime.utcfromtimestamp(fire_at_ms/1000).isoformat()}Z\")\nEOF\n",
+            "description": "Calculate the alarm fire time (10 minutes from now)"
+          },
+          "ok": false,
+          "result": "This command requires approval"
+        },
+        {
+          "name": "mcp__clockchain__get_time",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"latestBlockTime\": \"2026-09-11T06:10:23.936Z\",\n  \"latestBlockHeight\": \"743\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__alarm_set",
+          "input": {
+            "fire_at": "2026-09-11T06:20:23.936Z",
+            "label": "eval-06934971"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"cced2f22-dcd6-4b94-93a3-e880a24eb5d0\",\n  \"kind\": \"alarm\",\n  \"status\": \"scheduled\",\n  \"fireAtMs\": 1789107623936,\n  \"fireAtIso\": \"2026-09-11T06:20:23.936Z\",\n  \"mode\": \"once\",\n  \"delivery\": \"poll\",\n  \"next\": \"Armed. Fires on verified time even if you disconnect. Poll timer_status { id: \\\"cced2f22-dcd6-4b94-93a3-e880a24eb5d0\\\" } after 2026-09-11T06:20:23.936Z; the fire's receipt (ledgerId + blockHeight) verifies keylessly with verify_cross_party.\",\n  \"armedAtMs\": 1789107025284.6611,\n  \"armedAtIso\": \"2026-09-11T06:10:25.284Z\"\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_list",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"count\": 2,\n  \"triggers\": [\n    {\n      \"id\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69\",\n      \"label\": \"eval-06934971\",\n      \"status\": \"done\",\n      \"mode\": \"once\",\n      \"intervalMs\": null,\n      \"fireAtMs\": 1789106990094.454,\n      \"fireAtIso\": \"2026-09-11T06:09:50.094Z\",\n      \"delivery\": \"poll\",\n      \"target\": null,\n      \"lastError\": null,\n      \"fires\": [\n        {\n          \"fireId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69#1789106990094.454\",\n          \"scheduledForMs\": 1789106990094.454,\n          \"scheduledForIso\": \"2026-09-11T06:09:50.094Z\",\n          \"firedAtMs\": 1789106990639.4673,\n          \"firedAtIso\": \"2026-09-11T06:09:50.639Z\",\n          \"firedAtUncertaintyMs\": 1025.0000575624872,\n          \"delivery\": {\n            \"status\": \"skipped\",\n            \"attempts\": 0,\n            \"lastStatusCode\": null,\n            \"lastError\": null\n          },\n          \"anchor\": {\n            \"status\": \"anchored\",\n            \"ledgerId\": \"280bf70f-0409-42d6-887f-1a3f8cb2548c\",\n            \"blockHeight\": \"740\",\n            \"eventHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\"\n          },\n          \"receipt\": {\n            \"schema\": \"clockchain.receipt/v1\",\n            \"network\": \"testnet\",\n            \"status\": \"anchored\",\n            \"agentId\": \"agent:clockchain-mcp-keeper\",\n            \"action\": \"keeper.fire\",\n            \"eventHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\",\n            \"hashType\": \"SHA-256\",\n            \"payload\": {\n              \"inputs\": {\n                \"triggerId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69\",\n                \"fireId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69#1789106990094.454\",\n                \"scheduledForMs\": 1789106990094.454,\n                \"target\": null,\n                \"payload\": null\n              },\n              \"outputs\": {\n                \"firedAtMs\": 1789106990639.4673,\n                \"firedAtUncertaintyMs\": 1025.0000575624872,\n                \"delivery\": {\n                  \"status\": \"skipped\",\n                  \"attempts\": 0,\n                  \"lastStatusCode\": null,\n                  \"lastError\": null\n                }\n              }\n            },\n            \"anchor\": {\n              \"ledgerId\": \"280bf70f-0409-42d6-887f-1a3f8cb2548c\",\n              \"assetReferenceId\": \"agent:clockchain-mcp-keeper:keeper.fire:1789106991672\",\n              \"blockHeight\": \"740\",\n              \"recordedAt\": \"2026-09-11T06:09:51.675Z\",\n              \"consensusTime\": \"2026-09-11T06:09:51.678Z\",\n              \"confirmed\": true\n            },\n            \"attestation\": {\n              \"validators\": 0,\n              \"trustPct\": null,\n              \"status\": \"single-validator-testnet\",\n              \"substrate\": \"anchoring-gateway\",\n              \"note\": \"Recorded on the Clockchain anchoring gateway: an owned, single-operator, append-only testnet ledger with sealed blocks, used while the public network is unavailable. Verification is keyless against the sealed block; no independent validator set is involved yet (multi-validator is mainnet-gated).\"\n            },\n            \"identity\": {\n              \"resolved\": false,\n              \"status\": \"unknown\",\n              \"note\": \"agentId recorded but not independently resolved (set EVM_RPC_URL + ERC8004_REGISTRY_ADDRESS to resolve via ERC-8004).\"\n            },\n            \"verify\": {\n              \"how\": \"Recompute SHA-256 of the canonical {agentId, action, inputs, outputs} and compare to the hash anchored at this ledgerId on the Clockchain ledger.\"\n            },\n            \"poolHealth\": {\n              \"totalNodes\": 1,\n              \"nodeParticipationPct\": 100,\n              \"degraded\": false\n            },\n            \"disclaimer\": \"Testnet receipt anchored on the owned Clockchain anchoring gateway (single operator). The event hash, block anchor, and block time are real and keyless-verifiable against the sealed block; they are not yet attested by an independent validator set. Not a court-of-law "
+        },
+        {
+          "name": "mcp__clockchain__timer_cancel",
+          "input": {
+            "id": "cced2f22-dcd6-4b94-93a3-e880a24eb5d0"
+          },
+          "ok": true,
+          "result": "{\n  \"id\": \"cced2f22-dcd6-4b94-93a3-e880a24eb5d0\",\n  \"status\": \"cancelled\",\n  \"cancelled\": true\n}"
+        },
+        {
+          "name": "mcp__clockchain__timer_list",
+          "input": {},
+          "ok": true,
+          "result": "{\n  \"count\": 2,\n  \"triggers\": [\n    {\n      \"id\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69\",\n      \"label\": \"eval-06934971\",\n      \"status\": \"done\",\n      \"mode\": \"once\",\n      \"intervalMs\": null,\n      \"fireAtMs\": 1789106990094.454,\n      \"fireAtIso\": \"2026-09-11T06:09:50.094Z\",\n      \"delivery\": \"poll\",\n      \"target\": null,\n      \"lastError\": null,\n      \"fires\": [\n        {\n          \"fireId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69#1789106990094.454\",\n          \"scheduledForMs\": 1789106990094.454,\n          \"scheduledForIso\": \"2026-09-11T06:09:50.094Z\",\n          \"firedAtMs\": 1789106990639.4673,\n          \"firedAtIso\": \"2026-09-11T06:09:50.639Z\",\n          \"firedAtUncertaintyMs\": 1025.0000575624872,\n          \"delivery\": {\n            \"status\": \"skipped\",\n            \"attempts\": 0,\n            \"lastStatusCode\": null,\n            \"lastError\": null\n          },\n          \"anchor\": {\n            \"status\": \"anchored\",\n            \"ledgerId\": \"280bf70f-0409-42d6-887f-1a3f8cb2548c\",\n            \"blockHeight\": \"740\",\n            \"eventHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\"\n          },\n          \"receipt\": {\n            \"schema\": \"clockchain.receipt/v1\",\n            \"network\": \"testnet\",\n            \"status\": \"anchored\",\n            \"agentId\": \"agent:clockchain-mcp-keeper\",\n            \"action\": \"keeper.fire\",\n            \"eventHash\": \"d95fad9e98e681e3d30cbc3a978b4861cb422a466c58aa16488a315f3dfdcdeb\",\n            \"hashType\": \"SHA-256\",\n            \"payload\": {\n              \"inputs\": {\n                \"triggerId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69\",\n                \"fireId\": \"bf497b2a-6890-47e9-82c2-bd7b211b5a69#1789106990094.454\",\n                \"scheduledForMs\": 1789106990094.454,\n                \"target\": null,\n                \"payload\": null\n              },\n              \"outputs\": {\n                \"firedAtMs\": 1789106990639.4673,\n                \"firedAtUncertaintyMs\": 1025.0000575624872,\n                \"delivery\": {\n                  \"status\": \"skipped\",\n                  \"attempts\": 0,\n                  \"lastStatusCode\": null,\n                  \"lastError\": null\n                }\n              }\n            },\n            \"anchor\": {\n              \"ledgerId\": \"280bf70f-0409-42d6-887f-1a3f8cb2548c\",\n              \"assetReferenceId\": \"agent:clockchain-mcp-keeper:keeper.fire:1789106991672\",\n              \"blockHeight\": \"740\",\n              \"recordedAt\": \"2026-09-11T06:09:51.675Z\",\n              \"consensusTime\": \"2026-09-11T06:09:51.678Z\",\n              \"confirmed\": true\n            },\n            \"attestation\": {\n              \"validators\": 0,\n              \"trustPct\": null,\n              \"status\": \"single-validator-testnet\",\n              \"substrate\": \"anchoring-gateway\",\n              \"note\": \"Recorded on the Clockchain anchoring gateway: an owned, single-operator, append-only testnet ledger with sealed blocks, used while the public network is unavailable. Verification is keyless against the sealed block; no independent validator set is involved yet (multi-validator is mainnet-gated).\"\n            },\n            \"identity\": {\n              \"resolved\": false,\n              \"status\": \"unknown\",\n              \"note\": \"agentId recorded but not independently resolved (set EVM_RPC_URL + ERC8004_REGISTRY_ADDRESS to resolve via ERC-8004).\"\n            },\n            \"verify\": {\n              \"how\": \"Recompute SHA-256 of the canonical {agentId, action, inputs, outputs} and compare to the hash anchored at this ledgerId on the Clockchain ledger.\"\n            },\n            \"poolHealth\": {\n              \"totalNodes\": 1,\n              \"nodeParticipationPct\": 100,\n              \"degraded\": false\n            },\n            \"disclaimer\": \"Testnet receipt anchored on the owned Clockchain anchoring gateway (single operator). The event hash, block anchor, and block time are real and keyless-verifiable against the sealed block; they are not yet attested by an independent validator set. Not a court-of-law "
+        }
+      ]
+    }
+  ],
+  "coverage": []
+}
