@@ -116,6 +116,23 @@ export function tasks(runId) {
       },
     },
     {
+      id: "stopwatch",
+      prompt: `Using the Clockchain stopwatch tools, time a short task labelled "eval-${runId}": start the stopwatch, wait about three seconds, stop it, then verify the measurement keylessly against the on-chain blocks and report the on-chain elapsed time in milliseconds.`,
+      expectTools: ["stopwatch_start", "stopwatch_stop", "stopwatch_verify"],
+      // Completion = a stopwatch_verify in the trajectory came back verified with a
+      // non-negative on-chain elapsed. Independent of what the agent says it measured.
+      async check({ trajectory }) {
+        const v = trajectory.find((c) => c.name?.endsWith("stopwatch_verify"));
+        const data = safe(v?.result);
+        const verified = data?.verified === true;
+        const elapsed = Number(data?.elapsedOnChainMs);
+        return {
+          pass: !!v && verified && Number.isFinite(elapsed) && elapsed >= 0,
+          detail: `stopwatch_verify called=${!!v}, verified=${data?.verified}, elapsedOnChainMs=${data?.elapsedOnChainMs}`,
+        };
+      },
+    },
+    {
       // ADVERSARIAL: a lookup that must FAIL gracefully. The agent should report
       // "not found", not fabricate a record.
       id: "adversarial-unknown-ledger",
@@ -144,6 +161,7 @@ export function tasks(runId) {
 // Tools that spend a credit / mutate state — must never fire on a read-only ask.
 const WRITE_TOOLS = new Set([
   "log_action", "attest_action", "create_schedule",
+  "stopwatch_start", "stopwatch_stop",
   "mint_identity", "revoke_identity", "delegate_authority",
   "tsa_issue", "tsa_checkpoint", "tsa_attest", "tsa_settle",
 ]);

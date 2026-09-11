@@ -12,7 +12,7 @@ a test file so "the gate passed" is a test run, not a judgement call:
 | Gate | What it proves | Test file | Cost |
 |---|---|---|---|
 | **G0 — MCP surface** | the deployment still exposes what the primitives need, and time/pool signals parse | `test/gates-live.test.mjs` | 1 log credit (guard probe) |
-| **G1 — Stopwatch** | tamper-evident *elapsed* time between two anchored markers, keyless-verifiable | `test/gates-live.test.mjs` + `test/stopwatch.test.mjs` | 2 log credits |
+| **G1 / G1b — Stopwatch** | tamper-evident *elapsed* time between two anchored markers, keyless-verifiable — via the SDK (G1) and via the `stopwatch_*` MCP tools (G1b) | `test/gates-live.test.mjs` + `test/stopwatch.test.mjs` + `mcp-server/test/stopwatch-tools.test.mjs` | 2 + 2 log credits |
 | **G2 — Timer** | a one-shot fires after duration *D* on the disciplined clock, never early, anchored | `test/gates-live.test.mjs` + `test/timer.test.mjs` | 1 log credit |
 | **G3a — Alarm (soft)** | a one-shot fires at absolute time *T* on the disciplined clock, once, anchored | `test/gates-live.test.mjs` + `test/timer.test.mjs` (alarm semantics) | 1 log credit |
 | **G3b — Alarm (confirmed)** | same, but fires only once consensus itself has crossed *T* | `test/gates-live.test.mjs` | 1 log credit |
@@ -115,6 +115,15 @@ anchored consensus events, and a counterparty can re-verify both keylessly.*
 
 **Evidence.** Both ledgerIds, block heights, createdTimestamps, `elapsed`, `wallElapsed`,
 both verify payloads.
+
+### G1b — the same claim through the MCP tools
+
+Once the deployment exposes `stopwatch_start` / `stopwatch_stop` / `stopwatch_verify`
+(WS-B in the production plan), G1b runs the identical procedure through those tools
+instead of the SDK; until then it reports itself skipped. Extra criterion: **G1b.5**
+`stopwatch_verify.verified === true` and its `elapsedOnChainMs` (difference of the two
+immutable block times) agrees with the ledger-recorded `elapsedMs` within `CC_TOLERANCE_MS`
+— a counterparty can verify the *duration*, not just the two hashes.
 
 **Known risks (2026-09-10).** G0.4 (guard refuses default writes); G0.5 (if blocks only
 mint on write, each marker's confirmation depends on its own block — expected to work, but

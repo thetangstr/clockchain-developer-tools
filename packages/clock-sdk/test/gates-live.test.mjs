@@ -268,6 +268,41 @@ describe(
       assert.notEqual(m.start.assetHash, m.stop.assetHash, "G1.6 markers share a hash");
     });
 
+    test("G1b stopwatch via the MCP tools: start → stop → verify, elapsed recomputed from block times", { timeout: CFG.holdMs + 2 * CFG.confirmMs + SLACK_MS }, async (t) => {
+      const tools = await mcp.listTools();
+      if (!["stopwatch_start", "stopwatch_stop", "stopwatch_verify"].every((n) => tools.includes(n))) {
+        t.skip("deployment does not expose stopwatch_* yet (ships with WS-B)");
+        return;
+      }
+      const label = `gate-tools-${Date.now().toString(36)}`;
+      const w = (args) => (mcp.allowDegraded ? { ...args, allow_degraded: true } : args);
+      const started = await mcp.call("stopwatch_start", w({ label, wait_ms: CFG.confirmMs }));
+      const issuedStart = Date.now();
+      await sleep(CFG.holdMs);
+      const issuedStop = Date.now();
+      const stopped = await mcp.call("stopwatch_stop", w({ label, start_ledger_id: started.start.ledgerId, wait_ms: CFG.confirmMs }));
+      const verified = await mcp.call("stopwatch_verify", {
+        start_ledger_id: stopped.start.ledgerId,
+        stop_ledger_id: stopped.stop.ledgerId,
+        start_block_height: stopped.start.blockHeight,
+        stop_block_height: stopped.stop.blockHeight,
+      });
+      const wallElapsed = issuedStop - issuedStart;
+      await evidence(t, "G1b", { label, started, stopped, verified, wallElapsedMs: wallElapsed, allowDegraded: mcp.allowDegraded });
+
+      assert.equal(started.status, "anchored", `G1b.1 start marker: ${started.warning ?? started.status}`);
+      assert.equal(stopped.status, "anchored", `G1b.1 measurement: ${stopped.warning ?? stopped.status}`);
+      assert.ok(Number.isFinite(stopped.elapsedMs) && stopped.elapsedMs >= 0, `G1b.3 elapsedMs ${stopped.elapsedMs}`);
+      assert.ok(Math.abs(stopped.elapsedMs - wallElapsed) <= CFG.toleranceMs, `G1b.4 elapsed ${stopped.elapsedMs}ms vs wall ${wallElapsed}ms`);
+      assert.equal(verified.verified, true, `G1b.5 ${verified.note}`);
+      assert.equal(verified.start.verifiedAgainst, "on-chain block");
+      assert.equal(verified.stop.verifiedAgainst, "on-chain block");
+      assert.ok(
+        Number.isFinite(verified.elapsedOnChainMs) && Math.abs(verified.elapsedOnChainMs - stopped.elapsedMs) <= CFG.toleranceMs,
+        `G1b.5 on-chain elapsed ${verified.elapsedOnChainMs}ms vs recorded ${stopped.elapsedMs}ms`,
+      );
+    });
+
     // ------------------------------------------------- G2 / G3 one-shot runner
 
     /**
