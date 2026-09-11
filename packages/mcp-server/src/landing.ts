@@ -107,6 +107,8 @@ call get_time to read the current consensus time.
 
 Docs:  https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md
 Page:  https://mcp.clockchain.network/  (open in a browser for the full page)
+Clock tools (stopwatch, timer, alarm — how to use them, exact arguments, the recipe):
+       https://mcp.clockchain.network/clock-tools.txt
 `;
 
 // Machine-readable manifest served at GET /.well-known/mcp.json for ANY Accept
@@ -170,6 +172,9 @@ export const MCP_MANIFEST = {
     authentication: "single-use invitation and role-scoped capability",
   },
   docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
+  guides: {
+    clockTools: "https://mcp.clockchain.network/clock-tools.txt",
+  },
 } as const;
 
 const MODULES = [
@@ -179,32 +184,20 @@ const MODULES = [
   { i: "04", name: "Audit", body: "Audit trails, compliance reports (EU AI Act Art. 12, SEC 17a-4, ISO 27001), and portable evidence packages." },
   { i: "05", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
   { i: "06", name: "Commitments", body: "Issue, checkpoint, attest, settle — every commitment's outcome, kept or broken, on the record." },
-  { i: "07", name: "Verified time tools", wide: true, body: `Stopwatch, timer, alarm on consensus time — hosted. stopwatch_start / stop / verify: elapsed time between two anchored markers, re-verifiable from the blocks. timer_set / alarm_set: fire on verified time while your client is offline, never early; poll timer_status for the receipt, or receive a signed webhook. Every fire is a keyless-verifiable anchor on the ${SUBSTRATE_LABEL}.` },
+  { i: "07", name: "Verified time tools", wide: true, href: "/clock-tools", cta: "How to use the stopwatch, timer and alarm →", body: `Stopwatch, timer, alarm on consensus time — hosted. stopwatch_start / stop / verify: elapsed time between two anchored markers, re-verifiable from the blocks. timer_set / alarm_set: fire on verified time while your client is offline, never early; poll timer_status for the receipt, or receive a signed webhook. Every fire is a keyless-verifiable anchor on the ${SUBSTRATE_LABEL}.` },
 ];
 export const MODULE_COUNT = MODULES.length;
 const MODULE_WORD = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][MODULE_COUNT] ?? String(MODULE_COUNT);
 
 // Green clock mark, echoing the Clockchain site logo.
-const LOGO_SVG = `<svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true" style="flex:none">
+export const LOGO_SVG = `<svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true" style="flex:none">
   <circle cx="16" cy="16" r="14" stroke="#0a9d44" stroke-width="2.4"/>
   <path d="M16 8.5V16l5 3" stroke="#0a9d44" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>`;
 
-export const LANDING_HTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Clockchain MCP — time your agents can prove</title>
-<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. ${TOOL_COUNT} tools across ${MODULE_WORD} modules, one endpoint." />
-<meta property="og:title" content="Clockchain MCP" />
-<meta property="og:description" content="Time your agents can prove. ${TOOL_COUNT} tools, one endpoint." />
-<meta property="og:type" content="website" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-<style>
-  :root {
+// The site stylesheet, shared by every page the server renders (landing, clock tools)
+// so a second page is the same product, not a second design.
+export const BASE_CSS = `  :root {
     --bg: #ffffff;
     --alt: #f5f5f7;
     --ink: #1d1d1f;
@@ -281,6 +274,8 @@ export const LANDING_HTML = `<!doctype html>
   .card .i { font-family: var(--mono); font-size: 12px; color: var(--green); letter-spacing: .1em; }
   .card h3 { font-size: 21px; margin: 12px 0 10px; }
   .card p { color: var(--fg-2); font-size: 14.5px; line-height: 1.6; }
+  .card .more { margin-top: 12px; }
+  .card .more a { color: var(--green); font-weight: 600; }
 
   .tenets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 44px; }
   .tenet h3 { font-size: 20px; margin-bottom: 10px; }
@@ -330,7 +325,23 @@ export const LANDING_HTML = `<!doctype html>
   .demo-frame video { width: 100%; display: block; aspect-ratio: 16 / 9; opacity: 0; transition: opacity .45s ease; }
   .demo-frame video.playing { opacity: 1; }
   @media (max-width: 760px) { .grid, .tenets { grid-template-columns: 1fr; } .nav-links a:not(.pill) { display: none; } }
-</style>
+`;
+
+export const LANDING_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Clockchain MCP — time your agents can prove</title>
+<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. ${TOOL_COUNT} tools across ${MODULE_WORD} modules, one endpoint." />
+<meta property="og:title" content="Clockchain MCP" />
+<meta property="og:description" content="Time your agents can prove. ${TOOL_COUNT} tools, one endpoint." />
+<meta property="og:type" content="website" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+${BASE_CSS}</style>
 </head>
 <body>
 <nav><div class="wrap nav-in">
@@ -338,6 +349,7 @@ export const LANDING_HTML = `<!doctype html>
   <div class="nav-links">
     <a href="#demo">Demo</a>
     <a href="#modules">Modules</a>
+    <a href="/clock-tools">Clock tools</a>
     <a href="#install">Install</a>
     <a href="https://clockchain-research.vercel.app/dashboard"><span class="ndot"></span>Status</a>
     <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
@@ -385,7 +397,7 @@ export const LANDING_HTML = `<!doctype html>
   </div>
   <div class="grid">
     ${MODULES.map((m) => `
-    <div class="card${"wide" in m && m.wide ? " wide" : ""}"><div class="i">${m.i}</div><h3>${m.name}</h3><p>${m.body}</p></div>`).join("")}
+    <div class="card${"wide" in m && m.wide ? " wide" : ""}"><div class="i">${m.i}</div><h3>${m.name}</h3><p>${m.body}</p>${"href" in m ? `<p class="more"><a href="${m.href}">${m.cta}</a></p>` : ""}</div>`).join("")}
   </div>
 </div></section>
 
@@ -446,6 +458,7 @@ export const LANDING_HTML = `<!doctype html>
   <div class="foot-row">
     <a class="brand" href="/">${LOGO_SVG}Clockchain</a>
     <div class="foot-links">
+      <a href="/clock-tools">Clock tools</a>
       <a href="https://clockchain-research.vercel.app/dashboard">Status</a>
       <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
       <a href="https://mcp.clockchain.network/health">Health</a>

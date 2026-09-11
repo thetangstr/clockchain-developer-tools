@@ -9,6 +9,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
+import { CLOCK_TOOLS_HTML, CLOCK_TOOLS_TXT } from "./clock-tools-page.js";
 import {
   mintToken,
   verifyToken,
@@ -506,6 +507,18 @@ export async function runHttp(): Promise<void> {
     // (no browser, no auth). An agent that fetches the bare endpoint with a
     // default Accept gets a 401; this gives it a header-agnostic place to read
     // exactly how to connect. Public, before auth — like the health probe.
+    // The clock-tools guide: HTML for a browser, plain text for everything else (an
+    // agent fetching the bare URL gets the guide, not markup). /clock-tools.txt is
+    // always text. Public, like the landing page.
+    if (req.method === "GET" && (pathOf(req.url) === "/clock-tools" || pathOf(req.url) === "/clock-tools.txt")) {
+      const wantsHtml = pathOf(req.url) === "/clock-tools" && firstHeader(req.headers.accept).includes("text/html");
+      res.writeHead(200, {
+        "content-type": wantsHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      });
+      res.end(wantsHtml ? CLOCK_TOOLS_HTML : CLOCK_TOOLS_TXT);
+      return;
+    }
     if (req.method === "GET" && (pathOf(req.url) === "/llms.txt" || pathOf(req.url) === "/install.txt")) {
       res.writeHead(200, {
         "content-type": "text/plain; charset=utf-8",
