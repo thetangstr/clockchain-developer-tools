@@ -24,7 +24,7 @@ import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
 import { callTool, listTools, MCP_URL, round } from "./lib.mjs";
 import { tasks } from "./tasks.mjs";
-import { writeReport } from "./report.mjs";
+import { writeReport, parses } from "./report.mjs";
 
 const TOKEN = process.env.MCP_TOKEN || process.env.MCP_API_KEY || "";
 const MAX_TURNS = Number(process.env.MAX_TURNS || 12);
@@ -249,7 +249,7 @@ async function main() {
     const expected = task.expectTools.filter((t) => usedTools.includes(t));
     const selOk = expected.length === task.expectTools.length;
     const toks = (usage.input_tokens ?? usage.prompt_tokens ?? 0) + (usage.output_tokens ?? usage.completion_tokens ?? 0);
-    rows.push({ id: task.id, pass, selOk, expectTools: task.expectTools, usedTools, calls: trajectory.length, toks, detail, finalText: String(finalText).slice(0, 2000), trajectory: trajectory.map((c) => ({ name: c.name, input: c.input, result: typeof c.result === "string" ? c.result.slice(0, 4000) : c.result })) });
+    rows.push({ id: task.id, pass, selOk, expectTools: task.expectTools, usedTools, calls: trajectory.length, toks, detail, finalText: String(finalText).slice(0, 2000), trajectory: trajectory.map((c) => ({ name: c.name, input: c.input, ok: parses(c.result), result: typeof c.result === "string" ? c.result.slice(0, 4000) : c.result })) });
     console.log(`${pass ? "PASS" : "FAIL"}  [tools ${selOk ? "ok" : "miss"}, ${trajectory.length} calls, ~${toks} tok]  ${detail}`);
     if (trajectory.length === 0 && r.stderr) console.log(`   (agent stderr: ${r.stderr.slice(-300).replace(/\s+/g, " ")})`);
   }
