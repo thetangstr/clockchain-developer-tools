@@ -125,6 +125,7 @@ Corrected 2026-09-11: N1–N3 turned out to be properties of our own anchoring g
 ```
 Thu Sep 10  gates drafted + run (done)            ── GATES.md
 Thu Sep 11  #98 #99 #100 merged + deployed (done)  ── guard fix, stopwatch tools, page, heartbeat gateway; prod gates 10/10
+Thu Sep 11  #102 D8 (done)                          ── main == production; box checkout clean; deploy-box.sh (36 s restart); nightly gates armed
 Mon Sep 14  Monday meeting: results, D1–D6, N1–N4  ── WS-A landed on main (G0.4 green after deploy)
 Wed Sep 17  handshake demo target (unchanged)       ── stopwatch tools + page v1 live (WS-B, in the same PR as WS-A)
 Fri Sep 19  keeper worker deployed w/ heartbeat     ── C1–C4; G3b/G4 green; page update v2 (timer/alarm live, beta)
