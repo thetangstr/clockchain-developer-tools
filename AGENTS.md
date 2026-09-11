@@ -30,11 +30,11 @@ npm test                      # all workspaces  (or: -w @clockchain/mcp-server)
    before `git push origin HEAD:main`.
 6. **No secrets in git or docs.** Secret Manager (server), WIF (CI, keyless), Vercel env
    (playground). Use placeholders in committed files.
-7. **Deploys are NOT automated to production.** `deploy.yml` still pushes to Cloud Run, which
-   nothing points at. Production is the AWS box: runbook step 3 over SSM (check out the commit
-   in `/opt/clockchain-mcp/app`, `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`).
-   The box carries gateway wiring in `compose-up.sh` / `docker-compose.yml` that is not in git —
-   never check out over it blind; preserve it first (see `host/pre-main-2026-09-11` on the box).
+7. **Deploys are NOT automated.** Production is the AWS box; deploy a merged `main` commit with
+   `scripts/deploy-box.sh <sha>` (runbook step 3 over SSM: checkout, pre-build, installer restart,
+   canaries, G0 gates). It refuses a dirty box checkout — keep production config in git, never as
+   on-box edits. The legacy Cloud Run workflow is manual-only and is not production. The anchoring
+   gateway container deploys separately (RUNBOOK, "The anchoring gateway").
 
 ## Where things live
 

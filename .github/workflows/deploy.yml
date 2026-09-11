@@ -1,22 +1,13 @@
-name: Deploy MCP to Cloud Run
+name: Deploy MCP to Cloud Run (legacy standby, manual only)
 
-# Auto-deploy the hosted Clockchain MCP server (mcp.clockchain.network) on push to
-# main. Keyless auth via Workload Identity Federation (no SA key stored in GitHub).
+# NOT production. mcp.clockchain.network is served by the AWS box (Caddy + docker-compose,
+# deployed over SSM per infra/clockchain-mcp/RUNBOOK.md and scripts/deploy-box.sh). This
+# workflow keeps the legacy GCP Cloud Run service deployable by hand as a standby; it used
+# to run on every push to main and went green while changing nothing in production
+# (2026-09-11). Keyless auth via Workload Identity Federation (no SA key stored in GitHub).
 # `gcloud run deploy --source` preserves the service's existing env/secrets/scaling.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      # Only packages baked into the deployed image trigger a redeploy.
-      # Other workspaces (clock-sdk, web-demo, verify) + docs/examples do NOT.
-      - "packages/mcp-server/**"
-      - "packages/core/**"
-      - "Dockerfile"
-      - ".dockerignore"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/deploy.yml"
   workflow_dispatch: {}
 
 permissions:
