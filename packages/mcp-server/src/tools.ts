@@ -1645,10 +1645,25 @@ export function registerTools(
         const onChain = ledger_id
           ? await client.verifyOnChain(ledger_id, block_height)
           : null;
-        // Advisory only (reads the mutable cache an api-key holder can rewrite).
-        const advisoryHashCheck = hash
-          ? await client.publicVerifyHash(hash)
-          : null;
+        // Advisory only (reads the mutable cache an api-key holder can rewrite). It must
+        // never sink the authoritative answer: the owned anchoring gateway has no
+        // /verifyAsset, so an agent that passes ledger_id + hash together would otherwise
+        // get a 404 for a record that verifies on-chain (found by the Clark agent eval).
+        let advisoryHashCheck: unknown = null;
+        if (hash) {
+          try {
+            advisoryHashCheck = await client.publicVerifyHash(hash);
+          } catch (err) {
+            advisoryHashCheck = {
+              unavailable: true,
+              note: "Advisory hash lookup is not available on this substrate; the on-chain result above is the authoritative check.",
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+        }
+        if (!onChain && hash && (advisoryHashCheck as { unavailable?: boolean })?.unavailable) {
+          throw new ApiError("Advisory hash lookup is unavailable here; pass ledger_id (and block_height) for the authoritative on-chain check.", 404);
+        }
         return { onChain, advisoryHashCheck };
       }),
   );
