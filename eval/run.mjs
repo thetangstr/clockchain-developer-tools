@@ -193,6 +193,8 @@ export function bareTool(name) {
 const TRACE_PY = `import sqlite3, json, os, sys
 home = os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
 db = os.path.join(home, "profiles", sys.argv[1], "state.db")
+if sys.argv[1] == "default" or not os.path.exists(db):
+    db = os.path.join(home, "state.db")  # the default profile keeps its store at HERMES_HOME
 sid = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
 c = sqlite3.connect(db)
 if not sid:
