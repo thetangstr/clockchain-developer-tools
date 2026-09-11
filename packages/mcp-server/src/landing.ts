@@ -5,8 +5,16 @@
 // #f5f5f7), ink #1d1d1f, green accent (#0a9d44 / #00cc00), Space Grotesk display
 // + Inter body + JetBrains Mono. Clean, modern, generous whitespace.
 
+import { CLASSIFIED_TOOLS } from "./entitlement.js";
+
 // HTML-escape so snippets with <…> placeholders render as text, not tags.
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// Single source of truth for the numbers on the page. Every registered tool is
+// asserted into CLASSIFIED_TOOLS at boot (entitlement.ts), so its size IS the
+// full-surface tool count; the module count is the MODULES list below. The
+// page used to hard-code these in seven places and drifted (31/42, six/seven).
+export const TOOL_COUNT = CLASSIFIED_TOOLS.size;
 
 const CMD_CLAUDE =
   'claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp --header "x-api-key: <YOUR_TOKEN>"';
@@ -73,7 +81,7 @@ Client supports stdio only (command + args, no HTTP transport)? Bridge the
 remote server through mcp-remote — works in any stdio-only client:
   npx -y mcp-remote https://mcp.clockchain.network/mcp --header "x-api-key:<YOUR_TOKEN>"
 
-Then list your MCP servers, confirm "clockchain" is connected (42 tools), and
+Then list your MCP servers, confirm "clockchain" is connected (${TOOL_COUNT} tools), and
 call get_time to read the current consensus time.
 
 Docs:  https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md
@@ -90,7 +98,7 @@ export const MCP_MANIFEST = {
   displayName: "Clockchain MCP",
   description:
     "Hosted MCP server: consensus time, notarization, agent-attested receipts, " +
-    "audit trails, agent identity, and commitments. 42 tools, one endpoint.",
+    `audit trails, agent identity, and commitments. ${TOOL_COUNT} tools, one endpoint.`,
   type: "http",
   transport: "streamable-http",
   endpoint: "https://mcp.clockchain.network/mcp",
@@ -150,7 +158,10 @@ const MODULES = [
   { i: "04", name: "Audit", body: "Audit trails, compliance reports (EU AI Act Art. 12, SEC 17a-4, ISO 27001), and portable evidence packages." },
   { i: "05", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
   { i: "06", name: "Commitments", body: "Issue, checkpoint, attest, settle — every commitment's outcome, kept or broken, on the record." },
+  { i: "07", name: "Verified time tools", wide: true, body: "Stopwatch, timer, alarm on consensus time — elapsed time between two anchored markers, and fires that land on verified time, never early, each anchored as a keyless-verifiable receipt. Open clock SDK today; hosted tools in beta next." },
 ];
+export const MODULE_COUNT = MODULES.length;
+const MODULE_WORD = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][MODULE_COUNT] ?? String(MODULE_COUNT);
 
 // Green clock mark, echoing the Clockchain site logo.
 const LOGO_SVG = `<svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true" style="flex:none">
@@ -164,9 +175,9 @@ export const LANDING_HTML = `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Clockchain MCP — time your agents can prove</title>
-<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. 42 tools across seven modules, one endpoint." />
+<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. ${TOOL_COUNT} tools across ${MODULE_WORD} modules, one endpoint." />
 <meta property="og:title" content="Clockchain MCP" />
-<meta property="og:description" content="Time your agents can prove. 42 tools, one endpoint." />
+<meta property="og:description" content="Time your agents can prove. ${TOOL_COUNT} tools, one endpoint." />
 <meta property="og:type" content="website" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -243,6 +254,7 @@ export const LANDING_HTML = `<!doctype html>
   .head p { color: var(--fg-2); margin-top: 12px; font-size: 17px; }
 
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .card.wide { grid-column: 1 / -1; }
   .card { background: var(--bg); border: 1px solid var(--line); border-radius: 16px; padding: 26px; transition: box-shadow .25s, transform .25s; }
   .card:hover { box-shadow: var(--shadow); transform: translateY(-3px); }
   .card .i { font-family: var(--mono); font-size: 12px; color: var(--green); letter-spacing: .1em; }
@@ -315,7 +327,7 @@ export const LANDING_HTML = `<!doctype html>
 <header class="hero"><div class="wrap">
   <span class="eyebrow">Model Context Protocol · Testnet</span>
   <h1>Time your agents can <span class="green">prove.</span></h1>
-  <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — 42 tools across seven modules, one endpoint.</p>
+  <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — ${TOOL_COUNT} tools across ${MODULE_WORD} modules, one endpoint.</p>
   <div class="cta">
     <a class="btn btn-green" href="#install">Add to your agent</a>
     <a class="btn btn-ghost" href="https://clockchain-research.vercel.app/dashboard">View live status</a>
@@ -327,8 +339,8 @@ export const LANDING_HTML = `<!doctype html>
 </div></header>
 
 <div class="strip"><div class="wrap strip-in">
-  <div class="stat"><div class="k">Tools</div><div class="v">31</div></div>
-  <div class="stat"><div class="k">Modules</div><div class="v">6</div></div>
+  <div class="stat"><div class="k">Tools</div><div class="v">${TOOL_COUNT}</div></div>
+  <div class="stat"><div class="k">Modules</div><div class="v">${MODULE_COUNT}</div></div>
   <div class="stat"><div class="k">Transport</div><div class="v">StreamableHTTP</div></div>
   <div class="stat"><div class="k">Network</div><div class="v">Testnet</div></div>
 </div></div>
@@ -347,12 +359,12 @@ export const LANDING_HTML = `<!doctype html>
 <section id="modules"><div class="wrap">
   <div class="head">
     <span class="eyebrow">The surface</span>
-    <h2>Six modules</h2>
+    <h2>${MODULE_WORD[0].toUpperCase()}${MODULE_WORD.slice(1)} modules</h2>
     <p>Every tool is typed, idempotent where it writes, and degrades with grace.</p>
   </div>
   <div class="grid">
     ${MODULES.map((m) => `
-    <div class="card"><div class="i">${m.i}</div><h3>${m.name}</h3><p>${m.body}</p></div>`).join("")}
+    <div class="card${"wide" in m && m.wide ? " wide" : ""}"><div class="i">${m.i}</div><h3>${m.name}</h3><p>${m.body}</p></div>`).join("")}
   </div>
 </div></section>
 
@@ -399,7 +411,7 @@ export const LANDING_HTML = `<!doctype html>
       <span class="sn">3</span>
       <div class="sbody">
         <h4>Verify</h4>
-        <p>Open a <b>new</b> session, run <span class="mono">/mcp</span> (you should see <span class="mono">clockchain</span> with all 42 tools), then ask: <em>"use clockchain to get the current consensus time."</em></p>
+        <p>Open a <b>new</b> session, run <span class="mono">/mcp</span> (you should see <span class="mono">clockchain</span> with all ${TOOL_COUNT} tools), then ask: <em>"use clockchain to get the current consensus time."</em></p>
       </div>
     </li>
   </ol>
