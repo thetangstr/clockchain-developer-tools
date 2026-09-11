@@ -93,7 +93,7 @@ A=$(code -X POST "$BASE_URL/mcp" -H 'content-type: application/json' -H 'accept:
 if [[ -n "${CC_MCP_TOKEN:-}" ]]; then
   echo "--- clock gates G0 (surface checks; the guard probe spends 1 credit)"
   [[ -f packages/clock-sdk/dist/index.js ]] || npm run build -w @clockchain/core -w @clockchain/clock-sdk >/dev/null
-  CC_LIVE_GATES=1 CC_MCP_URL="$BASE_URL/mcp" node --test --test-name-pattern 'G0' packages/clock-sdk/test/gates-live.test.mjs
+  CC_LIVE_GATES=1 CC_MCP_URL="$BASE_URL/mcp" node --test --test-name-pattern 'G0\.[0-9]' packages/clock-sdk/test/gates-live.test.mjs
 else
   echo "(set CC_MCP_TOKEN to also run the G0 clock gates; full suite: CC_LIVE_GATES=1 node --test packages/clock-sdk/test/gates-live.test.mjs)"
 fi
