@@ -53,8 +53,8 @@ A tool is production-ready when all of the following hold on the deployed endpoi
 |---|---|---|---|
 | D1 | Ship timer/alarm as MCP tools via the **keeper** (server-side firing) vs. SDK-only | **Keeper.** It is exactly the meeting's split: keeper = timing + notification, harness = job. SDK stays for users who want firing inside their own boundary. | "Offered via the MCP" is not true while the user must build an npm workspace. |
 | D2 | Fire notification: webhook, poll, or both | **Both.** `keeper_schedule` takes an optional `webhook_url`; without one, the fire still anchors and `keeper_list` / `timer_status` returns the receipt. | Most agent harnesses can poll; few have an inbound URL. |
-| D3 | How to keep consensus time fresh on a mint-on-write gateway | **Fix `gateway.mjs` (ours, small):** `/getTime` returns a live `madMarzulloTime` (the gateway's clock, monotonic-guarded so it never precedes the last seal) while `latestBlockTime` stays the last seal — and/or seal a heartbeat block every N s. No keeper heartbeat, no credits. Re-run G3b/G4 to prove it. | The oracle is our own service; the "network" fix is a PR. Decide whether a live oracle is honest to call "consensus" while the real network is down — see D7. |
-| D4 | Default alarm mode offered on the MCP | **`confirmed`** once D3 heartbeat lands; `soft` until then, labelled. | Confirmed is the product claim ("fires only after consensus crossed T"); it just needs cadence. |
+| D3 | How to keep consensus time fresh on a seal-on-write gateway | **Done (PR #100, deployed):** read-triggered heartbeat in `gateway.mjs` — every reading is still a real sealed block, readers never see a stale "now", an unread ledger stays quiet. G3b and G4 green in production. Monday: confirm this is the semantics we want to keep (vs. a live clock in `/getTime`), see D7. | The oracle is our own service, so this was a PR, not a network ask. |
+| D4 | Default alarm mode offered on the MCP | **`confirmed`** — D3 has landed and G3b passes in production. | Confirmed is the product claim ("fires only after consensus crossed T"). |
 | D5 | Uncertainty reporting | Widen `uncertaintyMs` by measured consensus staleness (`|wall − consensus|` at sync, and time since last block) and surface it in receipts. | "No false precision" is a README promise; G4 shows we break it today. |
 | D6 | Page positioning | Add a seventh module **"Verified time tools"** (stopwatch / timer / alarm) with beta labels until Phase 2 ships; copy in §6. **Done, live.** | Meta tag already says seven modules; the page says six. |
 | D7 | Honesty of "anchored on Clockchain" while the network is down | Receipts and the page say `single-validator-testnet`; today the anchor is the owned gateway's append-only ledger. Decide the wording (e.g. "anchored on the Clockchain anchoring gateway (testnet)") and whether `network` in receipts should say so. | The gates proved the mechanics; the claim should match the substrate. |
@@ -107,7 +107,7 @@ Corrected 2026-09-11: N1–N3 turned out to be properties of our own anchoring g
 
 | Item | What | Owner |
 |---|---|---|
-| N1 | **Done on branch.** `gateway.mjs`: read-triggered heartbeat — a `/getTime` older than `GATEWAY_HEARTBEAT_MS` (2 s) seals an empty block first; `selftest.mjs` cases; **G3b + G4 green locally (10/10)**; deploy to the box next | MCP/SDK |
+| N1 | **Done and deployed (PR #100, 2026-09-11 01:02 UTC).** `gateway.mjs`: read-triggered heartbeat — a `/getTime` older than `GATEWAY_HEARTBEAT_MS` (2 s) seals an empty block first. **Production gates 10/10**: confirmed alarm fires (117 ms late), freshness drift −7 ms. | MCP/SDK |
 | N2 | `gateway.mjs` response shape: keep `nodeParticipation`, also emit `nodeParticipation%` for one release, and version the payload so the next rename doesn't refuse writes again | MCP/SDK |
 | N3 | Commit the on-box wiring; retire/repoint Cloud Run deploy (D8) | MCP/SDK |
 | N4 | The real network: when `node.clockchain.network` returns, re-run G0–G4 against it before pointing production back; multi-validator timeline gates "court-grade" wording | network team via Rakesh |
@@ -124,6 +124,7 @@ Corrected 2026-09-11: N1–N3 turned out to be properties of our own anchoring g
 
 ```
 Thu Sep 10  gates drafted + run (done)            ── GATES.md
+Thu Sep 11  #98 #99 #100 merged + deployed (done)  ── guard fix, stopwatch tools, page, heartbeat gateway; prod gates 10/10
 Mon Sep 14  Monday meeting: results, D1–D6, N1–N4  ── WS-A landed on main (G0.4 green after deploy)
 Wed Sep 17  handshake demo target (unchanged)       ── stopwatch tools + page v1 live (WS-B, in the same PR as WS-A)
 Fri Sep 19  keeper worker deployed w/ heartbeat     ── C1–C4; G3b/G4 green; page update v2 (timer/alarm live, beta)
