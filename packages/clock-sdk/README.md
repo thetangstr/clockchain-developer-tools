@@ -137,8 +137,12 @@ approval. It mints **one** token (cached), checks pool health, arms an alarm, fi
   control** is the **multi-validator** roadmap item. Until then, describe verification as
   *keyless and self-verifying on integrity* — **not** "trustless" — to a compliance buyer.
 - **No false precision.** Every clock reading carries an explicit `uncertaintyMs`
-  (round-trip/2 + the network's reported offset). Treat time as an interval, not a point;
-  use `mode: "confirmed"` when the boundary matters.
+  (round-trip/2 + the network's reported offset **+ the skew between the consensus
+  reading and this host's wall clock at sync**). The wall clock is never used to tell
+  time, but a disagreement is something the band cannot rule out — a stale reading on a
+  quiet ledger looks exactly like that — so it widens the band instead of hiding behind
+  ±20 ms. `SyncResult.skewMs` exposes it. Treat time as an interval, not a point; use
+  `mode: "confirmed"` when the boundary matters.
 - **Your trust boundary.** Schedule, actions, and outbound calls stay on your side. The SDK
   talks only to the Clockchain gateway (`get_timestamp`, `log`/`attest`, `verify`).
 - **Auditable by construction.** Every fire yields a receipt (event hash + on-chain anchor

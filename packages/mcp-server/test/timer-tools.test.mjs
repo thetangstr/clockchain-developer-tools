@@ -206,3 +206,18 @@ test("before the keeper clock is disciplined, timer_set fails with a clear error
   assert.equal(res.isError, true);
   assert.match(textOf(res), /not disciplined/);
 });
+
+test("with webhooks on, registration shows the owner's derived verification secret (never the server secret)", async () => {
+  const on = harness({ webhooks: true });
+  const tools = {};
+  registerTools({ registerTool: (name, _c, handler) => { tools[name] = handler; } }, cfg, {
+    keeper: on.keeper, keeperWebhooks: true, principalId: "caller-A",
+    keeperWebhookSecretFor: (owner) => `whsec_derived_for_${owner}`,
+  });
+  const out = json(await tools.alarm_set({ fire_at: T0 + 5000, webhook_url: "https://127.0.0.1/hook" }));
+  assert.equal(out.delivery, "webhook");
+  assert.equal(out.webhookSecret, "whsec_derived_for_caller-A");
+  assert.match(out.webhookVerify, /webhook-signature/);
+  const poll = json(await tools.timer_set({ delay_ms: 5000 }));
+  assert.equal(poll.webhookSecret, undefined, "poll-only registrations show no secret");
+});

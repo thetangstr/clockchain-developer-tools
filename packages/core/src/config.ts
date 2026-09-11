@@ -19,6 +19,28 @@ export interface ClockchainConfig {
    */
   signingKeyId?: string;
   signingSecret?: string;
+  /**
+   * Where anchors actually live, named honestly in every receipt:
+   *   "clockchain-network"  — the public Clockchain network (node.clockchain.network)
+   *   "anchoring-gateway"   — the owned single-operator anchoring gateway
+   *                           (infra/anchoring-gateway), used while the network is down
+   * Defaults from the endpoint hostname; set CLOCKCHAIN_SUBSTRATE to state it explicitly.
+   */
+  substrate?: AnchorSubstrate;
+}
+
+export type AnchorSubstrate = "clockchain-network" | "anchoring-gateway";
+
+/** Derive the substrate label from an endpoint when none is configured. */
+export function substrateForEndpoint(endpoint: string | undefined): AnchorSubstrate {
+  try {
+    const host = new URL(endpoint || DEFAULT_ENDPOINT).hostname.toLowerCase();
+    return host === "clockchain.network" || host.endsWith(".clockchain.network")
+      ? "clockchain-network"
+      : "anchoring-gateway";
+  } catch {
+    return "anchoring-gateway";
+  }
 }
 
 export const DEFAULT_ENDPOINT = "https://node.clockchain.network";
@@ -50,5 +72,9 @@ export function readConfigFromEnv(
     erc8004RegistryAddress: env.ERC8004_REGISTRY_ADDRESS ?? DEFAULT_ERC8004_REGISTRY,
     signingKeyId: env.CLOCKCHAIN_SIGNING_KEY_ID ?? "default",
     signingSecret: env.CLOCKCHAIN_SIGNING_SECRET ?? undefined,
+    substrate:
+      env.CLOCKCHAIN_SUBSTRATE === "clockchain-network" || env.CLOCKCHAIN_SUBSTRATE === "anchoring-gateway"
+        ? env.CLOCKCHAIN_SUBSTRATE
+        : undefined,
   };
 }

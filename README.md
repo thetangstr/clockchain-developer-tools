@@ -77,13 +77,14 @@ client. Chat-connector clients (claude.ai chat, Cowork) are different — see
 - **Time:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
 - **Logging (notarization):** `log_action`, `get_log_entry`, `search_actions`,
   `verify_asset`.
-- **Verified time tools:** `stopwatch_start`, `stopwatch_stop`, `stopwatch_verify` —
+- **Verified time tools** (try them in 60 s, no signup: `curl -fsSL https://raw.githubusercontent.com/thetangstr/clockchain-developer-tools/main/packages/clock-sdk/examples/try-clock-tools-mcp.sh | bash`): `stopwatch_start`, `stopwatch_stop`, `stopwatch_verify` —
   a tamper-evident elapsed time between two anchored markers; `stopwatch_verify`
   recomputes the duration from the two immutable block times, keylessly.
   `timer_set`, `alarm_set`, `timer_status`, `timer_cancel`, `timer_list` — hosted
   one-shots (and recurring alarms) on consensus time that fire while your client is
-  offline; poll `timer_status` for the fire and its receipt. Account-gated (server-side
-  firing spends credits unattended); webhook delivery is off until the allow-list ships.
+  offline; poll `timer_status` for the fire and its receipt, or give a `webhook_url` on an
+  allow-listed host for a signed, DNS-pinned POST (a per-owner verification secret is returned
+  at registration). Receipts say where the anchor lives (`attestation.substrate`).
   The same primitives run client-side via [`@clockchain/clock-sdk`](packages/clock-sdk).
 - **Scheduler (smart-contract):** `get_contract_types`, `estimate_schedule`,
   `create_schedule`, `list_schedules`. Types/estimate/list are live;

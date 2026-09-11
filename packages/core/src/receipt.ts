@@ -42,14 +42,29 @@ export function eventHashOf(input: AttestActionInput): string {
   );
 }
 
-const TESTNET_NOTE =
-  "Recorded on the current single-validator testnet. Multi-validator " +
-  "supermajority signatures (GPS / atomic time sources) activate at mainnet.";
+/** Substrate-honest wording: say where the anchor actually lives. */
+const NOTES = {
+  "clockchain-network":
+    "Recorded on the current single-validator Clockchain testnet. Multi-validator " +
+    "supermajority signatures (GPS / atomic time sources) activate at mainnet.",
+  "anchoring-gateway":
+    "Recorded on the Clockchain anchoring gateway: an owned, single-operator, " +
+    "append-only testnet ledger with sealed blocks, used while the public network " +
+    "is unavailable. Verification is keyless against the sealed block; no " +
+    "independent validator set is involved yet (multi-validator is mainnet-gated).",
+} as const;
 
-const DISCLAIMER =
-  "Testnet receipt: the event hash, on-chain anchor, and consensus timestamp are " +
-  "real and independently verifiable. Validator-signature attestation is " +
-  "mainnet-gated. Not yet a court-of-law evidentiary claim.";
+const DISCLAIMERS = {
+  "clockchain-network":
+    "Testnet receipt: the event hash, on-chain anchor, and consensus timestamp are " +
+    "real and independently verifiable. Validator-signature attestation is " +
+    "mainnet-gated. Not yet a court-of-law evidentiary claim.",
+  "anchoring-gateway":
+    "Testnet receipt anchored on the owned Clockchain anchoring gateway (single " +
+    "operator). The event hash, block anchor, and block time are real and " +
+    "keyless-verifiable against the sealed block; they are not yet attested by an " +
+    "independent validator set. Not a court-of-law evidentiary claim.",
+} as const;
 
 /**
  * Assemble an {@link AgentReceipt} from the pieces the client fetched. Pure: all
@@ -58,6 +73,8 @@ const DISCLAIMER =
 export function buildReceipt(args: {
   input: AttestActionInput;
   eventHash: string;
+  /** Where the anchor lives (default: the public network wording). */
+  substrate?: "clockchain-network" | "anchoring-gateway";
   network: string;
   log: LogResponse;
   block?: BlockResponse | null;
@@ -65,6 +82,7 @@ export function buildReceipt(args: {
   identity?: { resolved: boolean; status: string } | null;
   poolHealth?: PoolHealth | null;
 }): AgentReceipt {
+  const substrate = args.substrate ?? "clockchain-network";
   const { input, eventHash, network, log, block, validation, identity, poolHealth } =
     args;
   const confirmed = log.blockHeight != null;
@@ -104,7 +122,8 @@ export function buildReceipt(args: {
       validators,
       trustPct,
       status: "single-validator-testnet",
-      note: TESTNET_NOTE,
+      substrate,
+      note: NOTES[substrate],
     },
     identity: identity?.resolved
       ? { resolved: true, status: identity.status, note: "Resolved via ERC-8004." }
@@ -121,6 +140,6 @@ export function buildReceipt(args: {
         "and compare to the hash anchored at this ledgerId on the Clockchain ledger.",
     },
     ...(poolHealth ? { poolHealth } : {}),
-    disclaimer: DISCLAIMER,
+    disclaimer: DISCLAIMERS[substrate],
   };
 }

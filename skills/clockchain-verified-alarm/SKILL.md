@@ -26,8 +26,10 @@ No account, no API key, no secrets — it spends one log credit on a **shared de
 5. **Keyless verify:** `verify_cross_party {ledger_id, block_height:<number>}` → expect `.onChain.verifiedAgainst == "on-chain block"` and `.onChain.keyless == true`. The authoritative fields live under `.onChain`.
 6. **"Keyless" ≠ trustless.** It's a cryptographic integrity check against the immutable on-chain block, but the block is still served by a single gateway operator (multi-validator is on the roadmap). Don't say "trustless" or "court-grade" to a compliance buyer.
 
-## Stopwatch (hosted tools, no SDK)
-`stopwatch_start {label}` → `stopwatch_stop {label, start_ledger_id}` → `stopwatch_verify {start_ledger_id, stop_ledger_id}`. Elapsed is the difference of the two markers' consensus timestamps; `stopwatch_verify` recomputes it from the two immutable block times keylessly (`verified:true`). Two log credits.
+## Hosted tools (no SDK) — stopwatch, timer, alarm
+Fastest path: `packages/clock-sdk/examples/try-clock-tools-mcp.sh` (demo token, no signup).
+- Stopwatch: `stopwatch_start {label}` → `stopwatch_stop {label, start_ledger_id}` → `stopwatch_verify {start_ledger_id, stop_ledger_id}`. Elapsed is the difference of the two markers' consensus timestamps; `stopwatch_verify` recomputes it from the two immutable block times keylessly (`verified:true`). Two log credits.
+- Timer / alarm: `timer_set {delay_ms}` or `alarm_set {fire_at, every_ms?}` → the keeper fires while you are offline → `timer_status {id}` returns the fire with `anchor.ledgerId` / `blockHeight` and the receipt → `verify_cross_party`. Never early; ~1 s tick. Optional `webhook_url` on an allow-listed host gets a Standard-Webhooks POST; verify it with the `webhookSecret` returned at registration. Receipts name the substrate (`attestation.substrate`).
 
 ## Run the SDK through the hosted MCP (demo token, no gateway creds)
 `packages/clock-sdk/examples/mcp-adapter.mjs` implements the SDK's client surface over MCP tool calls; `packages/clock-sdk/test/gates-live.test.mjs` is the acceptance suite (`CC_LIVE_GATES=1 CC_MCP_TOKEN=<token>`).

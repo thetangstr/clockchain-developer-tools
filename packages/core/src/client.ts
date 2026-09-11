@@ -1,4 +1,4 @@
-import type { ClockchainConfig } from "./config.js";
+import { substrateForEndpoint, type AnchorSubstrate, type ClockchainConfig } from "./config.js";
 import { DEFAULT_ENDPOINT } from "./config.js";
 import {
   ApiError,
@@ -243,6 +243,11 @@ export class ClockchainClient {
         throw new Error("CLOCKCHAIN_ENDPOINT must be an origin with no path prefix when request signing is enabled");
       }
     }
+  }
+
+  /** Where this client's anchors live — configured, else derived from the endpoint. */
+  substrate(): AnchorSubstrate {
+    return this.config.substrate ?? substrateForEndpoint(this.config.endpoint);
   }
 
   /**
@@ -566,6 +571,7 @@ export class ClockchainClient {
     return buildReceipt({
       input,
       eventHash,
+      substrate: this.substrate(),
       network,
       log,
       block,
@@ -613,6 +619,7 @@ export class ClockchainClient {
     return buildReceipt({
       input,
       eventHash: receipt.eventHash,
+      substrate: this.substrate(),
       network: receipt.network,
       log,
       block,

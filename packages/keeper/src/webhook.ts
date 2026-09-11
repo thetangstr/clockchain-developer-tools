@@ -13,6 +13,9 @@
  * form (the base64 part is decoded before HMAC, per spec).
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
+import http from "node:http";
+import https from "node:https";
+import { resolvePinnedAddress, type Resolver, type SsrfOptions } from "./ssrf.js";
 
 /** Result of a single POST attempt. */
 export interface DeliverResult {
@@ -27,15 +30,59 @@ export type FetchLike = (
   init: { method: string; headers: Record<string, string>; body: string },
 ) => Promise<{ status: number }>;
 
-const defaultFetch: FetchLike = async (url, init) => {
-  const res = await fetch(url, {
-    method: init.method,
-    headers: init.headers,
-    body: init.body,
-    redirect: "manual", // never follow redirects (SSRF: a 30x could point inward)
-  });
-  return { status: res.status };
-};
+/**
+ * The production deliverer: DNS-pinned. Resolves the target host, range-checks every
+ * address, then opens the connection to that exact address via node:http(s) with a
+ * `lookup` that returns only the vetted address — so a DNS flip between check and
+ * connect cannot redirect the POST. TLS still verifies against the hostname (SNI /
+ * servername), and the Host header is the hostname. Redirects are never followed.
+ */
+export function pinnedFetch(opts: SsrfOptions & { resolver?: Resolver; timeoutMs?: number } = {}): FetchLike {
+  return async (url, init) => {
+    const u = new URL(url);
+    const pinned = await resolvePinnedAddress(u.hostname, opts);
+    const isHttps = u.protocol === "https:";
+    const mod = isHttps ? https : http;
+    return new Promise<{ status: number }>((resolve, reject) => {
+      const req = mod.request(
+        {
+          protocol: u.protocol,
+          hostname: u.hostname,
+          port: u.port || (isHttps ? 443 : 80),
+          path: `${u.pathname}${u.search}`,
+          method: init.method,
+          headers: { ...init.headers, host: u.host, "content-length": String(Buffer.byteLength(init.body)) },
+          servername: isHttps ? u.hostname : undefined,
+          // The pin: every connect for this request goes to the address that passed the
+          // check. Node may ask with `all: true` (happy-eyeballs) or for a single address.
+          lookup: ((_host: string, o: { all?: boolean }, cb: (...a: unknown[]) => void) =>
+            o?.all
+              ? cb(null, [{ address: pinned.address, family: pinned.family }])
+              : cb(null, pinned.address, pinned.family)) as unknown as http.RequestOptions["lookup"],
+          timeout: opts.timeoutMs ?? 10_000,
+        },
+        (res) => {
+          res.resume(); // drain; the body is irrelevant to delivery success
+          resolve({ status: res.statusCode ?? 0 });
+        },
+      );
+      req.on("timeout", () => req.destroy(new Error("webhook delivery timed out")));
+      req.on("error", reject);
+      req.end(init.body);
+    });
+  };
+}
+
+const defaultFetch: FetchLike = pinnedFetch();
+
+/**
+ * Per-owner webhook secret derived from the server secret: `whsec_` +
+ * base64(HMAC-SHA256(serverSecret, owner)). Each owner verifies their own fires with
+ * a secret only they were shown, and the server secret itself is never disclosed.
+ */
+export function deriveOwnerSecret(serverSecret: string, owner: string): string {
+  return "whsec_" + createHmac("sha256", decodeSecret(serverSecret)).update(owner, "utf8").digest("base64");
+}
 
 /** Decode a Standard-Webhooks secret to the raw key bytes used for HMAC. */
 export function decodeSecret(secret: string): Buffer {
@@ -120,8 +167,10 @@ export async function deliverWebhook(args: {
   idempotencyKey: string;
   nowSec: number;
   fetchFn?: FetchLike;
+  /** SSRF policy for the default (DNS-pinned) deliverer. */
+  ssrf?: SsrfOptions;
 }): Promise<DeliverResult> {
-  const fetchFn = args.fetchFn ?? defaultFetch;
+  const fetchFn = args.fetchFn ?? (args.ssrf ? pinnedFetch(args.ssrf) : defaultFetch);
   const body = JSON.stringify(args.body ?? null);
   const headers = buildHeaders({
     id: args.idempotencyKey,
