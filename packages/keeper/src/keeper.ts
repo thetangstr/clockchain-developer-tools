@@ -93,6 +93,16 @@ export class Keeper {
 
   // ===== control plane =====
 
+  /** The keeper's disciplined "now" (epoch ms) — what fire times are compared against. */
+  now(): number {
+    return this.d.nowMs();
+  }
+
+  /** Uncertainty half-width of {@link now}, ms. */
+  nowUncertaintyMs(): number {
+    return this.d.nowUncertaintyMs?.() ?? 0;
+  }
+
   /** Register a new trigger. Validates the target against the SSRF guard. */
   async schedule(input: ScheduleInput): Promise<Trigger> {
     const cfg = this.d.config;
@@ -118,8 +128,10 @@ export class Keeper {
     if (live.length >= maxPerSub) {
       throw new Error(`trigger limit reached for this owner (${maxPerSub}).`);
     }
-    // SSRF check at registration time (and again before each delivery).
-    assertSafeWebhookUrl(input.target, cfg.ssrf);
+    // SSRF check at registration time (and again before each delivery). Poll-only
+    // triggers (no target) have nothing to deliver and skip the guard.
+    const target = input.target ?? null;
+    if (target) assertSafeWebhookUrl(target, cfg.ssrf);
 
     const now = this.d.nowMs();
     const id = (this.d.idGen ?? randomUUID)();
@@ -127,7 +139,8 @@ export class Keeper {
       id,
       sub: input.sub,
       fireAtMs: input.fireAtMs,
-      target: input.target,
+      target,
+      label: input.label,
       payload: input.payload ?? null,
       mode,
       intervalMs: input.intervalMs,
@@ -141,6 +154,17 @@ export class Keeper {
     };
     await this.d.store.put(trigger);
     return trigger;
+  }
+
+  /**
+   * One trigger by id. When `sub` is given it must match the owner, so one tenant
+   * cannot read another's trigger (returns null instead of leaking existence).
+   */
+  async get(id: string, sub?: string): Promise<Trigger | null> {
+    const t = await this.d.store.get(id);
+    if (!t) return null;
+    if (sub && t.sub !== sub) return null;
+    return t;
   }
 
   /** List triggers, optionally scoped to one owner (per-user auth tenant isolation). */
@@ -229,10 +253,15 @@ export class Keeper {
     let retryDelay = Number.POSITIVE_INFINITY;
 
     // ---- delivery step: at most one POST per tick ----
-    if (fire.delivery.status === "pending") {
+    if (fire.delivery.status === "pending" && !trigger.target) {
+      // Poll-only trigger: nothing to deliver. The fire is still anchored below and
+      // the owner reads it back (fires[].anchor) via the status tool.
+      fire.delivery.status = "skipped";
+    } else if (fire.delivery.status === "pending") {
+      const target = trigger.target as string;
       let ssrfError: string | null = null;
       try {
-        assertSafeWebhookUrl(trigger.target, cfg.ssrf);
+        assertSafeWebhookUrl(target, cfg.ssrf);
       } catch (err) {
         ssrfError = err instanceof Error ? err.message : String(err);
       }
@@ -243,7 +272,7 @@ export class Keeper {
         summary.deadLettered++;
       } else {
         const res = await deliverWebhook({
-          target: trigger.target,
+          target,
           body: deliveryBody(trigger, fire),
           secret: cfg.webhookSecret,
           idempotencyKey: fire.fireId, // stable across retries + restart re-fire
@@ -303,7 +332,9 @@ export class Keeper {
 
     // ---- finalize ONLY when delivery is terminal AND the fire is anchored ----
     const deliveryTerminal =
-      fire.delivery.status === "delivered" || fire.delivery.status === "dead";
+      fire.delivery.status === "delivered" ||
+      fire.delivery.status === "dead" ||
+      fire.delivery.status === "skipped";
     if (deliveryTerminal && fire.anchor.status === "anchored") {
       this.finalize(trigger, fire, now);
     } else {

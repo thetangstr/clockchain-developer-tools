@@ -32,8 +32,12 @@ export type TriggerStatus =
   | "cancelled"
   | "dead";
 
-/** Delivery outcome of a single fire's webhook POST chain. */
-export type DeliveryStatus = "pending" | "delivered" | "dead";
+/**
+ * Delivery outcome of a single fire's webhook POST chain. "skipped" is the terminal
+ * state for a poll-only trigger (no webhook target): the fire is still anchored and
+ * the owner reads it back via the status tool.
+ */
+export type DeliveryStatus = "pending" | "delivered" | "dead" | "skipped";
 
 /** On-chain anchor status of a single fire (truthful anchoring). */
 export type FireAnchorStatus = "pending" | "anchored";
@@ -83,8 +87,10 @@ export interface Trigger {
   sub: string;
   /** When to fire, epoch ms (Clockchain-disciplined time is compared against this). */
   fireAtMs: number;
-  /** Webhook URL the fire POSTs to. */
-  target: string;
+  /** Webhook URL the fire POSTs to, or null for a poll-only trigger (owner reads fires back). */
+  target: string | null;
+  /** Optional human label (what the owner called this timer/alarm). */
+  label?: string;
   /** Arbitrary JSON payload delivered (and hashed into the anchor). */
   payload: unknown;
   mode: TriggerMode;
@@ -107,7 +113,9 @@ export interface Trigger {
 export interface ScheduleInput {
   sub: string;
   fireAtMs: number;
-  target: string;
+  /** Webhook URL, or null/undefined for a poll-only trigger. */
+  target?: string | null;
+  label?: string;
   payload?: unknown;
   mode?: TriggerMode;
   intervalMs?: number;

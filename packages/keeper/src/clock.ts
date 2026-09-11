@@ -14,6 +14,8 @@ export interface DisciplinedClock {
   nowUncertaintyMs(): number;
   /** Re-discipline against consensus time. Call once on boot. */
   sync(): Promise<void>;
+  /** Start background auto-resync (no-op if already running). */
+  startAutoResync(periodMs?: number): void;
   /** Stop background auto-resync. */
   stop(): void;
 }
@@ -36,6 +38,7 @@ export function createDisciplinedClock(
     sync: async () => {
       await clock.sync();
     },
+    startAutoResync: (periodMs) => clock.startAutoResync(periodMs ?? opts.autoResyncMs ?? 60_000),
     stop: () => clock.stopAutoResync(),
   };
 }

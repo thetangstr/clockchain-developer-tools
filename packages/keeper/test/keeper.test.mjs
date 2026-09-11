@@ -346,3 +346,48 @@ test("fires history is capped (ring buffer) on a long-running interval", async (
   const stored = await store.get("trgRing");
   assert.ok(stored.fires.length <= 3, `fires capped at 3 (got ${stored.fires.length})`);
 });
+
+// ---- poll-only triggers (no webhook): the hosted timer/alarm tools' default path ----
+
+test("poll-only trigger (no target): no POST, delivery 'skipped', fire still anchored, trigger done", async () => {
+  const { keeper, clock, fetch, anchorer } = makeKeeper({ clock: clockAt(1000) });
+  const t = await keeper.schedule({ sub: "u1", fireAtMs: 2000, label: "coffee" });
+  assert.equal(t.target, null);
+  assert.equal(t.label, "coffee");
+
+  clock.set(2000);
+  const s = await keeper.tick();
+  assert.equal(fetch.calls.length, 0, "nothing is delivered for a poll-only trigger");
+  assert.equal(s.fired, 1);
+  assert.equal(s.anchored, 1);
+  assert.equal(anchorer.calls.anchorFire, 1, "still anchored exactly once");
+
+  const after = await keeper.get(t.id, "u1");
+  assert.equal(after.status, "done");
+  assert.equal(after.fires.length, 1);
+  assert.equal(after.fires[0].delivery.status, "skipped");
+  assert.equal(after.fires[0].anchor.status, "anchored");
+  assert.equal(after.fires[0].anchor.ledgerId, "L1");
+});
+
+test("poll-only trigger with a pending anchor stays 'firing' until the anchor lands (truthful)", async () => {
+  const { keeper, clock } = makeKeeper({ clock: clockAt(1000), anchorer: anchorPendingThenAnchored() });
+  const t = await keeper.schedule({ sub: "u1", fireAtMs: 2000 });
+  clock.set(2000);
+  await keeper.tick();
+  let cur = await keeper.get(t.id);
+  assert.equal(cur.status, "firing", "skipped delivery alone does not finish the fire");
+  assert.equal(cur.fires[0].anchor.status, "pending");
+  await keeper.tick();
+  cur = await keeper.get(t.id);
+  assert.equal(cur.status, "done");
+  assert.equal(cur.fires[0].anchor.status, "anchored");
+});
+
+test("get is owner-scoped: another tenant reads null, not the trigger", async () => {
+  const { keeper } = makeKeeper({ clock: clockAt(1000) });
+  const t = await keeper.schedule({ sub: "u1", fireAtMs: 5000 });
+  assert.ok(await keeper.get(t.id, "u1"));
+  assert.equal(await keeper.get(t.id, "u2"), null);
+  assert.equal(await keeper.get("nope", "u1"), null);
+});
