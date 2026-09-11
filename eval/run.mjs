@@ -4,7 +4,16 @@
 // on-chain check (no LLM judge). Writes a test report (JSON + Markdown) per run.
 //
 // Agents (EVAL_AGENT):
-//   claude  (default) — the `claude` CLI, headless, stream-json trajectory.
+//   claude  (default) — the `claude` CLI, headless, stream-json trajectory. A FRESH agent:
+//                       --strict-mcp-config (only the eval's MCP config, none of the
+//                       machine's), run from an empty temp directory (no project
+//                       CLAUDE.md/AGENTS.md). CLAUDE_MODEL selects the model.
+//   codex             — the `codex` CLI (`codex exec --json`), headless, fresh: a temporary
+//                       CODEX_HOME with only the hosted MCP configured (auth copied from
+//                       ~/.codex/auth.json), or your own prepared home via CODEX_HOME.
+//                       CODEX_BIN (default "codex"), CODEX_MODEL, CODEX_CONFIG_EXTRA
+//                       (path to a TOML fragment appended to the generated config, e.g. a
+//                       model provider), CODEX_ARGS (extra exec args).
 //   hermes            — a Hermes profile (e.g. Clark's), headless `hermes chat -q`;
 //                       the trajectory is read from Hermes's own session store
 //                       (profiles/<p>/state.db), so nothing depends on stdout parsing
@@ -16,19 +25,23 @@
 //                       must already have the clockchain MCP configured.
 //
 // Run:  MCP_TOKEN=<tester token> node eval/run.mjs
-//   env: MCP_URL (default mcp.clockchain.network), MAX_TURNS, TASK (id filter),
-//        EVAL_REPORT_DIR (default eval/reports)
-import { writeFileSync, mkdtempSync, readFileSync } from "node:fs";
+//   env: MCP_URL (default mcp.clockchain.network), MAX_TURNS, TASK (comma-separated id
+//        filter; substring match), EVAL_REPORT_DIR (default eval/reports),
+//        EVAL_TOKEN_LABEL (how the token was obtained, e.g. "self-serve demo token
+//        (POST /token)" — printed in the report so "anyone can do this" is on record)
+import { writeFileSync, mkdtempSync, readFileSync, copyFileSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
-import { callTool, listTools, MCP_URL, round } from "./lib.mjs";
+import { callTool, listTools, rpc, MCP_URL, round } from "./lib.mjs";
 import { tasks } from "./tasks.mjs";
 import { writeReport, parses } from "./report.mjs";
 
 const TOKEN = process.env.MCP_TOKEN || process.env.MCP_API_KEY || "";
 const MAX_TURNS = Number(process.env.MAX_TURNS || 12);
-const FILTER = process.env.TASK || "";
+const FILTER = (process.env.TASK || "").split(",").map((s) => s.trim()).filter(Boolean);
+const TOKEN_LABEL = process.env.EVAL_TOKEN_LABEL || "";
+const CODEX_BIN = process.env.CODEX_BIN || "codex";
 const AGENT = (process.env.EVAL_AGENT || "claude").toLowerCase();
 const HERMES_PROFILE = process.env.HERMES_PROFILE || "clark";
 const HERMES_BIN = process.env.HERMES_BIN || "hermes";
@@ -41,9 +54,9 @@ const AWS_REGION = process.env.AWS_REGION || "us-west-2";
 const REPORT_DIR = process.env.EVAL_REPORT_DIR || path.join(path.dirname(new URL(import.meta.url).pathname), "reports");
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS || 240_000);
 
-function sh(cmd, args, { input, timeoutMs = TASK_TIMEOUT_MS, env } = {}) {
+function sh(cmd, args, { input, timeoutMs = TASK_TIMEOUT_MS, env, cwd } = {}) {
   return new Promise((resolve) => {
-    const cp = spawn(cmd, args, { stdio: [input ? "pipe" : "ignore", "pipe", "pipe"], env: env ?? process.env });
+    const cp = spawn(cmd, args, { stdio: [input ? "pipe" : "ignore", "pipe", "pipe"], env: env ?? process.env, cwd });
     let out = "", err = "";
     const timer = setTimeout(() => cp.kill("SIGKILL"), timeoutMs);
     cp.stdout.on("data", (d) => (out += d));
@@ -55,12 +68,72 @@ function sh(cmd, args, { input, timeoutMs = TASK_TIMEOUT_MS, env } = {}) {
 
 // ---------------------------------------------------------------- claude runner
 async function runClaude(prompt, allowed) {
-  const cfg = path.join(mkdtempSync(path.join(tmpdir(), "cc-eval-")), "mcp.json");
-  writeFileSync(cfg, JSON.stringify({ mcpServers: { clockchain: { type: "http", url: MCP_URL, headers: { "x-api-key": TOKEN } } } }));
-  const args = ["-p", prompt, "--mcp-config", cfg, "--allowedTools", allowed,
+  // Fresh agent: its own MCP config only (--strict-mcp-config ignores the machine's servers),
+  // an empty cwd so no project CLAUDE.md/AGENTS.md leaks in, no prior session.
+  const dir = mkdtempSync(path.join(tmpdir(), "cc-eval-"));
+  const cfg = path.join(dir, "mcp.json");
+  writeFileSync(cfg, JSON.stringify({ mcpServers: { clockchain: { type: "http", url: MCP_URL, headers: { "x-api-key": TOKEN } } } }), { mode: 0o600 });
+  const args = ["-p", prompt, "--mcp-config", cfg, "--strict-mcp-config", "--allowedTools", allowed,
     "--output-format", "stream-json", "--verbose", "--max-turns", String(MAX_TURNS)];
-  const { out, err } = await sh("claude", args);
-  return { ...parseStream(out), stderr: err, model: "claude (CLI default)" };
+  if (process.env.CLAUDE_MODEL) args.push("--model", process.env.CLAUDE_MODEL);
+  const { out, err } = await sh("claude", args, { cwd: dir });
+  const parsed = parseStream(out);
+  // The result event names the model(s) actually used.
+  let model = "claude (CLI default)";
+  for (const line of out.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    try { const ev = JSON.parse(line); if (ev.type === "result" && ev.modelUsage) { model = `Claude Code ${Object.keys(ev.modelUsage).join("+")}`; break; } } catch { /* skip */ }
+  }
+  return { ...parsed, stderr: err, model };
+}
+
+// ---------------------------------------------------------------- codex runner
+/** Prepare a fresh CODEX_HOME: only the hosted MCP, auth copied from the user's real home. */
+function freshCodexHome() {
+  if (process.env.CODEX_HOME) return process.env.CODEX_HOME;
+  const home = mkdtempSync(path.join(tmpdir(), "codex-eval-"));
+  const auth = path.join(process.env.HOME || "", ".codex", "auth.json");
+  if (existsSync(auth)) { copyFileSync(auth, path.join(home, "auth.json")); chmodSync(path.join(home, "auth.json"), 0o600); }
+  const extra = process.env.CODEX_CONFIG_EXTRA ? readFileSync(process.env.CODEX_CONFIG_EXTRA, "utf8") : "";
+  const model = process.env.CODEX_MODEL ? `model = "${process.env.CODEX_MODEL}"\n` : "";
+  // default_tools_approval_mode: headless `codex exec` has nobody to approve an MCP call —
+  // without this every call comes back "user cancelled MCP tool call".
+  writeFileSync(path.join(home, "config.toml"), `# fresh Codex agent for the Clockchain eval
+disable_response_storage = true
+${model}${extra}
+[mcp_servers.clockchain]
+url = "${MCP_URL}"
+http_headers = { "x-api-key" = "${TOKEN}" }
+default_tools_approval_mode = "approve"
+tool_timeout_sec = 120
+`, { mode: 0o600 });
+  return home;
+}
+
+async function runCodex(prompt) {
+  const home = freshCodexHome();
+  const cwd = mkdtempSync(path.join(tmpdir(), "codex-eval-cwd-"));
+  const args = ["exec", "--ephemeral", "--skip-git-repo-check", "--json", "-s", "read-only", "-c", 'approval_policy="never"',
+    ...(process.env.CODEX_ARGS ? process.env.CODEX_ARGS.split(" ").filter(Boolean) : []), prompt];
+  const { out, err } = await sh(CODEX_BIN, args, { cwd, env: { ...process.env, CODEX_HOME: home } });
+  // codex exec --json: one event per line; MCP calls are item.completed / type mcp_tool_call.
+  const trajectory = [];
+  let finalText = "", usage = {}, model = process.env.CODEX_MODEL ? `Codex CLI ${process.env.CODEX_MODEL}` : "Codex CLI (default model)";
+  for (const line of out.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    let ev; try { ev = JSON.parse(line); } catch { continue; }
+    const it = ev.item;
+    if (ev.type === "item.completed" && it?.type === "mcp_tool_call") {
+      const text = it.error ? `ERROR: ${it.error.message ?? JSON.stringify(it.error)}`
+        : (it.result?.content ?? []).map((c) => c.text ?? "").join("");
+      trajectory.push({ name: `mcp__${it.server}__${it.tool}`, input: it.arguments ?? {}, result: text });
+    } else if (ev.type === "item.completed" && it?.type === "agent_message" && it.text) {
+      finalText = it.text;
+    } else if (ev.type === "turn.completed" && ev.usage) {
+      usage = ev.usage;
+    }
+  }
+  return { trajectory, usage, finalText, stderr: err, model };
 }
 
 // ---------------------------------------------------------------- hermes runner
@@ -200,11 +273,15 @@ echo "=====STDERR====="; tail -c 1500 "$T/stderr.txt"; ${remote ? "true" : 'rm -
 function parseStream(out, resultMapper = (c) => (Array.isArray(c) ? c.map((x) => x.text ?? "").join("") : c)) {
   const calls = new Map();
   const order = [];
-  let usage = {}, finalText = "";
+  let usage = {}, finalText = "", mcpStatus;
   for (const line of out.split("\n")) {
     const s = line.trim(); if (!s.startsWith("{")) continue;
     let ev; try { ev = JSON.parse(s); } catch { continue; }
-    if (ev.type === "assistant") {
+    if (ev.type === "system" && ev.subtype === "init" && Array.isArray(ev.mcp_servers)) {
+      // Claude Code reports whether each MCP server connected; a fresh session that could not
+      // reach the server has no tools at all, which must never read as "the agent chose wrong".
+      mcpStatus = ev.mcp_servers.find((m) => m.name === "clockchain")?.status ?? "absent";
+    } else if (ev.type === "assistant") {
       for (const b of ev.message?.content ?? []) {
         if (b.type === "tool_use") { const c = { name: b.name, input: b.input, result: null }; calls.set(b.id, c); order.push(c); }
         else if (b.type === "text" && b.text) finalText = b.text;
@@ -219,7 +296,7 @@ function parseStream(out, resultMapper = (c) => (Array.isArray(c) ? c.map((x) =>
       }
     } else if (ev.type === "result") { usage = ev.usage ?? usage; finalText = ev.result ?? finalText; }
   }
-  return { trajectory: order, usage, finalText };
+  return { trajectory: order, usage, finalText, mcpStatus };
 }
 
 // ---------------------------------------------------------------- main
@@ -230,8 +307,8 @@ async function main() {
   const allowed = toolNames.map((t) => `mcp__clockchain__${t}`).join(",");
   const runId = String(Date.now()).slice(-8);
   let suite = tasks(runId);
-  if (FILTER) suite = suite.filter((t) => t.id.includes(FILTER));
-  const agentLabel = AGENT === "hermes" ? `hermes:${HERMES_PROFILE}${HERMES_SSM_INSTANCE ? "@" + HERMES_SSM_INSTANCE : ""}` : "claude";
+  if (FILTER.length) suite = suite.filter((t) => FILTER.some((f) => t.id.includes(f)));
+  const agentLabel = AGENT === "hermes" ? `hermes:${HERMES_PROFILE}${HERMES_SSM_INSTANCE ? "@" + HERMES_SSM_INSTANCE : ""}` : AGENT;
   const startedAt = new Date().toISOString();
 
   console.log(`# Clockchain MCP — agent eval\nagent: ${agentLabel} | endpoint: ${MCP_URL} | tools: ${tools.length} | tasks: ${suite.length} | runId: ${runId}\n`);
@@ -239,7 +316,7 @@ async function main() {
   let model = agentLabel;
   for (const task of suite) {
     process.stdout.write(`▶ ${task.id} … `);
-    const r = AGENT === "hermes" ? await runHermes(task.prompt) : await runClaude(task.prompt, allowed);
+    const r = AGENT === "hermes" ? await runHermes(task.prompt) : AGENT === "codex" ? await runCodex(task.prompt) : await runClaude(task.prompt, allowed);
     if (r.model) model = r.model;
     const { trajectory, usage, finalText } = r;
     let pass = false, detail = "";
@@ -249,13 +326,19 @@ async function main() {
     const expected = task.expectTools.filter((t) => usedTools.includes(t));
     const selOk = expected.length === task.expectTools.length;
     const toks = (usage.input_tokens ?? usage.prompt_tokens ?? 0) + (usage.output_tokens ?? usage.completion_tokens ?? 0);
-    rows.push({ id: task.id, pass, selOk, expectTools: task.expectTools, usedTools, calls: trajectory.length, toks, detail, finalText: String(finalText).slice(0, 2000), trajectory: trajectory.map((c) => ({ name: c.name, input: c.input, ok: parses(c.result), result: typeof c.result === "string" ? c.result.slice(0, 4000) : c.result })) });
+    rows.push({ id: task.id, pass, selOk, expectTools: task.expectTools, usedTools, calls: trajectory.length, toks, detail, mcpStatus: r.mcpStatus ?? null, finalText: String(finalText).slice(0, 2000), trajectory: trajectory.map((c) => ({ name: c.name, input: c.input, ok: parses(c.result), result: typeof c.result === "string" ? c.result.slice(0, 4000) : c.result })) });
     console.log(`${pass ? "PASS" : "FAIL"}  [tools ${selOk ? "ok" : "miss"}, ${trajectory.length} calls, ~${toks} tok]  ${detail}`);
     if (trajectory.length === 0 && r.stderr) console.log(`   (agent stderr: ${r.stderr.slice(-300).replace(/\s+/g, " ")})`);
+    if (r.mcpStatus && r.mcpStatus !== "connected") {
+      // The agent never saw the server: probe the endpoint right now so the log says why
+      // (a 429 here = the token's per-minute rate limit, not the agent).
+      const probe = await rpc("tools/list").catch((e) => ({ status: `error ${e.message}` }));
+      console.log(`   (MCP server status in the agent's session: ${r.mcpStatus}; tools/list probe now: HTTP ${probe.status})`);
+    }
   }
   const p = rows.filter((r) => r.pass).length, s = rows.filter((r) => r.selOk).length;
   console.log(`\n==== completion ${p}/${rows.length} | tool-selection ${s}/${rows.length} | avg ${round(rows.reduce((a, r) => a + r.calls, 0) / rows.length)} calls, ~${Math.round(rows.reduce((a, r) => a + r.toks, 0) / rows.length)} tok/task ====`);
-  const rep = writeReport({ dir: REPORT_DIR, runId, agent: agentLabel, model, endpoint: MCP_URL, toolNames, rows, startedAt, finishedAt: new Date().toISOString() });
+  const rep = writeReport({ dir: REPORT_DIR, runId, agent: agentLabel, model, endpoint: MCP_URL, tokenLabel: TOKEN_LABEL, toolNames, rows, startedAt, finishedAt: new Date().toISOString() });
   console.log(`report: ${rep.md} (${rep.verdict}; ${rep.exercisedOk} tools exercised OK, ${rep.exercisedErr} with error results${rep.notExercised.length ? `; not exercised: ${rep.notExercised.join(", ")}` : ""})`);
   process.exit(rep.verdict === "PASS" ? 0 : 1);
 }

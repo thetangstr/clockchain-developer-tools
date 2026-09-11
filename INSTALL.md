@@ -34,6 +34,17 @@ claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
   --header "x-api-key: <YOUR_TOKEN>"
 ```
 
+**Codex** reads `~/.codex/config.toml` (TOML, not the JSON block); the header map is
+`http_headers`. Verified with codex-cli 0.142:
+
+```toml
+[mcp_servers.clockchain]
+url = "https://mcp.clockchain.network/mcp"
+http_headers = { "x-api-key" = "<YOUR_TOKEN>" }
+# headless (`codex exec`) only — nobody is there to approve each call:
+default_tools_approval_mode = "approve"
+```
+
 **Bring your own key** (spend your own credits): swap the token for your Clockchain
 credentials as headers — `x-clockchain-api-key`, `x-clockchain-client-id`,
 `x-clockchain-wallet-id` (no MCP token needed).

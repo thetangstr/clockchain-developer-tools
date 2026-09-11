@@ -348,6 +348,35 @@ export function rateLimitHeaders(
  * own body; this is only for our small JSON control endpoints like /promote).
  * Rejects on invalid JSON or an over-size body.
  */
+/**
+ * JSON-RPC methods every MCP client sends just to attach — initialize, the
+ * initialized notification, ping, and the list_* discovery calls. They are cheap
+ * (no Clockchain call behind them) and they are exactly what a fresh session does
+ * first, so they are exempt from the per-caller rate limit: a client that reaches
+ * the limit while polling must still be able to open its next session, and the
+ * 30/min demo budget should be spent on tool calls, not on handshakes. Only
+ * `tools/call` (and any unknown method) counts. Auth still applies.
+ */
+export const RATE_LIMIT_EXEMPT_METHODS: ReadonlySet<string> = new Set([
+  "initialize",
+  "notifications/initialized",
+  "ping",
+  "tools/list",
+  "prompts/list",
+  "resources/list",
+  "resources/templates/list",
+]);
+
+/** True when a parsed JSON-RPC body (single message or batch) is lifecycle/discovery only. */
+export function isRateLimitExempt(body: unknown): boolean {
+  const msgs = Array.isArray(body) ? body : [body];
+  if (msgs.length === 0) return false;
+  return msgs.every(
+    (m) => !!m && typeof m === "object" && typeof (m as { method?: unknown }).method === "string" &&
+      RATE_LIMIT_EXEMPT_METHODS.has((m as { method: string }).method),
+  );
+}
+
 export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -792,7 +821,19 @@ export async function runHttp(): Promise<void> {
       selfServeJti,
       byo?.apiKey,
     );
-    const rl = limiter.enabled
+    // Read the JSON-RPC body once here (the transport accepts a pre-parsed body) so
+    // the rate limiter can wave lifecycle/discovery through — see RATE_LIMIT_EXEMPT_METHODS.
+    let parsedBody: unknown;
+    if (req.method === "POST") {
+      try {
+        parsedBody = await readJsonBody(req, 4_000_000);
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_json_body" }));
+        return;
+      }
+    }
+    const rl = limiter.enabled && !(parsedBody !== undefined && isRateLimitExempt(parsedBody))
       ? limiter.allow(
           effectiveCallerId,
         )
@@ -874,7 +915,7 @@ export async function runHttp(): Promise<void> {
         void server.close();
       });
       await server.connect(transport);
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, parsedBody);
     } catch (err) {
       console.error("[clockchain-mcp] http request error:", err);
       if (!res.headersSent) {
