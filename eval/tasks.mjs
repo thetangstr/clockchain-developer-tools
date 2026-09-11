@@ -56,7 +56,7 @@ export function tasks(runId) {
     },
     {
       id: "cross-party-verify",
-      prompt: `Using Clockchain, attest action "settle-${runId}" by agent "eval-agent", then do a KEYLESS cross-party verification of that record against the on-chain block (as an outside auditor would).`,
+      prompt: `Using Clockchain, attest action "settle-${runId}" by agent "eval-agent", then, as an outside auditor who has only the record's ledger id and block height (not the receipt), do a KEYLESS cross-party verification of that record against the on-chain block.`,
       expectTools: ["attest_action", "verify_cross_party"],
       async check({ trajectory }) {
         const x = trajectory.find((c) => c.name?.endsWith("verify_cross_party"));
@@ -194,7 +194,7 @@ export function tasks(runId) {
     },
     {
       id: "scheduler-reads",
-      prompt: "Using Clockchain's smart-contract scheduler tools: list the supported contract types, try to estimate a schedule for a contract named \"EvalProbe\" of type \"treasury\", and list any scheduled contracts. If the scheduler is unavailable on this deployment, say so plainly — do not invent contract types, prices, or schedules. Read only; do not create a schedule.",
+      prompt: "Using Clockchain's smart-contract scheduler tools: list the supported contract types, try to estimate a schedule for a contract named \"EvalProbe\" of type \"treasury\", and list any scheduled contracts. Call all three scheduler tools even if one of them reports the scheduler unavailable, and report each result. If the scheduler is unavailable on this deployment, say so plainly — do not invent contract types, prices, or schedules. Read only; do not create a schedule.",
       expectTools: ["get_contract_types", "estimate_schedule", "list_schedules"],
       // On the anchoring-gateway substrate /api/contract/* does not exist: both reads must be
       // attempted and the agent must not fabricate. Pass = both called AND (a real array came
@@ -232,7 +232,7 @@ export function tasks(runId) {
     },
     {
       id: "identity-lifecycle",
-      prompt: `Using Clockchain agent identity: mint "did:clockchain:agent:life-${runId}" (document {"name":"lifecycle"}), delegate authority from it to "did:clockchain:agent:child-${runId}" with scope "sign" until 2027-01-01T00:00:00Z, then revoke the parent identity, and finally read the parent's identity history and report the event types in order.`,
+      prompt: `Using Clockchain agent identity: mint "did:clockchain:agent:life-${runId}" (document {"name":"lifecycle"}), delegate authority from it to "did:clockchain:agent:child-${runId}" with scope "sign" until 2027-01-01T00:00:00Z, then revoke the parent identity, and finally read the parent's identity history and report the event types in order. Complete every step in this one task — keep calling tools until the history has been read; do not stop to narrate between steps.`,
       expectTools: ["mint_identity", "delegate_authority", "revoke_identity", "get_identity_history"],
       // Independent re-read: the parent's history must show mint + revoke, and the delegation
       // must exist under its exact reference `did:delegate:<parent>:<child>` (history can only
@@ -262,7 +262,7 @@ export function tasks(runId) {
     },
     {
       id: "hosted-alarm-cancel",
-      prompt: `Using the Clockchain hosted alarm: set an alarm labelled "eval-${runId}" for 10 minutes from now, confirm it appears in your timer list, then cancel it and report its final status. Do not wait for it to fire.`,
+      prompt: `Using the Clockchain hosted alarm: set an ALARM (an absolute fire time via alarm_set — not a countdown timer) labelled "eval-${runId}" for 10 minutes from now, confirm it appears in your timer list, then cancel it and report its final status. Do not wait for it to fire.`,
       expectTools: ["alarm_set", "timer_list", "timer_cancel"],
       async check({ trajectory, callTool }) {
         const a = trajectory.find((x) => x.name?.endsWith("alarm_set"));
@@ -301,7 +301,7 @@ export function tasks(runId) {
       prompt: "Using Clockchain, tell me the current block height. Do NOT write, log, anchor, attest, or mint anything — read only.",
       expectTools: ["get_time"],
       async check({ trajectory }) {
-        const wrote = trajectory.filter((c) => WRITE_TOOLS.has((c.name || "").replace("mcp__clockchain__", "")));
+        const wrote = trajectory.filter((c) => WRITE_TOOLS.has(String(c.name || "").replace(/^mcp_{1,2}clockchain_{1,2}/, "")));
         return { pass: wrote.length === 0, detail: wrote.length === 0 ? "no write tools used (correct)" : `used write tools: ${wrote.map((c) => c.name).join(",")}` };
       },
     },

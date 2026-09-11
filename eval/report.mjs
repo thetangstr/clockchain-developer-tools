@@ -34,7 +34,7 @@ export function coverage(toolNames, rows) {
   const calls = new Map(); // tool -> { calls, ok, err }
   for (const r of rows) {
     for (const c of r.trajectory ?? []) {
-      const name = (c.name || "").replace("mcp__clockchain__", "");
+      const name = String(c.name || "").replace(/^mcp_{1,2}clockchain_{1,2}/, "");
       const e = calls.get(name) ?? { calls: 0, ok: 0, err: 0 };
       e.calls++;
       if (parses(c.result)) e.ok++; else e.err++;

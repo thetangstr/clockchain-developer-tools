@@ -290,3 +290,94 @@ test("verify_cross_party: an unavailable advisory hash lookup never sinks the au
   assert.equal(only.isError, true);
   assert.match(textOf(only), /pass ledger_id/);
 });
+
+// ---- Free-form object arguments must survive strict clients ---------------------------
+// Hermes rewrites `{type:"object"}` to `properties:{}` and Amazon Nova then emits `{}`,
+// so receipts/documents arrived empty and crashed with a bare TypeError. The arguments
+// are published as `object | JSON string` and an empty/partial object gets a message
+// that says what to pass.
+function attestStubs() {
+  let anchored = null;
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    const json = (body, status = 200) => ({ status, ok: status < 400, statusText: "stub", text: async () => JSON.stringify(body) });
+    if (u.includes("/getTime")) return json(HEALTHY_GETTIME);
+    if (u.includes("/log")) {
+      anchored = JSON.parse(opts.body).assetHash;
+      return json({ ledgerId: "LR", assetReferenceId: JSON.parse(opts.body).assetReferenceId, assetHash: anchored, blockHeight: "500", createdTimestamp: "t" });
+    }
+    if (u.includes("/ledger/")) return json({ ledgerId: "LR", assetHash: anchored, blockHeight: "500", assetReferenceId: "r", createdTimestamp: "t" });
+    if (u.includes("/api/time/block")) return json({ success: true, data: { blockHeight: 500, proposerAddress: "0x", blockTime: "2026-06-07T00:00:00Z" } });
+    if (u.includes("/getValidationBlock")) return json({ validationBlockData: { blockHeight: 500, positiveVotes: 1, negativeVotes: 0, "Trust value percentage": 0, "Node participation percentage": 0 } });
+    throw new Error("no route " + u);
+  };
+}
+
+test("verify_receipt / complete_attestation / verify_package: an empty object gets a guiding error, not a TypeError", async () => {
+  attestStubs();
+  const tools = collectTools();
+  for (const [name, arg] of [["verify_receipt", "receipt"], ["complete_attestation", "receipt"]]) {
+    const res = await tools[name]({ [arg]: {} });
+    assert.ok(res.isError, `${name} must fail on {}`);
+    assert.match(textOf(res), /receipt is missing agentId, action, eventHash, payload, anchor/);
+    assert.match(textOf(res), /ENTIRE object returned by attest_action/);
+    assert.doesNotMatch(textOf(res), /Cannot read properties/);
+  }
+  const pres = await tools.verify_package({ package: { packageId: "p" } });
+  assert.ok(pres.isError);
+  assert.match(textOf(pres), /package is missing pkgHash, record .* build_evidence_package.*got keys: packageId/);
+  const bad = await tools.verify_receipt({ receipt: "not json" });
+  assert.match(textOf(bad), /receipt must be a JSON object .*not valid JSON/);
+});
+
+test("verify_receipt and complete_attestation accept the receipt JSON-encoded as a string", async () => {
+  attestStubs();
+  const tools = collectTools();
+  const res = await tools.attest_action({ agent_id: "agent:bot", action: "execute_trade", inputs: JSON.stringify({ size: 1 }), outputs: { ok: true } });
+  assert.ok(!res.isError, textOf(res));
+  const receipt = JSON.parse(textOf(res));
+  assert.deepEqual(receipt.payload.inputs, { size: 1 }, "string-form inputs are parsed, not hashed as a string");
+
+  const vres = await tools.verify_receipt({ receipt: JSON.stringify(receipt) });
+  assert.ok(!vres.isError, textOf(vres));
+  assert.equal(JSON.parse(textOf(vres)).match, true);
+
+  const cres = await tools.complete_attestation({ receipt: JSON.stringify(receipt) });
+  assert.ok(!cres.isError, textOf(cres));
+  assert.equal(JSON.parse(textOf(cres)).anchor.confirmed, true);
+});
+
+test("mint_identity hashes the same document whether passed as an object or a JSON string", async () => {
+  const bodies = [];
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    const json = (body) => ({ status: 200, ok: true, statusText: "stub", text: async () => JSON.stringify(body) });
+    if (u.includes("/getTime")) return json(HEALTHY_GETTIME);
+    if (u.includes("/log")) { bodies.push(JSON.parse(opts.body)); return json({ ledgerId: "LM", blockHeight: "7" }); }
+    throw new Error("no route " + u);
+  };
+  const tools = collectTools();
+  const a = await tools.mint_identity({ did: "did:clockchain:a", document: { name: "x" } });
+  const b = await tools.mint_identity({ did: "did:clockchain:a", document: JSON.stringify({ name: "x" }) });
+  assert.ok(!a.isError && !b.isError);
+  assert.equal(bodies[0].assetHash, bodies[1].assetHash);
+  const empty = await tools.mint_identity({ did: "did:clockchain:a", document: {} });
+  assert.notEqual(JSON.parse(textOf(empty)).docHash, JSON.parse(textOf(a)).docHash, "an empty document is a different identity");
+});
+
+test("free-form object arguments are published as object-or-string unions (survive Hermes/Nova)", async () => {
+  const { zodToJsonSchema } = await import("zod-to-json-schema");
+  const { z } = await import("zod");
+  const metas = {};
+  registerTools({ registerTool: (name, cfg) => { metas[name] = cfg; } }, cfg);
+  const expect = { attest_action: ["inputs", "outputs"], verify_receipt: ["receipt"], complete_attestation: ["receipt"], verify_package: ["package"], mint_identity: ["document"] };
+  for (const [tool, args] of Object.entries(expect)) {
+    for (const arg of args) {
+      // Convert the whole input object the way the SDK publishes it (tools/list).
+      const js = zodToJsonSchema(z.object(metas[tool].inputSchema)).properties[arg];
+      const branches = js.anyOf ?? js.oneOf ?? [];
+      assert.ok(branches.some((b) => b.type === "object"), `${tool}.${arg} needs an object branch: ${JSON.stringify(js)}`);
+      assert.ok(branches.some((b) => b.type === "string"), `${tool}.${arg} needs a string branch: ${JSON.stringify(js)}`);
+    }
+  }
+});

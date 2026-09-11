@@ -63,6 +63,59 @@ const allowDegradedSchema = z
       "as anchored when it may not be.",
   );
 
+// ---- Free-form JSON object arguments -----------------------------------------------
+// Some agent runtimes rewrite a bare `{type:"object"}` argument schema to `properties: {}`
+// (Hermes does this to every MCP tool schema) and some models then take that literally and
+// emit `{}` (Amazon Nova does) — so a receipt, document or inputs object silently arrives
+// EMPTY. Publishing the argument as `object | JSON-encoded string` keeps the object branch
+// intact in those clients (verified against Bedrock Nova 2 Lite) and lets clients that can
+// only pass strings pass a string. Handlers normalize with asJsonObject().
+const jsonObjectSchema = (desc: string) =>
+  z
+    .union([z.record(z.string(), z.unknown()), z.string()])
+    .describe(`${desc} Pass the JSON object itself, or the same object JSON-encoded as a string.`);
+
+/** Normalize a jsonObjectSchema value (object, or JSON string) to a plain object. */
+function asJsonObject(value: unknown, what: string): Record<string, unknown> {
+  let v = value;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      throw new Error(
+        `${what} must be a JSON object (or that object JSON-encoded as a string); ` +
+          "got a string that is not valid JSON.",
+      );
+    }
+  }
+  if (!v || typeof v !== "object" || Array.isArray(v)) {
+    throw new Error(`${what} must be a JSON object; got ${v === null ? "null" : Array.isArray(v) ? "an array" : typeof v}.`);
+  }
+  return v as Record<string, unknown>;
+}
+
+/**
+ * Reject a receipt/package that is not the full object a prior tool returned. An empty or
+ * partial object used to crash deep inside verification with a bare TypeError; the message
+ * now says exactly what to pass, so an agent can recover in one retry.
+ */
+function requireFullObject(
+  obj: Record<string, unknown>,
+  what: string,
+  keys: readonly string[],
+  from: string,
+): void {
+  const missing = keys.filter((k) => !(k in obj));
+  if (missing.length === 0) return;
+  const got = Object.keys(obj);
+  throw new Error(
+    `${what} is missing ${missing.join(", ")} — pass the ENTIRE object returned by ` +
+      `${from}, unmodified (got ${got.length ? "keys: " + got.join(", ") : "an empty object"}).`,
+  );
+}
+const RECEIPT_KEYS = ["agentId", "action", "eventHash", "payload", "anchor"] as const;
+const PACKAGE_KEYS = ["packageId", "pkgHash", "record"] as const;
+
 const handshakeRoleSchema = z
   .enum(["payer", "requestor"])
   .describe("Public handshake role. Must be exactly payer or requestor.");
@@ -1139,8 +1192,8 @@ export function registerTools(
       inputSchema: {
         agent_id: z.string().describe("Who acted (ERC-8004 agentId or an agent label)."),
         action: z.string().describe('What they did, e.g. "execute_trade".'),
-        inputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision inputs."),
-        outputs: z.record(z.string(), z.unknown()).optional().describe("The exact decision outputs."),
+        inputs: jsonObjectSchema("The exact decision inputs.").optional(),
+        outputs: jsonObjectSchema("The exact decision outputs.").optional(),
         wait: z
           .boolean()
           .optional()
@@ -1163,8 +1216,8 @@ export function registerTools(
           {
             agentId: agent_id,
             action,
-            inputs,
-            outputs,
+            inputs: inputs === undefined ? undefined : asJsonObject(inputs, "inputs"),
+            outputs: outputs === undefined ? undefined : asJsonObject(outputs, "outputs"),
             wait,
             waitMs: wait_ms,
           },
@@ -1199,11 +1252,15 @@ export function registerTools(
         "when not yet anchored on-chain (see verifiedAgainst). Pass the full " +
         "receipt object returned by attest_action.",
       inputSchema: {
-        receipt: z.record(z.string(), z.unknown()).describe("The receipt object from attest_action."),
+        receipt: jsonObjectSchema("The full receipt object from attest_action, unmodified."),
       },
     },
     async ({ receipt }) =>
-      run("verify_receipt", () => client.verifyReceipt(receipt as unknown as AgentReceipt)),
+      run("verify_receipt", () => {
+        const r = asJsonObject(receipt, "receipt");
+        requireFullObject(r, "receipt", RECEIPT_KEYS, "attest_action");
+        return client.verifyReceipt(r as unknown as AgentReceipt);
+      }),
   );
 
   server.registerTool(
@@ -1220,16 +1277,16 @@ export function registerTools(
         "has not landed yet it returns the still-pending receipt — call again. " +
         "Read-only; spends no log credit.",
       inputSchema: {
-        receipt: z
-          .record(z.string(), z.unknown())
-          .describe("The (possibly pending) receipt object from attest_action."),
+        receipt: jsonObjectSchema(
+          "The full (possibly pending) receipt object from attest_action, unmodified.",
+        ),
       },
     },
     async ({ receipt }) =>
       run("complete_attestation", async () => {
-        const completed = await client.completeReceipt(
-          receipt as unknown as AgentReceipt,
-        );
+        const r = asJsonObject(receipt, "receipt");
+        requireFullObject(r, "receipt", RECEIPT_KEYS, "attest_action");
+        const completed = await client.completeReceipt(r as unknown as AgentReceipt);
         // Truthful anchoring: a still-pending re-poll must keep saying so — never let the
         // poll path quietly look like success.
         if (completed.status !== "anchored") {
@@ -1443,15 +1500,17 @@ export function registerTools(
         "against the Clockchain ledger (never a local store). Returns a match " +
         "boolean. Pass the full package object from build_evidence_package.",
       inputSchema: {
-        package: z
-          .record(z.string(), z.unknown())
-          .describe("The package object from build_evidence_package."),
+        package: jsonObjectSchema(
+          "The full package object from build_evidence_package, unmodified.",
+        ),
       },
     },
     async ({ package: pkg }) =>
-      run("verify_package", () =>
-        client.verifyPackage(pkg as unknown as EvidencePackage),
-      ),
+      run("verify_package", () => {
+        const p = asJsonObject(pkg, "package");
+        requireFullObject(p, "package", PACKAGE_KEYS, "build_evidence_package");
+        return client.verifyPackage(p as unknown as EvidencePackage);
+      }),
   );
 
   // ===== AGENT IDENTITY MCP (writes) =====
@@ -1473,17 +1532,16 @@ export function registerTools(
         "Cross-agent verification / enumeration are backend-gated. Write.",
       inputSchema: {
         did: z.string().describe("The DID to mint (e.g. did:clockchain:…)."),
-        document: z
-          .record(z.string(), z.unknown())
-          .describe("The identity document (kept client-side; only hashed)."),
+        document: jsonObjectSchema("The identity document (kept client-side; only hashed)."),
         allow_degraded: allowDegradedSchema,
       },
     },
     async ({ did, document, allow_degraded }) =>
       run("mint_identity", async () => {
+        const doc = asJsonObject(document, "document");
         await ensurePoolHealthy(client, allow_degraded);
         budget.check();
-        const result = await client.mintIdentity(did, document);
+        const result = await client.mintIdentity(did, doc);
         budget.record();
         return okWrite(result);
       }),
