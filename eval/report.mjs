@@ -62,7 +62,7 @@ export function coverage(toolNames, rows) {
   });
 }
 
-export function writeReport({ dir, runId, agent, model, endpoint, toolNames, rows, startedAt, finishedAt }) {
+export function writeReport({ dir, runId, agent, model, endpoint, tokenLabel = "", toolNames, rows, startedAt, finishedAt }) {
   mkdirSync(dir, { recursive: true });
   const cov = coverage(toolNames, rows);
   const passed = rows.filter((r) => r.pass).length;
@@ -72,7 +72,7 @@ export function writeReport({ dir, runId, agent, model, endpoint, toolNames, row
   const notSingle = cov.filter((c) => c.status === "not-single-agent").length;
   const notExercised = cov.filter((c) => c.status === "not-exercised");
   const stem = `${startedAt.replace(/[:.]/g, "-")}-${agent}`;
-  const json = { schema: "clockchain.eval-report/v1", runId, agent, model, endpoint, startedAt, finishedAt,
+  const json = { schema: "clockchain.eval-report/v1", runId, agent, model, endpoint, tokenLabel, startedAt, finishedAt,
     summary: { tasks: rows.length, passed, toolSelection: selected, tools: toolNames.length, exercisedOk, exercisedErr, notSingleAgent: notSingle, notExercised: notExercised.length },
     tasks: rows, coverage: cov };
   writeFileSync(path.join(dir, `${stem}.json`), JSON.stringify(json, null, 2));
@@ -84,6 +84,7 @@ export function writeReport({ dir, runId, agent, model, endpoint, toolNames, row
   md.push(`| | |`); md.push(`|---|---|`);
   md.push(`| Agent | \`${agent}\` (${model}) |`);
   md.push(`| Endpoint | ${endpoint} |`);
+  if (tokenLabel) md.push(`| Credentials | ${tokenLabel} |`);
   md.push(`| Run | \`${runId}\` · ${startedAt} → ${finishedAt} |`);
   md.push(`| Tasks | **${passed} / ${rows.length} passed** (on-chain checks, no LLM judge); tool selection ${selected} / ${rows.length} |`);
   md.push(`| Tools | ${toolNames.length} on the live surface: **${exercisedOk} exercised OK**, ${exercisedErr} exercised with an error result, ${notSingle} not single-agent testable (covered elsewhere), ${notExercised.length} not exercised |`);

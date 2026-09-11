@@ -1,7 +1,7 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAuthorized, parseTokens, isHealthCheck, callerKey, callerPrincipalId, principalIdForCallerKey, createRateLimiter, rateLimitHeaders, sanitizeSub, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp } from "../dist/http.js";
+import { isAuthorized, parseTokens, isHealthCheck, callerKey, callerPrincipalId, principalIdForCallerKey, createRateLimiter, rateLimitHeaders, sanitizeSub, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp, isRateLimitExempt, RATE_LIMIT_EXEMPT_METHODS } from "../dist/http.js";
 import { mintToken } from "../dist/token.js";
 
 const tokens = ["tester-a", "tester-b"];
@@ -225,4 +225,24 @@ test("rate limiter evicts expired entries to bound memory (per-user auth)", () =
   // A call past the prune interval triggers a full sweep of expired windows.
   rl.allow("fresh", 1001); // now >= resetAt(1000) for all k* → all evicted
   assert.equal(rl.size(), 1); // only "fresh" remains
+});
+
+// --- rate limit: lifecycle/discovery is free, tool calls are metered ------------------
+// A fresh Claude Code session does initialize + tools/list before its first call; if
+// those 429 (the previous session spent the minute polling a timer), the client drops
+// the server and the agent has no tools at all. Handshakes must never be what runs out.
+test("isRateLimitExempt: initialize / initialized / ping / list_* are exempt, tools/call is not", () => {
+  for (const method of RATE_LIMIT_EXEMPT_METHODS) {
+    assert.equal(isRateLimitExempt({ jsonrpc: "2.0", id: 1, method }), true, method);
+  }
+  assert.equal(isRateLimitExempt({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_time" } }), false);
+  assert.equal(isRateLimitExempt({ jsonrpc: "2.0", id: 1, method: "resources/read" }), false);
+  // a batch is exempt only if EVERY message is; a tool call hidden in a batch still counts
+  assert.equal(isRateLimitExempt([{ method: "initialize" }, { method: "notifications/initialized" }]), true);
+  assert.equal(isRateLimitExempt([{ method: "initialize" }, { method: "tools/call" }]), false);
+  // malformed or empty bodies are metered (never a free pass)
+  assert.equal(isRateLimitExempt([]), false);
+  assert.equal(isRateLimitExempt(null), false);
+  assert.equal(isRateLimitExempt("initialize"), false);
+  assert.equal(isRateLimitExempt({ method: 42 }), false);
 });
