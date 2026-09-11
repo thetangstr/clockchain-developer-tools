@@ -35,3 +35,60 @@ jobs:
         env:
           MCP_TOKEN: ${{ secrets.MCP_EVAL_TOKEN }}
         run: node eval/perf.mjs
+
+  # Clock-primitive gates (packages/clock-sdk/GATES.md) against production: the real SDK
+  # driven through the hosted MCP, every anchor keyless-verified. Spends ~8 testnet log
+  # credits per run. This is the drift alarm — the 2026-09 gateway key rename went unnoticed
+  # for weeks because nothing exercised the deployment; a red run here opens an issue.
+  clock-gates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Guard on token
+        id: guard
+        run: |
+          if [ -z "${{ secrets.MCP_EVAL_TOKEN }}" ]; then
+            echo "MCP_EVAL_TOKEN not set — skipping live clock gates."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build
+        if: steps.guard.outputs.run == 'true'
+        run: npm ci && npm run build -w @clockchain/core -w @clockchain/clock-sdk
+      - name: Live gates G0–G4
+        if: steps.guard.outputs.run == 'true'
+        id: gates
+        env:
+          CC_LIVE_GATES: "1"
+          CC_MCP_TOKEN: ${{ secrets.MCP_EVAL_TOKEN }}
+          CC_EVIDENCE_DIR: ${{ github.workspace }}/gate-evidence
+        run: node --test packages/clock-sdk/test/gates-live.test.mjs
+      - name: Upload evidence
+        if: steps.guard.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clock-gate-evidence-${{ github.run_id }}
+          path: gate-evidence/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Open or update the alarm issue on red
+        if: steps.guard.outputs.run == 'true' && failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="Nightly clock gates red on production"
+          BODY="The live clock-primitive gates (packages/clock-sdk/GATES.md) failed against mcp.clockchain.network. Evidence JSON is attached to the run: $RUN_URL"
+          NUM=$(gh issue list --state open --search "in:title $TITLE" --json number --jq '.[0].number')
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "Still red: $RUN_URL"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label bug
+          fi

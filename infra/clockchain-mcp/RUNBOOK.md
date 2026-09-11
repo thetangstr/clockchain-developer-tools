@@ -19,6 +19,8 @@ Provisioning does not report success until the exact new instance is SSM
 - `/clockchain/mcp/CLOCKCHAIN_API_KEY`
 - `/clockchain/mcp/MCP_AUTH_TOKENS`
 - `/clockchain/mcp/MCP_TOKEN_SIGNING_SECRET`
+- `/clockchain/mcp/GATEWAY_SIGNING_SECRET` — payload-bound request signing between the MCP and the
+  owned anchoring gateway (both sides read the same value)
 - `/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS`
@@ -32,6 +34,21 @@ The release pin is public metadata held in SSM so that the deploy is atomic. It
 must name the immutable helper release, manifest digest, and active/previous
 host-root fingerprints. Role-access keys are server signing keys; generated
 stakeholder capabilities are never stored in SSM.
+
+## The anchoring gateway (owned time + ledger)
+
+The MCP does not anchor to `node.clockchain.network` (unowned, down). `compose-up.sh` points
+`CLOCKCHAIN_ENDPOINT` at `http://clockchain-anchor-gateway:8090`: the owned anchoring gateway
+(`infra/anchoring-gateway/gateway.mjs`) running as a standalone container on the compose
+edge network (`clockchain-mcp_clockchain_edge`), deliberately outside Compose so an MCP
+restart never takes the ledger down. It is the `/getTime` oracle and the durable ledger;
+every request from the MCP is HMAC-signed with `GATEWAY_SIGNING_SECRET`. Deploy it per
+`infra/anchoring-gateway/deploy-m3-hardening.sh` phase 3: copy `gateway.mjs` to
+`/opt/clockchain-anchor-gateway/gateway.mjs`, then recreate the container with the same
+network, the `anchor_gateway_data` volume, the read-only bind mount, and
+`GATEWAY_SIGNING_KEYS` from SSM. Check it from inside the network:
+`docker run --rm --network clockchain-mcp_clockchain_edge node:24-alpine wget -qO- http://clockchain-anchor-gateway:8090/healthz`.
+Rollback: the on-box `gateway.mjs.*-backup` copies + the same recreate.
 
 ## Release and deploy order
 

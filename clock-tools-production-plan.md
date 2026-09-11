@@ -58,7 +58,7 @@ A tool is production-ready when all of the following hold on the deployed endpoi
 | D5 | Uncertainty reporting | Widen `uncertaintyMs` by measured consensus staleness (`|wall − consensus|` at sync, and time since last block) and surface it in receipts. | "No false precision" is a README promise; G4 shows we break it today. |
 | D6 | Page positioning | Add a seventh module **"Verified time tools"** (stopwatch / timer / alarm) with beta labels until Phase 2 ships; copy in §6. **Done, live.** | Meta tag already says seven modules; the page says six. |
 | D7 | Honesty of "anchored on Clockchain" while the network is down | Receipts and the page say `single-validator-testnet`; today the anchor is the owned gateway's append-only ledger. Decide the wording (e.g. "anchored on the Clockchain anchoring gateway (testnet)") and whether `network` in receipts should say so. | The gates proved the mechanics; the claim should match the substrate. |
-| D8 | Make `main` == production | Commit the on-box gateway wiring (`compose-up.sh`, `docker-compose.yml`: anchoring-gateway endpoint + signing secret) and update `infra/test/deploy-assets.test.mjs`; retire or repoint the Cloud Run `deploy.yml` (it goes green without touching prod); fix AGENTS.md's "push to main deploys". | The 2026-09-11 deploy nearly reverted production's gateway wiring because it lived only on the box. |
+| D8 | Make `main` == production | **Done.** Gateway wiring committed to `compose-up.sh` / `docker-compose.yml` with the deploy-assets fixture proving the env; RUNBOOK documents the gateway container and its SSM secret; Cloud Run `deploy.yml` is manual-only ("legacy standby"); `scripts/deploy-box.sh <sha>` is the one-command deploy that refuses a dirty box; nightly `clock-gates` job on `eval-nightly.yml` uploads evidence and opens an issue on red. | The 2026-09-11 deploy nearly reverted production's gateway wiring because it lived only on the box. |
 
 ## 4. Workstreams and steps
 
@@ -116,8 +116,8 @@ Corrected 2026-09-11: N1–N3 turned out to be properties of our own anchoring g
 
 | Step | What |
 |---|---|
-| E1 | Add a job to the existing `eval-nightly.yml` (it already has `MCP_EVAL_TOKEN`) that runs the live gates with `CC_MCP_TOKEN=${{ secrets.MCP_EVAL_TOKEN }}`, uploads the evidence JSON as an artifact, opens/updates an issue on red |
-| E2 | Post-deploy smoke: `G0.1`–`G0.5` only (≈1 credit) as the last step of `deploy.yml` after Cloud Run goes healthy; full suite stays scheduled to keep the deploy gate credit-free |
+| E1 | **Done.** `clock-gates` job on `eval-nightly.yml` runs the live gates nightly with `MCP_EVAL_TOKEN`, uploads evidence (30 days), opens/updates "Nightly clock gates red on production" on failure |
+| E2 | **Done.** `scripts/deploy-box.sh` ends with the runbook canaries and gates `G0.*` (≈1 credit) when `CC_MCP_TOKEN` is set |
 | E3 | Status dashboard shows stopwatch/timer/alarm availability from E1's last run |
 
 ## 5. Sequence and dates

@@ -42,3 +42,11 @@ Each created doc's URL is printed.
 - **File > Open** in Google Docs, or drag the `.md` into Drive and
   "Open with Google Docs" - fastest for a one-time batch.
 - **Tools > Preferences > Enable Markdown** turns on "Paste from Markdown".
+
+# scripts/deploy-box.sh - deploy to production (AWS box)
+
+`scripts/deploy-box.sh <full-sha> [--yes]` deploys a merged `main` commit to the production MCP
+box over AWS SSM: runbook step 3 (`infra/clockchain-mcp/RUNBOOK.md`) as one command, then the
+runbook canaries and, with `CC_MCP_TOKEN` set, the read-only clock gates `G0.*`. It refuses to
+run if the box checkout has local changes — production configuration lives in git, not on the
+box. The anchoring gateway container is deployed separately (RUNBOOK, "The anchoring gateway").
