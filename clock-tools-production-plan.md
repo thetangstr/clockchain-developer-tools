@@ -11,9 +11,9 @@ via MCP, execution stays on the local harness*).
 
 | Primitive | Works? | Offered via MCP today? | Blocking issue |
 |---|---|---|---|
-| **Stopwatch** | Yes — 6.16 s measured vs 6.08 s wall, both markers keyless-verified | Only as a *pattern* (`log_action` ×2 + `verify_cross_party`); no `stopwatch_*` tool | G0.4 guard bug refuses default writes |
-| **Timer** | Yes (soft) — fired 1.2 ms late, anchored, verified | No — needs the client-side SDK (`ClockScheduler`) | G0.4; absolute time inherits chain idleness (G4) |
-| **Alarm** | Mechanically yes (soft); **no** in confirmed mode | No — SDK, or the unshipped keeper | G0.4; confirmed mode deadlocks on an idle chain (G3b); absolute time stale (G4) |
+| **Stopwatch** | Yes — SDK (G1) and hosted `stopwatch_*` (G1b), elapsed re-verified from block times | **Yes** (since #98) | — |
+| **Timer** | Yes — SDK (G2) and hosted `timer_set` (G2b, +922 ms on a 1 s tick), anchored, verified | **Yes** (since #104, 2026-09-11) | — |
+| **Alarm** | Yes — SDK soft + confirmed (G3a/G3b) and hosted `alarm_set` (G3c), anchored, verified | **Yes** (since #104) | webhooks off until C6; `confirmed` variant of the hosted alarm is a follow-up |
 
 Three root causes, three different owners:
 
@@ -126,6 +126,7 @@ Corrected 2026-09-11: N1–N3 turned out to be properties of our own anchoring g
 Thu Sep 10  gates drafted + run (done)            ── GATES.md
 Thu Sep 11  #98 #99 #100 merged + deployed (done)  ── guard fix, stopwatch tools, page, heartbeat gateway; prod gates 10/10
 Thu Sep 11  #102 D8 (done)                          ── main == production; box checkout clean; deploy-box.sh (36 s restart); nightly gates armed
+Thu Sep 11  #104 WS-C (done)                        ── hosted timer/alarm live (timer_set / alarm_set / timer_status); prod gates 12/12
 Mon Sep 14  Monday meeting: results, D1–D6, N1–N4  ── WS-A landed on main (G0.4 green after deploy)
 Wed Sep 17  handshake demo target (unchanged)       ── stopwatch tools + page v1 live (WS-B, in the same PR as WS-A)
 Fri Sep 19  keeper worker deployed w/ heartbeat     ── C1–C4; G3b/G4 green; page update v2 (timer/alarm live, beta)
