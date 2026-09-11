@@ -267,3 +267,26 @@ test("attest_action wait=false submits, complete_attestation polls to confirmed"
   assert.equal(done.anchor.confirmed, true);
   assert.equal(done.eventHash, pending.eventHash);
 });
+
+test("verify_cross_party: an unavailable advisory hash lookup never sinks the authoritative on-chain check", async () => {
+  // The owned anchoring gateway has no /verifyAsset (404). With ledger_id + block_height + hash
+  // the on-chain result must still come back; the advisory section reports unavailable.
+  const HEX2 = "b".repeat(64);
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    const body = (o) => ({ status: 200, ok: true, statusText: "stub", text: async () => JSON.stringify(o), json: async () => o });
+    if (u.includes("/searchAssetFromChain")) return body({ blockHeight: "7", proposerAddress: "0xp", blockTime: "2026-09-11T00:00:00Z", transactions: [`ledgerId=L9,assetHash=${HEX2},assetReferenceId=r`] });
+    if (u.includes("/verifyAsset")) return { status: 404, ok: false, statusText: "Not Found", text: async () => "not found", json: async () => ({}) };
+    throw new Error("no stubbed route for " + u);
+  };
+  const res = await collectTools().verify_cross_party({ ledger_id: "L9", block_height: 7, hash: HEX2 });
+  assert.ok(!res.isError, textOf(res));
+  const out = JSON.parse(textOf(res));
+  assert.equal(out.onChain.verifiedAgainst, "on-chain block");
+  assert.equal(out.onChain.anchoredHash, HEX2);
+  assert.equal(out.advisoryHashCheck.unavailable, true);
+  // hash alone with no advisory path -> a clear error pointing at ledger_id, not a bare 404.
+  const only = await collectTools().verify_cross_party({ hash: HEX2 });
+  assert.equal(only.isError, true);
+  assert.match(textOf(only), /pass ledger_id/);
+});
