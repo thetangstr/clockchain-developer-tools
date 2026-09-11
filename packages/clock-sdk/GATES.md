@@ -303,6 +303,21 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
   preserved on the box as local branch `host/pre-main-2026-09-11`.
 
+## Run results — 2026-09-11 01:59 UTC, production with the hosted timer/alarm (PR #104) — 12 / 12
+
+`CC_LIVE_GATES=1 node --test test/gates-live.test.mjs` against `mcp.clockchain.network` after
+`scripts/deploy-box.sh 5308ac2` — **12 pass / 0 fail, 118 s.**
+
+| Gate | Result | Evidence |
+|---|---|---|
+| G2b hosted timer (`timer_set`, poll) | **PASS** (new) | fired 922 ms after the armed instant (1 s tick), `delivery: skipped`, anchored at block 219, keyless-verified, block-time drift 15 ms |
+| G3c hosted alarm (`alarm_set`, poll) | **PASS** (new) | fired 993 ms after T, anchored at block 221, verified, drift 13 ms |
+| G0–G4 (10 earlier gates) | **PASS** | unchanged |
+
+All three primitives are now **offered as MCP tools** and pass their gates on the deployed
+endpoint: stopwatch (`stopwatch_*`), timer (`timer_set`), alarm (`alarm_set`), with the SDK
+path (G2/G3a/G3b) still green alongside.
+
 ## Run results — 2026-09-11 01:03 UTC, production with the heartbeat gateway (PR #100) — 10 / 10
 
 `CC_LIVE_GATES=1 node --test test/gates-live.test.mjs` against `mcp.clockchain.network` after the
