@@ -1,8 +1,8 @@
 # Quickstart - Clockchain MCP Server
 
-Run and verify the Clockchain MCP server locally. The server exposes **31 tools
+Run and verify the Clockchain MCP server locally. The server exposes **45 tools
 across six modules** (time, notarization, scheduler, audit, agent identity, TSA) over
-stdio; this quickstart drives the verified core — **8 of the 31**, the time +
+stdio; this quickstart drives the verified core — **8 of the 45**, the time +
 notarization tools. Everything below is copy-paste tested.
 
 > The identity module is **verification (valid-at-T), not authentication**.
@@ -62,7 +62,7 @@ claude mcp add clockchain \
 ```
 
 Then open a **new** Claude Code session (MCP servers load at startup), run `/mcp`
-(should list `clockchain` with 31 tools), and ask: *"use clockchain to timestamp the
+(should list `clockchain` with 45 tools), and ask: *"use clockchain to timestamp the
 text 'hello' and then verify it."*
 
 **b) Narrated live demo** (spends one log credit):
@@ -99,7 +99,7 @@ The full server also ships the **scheduler** (`get_contract_types`,
 `verify_receipt`, `mint_identity`, `revoke_identity`, `delegate_authority`,
 `get_identity_history`, `verify_identity_at`, `verify_cross_party`) modules, plus
 **TSA** (`tsa_issue`, `tsa_checkpoint`, `tsa_attest`, `tsa_settle`, `tsa_status`) —
-**31 tools total**. Cross-party verification is keyless: it reads the immutable on-chain
+**45 tools total**. Cross-party verification is keyless: it reads the immutable on-chain
 block (`/searchAssetFromChain?blockHeight={h}`), not the mutable ledger cache.
 
 ## Optional: override the ERC-8004 identity target

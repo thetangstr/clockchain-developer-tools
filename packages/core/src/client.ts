@@ -279,10 +279,21 @@ export class ClockchainClient {
    */
   async getPoolHealth(): Promise<PoolHealth> {
     const ts = await this.getTimestamp();
-    // Coerce: the gateway may return participation as a string ("0"), which must
-    // still count as degraded. NaN (unparseable) is treated as 0 -> degraded.
-    const rawPct = ts["nodeParticipation%"];
-    const parsed = Number(rawPct ?? 0);
+    // The gateway renamed the field in 2026-09 (`nodeParticipation%` ->
+    // `nodeParticipation`); honor both. Reading only the old key made a 100%
+    // pool look 0% and refused every default write (clock-sdk gate G0.4).
+    // Coerce: participation may arrive as a string ("0"), which must still
+    // count as degraded. NaN (unparseable) is treated as 0 -> degraded.
+    const rawPct = ts["nodeParticipation%"] ?? ts.nodeParticipation;
+    if (rawPct == null) {
+      // Neither key present: health is UNKNOWN, not zero. Throw so callers take
+      // their "cannot determine health" path (the MCP write guard fails open,
+      // receipts stay "pending") instead of inventing a degraded pool.
+      throw new Error(
+        "getPoolHealth: gateway reported no nodeParticipation / nodeParticipation% field",
+      );
+    }
+    const parsed = Number(rawPct);
     const nodeParticipationPct = Number.isNaN(parsed) ? 0 : parsed;
     return {
       totalNodes: Number(ts.totalNodes ?? 0) || 0,

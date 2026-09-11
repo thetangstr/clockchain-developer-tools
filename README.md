@@ -46,7 +46,7 @@ claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \
   --header "x-api-key: <YOUR_TOKEN>"
 ```
 
-Then run `/mcp` (or your client's equivalent), confirm `clockchain` (31 tools), and
+Then run `/mcp` (or your client's equivalent), confirm `clockchain` (45 tools), and
 ask: *"use clockchain to get the current consensus time."* Self-host (local stdio),
 bring-your-own-key, and chat-connector setup are in [`INSTALL.md`](INSTALL.md).
 
@@ -72,11 +72,17 @@ client. Chat-connector clients (claude.ai chat, Cowork) are different — see
 
 ## What you get
 
-**31 tools across six modules:**
+**45 tools across seven modules:**
 
 - **Time:** `get_time`, `get_timestamp`, `get_block`, `get_validation`.
 - **Logging (notarization):** `log_action`, `get_log_entry`, `search_actions`,
   `verify_asset`.
+- **Verified time tools:** `stopwatch_start`, `stopwatch_stop`, `stopwatch_verify` —
+  a tamper-evident elapsed time between two anchored markers; `stopwatch_verify`
+  recomputes the duration from the two immutable block times, keylessly. Timer and
+  alarm run client-side today via [`@clockchain/clock-sdk`](packages/clock-sdk)
+  (hosted firing is the keeper, in beta next — see
+  [`clock-tools-production-plan.md`](clock-tools-production-plan.md)).
 - **Scheduler (smart-contract):** `get_contract_types`, `estimate_schedule`,
   `create_schedule`, `list_schedules`. Types/estimate/list are live;
   `create_schedule` is a preview — it's blocked on the backend signing-message
@@ -193,7 +199,8 @@ against Clockchain's hosted MCP (https://mcp.clockchain.network/mcp — JSON-RPC
 2. call(name,args) helper: POST {jsonrpc:"2.0",id:1,method:"tools/call",params:{name,arguments:args}}
    with headers x-api-key + accept "application/json, text/event-stream". Reply is SSE — take the
    last `data:` line, JSON-parse, read result.content[0].text (itself a JSON string).
-3. Alarm: poll get_timestamp (madMarzulloTime, format DD-MM-YYYY_HH:MM:SS:mmm) until consensus
+3. Alarm: poll get_timestamp (madMarzulloTime, ISO 8601 since 2026-09; older gateways used
+   DD-MM-YYYY_HH:MM:SS:mmm — parse both) until consensus
    time >= your target T (never fire early), then log_action {action, asset_reference_id, content,
    wait:true, wait_ms:30000} to fire + anchor. Content is SHA-256-hashed, never stored.
 4. Assert it anchored: if blockHeight is null the validator pool was degraded — treat as FAILURE,
@@ -234,7 +241,7 @@ anchored); multi-validator (Phase 3) addresses pool participation. The
 ## Status
 
 Working against the live gateway. The MCP server is **verified working** —
-`initialize` + `tools/list` returns 31 tools and live calls succeed. Verified
+`initialize` + `tools/list` returns 45 tools and live calls succeed. Verified
 surface (updated 2026-06-11):
 
 - **Time:** read consensus time from the **public `/getTime`** (no key scope). The

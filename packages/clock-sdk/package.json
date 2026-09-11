@@ -24,13 +24,17 @@
   "scripts": {
     "build": "tsc -b",
     "test": "tsc -b && node --test",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test:gates": "tsc -b && CC_LIVE_GATES=1 node --test test/gates-live.test.mjs"
   },
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {
     "@clockchain/core": "*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
   },
   "engines": {
     "node": ">=18"

@@ -4,6 +4,7 @@ import {
   ClockchainClient,
   computeHash,
   InsufficientCreditsError,
+  parseClockTime,
   PoolDegradedError,
   RateLimitError,
   resolveAgent,
@@ -649,6 +650,218 @@ export function registerTools(
           anchoredHash: record.assetHash,
           currentHash: current_hash,
           assetReferenceId: record.assetReferenceId,
+        };
+      }),
+  );
+
+  // ----- Verified-time tools: stopwatch -----
+  //
+  // A tamper-evident ELAPSED time: two independently anchored markers, elapsed
+  // computed from the ledger's own timestamps and re-verifiable from the two
+  // immutable blocks. Same conventions as @clockchain/clock-sdk's stopwatch
+  // (reference ids `stopwatch:<label>:start|stop`, hashed preimage), kept
+  // inline because the container image ships only core + mcp-server. The
+  // server holds no state between calls: stop re-reads the start marker by
+  // ledgerId, so a caller cannot hand in a fabricated start time.
+
+  const stopwatchWaitMsSchema = z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Max time to wait for the marker's block, in ms. Default 30000.");
+
+  /** Shape a ledger record into a stopwatch marker (both timestamps parsed to epoch ms). */
+  function stopwatchMarker(record: {
+    ledgerId: string;
+    blockHeight: string | null;
+    createdTimestamp: string;
+    assetHash: string;
+    assetReferenceId: string;
+  }) {
+    return {
+      ledgerId: record.ledgerId,
+      blockHeight: record.blockHeight,
+      createdTimestamp: record.createdTimestamp,
+      epochMs: parseClockTime(record.createdTimestamp),
+      assetHash: record.assetHash,
+      assetReferenceId: record.assetReferenceId,
+    };
+  }
+
+  /** Anchor one marker (start|stop) and wait for its block. Spends one log credit. */
+  async function anchorStopwatchMarker(
+    label: string,
+    kind: "start" | "stop",
+    waitMs: number | undefined,
+    allowDegraded: boolean | undefined,
+  ) {
+    await ensurePoolHealthy(client, allowDegraded);
+    budget.check();
+    const created = await client.log({
+      assetHash: computeHash(`stopwatch-${kind}:${label}:${Date.now()}`),
+      assetReferenceId: `stopwatch:${label}:${kind}`,
+      additionalInfo: `stopwatch ${kind}`,
+    });
+    budget.record();
+    const confirmed = await client.waitForConfirmation(created.ledgerId, waitMs ?? 30000);
+    return stopwatchMarker(confirmed);
+  }
+
+  server.registerTool(
+    "stopwatch_start",
+    {
+      title: "Start a verified stopwatch",
+      description:
+        "Anchor a stopwatch START marker on Clockchain and wait for its block. " +
+        "Returns the marker; pass its `ledgerId` to stopwatch_stop as `start_ledger_id`. " +
+        "Elapsed time is later measured between the two markers' consensus " +
+        "timestamps, not your local clock. Write — spends one log credit.",
+      inputSchema: {
+        label: z
+          .string()
+          .min(1)
+          .max(128)
+          .describe("What is being timed (plain text; becomes part of the reference id `stopwatch:<label>:start`)."),
+        wait_ms: stopwatchWaitMsSchema,
+        idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
+      },
+    },
+    async ({ label, wait_ms, idempotency_key, allow_degraded }) =>
+      run("stopwatch_start", () => idempotent(idempotency_key, async () => {
+        const start = await anchorStopwatchMarker(label, "start", wait_ms, allow_degraded);
+        return okWrite({
+          label,
+          blockHeight: start.blockHeight,
+          start,
+          next: "Call stopwatch_stop with { label, start_ledger_id: start.ledgerId } to close the measurement.",
+        });
+      })),
+  );
+
+  server.registerTool(
+    "stopwatch_stop",
+    {
+      title: "Stop a verified stopwatch",
+      description:
+        "Anchor a stopwatch STOP marker, re-read the START marker from the ledger by " +
+        "its ledgerId, and return the measurement: both markers plus `elapsedMs` = " +
+        "stop.createdTimestamp − start.createdTimestamp (consensus-recorded, not the " +
+        "caller's clock). `status` is \"anchored\" only when BOTH markers have a block. " +
+        "Write — spends one log credit.",
+      inputSchema: {
+        label: z
+          .string()
+          .min(1)
+          .max(128)
+          .describe("The same label passed to stopwatch_start."),
+        start_ledger_id: z
+          .string()
+          .describe("The `start.ledgerId` returned by stopwatch_start."),
+        wait_ms: stopwatchWaitMsSchema,
+        idempotency_key: idempotencyKeySchema,
+        allow_degraded: allowDegradedSchema,
+      },
+    },
+    async ({ label, start_ledger_id, wait_ms, idempotency_key, allow_degraded }) =>
+      run("stopwatch_stop", () => idempotent(idempotency_key, async () => {
+        // The start marker comes from the ledger, never from the caller.
+        const startRecord = await client.getLedgerEntry(start_ledger_id);
+        const expectedRef = `stopwatch:${label}:start`;
+        if (startRecord.assetReferenceId !== expectedRef) {
+          throw new ApiError(
+            `start_ledger_id ${start_ledger_id} is "${startRecord.assetReferenceId}", not the start marker "${expectedRef}" — pass the ledgerId returned by stopwatch_start for this label.`,
+            400,
+          );
+        }
+        const start = stopwatchMarker(startRecord);
+        const stop = await anchorStopwatchMarker(label, "stop", wait_ms, allow_degraded);
+        const elapsedMs = stop.epochMs - start.epochMs;
+        const bothAnchored = start.blockHeight != null && stop.blockHeight != null;
+        return okWrite({
+          label,
+          // okWrite derives the anchor status from this: anchored only if both
+          // markers landed a block (a stop that confirmed on top of a pending
+          // start is still not a verifiable measurement).
+          blockHeight: bothAnchored ? stop.blockHeight : null,
+          elapsedMs: Number.isFinite(elapsedMs) ? elapsedMs : null,
+          start,
+          stop,
+          verify: {
+            how: "stopwatch_verify { start_ledger_id, stop_ledger_id } — recomputes elapsed from the two immutable block times, keyless.",
+            start: { ledgerId: start.ledgerId, blockHeight: start.blockHeight },
+            stop: { ledgerId: stop.ledgerId, blockHeight: stop.blockHeight },
+          },
+        });
+      })),
+  );
+
+  server.registerTool(
+    "stopwatch_verify",
+    {
+      title: "Verify a stopwatch measurement keylessly",
+      description:
+        "Counterparty check for a stopwatch measurement: verify BOTH markers against " +
+        "the immutable on-chain blocks (no api key) and recompute the elapsed time " +
+        "from the two block times (`elapsedOnChainMs`). Also reports the ledger's " +
+        "recorded elapsed (`elapsedRecordedMs`, advisory cache) so the two can be " +
+        "compared. Read-only; testnet.",
+      inputSchema: {
+        start_ledger_id: z.string().describe("The start marker's ledgerId."),
+        stop_ledger_id: z.string().describe("The stop marker's ledgerId."),
+        start_block_height: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe("The start marker's blockHeight when known (skips the advisory cache lookup)."),
+        stop_block_height: z
+          .union([z.string(), z.number()])
+          .optional()
+          .describe("The stop marker's blockHeight when known."),
+      },
+    },
+    async ({ start_ledger_id, stop_ledger_id, start_block_height, stop_block_height }) =>
+      run("stopwatch_verify", async () => {
+        const [startChain, stopChain] = await Promise.all([
+          client.verifyOnChain(start_ledger_id, start_block_height),
+          client.verifyOnChain(stop_ledger_id, stop_block_height),
+        ]);
+        const onChain = (v: { verifiedAgainst: string }) => v.verifiedAgainst === "on-chain block";
+        // Block times: the immutable consensus time of each anchoring block.
+        const blockTimeOf = async (height?: string) =>
+          height == null ? null : await client.getBlock(height).then((b) => b.blockTime ?? null).catch(() => null);
+        const [startBlockTime, stopBlockTime] = await Promise.all([
+          blockTimeOf(startChain.blockHeight),
+          blockTimeOf(stopChain.blockHeight),
+        ]);
+        const startMs = parseClockTime(startBlockTime);
+        const stopMs = parseClockTime(stopBlockTime);
+        const elapsedOnChainMs =
+          Number.isFinite(startMs) && Number.isFinite(stopMs) ? stopMs - startMs : null;
+        // Advisory: the ledger records' own createdTimestamps (rewritable cache).
+        const [startRec, stopRec] = await Promise.all([
+          client.getLedgerEntry(start_ledger_id).catch(() => null),
+          client.getLedgerEntry(stop_ledger_id).catch(() => null),
+        ]);
+        const recStart = parseClockTime(startRec?.createdTimestamp);
+        const recStop = parseClockTime(stopRec?.createdTimestamp);
+        const elapsedRecordedMs =
+          Number.isFinite(recStart) && Number.isFinite(recStop) ? recStop - recStart : null;
+        const ordered =
+          startChain.blockHeight != null &&
+          stopChain.blockHeight != null &&
+          Number(stopChain.blockHeight) >= Number(startChain.blockHeight);
+        const verified = onChain(startChain) && onChain(stopChain) && ordered && elapsedOnChainMs != null && elapsedOnChainMs >= 0;
+        return {
+          verified,
+          keyless: true,
+          elapsedOnChainMs,
+          elapsedRecordedMs,
+          start: { ...startChain, blockTime: startBlockTime },
+          stop: { ...stopChain, blockTime: stopBlockTime },
+          note: verified
+            ? "Both markers resolve to immutable on-chain blocks in causal order; elapsedOnChainMs is the difference of the two block times."
+            : "Not verified: a marker is missing from its block, the blocks are out of order, or a block time could not be read. Do not treat elapsedRecordedMs as proof.",
         };
       }),
   );

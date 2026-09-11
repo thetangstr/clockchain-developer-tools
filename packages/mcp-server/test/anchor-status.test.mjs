@@ -43,6 +43,38 @@ test("pool-health guard REFUSES a write at 0% participation (no allow_degraded)"
   assert.match(textOf(res), /allow_degraded/i);
 });
 
+test("pool-health guard reads the 2026-09 gateway shape: a 100% pool under `nodeParticipation` is NOT refused", async () => {
+  // Regression for clock-sdk gate G0.4: the gateway dropped the `%` from the key
+  // and every default write was refused as "degraded (0% participation)".
+  routeFetch([
+    ["/getTime", { body: { success: true, data: { blockHeight: "136", madMarzulloTime: "2026-09-10T22:59:34.197Z", totalNodes: 1, nodeParticipation: 100, votes: 1 } } }],
+    ["/log", { body: { ledgerId: "L_NEW", blockHeight: "137", assetHash: "h", assetReferenceId: "r" } }],
+  ]);
+  const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r" });
+  assert.ok(!res.isError, `default write must proceed on a healthy pool: ${textOf(res)}`);
+  assert.equal(JSON.parse(textOf(res)).status, "anchored");
+});
+
+test("pool-health guard still REFUSES 0% under the new `nodeParticipation` key", async () => {
+  routeFetch([
+    ["/getTime", { body: { success: true, data: { blockHeight: "136", madMarzulloTime: "2026-09-10T22:59:34.197Z", totalNodes: 1, nodeParticipation: 0 } } }],
+    ["/log", { body: { ledgerId: "L_NEW", blockHeight: null } }],
+  ]);
+  const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r" });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /degraded|participation/i);
+});
+
+test("pool-health guard fails OPEN when the gateway reports no participation field at all", async () => {
+  routeFetch([
+    ["/getTime", { body: { success: true, data: { blockHeight: "136", madMarzulloTime: "2026-09-10T22:59:34.197Z", totalNodes: 1 } } }],
+    ["/log", { body: { ledgerId: "L_UNK", blockHeight: null } }],
+  ]);
+  const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r" });
+  assert.ok(!res.isError, "unknown health must not be reported as degraded");
+  assert.equal(JSON.parse(textOf(res)).status, "pending", "and the un-anchored write is still not a success");
+});
+
 test("pool-health guard ALLOWS the write at 0% participation when allow_degraded=true", async () => {
   routeFetch([gettime(0), ["/log", { body: { ledgerId: "LD", blockHeight: null } }]]);
   const res = await collectTools().log_action({ asset_hash: HEX, asset_reference_id: "r", allow_degraded: true });

@@ -82,6 +82,38 @@ test("getPoolHealth: degraded=true at 0% participation, false otherwise", async 
   assert.equal(healthy.nodeParticipationPct, 80);
 });
 
+test("getPoolHealth: reads the renamed `nodeParticipation` key (2026-09 gateway shape)", async () => {
+  // Live shape observed 2026-09-10: no `%` key, ISO time, string blockHeight, votes.
+  stubFetch(200, {
+    success: true,
+    data: { blockHeight: "136", madMarzulloTime: "2026-09-10T22:59:34.197Z", totalNodes: 1, nodeParticipation: 100, votes: 1 },
+  });
+  const healthy = await new ClockchainClient(cfg).getPoolHealth();
+  assert.equal(healthy.degraded, false, "a 100% pool must not be reported degraded");
+  assert.equal(healthy.nodeParticipationPct, 100);
+  assert.equal(healthy.totalNodes, 1);
+
+  stubFetch(200, { success: true, data: { blockHeight: "136", madMarzulloTime: "2026-09-10T22:59:34.197Z", totalNodes: 1, nodeParticipation: 0 } });
+  const degraded = await new ClockchainClient(cfg).getPoolHealth();
+  assert.equal(degraded.degraded, true);
+
+  // String participation ("0") still counts as degraded under the new key too.
+  stubFetch(200, { success: true, data: { totalNodes: 1, nodeParticipation: "0" } });
+  assert.equal((await new ClockchainClient(cfg).getPoolHealth()).degraded, true);
+
+  // The legacy key wins when both are present (exact field the old gateway emitted).
+  stubFetch(200, { success: true, data: { totalNodes: 2, "nodeParticipation%": 50, nodeParticipation: 0 } });
+  assert.equal((await new ClockchainClient(cfg).getPoolHealth()).nodeParticipationPct, 50);
+});
+
+test("getPoolHealth: neither participation key -> throws (unknown), never a silent 0%", async () => {
+  stubFetch(200, { success: true, data: { blockHeight: "136", madMarzulloTime: "2026-09-10T22:59:34.197Z", totalNodes: 1 } });
+  await assert.rejects(
+    () => new ClockchainClient(cfg).getPoolHealth(),
+    /no nodeParticipation/,
+  );
+});
+
 test("buildReceipt: top-level status anchored when confirmed", () => {
   const input = { agentId: "a", action: "x" };
   const eventHash = eventHashOf(input);

@@ -1,11 +1,13 @@
 /**
  * Gateway time parsing/formatting for the verified-time SDK.
  *
- * The Clockchain gateway emits two DD-MM-YYYY time shapes, both UTC:
+ * Until 2026-08 the Clockchain gateway emitted two DD-MM-YYYY time shapes, both UTC:
  *   - get_time / get_timestamp:  "DD-MM-YYYY_HH:MM:SS:mmm"  (e.g. "24-06-2026_22:49:40:092")
  *   - log createdTimestamp:      "DD-MM-YYYY HH:MM:SS:mmm UTC" (e.g. "24-06-2026 22:49:48:434 UTC")
+ * Since 2026-09 it emits ISO 8601 for both (e.g. "2026-09-10T22:59:34.197Z"), which the
+ * Date.parse fallback below handles; the DD-MM-YYYY branches stay for older gateways.
  *
- * These MUST be pattern-matched BEFORE Date.parse: V8 leniently mis-parses them
+ * The DD-MM-YYYY shapes MUST be pattern-matched BEFORE Date.parse: V8 leniently mis-parses them
  * month-first (Nov 6 instead of Jun 11). Mirrors core's parseClockTime ordering
  * (gateway regex -> Date.parse(ISO) -> numeric epoch), kept local so the SDK's
  * time math has no hidden coupling to core internals.

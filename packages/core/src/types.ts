@@ -35,21 +35,29 @@ export interface TimeResponse {
 }
 
 /**
- * GET /api/time/timestamp -> data
- * `nodeParticipation%` is kept as a quoted key on purpose: that is the exact
- * field name returned by the gateway.
+ * GET /getTime -> data
+ *
+ * Two shapes have been observed. Until 2026-08 the gateway returned the live
+ * oracle shape below in full, with `madMarzulloTime` as `DD-MM-YYYY_HH:MM:SS:mmm`
+ * and participation under the quoted key `nodeParticipation%` (the exact field
+ * name). Since 2026-09 it returns a reduced shape: `blockHeight`,
+ * `madMarzulloTime` as ISO 8601 (equal to the latest block time), `totalNodes`,
+ * `nodeParticipation` (no `%`), and `votes`. Readers must accept either
+ * participation key; {@link ClockchainClient.getPoolHealth} does.
  */
 export interface TimestampResponse {
-  consentedOffset: number;
-  positiveVotesPercentage: number;
+  consentedOffset?: number;
+  positiveVotesPercentage?: number;
   blockHeight: number;
   madMarzulloTime: string;
-  nodeStatus: string;
-  systemTime: string;
-  AbsTimeDifference: number;
-  negativeVotesPercentage: number;
-  "nodeParticipation%": number;
+  nodeStatus?: string;
+  systemTime?: string;
+  AbsTimeDifference?: number;
+  negativeVotesPercentage?: number;
+  "nodeParticipation%"?: number | string;
+  nodeParticipation?: number | string;
   totalNodes: number;
+  votes?: number;
 }
 
 /** GET /api/time/block?height=N -> data */

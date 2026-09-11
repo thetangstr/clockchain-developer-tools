@@ -2,15 +2,47 @@
 // MCP host. Keep a light guard on its key content + the install/endpoint facts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "../dist/landing.js";
+import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST, TOOL_COUNT, MODULE_COUNT } from "../dist/landing.js";
+import { registerTools } from "../dist/tools.js";
+
+// The number of tools actually registered on the full surface — what an agent
+// sees in tools/list. The page must never claim a different number.
+function registeredToolCount() {
+  const names = [];
+  registerTools(
+    { registerTool: (name) => { names.push(name); } },
+    { apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://test.local" },
+    {},
+  );
+  return names.length;
+}
 
 test("landing page is well-formed HTML with the core message", () => {
   assert.match(LANDING_HTML, /^<!doctype html>/i);
   assert.match(LANDING_HTML, /<\/html>\s*$/i);
   assert.match(LANDING_HTML, /Clockchain/);
   assert.match(LANDING_HTML, /modules/i);
-  assert.match(LANDING_HTML, /\b42\b/);
-  assert.doesNotMatch(LANDING_HTML, /31 tools/);
+});
+
+test("every tool/module count on the page is derived from the registered surface (no drift)", () => {
+  const registered = registeredToolCount();
+  assert.equal(TOOL_COUNT, registered, "TOOL_COUNT must equal the registered full-surface tool count");
+  // Hero, stat strip, install step, meta tags all carry the same number...
+  const hits = LANDING_HTML.match(new RegExp(`\\b${registered} tools\\b`, "g")) ?? [];
+  assert.ok(hits.length >= 3, `expected the tool count in hero/meta/install, found ${hits.length}`);
+  assert.match(LANDING_HTML, new RegExp(`<div class="k">Tools</div><div class="v">${registered}</div>`));
+  assert.match(LANDING_HTML, new RegExp(`<div class="k">Modules</div><div class="v">${MODULE_COUNT}</div>`));
+  // ...and the stale literals never come back.
+  assert.doesNotMatch(LANDING_HTML, /\b31 tools\b|>31<|>6</);
+  assert.doesNotMatch(LANDING_HTML, /Six modules|six modules/);
+  assert.match(INSTALL_TXT, new RegExp(`\\(${registered} tools\\)`));
+});
+
+test("landing page lists the verified time tools module (stopwatch / timer / alarm)", () => {
+  assert.match(LANDING_HTML, /Verified time tools/);
+  assert.match(LANDING_HTML, /Stopwatch, timer, alarm/);
+  // Honest claim: hosted timer/alarm are not live yet.
+  assert.match(LANDING_HTML, /hosted tools in beta next/);
 });
 
 test("landing page points agents at the real endpoint + key headers, not a fake", () => {
@@ -43,7 +75,7 @@ test("MCP_MANIFEST (served at /.well-known/mcp.json) is self-configuring + remot
   assert.equal(MCP_MANIFEST.type, "http");
   assert.equal(MCP_MANIFEST.remote, true);
   assert.equal(MCP_MANIFEST.package, null); // no package to hunt for
-  assert.match(MCP_MANIFEST.description, /42 tools/);
+  assert.match(MCP_MANIFEST.description, new RegExp(`${TOOL_COUNT} tools`));
   // Two co-equal auth methods: MCP token (x-api-key) and BYO Clockchain key.
   const methodHeaders = MCP_MANIFEST.authentication.methods.flatMap(
     (m) => m.header ?? m.headers,

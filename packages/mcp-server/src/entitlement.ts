@@ -68,6 +68,10 @@ export const FREE_TOOLS: ReadonlySet<string> = new Set([
   // Logging (write/generate; retrieval is keeper)
   "log_action",
   "verify_asset",
+  // Verified-time tools (generate-and-show; verify is keyless)
+  "stopwatch_start",
+  "stopwatch_stop",
+  "stopwatch_verify",
   // Agent identity / attestation (generate-and-show)
   "resolve_agent",
   "attest_action",
