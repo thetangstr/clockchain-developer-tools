@@ -280,6 +280,21 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
   preserved on the box as local branch `host/pre-main-2026-09-11`.
 
+## Run results — 2026-09-11 01:03 UTC, production with the heartbeat gateway (PR #100) — 10 / 10
+
+`CC_LIVE_GATES=1 node --test test/gates-live.test.mjs` against `mcp.clockchain.network` after the
+anchoring gateway was redeployed with `GATEWAY_HEARTBEAT_MS=2000` — **10 pass / 0 fail, 67 s.**
+
+| Gate | Result | Evidence |
+|---|---|---|
+| G0.6 staleness at start | — | **−5 ms** (was 1 485 195 ms on Sep 10) |
+| G3b alarm (confirmed) | **PASS** | fired 117 ms after T after one boundary read; consensus `01:03:24.770Z` ≥ T `01:03:24.193Z`; anchored at block 180, keyless-verified |
+| G4 freshness | **PASS** | post-idle probe drift **−7 ms** (was 86 s); G2 272 ms, G3a/G3b 582 ms |
+| G0–G2, G3a, G1b | **PASS** | unchanged |
+
+All three primitives — stopwatch, timer, alarm (soft and confirmed) — now pass their gates on the
+deployed endpoint.
+
 ## Run results — 2026-09-11 00:57 UTC, local MCP + gateway with read-triggered heartbeat
 
 `CC_LIVE_GATES=1 CC_MCP_URL=http://127.0.0.1:3210/mcp …` against a local `mcp-server` pointed at
