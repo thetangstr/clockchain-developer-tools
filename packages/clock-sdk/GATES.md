@@ -303,6 +303,17 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
   preserved on the box as local branch `host/pre-main-2026-09-11`.
 
+## Run results — 2026-09-11 06:35 UTC, the user's own Hermes on this Mac (agent layer) — 24 / 24, PASS
+
+The local counterpart of Clark's run: **Hermes v0.19.0, default profile (kimi k3)** on the
+developer's Mac, with the hosted MCP attached to that profile exactly as the install page says,
+ran the full 24-task suite against production: **24 / 24 tasks, 24 / 24 tool selection, 35 tools
+exercised OK, 5 honest error results in the probes built for them, 0 not exercised.** Clock tools:
+stopwatch verified, hosted timer fired and anchored, hosted alarm set → listed → cancelled. Report:
+`eval/reports/2026-09-11T06-34-47-573Z-hermes:default.md`. (A first pass scored 23 / 24 because
+one session started during the production restart that deployed `/clock-tools`; the miss was the
+deploy's timing, not the tools, and the clean re-run is the record.)
+
 ## Run results — 2026-09-11 06:09 UTC, fresh agents on a demo token (anyone with Claude Code / Codex) — 5 × 4 / 4
 
 The "can anyone do this?" check: **fresh** agents (no prior session, none of the machine's MCP
