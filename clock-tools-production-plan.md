@@ -43,11 +43,16 @@ Three root causes, three different owners:
 | Truthful anchoring | ✅ | ✅ | ✅ |
 | Operable | ✅ deploy-box.sh, nightly gates, bounds | ✅ | ✅ |
 | Driven by Clark (Hermes + Nova, its own box) | ✅ 4734 ms verified | ✅ fired, block 636 | ✅ set → listed → cancelled |
+| Fresh Claude Code (Opus/Sonnet/Haiku) + Codex on a demo token, no account | ✅ 4 agents verified | ✅ 4 fires, blocks 718–740 | ✅ 4 cancels |
 
 Clark's full-surface run (2026-09-11 05:28 UTC): **24 / 24 tasks, all 40 single-agent-testable
 tools exercised, verdict PASS** — `eval/reports/2026-09-11T05-27-49-287Z-hermes:clockchain-eval@…md`.
 Its first run (18 / 24) found that Hermes + Nova empty every free-form object argument; fixed in
 PR #109 (object args accept `object | JSON string`) and deployed before the passing run.
+
+Anyone with Claude Code or Codex can use the three tools with nothing but a demo token
+(2026-09-11 06:09 UTC): five fresh agents, 4 / 4 clock tasks each — see GATES.md. That check
+found the last blocker: the rate limit could 429 the MCP handshake itself; fixed in PR #111.
 
 Still open, by choice: per-owner billing (needs gateway sub-keys); a `confirmed`-mode variant of
 the hosted alarm; the real network (`node.clockchain.network`) coming back — re-run G0–G4 against

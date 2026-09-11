@@ -135,7 +135,9 @@ export function tasks(runId) {
     {
       id: "hosted-timer",
       prompt: `Using the Clockchain hosted timer: set a timer for 5 seconds labelled "eval-${runId}", wait for it to fire (poll its status — do not set a second timer), then report the fire's ledger id and block height and verify it keylessly.`,
-      expectTools: ["timer_set", "timer_status", "verify_cross_party"],
+      // Either keyless verification is right: verify_cross_party (ledger id + block) or
+      // verify_receipt (recompute the fire receipt's hash against the sealed block).
+      expectTools: ["timer_set", "timer_status", ["verify_cross_party", "verify_receipt"]],
       // Completion = a timer_status in the trajectory shows a done trigger with an anchored fire.
       async check({ trajectory }) {
         const statuses = trajectory.filter((c) => c.name?.endsWith("timer_status")).map((c) => safe(c.result)).filter(Boolean);
