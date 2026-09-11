@@ -24,20 +24,28 @@ export const NOT_SINGLE_AGENT = {
   agent_handshake_get_certificate: "issued only after both stakeholders complete — covered by agent-handshake-v2-*.test.mjs",
 };
 
-function parses(text) {
+/** True when a tool result is the server's JSON success payload (errors come back as plain text). */
+export function parses(text) {
   if (text == null) return false;
   try { const v = typeof text === "string" ? JSON.parse(text) : text; return v !== null && typeof v === "object"; } catch { return false; }
 }
 
-/** Build the coverage matrix: every live tool → exercised/ok/error/not-testable. */
+/**
+ * Build the coverage matrix: every live tool → exercised/ok/error/not-testable.
+ * A call's `ok` flag (computed by the runner on the full result, before the stored copy is
+ * truncated) wins over re-parsing the stored text, so a long successful payload is never
+ * mistaken for an error. Error results name the task(s) they occurred in, so a ⚠️ row is
+ * self-explanatory (an adversarial probe, or an API the substrate does not serve).
+ */
 export function coverage(toolNames, rows) {
-  const calls = new Map(); // tool -> { calls, ok, err }
+  const calls = new Map(); // tool -> { calls, ok, err, errTasks }
   for (const r of rows) {
     for (const c of r.trajectory ?? []) {
       const name = String(c.name || "").replace(/^mcp_{1,2}clockchain_{1,2}/, "");
-      const e = calls.get(name) ?? { calls: 0, ok: 0, err: 0 };
+      const e = calls.get(name) ?? { calls: 0, ok: 0, err: 0, errTasks: new Set() };
       e.calls++;
-      if (parses(c.result)) e.ok++; else e.err++;
+      const ok = typeof c.ok === "boolean" ? c.ok : parses(c.result);
+      if (ok) e.ok++; else { e.err++; e.errTasks.add(r.id); }
       calls.set(name, e);
     }
   }
@@ -48,7 +56,9 @@ export function coverage(toolNames, rows) {
     else if (e) status = "exercised-error";
     else if (NOT_SINGLE_AGENT[name]) status = "not-single-agent";
     else status = "not-exercised";
-    return { tool: name, status, calls: e?.calls ?? 0, ok: e?.ok ?? 0, err: e?.err ?? 0, note: NOT_SINGLE_AGENT[name] ?? "" };
+    const note = NOT_SINGLE_AGENT[name]
+      ?? (e?.err ? `error result in: ${[...e.errTasks].map((t) => "`" + t + "`").join(", ")}` : "");
+    return { tool: name, status, calls: e?.calls ?? 0, ok: e?.ok ?? 0, err: e?.err ?? 0, note };
   });
 }
 

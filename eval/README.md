@@ -38,20 +38,46 @@ MCP_TOKEN=<tester token> node eval/run.mjs
 ### Running it with Clark (or any Hermes profile)
 
 Clark — the AWS-hosted Hermes agent — is the reference *user* of the MCP, so the eval
-can drive a Hermes profile instead of the `claude` CLI. The trajectory comes from
-Hermes's own session export (`sessions export --format trace`, Claude-Code JSONL), so
-nothing depends on parsing stdout, and the same runner works locally or on Clark's box.
+can drive a Hermes profile instead of the `claude` CLI. The trajectory is read straight
+from Hermes's own session store (`profiles/<profile>/state.db`, the `messages` table),
+so nothing depends on parsing stdout or on a given Hermes release's export flags, and the
+same runner works locally or on Clark's box.
 
 ```bash
 # a local Hermes profile that has the clockchain MCP attached (same x-api-key as MCP_TOKEN,
 # so the eval's independent checks see the same owner-scoped state the agent created)
 MCP_TOKEN=<tester token> EVAL_AGENT=hermes HERMES_PROFILE=clark-local node eval/run.mjs
 
-# Clark's real runtime box, over SSM (commands run as Clark's user against Clark's profile)
+# Clark's real runtime box, over SSM (commands run as Clark's user against a profile on the box)
 MCP_TOKEN=<tester token> EVAL_AGENT=hermes HERMES_SSM_INSTANCE=i-… \
-  HERMES_PROFILE=clockchain HERMES_CMD_PREFIX="sudo -u clockchain env HERMES_HOME=/opt/clockchain/.hermes" \
-  node eval/run.mjs
+  HERMES_PROFILE=clockchain-eval \
+  HERMES_BIN="/opt/clockchain/current/venv/bin/python -m hermes_cli.main" \
+  HERMES_PY="/opt/clockchain/current/venv/bin/python" \
+  HERMES_CMD_PREFIX="sudo -u clockchain env HOME=/opt/clockchain HERMES_HOME=/opt/clockchain/.hermes PYTHONPATH=/opt/clockchain/eval/pylib" \
+  HERMES_MODEL_LABEL="Clark — Hermes 0.17.0 on AWS, Bedrock us.amazon.nova-2-lite-v1:0" \
+  MAX_TURNS=14 TASK_TIMEOUT_MS=360000 node eval/run.mjs
 ```
+
+How Clark's box is wired for the eval (nothing in Clark's live `clockchain` profile or its
+venv is touched):
+
+- `clockchain-eval` is a clone of Clark's profile (same model: Bedrock Nova 2 Lite) with
+  the Clockchain MCP mounted as a **stdio** server — Clark's Hermes runtime predates HTTP
+  MCP transport, so `eval/stdio-bridge.mjs` (dependency-free) forwards each JSON-RPC
+  message to `https://mcp.clockchain.network/mcp` with the eval's tester token.
+- The runtime's venv has no `mcp` package; the eval injects an eval-only
+  `PYTHONPATH=/opt/clockchain/eval/pylib` (mcp 1.30 + its missing deps) for its own
+  commands only.
+- Clark's Hermes names tools `mcp_clockchain_<tool>`; local Hermes uses
+  `mcp__clockchain__<tool>`. The runner and the coverage matrix normalize both.
+- SSM caps command output at 24 kB, so the trace is written on the box and paged back.
+
+What Clark taught us (2026-09-11): Hermes rewrites every bare `{type:"object"}` argument
+schema to `properties: {}`, and Nova then emits `{}` for it — so receipts, packages and
+identity documents arrived **empty** and `verify_receipt` crashed with a bare TypeError.
+The server now publishes those arguments as `object | JSON-encoded string` (the union
+survives the rewrite) and rejects a partial receipt with a message that says what to pass.
+The first Clark report in `reports/` is the run that found it; the next one is the pass.
 
 ### Reports
 

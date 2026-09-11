@@ -303,6 +303,30 @@ Kept short; each entry is something a gate turned up, with the date it was obser
   exists only as on-box edits to `compose-up.sh` / `docker-compose.yml`; the pre-deploy state is
   preserved on the box as local branch `host/pre-main-2026-09-11`.
 
+## Run results — 2026-09-11 05:28 UTC, production driven by Clark (agent layer) — 24 / 24, PASS
+
+Not a gate run — the agent-level check on top of G0–G4: **Clark** (the AWS-hosted Hermes 0.17
+agent, Bedrock `us.amazon.nova-2-lite-v1:0`, EC2 `i-049caedb6298592cd`) drove the eval's 24 tasks
+against production from its own box (`eval/run.mjs`, `EVAL_AGENT=hermes HERMES_SSM_INSTANCE=…`).
+Report: `eval/reports/2026-09-11T05-27-49-287Z-hermes:clockchain-eval@i-049caedb6298592cd.md`.
+
+- **24 / 24 tasks passed** on their on-chain checks, **24 / 24** picked the expected tools;
+  **35 of 50 tools exercised OK**, 5 returned honest error results in the tasks built to elicit
+  them (`get_validation` / `get_contract_types` / `estimate_schedule` — not served by the
+  anchoring-gateway substrate; `get_log_entry` on an unknown ledger; `handshake_status` on a
+  nonexistent session), 10 need a counterparty or a wallet signature (covered by their own
+  suites), **0 not exercised**.
+- Clock tools as Clark saw them: stopwatch **4734 ms** re-verified from the two sealed blocks;
+  hosted timer fired and anchored at **block 636**; hosted alarm set with `alarm_set`, listed,
+  cancelled (`status=cancelled` on independent re-read).
+- Clark's first run (04:57 UTC, same report dir) scored **18 / 24** and found a real defect: Hermes
+  rewrites every free-form object argument schema to `properties: {}` and Nova then emits `{}`,
+  so receipts, evidence packages and identity documents arrived **empty** and `verify_receipt`
+  crashed with a bare TypeError; three of those and Hermes declares the server unreachable for
+  60 s. Fixed in PR #109 (object args published as `object | JSON-encoded string`, which the
+  union survives — verified against Bedrock Nova directly — plus guiding errors for a partial
+  receipt/package) and deployed as `261dd14c` before the passing run.
+
 ## Run results — 2026-09-11 03:50 UTC, production after the finishing set (PR #106) — 12 / 12
 
 `scripts/deploy-box.sh 461999b` then the full suite — **12 pass / 0 fail, 118 s.** What changed

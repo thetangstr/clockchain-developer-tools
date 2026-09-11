@@ -42,6 +42,12 @@ Three root causes, three different owners:
 | Honest claims | ✅ substrate in receipts + page | ✅ | ✅ |
 | Truthful anchoring | ✅ | ✅ | ✅ |
 | Operable | ✅ deploy-box.sh, nightly gates, bounds | ✅ | ✅ |
+| Driven by Clark (Hermes + Nova, its own box) | ✅ 4734 ms verified | ✅ fired, block 636 | ✅ set → listed → cancelled |
+
+Clark's full-surface run (2026-09-11 05:28 UTC): **24 / 24 tasks, all 40 single-agent-testable
+tools exercised, verdict PASS** — `eval/reports/2026-09-11T05-27-49-287Z-hermes:clockchain-eval@…md`.
+Its first run (18 / 24) found that Hermes + Nova empty every free-form object argument; fixed in
+PR #109 (object args accept `object | JSON string`) and deployed before the passing run.
 
 Still open, by choice: per-owner billing (needs gateway sub-keys); a `confirmed`-mode variant of
 the hosted alarm; the real network (`node.clockchain.network`) coming back — re-run G0–G4 against
