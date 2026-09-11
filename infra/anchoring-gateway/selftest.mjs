@@ -40,7 +40,8 @@ function start(extraEnv = {}) {
   const p = spawn(process.execPath, [GATEWAY], {
     env: {
       ...process.env, GATEWAY_PORT: String(PORT), GATEWAY_HOST: "127.0.0.1", GATEWAY_DATA_DIR: DATA,
-      GATEWAY_SEAL_INTERVAL_MS: "300", GATEWAY_SYNC_SEAL: SYNC, GATEWAY_SIGNING_KEYS: SIGNING_KEYS_ENV, ...extraEnv,
+      GATEWAY_SEAL_INTERVAL_MS: "300", GATEWAY_SYNC_SEAL: SYNC, GATEWAY_SIGNING_KEYS: SIGNING_KEYS_ENV,
+      GATEWAY_HEARTBEAT_MS: "300", ...extraEnv,
     },
     stdio: ["ignore", "inherit", "inherit"],
   });
@@ -105,6 +106,23 @@ async function main() {
   const r7 = await j(await signedFetch(`/getTime`));
   ok(r7.body.success === true && typeof r7.body.data.blockHeight === "string" && typeof r7.body.data.madMarzulloTime === "string", "getTime has {success,data:{blockHeight,madMarzulloTime}}");
 
+  // 7c) fresh time: an idle ledger must not serve a stale "now". After > HEARTBEAT_MS with no writes, a
+  // /getTime read seals an empty heartbeat block: height advances by exactly one, madMarzulloTime moves forward
+  // and equals that block's blockTime, and the block is real (searchAssetFromChain finds it, empty). A second
+  // read inside the heartbeat window seals nothing.
+  const t0 = r7.body.data;
+  await new Promise((r) => setTimeout(r, 450));
+  const r7c = await j(await signedFetch(`/getTime`));
+  const t1 = r7c.body.data;
+  ok(Number(t1.blockHeight) === Number(t0.blockHeight) + 1, "idle /getTime seals one heartbeat block (height +1)");
+  ok(Date.parse(t1.madMarzulloTime) - Date.parse(t0.madMarzulloTime) >= 400, "heartbeat: madMarzulloTime moved forward with the wait");
+  const r7cb = await j(await signedFetch(`/searchAssetFromChain?blockHeight=${encodeURIComponent(t1.blockHeight)}`));
+  ok(r7cb.status === 200 && r7cb.body.blockTime === t1.madMarzulloTime && Array.isArray(r7cb.body.transactions) && r7cb.body.transactions.length === 0, "heartbeat block is a real, empty, durable block whose blockTime is the served time");
+  const r7cc = await j(await signedFetch(`/getTime`));
+  ok(Number(r7cc.body.data.blockHeight) === Number(t1.blockHeight), "a read inside the heartbeat window seals nothing");
+  const hz = await j(await fetch(`${BASE}/healthz`));
+  ok(hz.body.heartbeatMs === 300, "healthz reports heartbeatMs");
+
   // 7b) interop lock: this signer, the core signer (packages/core gateway-signing.test.mjs), and the gateway
   // verifier (which accepts this signer's output above) are pinned to ONE shared vector — any drift fails a test.
   const vectorSig = sign("POST", "/log", '{"a":1}', { ts: "1700000000", nonce: "00112233445566778899aabbccddeeff", secret: "test-secret", keyId: "x" })["x-cc-signature"];
@@ -142,6 +160,8 @@ async function main() {
   await waitUp();
   const r9 = await j(await signedFetch(`/ledger/${encodeURIComponent(ledgerId)}`));
   ok(r9.body && String(r9.body.blockHeight) === String(blockHeight), "restart recovery: entry + blockHeight survive a restart");
+  const r9t = await j(await signedFetch(`/getTime`));
+  ok(Number(r9t.body.data.blockHeight) >= Number(t1.blockHeight), "restart recovery: heartbeat blocks survive (height never goes backwards)");
   const r9b = await j(await signedFetch(`/searchAssetFromChain?blockHeight=${encodeURIComponent(blockHeight)}`));
   ok((r9b.body.transactions || []).some((t) => t.includes(`ledgerId=${ledgerId}`)), "restart recovery: sealed block + transactions survive");
   proc.kill("SIGTERM");

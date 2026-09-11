@@ -9,8 +9,10 @@ Separate service implementing the Clockchain ledger contract the MCP coordinator
 
 - `gateway.mjs` — the service (Node stdlib only): durable append-only fsync'd ledger, block sealing, idempotency,
   **authenticated payload-bound signed requests** (`x-cc-*`, replay + tamper protection, fail-closed 503 without a
-  key), `/healthz` + `/metrics`, restart recovery. Env: `GATEWAY_PORT`, `GATEWAY_DATA_DIR`, `GATEWAY_SYNC_SEAL`,
-  `GATEWAY_SIGNING_KEYS`.
+  key), `/healthz` + `/metrics`, restart recovery, **read-triggered heartbeat** (a `/getTime` that finds the last
+  seal older than `GATEWAY_HEARTBEAT_MS`, default 2000, seals an empty block first — readers never see a stale
+  "now", every reading is a durable block, an unread ledger stays quiet; `0` disables). Env: `GATEWAY_PORT`,
+  `GATEWAY_DATA_DIR`, `GATEWAY_SYNC_SEAL`, `GATEWAY_HEARTBEAT_MS`, `GATEWAY_SIGNING_KEYS`.
 - `selftest.mjs` — `node selftest.mjs` drives the full anchorV2 sequence + auth failure modes (unsigned/tamper/
   stale/replay/wrong-key → 401, no-key → 503) + idempotency + restart recovery + the shared interop vector.
 - `deploy-m3-hardening.sh` — self-gating box deploy (signer-MCP → enforcing gateway → edge lockdown) with
