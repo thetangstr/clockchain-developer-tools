@@ -1,0 +1,23 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { INSTALL_TXT, LANDING_HTML, MODULE_COUNT } from "../dist/landing.js";
+import { buildStandaloneDiscovery } from "../dist/standalone-handshake/public-server.js";
+
+test("the landing page announces Standalone Handshake and stays consistent", () => {
+  assert.match(LANDING_HTML, /Standalone Handshake/);
+  assert.match(LANDING_HTML, /\/connect\/mcp/);
+  assert.equal(LANDING_HTML.includes(String(MODULE_COUNT)), true);
+});
+
+test("llms.txt carries the agent-readable handshake facts", () => {
+  assert.match(INSTALL_TXT, /standalone-handshake/);
+  assert.match(INSTALL_TXT, /\/connect\/mcp/);
+  assert.match(INSTALL_TXT, /channel_open/);
+  assert.match(INSTALL_TXT, /Consent covers communication only/);
+});
+
+test("the discovery manifest matches what the page promises", () => {
+  const discovery = buildStandaloneDiscovery();
+  assert.match(LANDING_HTML, new RegExp(discovery.endpoint.replace(/\//g, "\\/")));
+});
