@@ -112,6 +112,76 @@ test("buildStandalonePublicServer wires every tool onto an MCP server", async ()
   assert.notEqual(server, undefined);
 });
 
+test("role-access handles slide their TTL on use and role-scoped results never carry access keys", async () => {
+  let t = 1_750_000_000_000;
+  const handler = createStandaloneHttpHandler({
+    // Defense-in-depth probe: the stub returns raw access tokens for EVERY tool, including role-scoped ones.
+    invoke: async () => ({ ok: true, initiatorAccess: `sat_${"i".repeat(28)}`, responderAccess: `sat_${"r".repeat(28)}` }),
+    invitesPerHour: 5,
+    callsPerMinute: 50,
+    now: () => t,
+  });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
+  try {
+    const rpc = async (method, params = {}) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      const text = await response.text();
+      const data = text.split("\n").find((line) => line.startsWith("data:"));
+      return JSON.parse(data ? data.slice(5) : text);
+    };
+    const inviteArgs = {
+      reference: "r",
+      purpose: "p",
+      channelLimits: { durationSeconds: "600", messageKinds: ["note"], maxMessageBytes: "4096" },
+      identityPolicy: { erc8004: "not_required", chainId: null, registryAddress: null },
+      readiness: {
+        sessionKeyAddress: `0x${"1".repeat(40)}`,
+        identity: null,
+        authorityStatement: { accountableParty: "party", statement: "statement" },
+        authoritySignatureHex: `0x${"2".repeat(130)}`,
+        capabilityManifest: { dataHandlingClass: "public", purpose: "test" },
+      },
+    };
+    await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
+    await rpc("notifications/initialized");
+    const invite = await rpc("tools/call", { name: "handshake_invite", arguments: inviteArgs });
+    const handle = invite.result.structuredContent.roleAccess;
+    assert.match(handle, /^csha_[A-Za-z0-9_-]{22}$/);
+    assert.equal("initiatorAccess" in invite.result.structuredContent, false);
+
+    const statusViaHandle = async () => rpc("tools/call", { name: "handshake_status", arguments: { access: handle } });
+
+    // Resolve 1 minute before the original horizon: succeeds and slides the TTL forward.
+    t += 59 * 60_000;
+    const beforeHorizon = await statusViaHandle();
+    assert.equal(beforeHorizon.result.isError, undefined);
+    assert.equal(beforeHorizon.result.structuredContent.roleAccess, handle);
+    assert.equal("initiatorAccess" in beforeHorizon.result.structuredContent, false);
+    assert.equal("responderAccess" in beforeHorizon.result.structuredContent, false);
+
+    // Two minutes later — past the ORIGINAL horizon, inside the refreshed one: still resolves.
+    t += 2 * 60_000;
+    const afterOriginalHorizon = await statusViaHandle();
+    assert.equal(afterOriginalHorizon.result.isError, undefined);
+    assert.equal("initiatorAccess" in afterOriginalHorizon.result.structuredContent, false);
+    assert.equal("responderAccess" in afterOriginalHorizon.result.structuredContent, false);
+
+    // An idle handle still dies: past the refreshed horizon it refuses.
+    t += 61 * 60_000;
+    const stale = await statusViaHandle();
+    assert.equal(stale.result.isError, true);
+    assert.deepEqual(JSON.parse(stale.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("tool failures surface reason codes and constants only, and log structured telemetry", async () => {
   const timeout = new Error("timed out upstream");
   timeout.name = "TimeoutError";

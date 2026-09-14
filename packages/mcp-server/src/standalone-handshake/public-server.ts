@@ -96,6 +96,9 @@ function createRoleAccessBroker(invoke: (name: string, args: Record<string, unkn
     prune();
     const entry = handles.get(value);
     if (!entry) throw new StandaloneRoleAccessError();
+    // Sliding TTL: channels may run far longer than one handle horizon, so each successful
+    // resolve of a live handle refreshes it. An idle handle still expires on its own.
+    entry.expiresAt = now() + ROLE_ACCESS_HANDLE_TTL_MS;
     return { clientHandle: value, signedAccess: entry.access };
   }
 
@@ -103,7 +106,7 @@ function createRoleAccessBroker(invoke: (name: string, args: Record<string, unkn
     if (STANDALONE_ROLE_SCOPED_TOOLS.includes(name as never)) {
       const resolved = resolve(args.access);
       const result = (await invoke(name, { ...args, access: resolved.signedAccess })) as Record<string, unknown>;
-      return { ...result, roleAccess: resolved.clientHandle ?? issue(resolved.signedAccess) };
+      return { ...withoutAccessKeys(result), roleAccess: resolved.clientHandle ?? issue(resolved.signedAccess) };
     }
     const result = (await invoke(name, args)) as Record<string, unknown>;
     if (name === "handshake_invite") return { ...withoutAccessKeys(result), roleAccess: issue(result.initiatorAccess) };
