@@ -9,6 +9,7 @@ import {
   createStandaloneHttpHandler,
 } from "../dist/standalone-handshake/public-server.js";
 import { buildStandalonePublicServer } from "../dist/standalone-handshake/public-server.js";
+import { StandaloneAdmissionError } from "../dist/standalone-handshake/session-store.js";
 
 const ACCEPT = "application/json, text/event-stream";
 
@@ -95,7 +96,7 @@ test("the HTTP handler serves /connect/mcp and rate-limits invites per IP", asyn
     assert.equal(second.status, 200);
     assert.equal(second.body.result.isError, true);
     const secondText = JSON.parse(second.body.result.content[0].text);
-    assert.deepEqual(secondText, { error: "rate_limited", retryable: false });
+    assert.deepEqual(secondText, { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
     assert.deepEqual(calls, ["handshake_invite"]);
 
     const wrong = await fetch(`http://127.0.0.1:${server.address().port}/other/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: ACCEPT }, body: "{}" });
@@ -109,4 +110,63 @@ test("buildStandalonePublicServer wires every tool onto an MCP server", async ()
   const seen = [];
   const server = buildStandalonePublicServer({ invoke: async (name) => { seen.push(name); return { ok: true }; } });
   assert.notEqual(server, undefined);
+});
+
+test("tool failures surface reason codes and constants only, and log structured telemetry", async () => {
+  const timeout = new Error("timed out upstream");
+  timeout.name = "TimeoutError";
+  const handler = createStandaloneHttpHandler({
+    invoke: async (name) => {
+      if (name === "handshake_status") throw new StandaloneAdmissionError("SCOPE_VIOLATION");
+      if (name === "consent_sign") throw new Error("secret internal detail");
+      throw timeout;
+    },
+  });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => { warnings.push(line); };
+  try {
+    const rpc = async (method, params = {}) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      const text = await response.text();
+      const data = text.split("\n").find((line) => line.startsWith("data:"));
+      return JSON.parse(data ? data.slice(5) : text);
+    };
+    await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
+    await rpc("notifications/initialized");
+    const access = { access: "a".repeat(24) };
+
+    const admission = await rpc("tools/call", { name: "handshake_status", arguments: access });
+    assert.equal(admission.result.isError, true);
+    assert.deepEqual(JSON.parse(admission.result.content[0].text), { error: "SCOPE_VIOLATION", retryable: false });
+
+    const generic = await rpc("tools/call", { name: "consent_sign", arguments: { ...access, signatureHex: `0x${"1".repeat(130)}` } });
+    assert.equal(generic.result.isError, true);
+    assert.deepEqual(JSON.parse(generic.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+    assert.equal(JSON.stringify(generic.result).includes("secret internal detail"), false);
+
+    const retryable = await rpc("tools/call", { name: "channel_send", arguments: { ...access, kind: "note", body: "x" } });
+    assert.equal(retryable.result.isError, undefined);
+    assert.deepEqual(retryable.result.structuredContent, { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 });
+
+    assert.equal(warnings.length, 3);
+    assert.deepEqual(
+      warnings.map((line) => JSON.parse(line)),
+      [
+        { event: "standalone_handshake_tool_failure", tool: "handshake_status", errorName: "StandaloneAdmissionError" },
+        { event: "standalone_handshake_tool_failure", tool: "consent_sign", errorName: "Error" },
+        { event: "standalone_handshake_tool_failure", tool: "channel_send", errorName: "TimeoutError" },
+      ],
+    );
+  } finally {
+    console.warn = originalWarn;
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

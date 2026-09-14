@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { StandaloneAdmissionError } from "./session-store.js";
 import { STANDALONE_CHAIN_ID, STANDALONE_REGISTRY_ADDRESS } from "./protocol.js";
 
 export const STANDALONE_TOOL_NAMES = Object.freeze([
@@ -88,10 +89,15 @@ export function registerStandaloneTools(server: any, invoke: (name: string, args
         return { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
       } catch (error) {
         const observedName = (error as Error)?.name;
+        const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName) ? observedName : "Error";
+        console.warn(JSON.stringify({ event: "standalone_handshake_tool_failure", tool: definition.name, errorName }));
         const retryable = typeof observedName === "string" && RETRYABLE_ERROR_NAMES.has(observedName);
-        const body = retryable
-          ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 }
-          : { error: (error as Error)?.message ?? "HANDSHAKE_UNAVAILABLE", retryable: false };
+        // Unauthenticated clients see reason codes and constants only — never raw error messages.
+        const body = error instanceof StandaloneAdmissionError
+          ? { error: error.reason, retryable: false }
+          : retryable
+            ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 }
+            : { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false };
         return retryable
           ? { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body }
           : { isError: true, content: [{ type: "text", text: JSON.stringify(body) }] };
