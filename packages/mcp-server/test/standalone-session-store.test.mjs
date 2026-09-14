@@ -68,6 +68,20 @@ test("scope violation, oversize, and unknown party are refused", () => {
   catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "UNKNOWN_PARTY"); }
 });
 
+test("malformed bodies are refused with MALFORMED, distinct from an oversize TOO_LARGE", () => {
+  const context = storeWithSession();
+  toOpen(context);
+  const { store } = context;
+  try { store.admitMessage(SESSION, "responder", "proposal", ""); assert.fail("expected throw"); }
+  catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "MALFORMED"); }
+  try { store.admitMessage(SESSION, "responder", "proposal", undefined); assert.fail("expected throw"); }
+  catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "MALFORMED"); }
+  try { store.admitMessage(SESSION, "responder", "proposal", { not: "a string" }); assert.fail("expected throw"); }
+  catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "MALFORMED"); }
+  try { store.admitMessage(SESSION, "responder", "proposal", "x".repeat(16385)); assert.fail("expected throw"); }
+  catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "TOO_LARGE"); }
+});
+
 test("expiry at exactly expiresAtMs refuses with EXPIRED and flips the stage", () => {
   const context = storeWithSession();
   toOpen(context);

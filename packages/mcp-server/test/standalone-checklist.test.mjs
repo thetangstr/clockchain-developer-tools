@@ -81,6 +81,20 @@ test("a party whose manifest purpose differs from the terms fails with PURPOSE_M
   assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["PURPOSE_MISMATCH"]);
 });
 
+test("a recoverAddress that throws fails closed with AUTHORITY_INVALID, not a crash", async () => {
+  const result = await run({ recoverAddress: async () => { throw new Error("rpc down"); } });
+  assert.equal(result.passed, false);
+  assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["AUTHORITY_INVALID"]);
+});
+
+test("the checklist digest reacts to check outcomes: a failing checklist digests differently", async () => {
+  const passing = await run();
+  const failing = await run({ responder: { authoritySignatureHex: "0x" + "33".repeat(64) + "1d" } });
+  assert.equal(passing.passed, true);
+  assert.equal(failing.passed, false);
+  assert.notEqual(failing.checklistDigest, passing.checklistDigest);
+});
+
 test("identity is structurally satisfied when the policy is not_required", async () => {
   const result = await run({ resolveIdentity: async (_identity, _sessionKeyAddress) => { throw new Error("must not be called"); } });
   assert.equal(result.passed, true);

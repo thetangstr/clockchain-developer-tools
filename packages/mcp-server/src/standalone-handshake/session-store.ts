@@ -136,7 +136,8 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
       if (session.stage === "revoked") throw new StandaloneAdmissionError("REVOKED");
       if (session.stage !== "open") throw new StandaloneAdmissionError("NOT_OPEN");
       if (!session.terms.channelLimits.messageKinds.includes(kind)) throw new StandaloneAdmissionError("SCOPE_VIOLATION");
-      if (typeof body !== "string" || body.length === 0 || Buffer.byteLength(body, "utf8") > Number(session.terms.channelLimits.maxMessageBytes)) {
+      if (typeof body !== "string" || body.length === 0) throw new StandaloneAdmissionError("MALFORMED");
+      if (Buffer.byteLength(body, "utf8") > Number(session.terms.channelLimits.maxMessageBytes)) {
         throw new StandaloneAdmissionError("TOO_LARGE");
       }
       session.seq += 1;

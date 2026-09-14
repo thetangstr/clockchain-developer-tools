@@ -32,6 +32,16 @@ test("terms rejects an extra key, a bad kind, an out-of-range duration, and a ba
   assert.throws(() => normalizeStandaloneTerms(validTerms({ channelLimits: { durationSeconds: "3600", messageKinds: ["question"], maxMessageBytes: "16385" } })), StandaloneHandshakeValidationError);
 });
 
+test("terms boundary values accept and reject exactly at the edges", () => {
+  // durationSeconds: both inclusive bounds accept.
+  assert.equal(normalizeStandaloneTerms(validTerms({ channelLimits: { durationSeconds: "60", messageKinds: ["question"], maxMessageBytes: "16384" } })).channelLimits.durationSeconds, "60");
+  assert.equal(normalizeStandaloneTerms(validTerms({ channelLimits: { durationSeconds: "86400", messageKinds: ["question"], maxMessageBytes: "16384" } })).channelLimits.durationSeconds, "86400");
+  // maxMessageBytes: both inclusive bounds accept, zero rejects.
+  assert.equal(normalizeStandaloneTerms(validTerms({ channelLimits: { durationSeconds: "3600", messageKinds: ["question"], maxMessageBytes: "1" } })).channelLimits.maxMessageBytes, "1");
+  assert.equal(normalizeStandaloneTerms(validTerms({ channelLimits: { durationSeconds: "3600", messageKinds: ["question"], maxMessageBytes: "16384" } })).channelLimits.maxMessageBytes, "16384");
+  assert.throws(() => normalizeStandaloneTerms(validTerms({ channelLimits: { durationSeconds: "3600", messageKinds: ["question"], maxMessageBytes: "0" } })), StandaloneHandshakeValidationError);
+});
+
 test("readiness validates address, signature shape, class, and identity-vs-policy", () => {
   const readiness = normalizeStandaloneReadiness(validReadiness(), "not_required");
   assert.equal(readiness.capabilityManifest.dataHandlingClass, "confidential");

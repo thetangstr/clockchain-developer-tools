@@ -88,6 +88,8 @@ verifiable claim carries digests, never bodies.
   the server clock. Consent terms carry `expiresAtMs = openedAtMs + durationSeconds`.
 - `channel_send` rejection reason codes: `NOT_OPEN`, `EXPIRED`, `REVOKED`,
   `SCOPE_VIOLATION`, `TOO_LARGE`, `UNKNOWN_PARTY`, `MALFORMED`.
+  `MALFORMED` is emitted when the body is not a non-empty string; a well-formed
+  string over the byte cap is `TOO_LARGE`.
 - Revocation by either party is immediate and permanent for the session.
 - Rate limits and role-access handles per the v2 broker pattern, instantiated locally
   in this module (v2 files are not modified; extraction into a shared module is
