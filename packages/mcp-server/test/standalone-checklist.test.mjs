@@ -7,7 +7,7 @@ import { validTerms, validReadiness } from "./helpers/standalone-fixtures.mjs";
 
 const SESSION = "0e2c8a34-9c1b-4f8e-9d0a-5f6a7b8c9d01";
 
-const OK_RESOLVE = async () => true;
+const OK_RESOLVE = async (_identity, _sessionKeyAddress) => true;
 const SIG_INITIATOR = "0x" + "11".repeat(64) + "1b";
 const SIG_RESPONDER = "0x" + "22".repeat(64) + "1c";
 const ADDR_INITIATOR = "0x" + "11".repeat(20);
@@ -57,7 +57,7 @@ test("identity failure carries IDENTITY_UNVERIFIED and fails the checklist", asy
     terms: { identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } },
     initiator: { identity: { agentId: "1", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } },
     responder: { identity: { agentId: "2", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } },
-    resolveIdentity: async () => false,
+    resolveIdentity: async (_identity, _sessionKeyAddress) => false,
   });
   assert.equal(result.passed, false);
   assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["IDENTITY_UNVERIFIED"]);
@@ -82,6 +82,6 @@ test("a party whose manifest purpose differs from the terms fails with PURPOSE_M
 });
 
 test("identity is structurally satisfied when the policy is not_required", async () => {
-  const result = await run({ resolveIdentity: async () => { throw new Error("must not be called"); } });
+  const result = await run({ resolveIdentity: async (_identity, _sessionKeyAddress) => { throw new Error("must not be called"); } });
   assert.equal(result.passed, true);
 });

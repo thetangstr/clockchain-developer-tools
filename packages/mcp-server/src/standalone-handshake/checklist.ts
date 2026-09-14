@@ -20,14 +20,16 @@ export async function evaluateStandaloneReadiness(input: {
   termsDigest: string;
   initiator: Readonly<Record<string, any>>;
   responder: Readonly<Record<string, any>>;
-  resolveIdentity: (identity: Readonly<Record<string, any>> | null) => Promise<boolean>;
+  resolveIdentity: (identity: Readonly<Record<string, any>> | null, sessionKeyAddress: string) => Promise<boolean>;
   recoverAddress: (input: { bytes: Buffer; signatureHex: string }) => Promise<string>;
 }): Promise<StandaloneChecklistResult> {
   const { sessionId, terms, termsDigest, initiator, responder, resolveIdentity, recoverAddress } = input;
   const checks: StandaloneCheck[] = [];
   const required = terms.identityPolicy.erc8004 !== "not_required";
 
-  const identityOk = !required ? true : (await resolveIdentity(initiator.identity)) && (await resolveIdentity(responder.identity));
+  const identityOk = !required
+    ? true
+    : (await resolveIdentity(initiator.identity, initiator.sessionKeyAddress)) && (await resolveIdentity(responder.identity, responder.sessionKeyAddress));
   checks.push({ check: "identity", passed: identityOk, ...(identityOk ? {} : { reason: "IDENTITY_UNVERIFIED" }) });
 
   const parties: readonly [string, any][] = [["initiator", initiator], ["responder", responder]];
