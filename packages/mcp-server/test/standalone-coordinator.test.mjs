@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordinator.js";
+import { normalizeStandaloneClosure, standaloneCanonicalRecord } from "../dist/standalone-handshake/protocol.js";
 import { validTerms, validReadiness } from "./helpers/standalone-fixtures.mjs";
 
 const SIG_INITIATOR = "0x" + "11".repeat(64) + "1b";
@@ -10,6 +11,14 @@ const SIG_RESPONDER = "0x" + "22".repeat(64) + "1c";
 const ADDR_INITIATOR = "0x" + "11".repeat(20);
 const ADDR_RESPONDER = "0x" + "22".repeat(20);
 const REQUIRED_IDENTITY_POLICY = { erc8004: "required_existing_or_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" };
+const FAKE_BLOCK_TIME = "2026-09-14T00:00:00.000Z";
+
+class TransientLedgerError extends Error {
+  constructor() {
+    super("transient ledger failure");
+    this.name = "TransientLedgerError";
+  }
+}
 
 function fakeLedger() {
   const entries = new Map();
@@ -34,8 +43,32 @@ function fakeLedger() {
       return record && record.blockHeight === String(blockHeight) ? { ...record } : null;
     },
     async getBlock(blockHeight) {
-      return { blockHeight: String(blockHeight), blockTime: "2026-09-14T00:00:00.000Z" };
+      return { blockHeight: String(blockHeight), blockTime: FAKE_BLOCK_TIME };
     },
+  };
+}
+
+// Fault-injection wrapper: fails the Nth client.log call outright, or every closure log, until repaired.
+function flakyLedger() {
+  const inner = fakeLedger();
+  let calls = 0;
+  let failOnLogCall = -1;
+  let failClosureLogs = false;
+  return {
+    blocks: inner.blocks,
+    failOnNthLog(n) { failOnLogCall = n; },
+    failClosureLogs() { failClosureLogs = true; },
+    repair() { failOnLogCall = -1; failClosureLogs = false; },
+    async searchAsset(reference) { return inner.searchAsset(reference); },
+    async log(args) {
+      calls += 1;
+      if (calls === failOnLogCall) throw new TransientLedgerError();
+      if (failClosureLogs && String(args.assetReferenceId).endsWith(":closure")) throw new TransientLedgerError();
+      return inner.log(args);
+    },
+    async getLedgerEntry(ledgerId) { return inner.getLedgerEntry(ledgerId); },
+    async getChainRecord(blockHeight, ledgerId) { return inner.getChainRecord(blockHeight, ledgerId); },
+    async getBlock(blockHeight) { return inner.getBlock(blockHeight); },
   };
 }
 
@@ -49,7 +82,7 @@ function coordinator(ledger = fakeLedger(), overrides = {}) {
     resolveIdentity: overrides.resolveIdentity ?? (async () => true),
     ...overrides.coordinator,
   });
-  return { ...instance, advance: (ms) => { nowMs += ms; } };
+  return { ...instance, advance: (ms) => { nowMs += ms; }, peek: () => nowMs };
 }
 
 async function openSession(instance, termsOverrides = {}, readinessOverrides = {}) {
@@ -130,6 +163,115 @@ test("opening anchors three chained transitions and the receipt is internally co
   }
 });
 
+test("channel_open anchors before mutating: a transient anchor failure leaves the session consented and retryable", async () => {
+  const ledger = flakyLedger();
+  const instance = coordinator(ledger);
+  const session = await openSession(instance);
+  await instance.invoke("consent_sign", { access: session.invite.initiatorAccess, signatureHex: SIG_INITIATOR });
+  await instance.invoke("consent_sign", { access: session.accept.responderAccess, signatureHex: SIG_RESPONDER });
+  ledger.failOnNthLog(2); // the CONSENT transition's log call
+  await assert.rejects(
+    () => instance.invoke("channel_open", { access: session.invite.initiatorAccess }),
+    (error) => error instanceof Error && error.name === "TransientLedgerError",
+  );
+  let status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
+  assert.equal(status.stage, "consented");
+  ledger.repair();
+  const receipt = await instance.invoke("channel_open", { access: session.invite.initiatorAccess });
+  assert.equal(receipt.anchors.length, 3);
+  assert.deepEqual(receipt.anchors.map((a) => a.kind), ["terms-readiness", "consent", "open"]);
+  status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
+  assert.equal(status.stage, "open");
+  // The session clock starts at the ledger's consensus block time, not the server clock.
+  assert.equal(receipt.openedAtMs, String(Date.parse(FAKE_BLOCK_TIME)));
+  assert.equal(receipt.expiresAtMs, String(Date.parse(FAKE_BLOCK_TIME) + 3_600_000));
+  // The retry reused the already-anchored first transition instead of duplicating it.
+  const seeded = await ledger.searchAsset(`standalone-handshake-v1:${session.invite.sessionId}:terms-readiness`);
+  assert.equal(seeded.length, 1);
+});
+
+test("the anchored CONSENT and OPEN transition records carry both parties' consent digests", async () => {
+  const ledger = fakeLedger();
+  const instance = coordinator(ledger);
+  const session = await openSession(instance);
+  const consentInitiator = await instance.invoke("consent_sign", { access: session.invite.initiatorAccess, signatureHex: SIG_INITIATOR });
+  const consentResponder = await instance.invoke("consent_sign", { access: session.accept.responderAccess, signatureHex: SIG_RESPONDER });
+  const receipt = await instance.invoke("channel_open", { access: session.invite.initiatorAccess });
+  const base = {
+    protocol: "clockchain.standalone-handshake/v1",
+    sessionId: session.invite.sessionId,
+    reference: session.invite.reference,
+    termsDigest: receipt.termsDigest,
+    checklistDigest: receipt.checklistDigest,
+    initiator: { sessionKeyAddress: ADDR_INITIATOR },
+    responder: { sessionKeyAddress: ADDR_RESPONDER },
+    externalBusinessActionPerformed: false,
+  };
+  const consentDigests = { initiator: consentInitiator.consentDigest, responder: consentResponder.consentDigest };
+  const termsReadiness = { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "TERMS_READINESS", sequence: "1", predecessor: null };
+  const consent = { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "CONSENT", sequence: "2", predecessor: standaloneCanonicalRecord(termsReadiness).digest, consentDigests };
+  const open = { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "OPEN", sequence: "3", predecessor: standaloneCanonicalRecord(consent).digest, consentDigests };
+  assert.equal(receipt.anchors[0].digest, standaloneCanonicalRecord(termsReadiness).digest);
+  assert.equal(receipt.anchors[1].digest, standaloneCanonicalRecord(consent).digest);
+  assert.equal(receipt.anchors[2].digest, standaloneCanonicalRecord(open).digest);
+  // The ledger record under the consent reference is exactly that transition record.
+  const anchoredConsent = await ledger.searchAsset(`standalone-handshake-v1:${session.invite.sessionId}:consent`);
+  assert.equal(anchoredConsent.length, 1);
+  assert.equal(anchoredConsent[0].assetHash, standaloneCanonicalRecord(consent).digest);
+});
+
+test("anchoring fails hard when the reference already holds a different digest, and never appends", async () => {
+  const ledger = fakeLedger();
+  let logs = 0;
+  const counting = { ...ledger, log: async (args) => { logs += 1; return ledger.log(args); } };
+  const instance = coordinator(counting);
+  const session = await openSession(instance);
+  await consentAndOpen(instance, session);
+  assert.equal(logs, 3);
+  await ledger.log({ assetHash: "e".repeat(64), assetReferenceId: `standalone-handshake-v1:${session.invite.sessionId}:closure` });
+  await assert.rejects(
+    () => instance.invoke("channel_close", { access: session.invite.initiatorAccess }),
+    (error) => error instanceof Error && error.name === "StandaloneCoordinatorError",
+  );
+  assert.equal(logs, 3); // the guard fired before any append
+  const status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
+  assert.equal(status.stage, "open");
+});
+
+test("closure anchors before mutating: a transient failure leaves the channel open and the retry re-anchors the pinned digest", async () => {
+  const ledger = flakyLedger();
+  ledger.failClosureLogs();
+  const instance = coordinator(ledger);
+  const session = await openSession(instance);
+  await consentAndOpen(instance, session);
+  await assert.rejects(
+    () => instance.invoke("channel_close", { access: session.invite.initiatorAccess }),
+    (error) => error instanceof Error && error.name === "TransientLedgerError",
+  );
+  let status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
+  assert.equal(status.stage, "open");
+  ledger.repair();
+  instance.advance(5_000); // a re-dated closure record would digest differently
+  const closed = await instance.invoke("channel_close", { access: session.invite.initiatorAccess });
+  assert.equal(closed.outcome, "closed");
+  const reference = `standalone-handshake-v1:${session.invite.sessionId}:closure`;
+  const records = await ledger.searchAsset(reference);
+  assert.equal(records.length, 1);
+  const pinnedDigest = standaloneCanonicalRecord(normalizeStandaloneClosure({
+    schema: "clockchain.standalone-handshake-closure/v1",
+    protocol: "clockchain.standalone-handshake/v1",
+    sessionId: session.invite.sessionId,
+    outcome: "closed",
+    byRole: "initiator",
+    closedAtMs: String(1_750_000_000_000), // the pinned record keeps the pre-failure date
+    externalBusinessActionPerformed: false,
+  })).digest;
+  assert.equal(records[0].assetHash, pinnedDigest);
+  assert.equal(closed.closureAnchor.digest, pinnedDigest);
+  status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
+  assert.equal(status.stage, "closed");
+});
+
 test("channel flows end to end: send, read, close — with an anchored closure", async () => {
   const instance = coordinator();
   const session = await openSession(instance);
@@ -162,11 +304,13 @@ test("revocation mid-conversation stops admission and anchors the revocation", a
   );
 });
 
-test("expiry: consented session that is opened late still expires on consensus time", async () => {
+test("expiry: the channel clock starts at the open anchor's consensus block time", async () => {
   const instance = coordinator();
   const session = await openSession(instance);
-  await consentAndOpen(instance, session);
-  instance.advance(3_600_000);
+  const receipt = await consentAndOpen(instance, session);
+  assert.equal(receipt.openedAtMs, String(Date.parse(FAKE_BLOCK_TIME)));
+  assert.equal(receipt.expiresAtMs, String(Date.parse(FAKE_BLOCK_TIME) + 3_600_000));
+  instance.advance(Number(receipt.expiresAtMs) + 1 - instance.peek());
   await assert.rejects(
     () => instance.invoke("channel_send", { access: session.invite.initiatorAccess, kind: "question", body: "still open?" }),
     (error) => error instanceof Error && error.name === "StandaloneAdmissionError",

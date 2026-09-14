@@ -29,6 +29,9 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
   const now = options.now ?? Date.now;
   const sessions = new Map<string, any>();
   const invitations = new Map<string, string>();
+  // Pinned closure records: prepared before anchoring so retries produce the identical digest.
+  // Kept beside (not on) the session objects, which stay read-only everywhere else.
+  const pendingClosures = new Map<string, any>();
 
   function requireSession(sessionId: string): any {
     const session = sessions.get(sessionId);
@@ -182,6 +185,17 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
       if (session.stage !== "open") throw new StandaloneAdmissionError("NOT_OPEN");
       session.stage = "closed";
       session.closedBy = role;
+    },
+
+    setPendingClosure(sessionId: string, record: Readonly<Record<string, any>>): void {
+      requireSession(sessionId);
+      pendingClosures.set(sessionId, record);
+    },
+
+    takePendingClosure(sessionId: string): Readonly<Record<string, any>> | undefined {
+      const record = pendingClosures.get(sessionId);
+      if (record !== undefined) pendingClosures.delete(sessionId);
+      return record;
     },
 
     revokeChannel(sessionId: string, role: string): void {

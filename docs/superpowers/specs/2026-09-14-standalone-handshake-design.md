@@ -98,7 +98,11 @@ verifiable claim carries digests, never bodies.
 Anchor through `ClockchainClient` from `@clockchain/core` (the same client and
 `readConfigFromEnv` configuration the v2 coordinator uses), with a local anchor helper
 per transition: at open, three records (`terms-readiness`, `consent`, `open`); at
-close/revoke, one `closure` record. The opening receipt carries all three anchors
+close/revoke, one `closure` record. The `consent` and `open` transition records carry
+both parties' consent digests (`consentDigests.initiator` / `consentDigests.responder`);
+session opening time derives from the open anchor's consensus block time, and each
+closure is verifiable against its anchor's consensus block time (the record's
+`closedAtMs` is pinned before anchoring so a retry re-anchors the identical digest). The opening receipt carries all three anchors
 (blockHeight, blockTimeRaw, digest, ledgerId) and is keylessly verifiable through the
 existing public verify path. Anchoring uses the same idempotency/degraded-pool posture
 as existing tools.

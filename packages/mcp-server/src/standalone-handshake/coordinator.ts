@@ -37,7 +37,10 @@ const KIND_REFERENCES = { TERMS_READINESS: "terms-readiness", CONSENT: "consent"
 async function anchorStandalone(client: any, record: Readonly<Record<string, any>>, reference: string, canWrite: boolean): Promise<any> {
   const digest = standaloneCanonicalRecord(record).digest;
   const found = await client.searchAsset(reference);
-  const matches = (Array.isArray(found) ? found : []).filter((entry: any) => entry.assetReferenceId === reference && entry.assetHash === digest);
+  const underReference = (Array.isArray(found) ? found : []).filter((entry: any) => entry.assetReferenceId === reference);
+  // Fail hard on a conflicting anchor: the reference already exists with a different digest.
+  if (underReference.some((entry: any) => entry.assetHash !== digest)) throw new StandaloneCoordinatorError();
+  const matches = underReference.filter((entry: any) => entry.assetHash === digest);
   if (matches.length > 1) throw new StandaloneCoordinatorError();
   let ledgerRecord = matches[0];
   if (!ledgerRecord && canWrite) {
@@ -176,12 +179,8 @@ export function createStandaloneCoordinator(options: {
       }
 
       if (name === "channel_open") {
-        const { session, role } = authedSession(args);
+        const { session } = authedSession(args);
         if (session.stage !== "consented" || !store.bothConsented(session.sessionId)) throw new StandaloneCoordinatorError();
-        const openedAtMs = now();
-        const expiresAtMs = openedAtMs + Number(session.terms.channelLimits.durationSeconds) * 1000;
-        store.setStage(session.sessionId, "open");
-        store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
         const base = {
           protocol: STANDALONE_HANDSHAKE_PROTOCOL,
           sessionId: session.sessionId,
@@ -192,10 +191,11 @@ export function createStandaloneCoordinator(options: {
           responder: { sessionKeyAddress: session.responderReadiness.sessionKeyAddress },
           externalBusinessActionPerformed: false,
         };
+        const consentDigests = Object.freeze({ initiator: session.consents.initiator, responder: session.consents.responder });
         const transitions: Array<Record<string, any>> = [
           { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "TERMS_READINESS", sequence: "1", predecessor: null },
-          { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "CONSENT", sequence: "2", predecessor: "" },
-          { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "OPEN", sequence: "3", predecessor: "" },
+          { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "CONSENT", sequence: "2", predecessor: "", consentDigests },
+          { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "OPEN", sequence: "3", predecessor: "", consentDigests },
         ];
         transitions[1].predecessor = standaloneCanonicalRecord(transitions[0]).digest;
         transitions[2].predecessor = standaloneCanonicalRecord(transitions[1]).digest;
@@ -208,6 +208,14 @@ export function createStandaloneCoordinator(options: {
           const receipt = await anchorStandalone(client, transitions[index], reference, true);
           anchors.push({ kind: KIND_REFERENCES[transitions[index].kind as keyof typeof KIND_REFERENCES], ...receipt });
         }
+        // Anchor before mutate: every transition is witnessed before the session becomes an open, usable channel,
+        // so a transient anchor failure leaves the stage at "consented" and channel_open can simply be retried.
+        // The session's clock starts at the ledger's consensus time (the open anchor's block time), not the server clock.
+        const anchorOpenMs = Date.parse(anchors[anchors.length - 1].blockTimeRaw);
+        const openedAtMs = Number.isNaN(anchorOpenMs) ? now() : anchorOpenMs;
+        const expiresAtMs = openedAtMs + Number(session.terms.channelLimits.durationSeconds) * 1000;
+        store.setStage(session.sessionId, "open");
+        store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
         return {
           schema: "clockchain.standalone-handshake-opening/v1",
           protocol: STANDALONE_HANDSHAKE_PROTOCOL,
@@ -237,17 +245,25 @@ export function createStandaloneCoordinator(options: {
       if (name === "channel_close" || name === "channel_revoke") {
         const { session, role } = authedSession(args);
         const outcome = name === "channel_close" ? "closed" : "revoked";
-        (outcome === "closed" ? store.closeChannel : store.revokeChannel).call(store, session.sessionId, role);
-        const closureRecord = normalizeStandaloneClosure({
-          schema: "clockchain.standalone-handshake-closure/v1",
-          protocol: STANDALONE_HANDSHAKE_PROTOCOL,
-          sessionId: session.sessionId,
-          outcome,
-          byRole: role,
-          closedAtMs: String(now()),
-          externalBusinessActionPerformed: false,
-        });
+        // Anchor before mutate, idempotently: the closure record is pinned in the store before anchoring so a
+        // retry after a transient anchor failure re-anchors the identical digest instead of re-dating a new
+        // record. A like-for-like retry reuses the pin; a changed outcome/role replaces it.
+        let closureRecord = store.takePendingClosure(session.sessionId);
+        if (!closureRecord || closureRecord.outcome !== outcome || closureRecord.byRole !== role) {
+          closureRecord = normalizeStandaloneClosure({
+            schema: "clockchain.standalone-handshake-closure/v1",
+            protocol: STANDALONE_HANDSHAKE_PROTOCOL,
+            sessionId: session.sessionId,
+            outcome,
+            byRole: role,
+            closedAtMs: String(now()),
+            externalBusinessActionPerformed: false,
+          });
+        }
+        store.setPendingClosure(session.sessionId, closureRecord);
         const anchor = await anchorStandalone(client, closureRecord, `standalone-handshake-v1:${session.sessionId}:closure`, true);
+        store.takePendingClosure(session.sessionId);
+        (outcome === "closed" ? store.closeChannel : store.revokeChannel).call(store, session.sessionId, role);
         return { sessionId: session.sessionId, outcome, byRole: role, closureAnchor: anchor };
       }
 
