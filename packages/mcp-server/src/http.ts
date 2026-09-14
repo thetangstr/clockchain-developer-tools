@@ -45,6 +45,8 @@ import {
   readV2ReleasePin,
 } from "./agent-handshake/v2/instructions.js";
 import { createRuntimeV2Coordinator } from "./agent-handshake/v2/coordinator.js";
+import { buildStandaloneDiscovery, createStandaloneHttpHandler } from "./standalone-handshake/public-server.js";
+import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -467,6 +469,20 @@ export async function runHttp(): Promise<void> {
     return publicHandshakeHandler;
   };
 
+  let standaloneHandshakeHandler: ReturnType<typeof createStandaloneHttpHandler> | undefined;
+  let standaloneHandshakeCoordinator: ReturnType<typeof createRuntimeStandaloneCoordinator> | undefined;
+  const getStandaloneHandshakeHandler = () => {
+    if (standaloneHandshakeHandler) return standaloneHandshakeHandler;
+    standaloneHandshakeCoordinator ??= createRuntimeStandaloneCoordinator(process.env);
+    standaloneHandshakeHandler = createStandaloneHttpHandler({
+      trustedProxy: process.env.STANDALONE_HANDSHAKE_TRUSTED_PROXY,
+      invitesPerHour: Number(process.env.STANDALONE_HANDSHAKE_INVITES_PER_HOUR ?? "5"),
+      callsPerMinute: Number(process.env.STANDALONE_HANDSHAKE_CALLS_PER_MINUTE ?? "120"),
+      invoke: (name, args) => standaloneHandshakeCoordinator!.invoke(name, args),
+    });
+    return standaloneHandshakeHandler;
+  };
+
   // A request is authorized if it carries a valid static MCP token OR a valid
   // self-serve signed token (v:1 demo or v:2 trial). Static tokens and v:1 demo
   // tokens resolve to AUTHENTICATED and bypass the trial/keeper layer (LLD §13);
@@ -550,6 +566,27 @@ export async function runHttp(): Promise<void> {
       } catch {
         res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
+      }
+      return;
+    }
+
+    if (req.method === "GET" && pathOf(req.url) === "/.well-known/standalone-handshake.json") {
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      });
+      res.end(JSON.stringify(buildStandaloneDiscovery(), null, 2));
+      return;
+    }
+
+    if (pathOf(req.url) === "/connect/mcp") {
+      try {
+        await getStandaloneHandshakeHandler()(req, res);
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "standalone_handshake_unavailable" }));
+        }
       }
       return;
     }
