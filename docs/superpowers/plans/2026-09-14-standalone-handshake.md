@@ -90,7 +90,7 @@ export function validReadiness(overrides = {}) {
     sessionKeyAddress: "0x" + "11".repeat(20),
     identity: null,
     authorityStatement: { accountableParty: "Acme Buying LLC", statement: "I am authorized to discuss delivery options for Acme." },
-    authoritySignatureHex: "0x" + "11".repeat(32) + "1b",
+    authoritySignatureHex: "0x" + "11".repeat(64) + "1b",
     capabilityManifest: { dataHandlingClass: "confidential", purpose: "Discuss delivery options for Q3 orders" },
     ...overrides,
   };
@@ -339,8 +339,8 @@ import { validTerms, validReadiness } from "./standalone-protocol.test.js";
 const SESSION = "0e2c8a34-9c1b-4f8e-9d0a-5f6a7b8c9d01";
 
 const OK_RESOLVE = async () => true;
-const SIG_INITIATOR = "0x" + "11".repeat(32) + "1b";
-const SIG_RESPONDER = "0x" + "22".repeat(32) + "1c";
+const SIG_INITIATOR = "0x" + "11".repeat(64) + "1b";
+const SIG_RESPONDER = "0x" + "22".repeat(64) + "1c";
 const ADDR_INITIATOR = "0x" + "11".repeat(20);
 const ADDR_RESPONDER = "0x" + "22".repeat(20);
 
@@ -390,7 +390,7 @@ test("identity failure carries IDENTITY_UNVERIFIED and fails the checklist", asy
 });
 
 test("a wrong authority signer fails with AUTHORITY_INVALID", async () => {
-  const result = await run({ responder: { authoritySignatureHex: "0x" + "33".repeat(32) + "1d" } });
+  const result = await run({ responder: { authoritySignatureHex: "0x" + "33".repeat(64) + "1d" } });
   assert.equal(result.passed, false);
   assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["AUTHORITY_INVALID"]);
 });
@@ -887,8 +887,8 @@ import { randomUUID } from "node:crypto";
 import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordinator.js";
 import { validTerms, validReadiness } from "./standalone-protocol.test.js";
 
-const SIG_INITIATOR = "0x" + "11".repeat(32) + "1b";
-const SIG_RESPONDER = "0x" + "22".repeat(32) + "1c";
+const SIG_INITIATOR = "0x" + "11".repeat(64) + "1b";
+const SIG_RESPONDER = "0x" + "22".repeat(64) + "1c";
 const ADDR_INITIATOR = "0x" + "11".repeat(20);
 const ADDR_RESPONDER = "0x" + "22".repeat(20);
 
@@ -1965,8 +1965,8 @@ import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordi
 import { createStandaloneHttpHandler } from "../dist/standalone-handshake/public-server.js";
 import { validTerms, validReadiness } from "./standalone-protocol.test.js";
 
-const SIG_INITIATOR = "0x" + "11".repeat(32) + "1b";
-const SIG_RESPONDER = "0x" + "22".repeat(32) + "1c";
+const SIG_INITIATOR = "0x" + "11".repeat(64) + "1b";
+const SIG_RESPONDER = "0x" + "22".repeat(64) + "1c";
 const ADDR_INITIATOR = "0x" + "11".repeat(20);
 const ADDR_RESPONDER = "0x" + "22".repeat(20);
 
