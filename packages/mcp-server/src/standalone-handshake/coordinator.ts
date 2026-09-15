@@ -276,7 +276,7 @@ export function createStandaloneCoordinator(options: {
           sessionId: session.sessionId,
           outcome,
           byRole: role,
-          closedAtMs: String(pinned?.closedAtMs ?? now()),
+          closedAtMs: String(pinned?.closedAtMs ?? Math.floor(now())),
           externalBusinessActionPerformed: false,
         });
         store.setPendingClosure(session.sessionId, closureRecord);
@@ -316,7 +316,9 @@ export function createRuntimeStandaloneCoordinator(env: Record<string, string | 
     rpcUrl,
     now: () => {
       try {
-        return clock.now().epochMs;
+        // epochMs carries sub-millisecond monotonic noise; protocol timestamps are
+        // integer milliseconds, so floor before they reach decimal-validated records.
+        return Math.floor(clock.now().epochMs);
       } catch {
         throw new StandaloneTransientCoordinatorError();
       }

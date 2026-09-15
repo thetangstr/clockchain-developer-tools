@@ -232,7 +232,7 @@ export function createStandaloneSessionStore(options: {
         fromRole: role,
         toRole: other(role),
         bodyDigest: createHash("sha256").update(body, "utf8").digest("hex"),
-        sentAtMs: now(),
+        sentAtMs: Math.floor(now()),
         body,
       };
       session.messages.push(message);
@@ -258,7 +258,7 @@ export function createStandaloneSessionStore(options: {
         consented: { initiator: session.consents.initiator !== undefined, responder: session.consents.responder !== undefined },
         openedAtMs: session.openedAtMs,
         expiresAtMs: session.expiresAtMs,
-        remainingMs: session.stage === "open" ? Math.max(0, session.expiresAtMs - now()) : 0,
+        remainingMs: session.stage === "open" ? Math.max(0, Math.floor(session.expiresAtMs - now())) : 0,
         scope: Object.freeze({ ...session.terms.channelLimits }),
         messageCount: session.messages.length,
         closedBy: session.closedBy,

@@ -461,6 +461,16 @@ test("an access token only ever authenticates its own session and role", async (
   assert.equal(statusB.sessionId, b.invite.sessionId);
 });
 
+test("a fractional-millisecond protocol clock still produces decimal-valid timestamps", async () => {
+  // Consensus clocks carry sub-ms monotonic noise; protocol timestamps must stay
+  // integer milliseconds or the closure record fails decimal validation.
+  const instance = coordinator(fakeLedger(), { coordinator: { now: () => 1_750_000_000_000.5 } });
+  const session = await openSession(instance);
+  await consentAndOpen(instance, session);
+  const revoked = await instance.invoke("channel_revoke", { access: session.invite.initiatorAccess });
+  assert.equal(revoked.outcome, "revoked");
+});
+
 test("an unparseable open-anchor block time fails transiently and the retry succeeds", async () => {
   const ledger = fakeLedger();
   let blockTime = "not-a-timestamp";
