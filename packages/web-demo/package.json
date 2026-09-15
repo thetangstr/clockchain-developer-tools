@@ -9,9 +9,10 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && esbuild src/handshake/browser-agent.ts --bundle --format=iife --outfile=dist/handshake/browser-agent.js",
     "test": "tsc -b && node --test",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "demo:handshake": "node dist/handshake-server.js"
   },
   "dependencies": {
     "@clockchain/core": "0.1.0",
@@ -21,5 +22,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

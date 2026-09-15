@@ -6,5 +6,6 @@
     "composite": true
   },
   "references": [{ "path": "../core" }, { "path": "../mcp-server" }],
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/handshake/browser-agent.ts"]
 }

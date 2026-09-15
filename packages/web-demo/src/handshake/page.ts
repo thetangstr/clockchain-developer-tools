@@ -45,6 +45,7 @@ export const HANDSHAKE_PAGE = `<!doctype html>
   <div class="controls">
     <select id="replay" title="Replay a past run"><option value="">replay…</option></select>
     <button id="verifyAll" disabled>verify anchors keylessly</button>
+    <button id="beResponder">be the responder</button>
     <button id="run" class="primary">▶ run live handshake</button>
   </div>
 </header>
@@ -65,6 +66,7 @@ export const HANDSHAKE_PAGE = `<!doctype html>
   <section class="pane" data-p="responder"><h2>Agent B · responder</h2><div class="feed" id="f-responder"></div></section>
 </main>
 <div id="statusbar"><span id="conn">connecting…</span><span id="sid"></span><span id="stage"></span></div>
+<script src="/handshake/agent.js"></script>
 <script>
 const feeds = { initiator: f("f-initiator"), responder: f("f-responder"), ledger: f("f-ledger"), control: f("f-ledger") };
 function f(id){ return document.getElementById(id); }
@@ -97,7 +99,7 @@ runBtn.onclick = async () => {
 };
 verifyBtn.onclick = async () => {
   verifyBtn.disabled = true;
-  const r = await fetch("/handshake/api/verify", { method:"POST" });
+  const r = await fetch("/handshake/api/verify", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ runId: replaySel.value || undefined }) });
   const j = await r.json();
   for (const v of j.results || []) {
     add({ ts:Date.now(), pane:"ledger", kind:"verify", label:"keyless verify · " + (v.assetReferenceId || v.ledgerId || "?").split(":").pop(),
@@ -119,6 +121,63 @@ replaySel.onchange = async () => {
   verifyBtn.disabled = anchors.length === 0;
 };
 loadRuns();
+
+// --- visitor-as-responder: this tab plays Agent B with a keypair that never
+// leaves the browser. Only signatures cross the wire.
+const beBtn = f("beResponder");
+const jpost = (u, b) => fetch(u, { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify(b||{}) }).then(r => r.json());
+const sayLocal = (pane, kind, label, detail) => add({ ts: Date.now(), pane, kind, label, detail });
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+beBtn.onclick = async () => {
+  if (!window.CCH) { sayLocal("responder","error","agent bundle missing","/handshake/agent.js did not load"); return; }
+  beBtn.disabled = true; runBtn.disabled = true; verifyBtn.disabled = true;
+  for (const k of Object.keys(feeds)) feeds[k].innerHTML = "";
+  try {
+    const you = window.CCH.generateKey();
+    sayLocal("responder","info","YOU generate an ephemeral Sepolia keypair","address " + you.address + " — the private key never leaves this tab");
+    const inv = await jpost("/handshake/api/host", { step: "invite" });
+    if (!inv.ok) throw new Error("invite failed");
+    const { invitation, sessionId, termsDigest } = inv.payload;
+    const party = "VisitorCo (you)";
+    const statement = party + " authorizes this browser-held agent to negotiate the Q3 delivery schedule.";
+    const authRec = window.CCH.authorityRecord(you.address, party, statement);
+    const authSig = await window.CCH.signRecord(you.account, authRec);
+    sayLocal("responder","sign","you sign the authority statement (EIP-191, in-tab)", authSig.slice(0,20) + "…");
+    const accept = await jpost("/handshake/api/proxy", { name:"handshake_accept_invitation", args:{ invitation, readiness:{
+      sessionKeyAddress: you.address, identity: null,
+      authorityStatement: { accountableParty: party, statement },
+      authoritySignatureHex: authSig,
+      capabilityManifest: { dataHandlingClass:"confidential", purpose:"Negotiate a Q3 delivery schedule for component orders" },
+    }}});
+    if (!accept.ok) throw new Error("accept refused: " + JSON.stringify(accept.payload));
+    const checklistDigest = accept.payload.checklist.checklistDigest;
+    for (const c of accept.payload.checklist.checks) { sayLocal("ledger","check","checklist · "+c.check, c.passed ? "passed" : "FAILED — "+(c.reason||"")); await sleep(200); }
+    if (accept.payload.stage !== "ready") { sayLocal("ledger","anchor","ready_failed — terminal","no channel, no consent"); return; }
+    const consentRec = window.CCH.consentRecord(sessionId, "responder", termsDigest, checklistDigest);
+    const consentSig = await window.CCH.signRecord(you.account, consentRec);
+    sayLocal("responder","sign","you sign the consent record","bound to termsDigest " + termsDigest.slice(0,12) + "…");
+    const c2 = await jpost("/handshake/api/proxy", { name:"consent_sign", args:{ access: accept.payload.roleAccess, signatureHex: consentSig }});
+    sayLocal("responder", c2.ok ? "action":"refusal", "consent_sign (you)", c2.ok ? "stage " + c2.payload.stage : JSON.stringify(c2.payload));
+    await jpost("/handshake/api/host", { step:"consent", args:{ checklistDigest } });
+    const open = await jpost("/handshake/api/host", { step:"open" });
+    if (open.ok) for (const a of open.payload.anchors) anchors.push(a);
+    const s1 = await jpost("/handshake/api/proxy", { name:"channel_send", args:{ access: accept.payload.roleAccess, kind:"proposal", body:"Visitor: ship Tuesdays from Newark — $4.20/unit FOB." }});
+    sayLocal("responder", s1.ok?"message":"refusal", "channel_send · proposal (you)", s1.ok ? "seq "+s1.payload.seq : JSON.stringify(s1.payload));
+    await jpost("/handshake/api/host", { step:"send", args:{ kind:"question", body:"Can you hold that price through October 15?" }});
+    const rd = await jpost("/handshake/api/proxy", { name:"channel_read", args:{ access: accept.payload.roleAccess }});
+    sayLocal("responder","info","channel_read (you see only what is addressed to you)", (rd.ok ? rd.payload.messages.length : "?") + " message(s)");
+    const rv = await jpost("/handshake/api/proxy", { name:"channel_revoke", args:{ access: accept.payload.roleAccess }});
+    if (rv.ok) { anchors.push(rv.payload.closureAnchor); sayLocal("responder","action","channel_revoke (you end it)","closure anchored"); sayLocal("ledger","anchor","anchor · closure","block "+rv.payload.closureAnchor.blockHeight+" · "+rv.payload.closureAnchor.digest.slice(0,10)+"…"); }
+    const st = await jpost("/handshake/api/proxy", { name:"handshake_status", args:{ access: accept.payload.roleAccess }});
+    sayLocal("control","info","final stage", st.ok ? st.payload.stage : "?");
+    verifyBtn.disabled = anchors.length === 0;
+  } catch (e) {
+    sayLocal("responder","error","visitor flow aborted", String(e.message || e).slice(0,160));
+  } finally {
+    beBtn.disabled = false; runBtn.disabled = false;
+  }
+};
 </script>
 </body>
 </html>`;

@@ -1,7 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { runHandshake, type DemoEvent, type DemoRunResult, type FaultFlags } from "./handshake/orchestrator.js";
+import { runVisitorHost, type VisitorHost } from "./handshake/visitor-host.js";
 import { HANDSHAKE_PAGE } from "./handshake/page.js";
+
+const BROWSER_AGENT_JS = resolve(dirname(fileURLToPath(import.meta.url)), "handshake/browser-agent.js");
 
 /**
  * Standalone Handshake theater — a self-contained demo server that drives two
@@ -28,6 +35,44 @@ const emit = (e: DemoEvent) => {
   const line = `data: ${JSON.stringify(e)}\n\n`;
   for (const res of subscribers) res.write(line);
 };
+
+// --- visitor-as-responder mode: a hosted initiator persona + a proxied tool --
+let visitorHost: VisitorHost | undefined;
+
+const PROXYABLE_TOOLS = new Set([
+  "handshake_accept_invitation",
+  "handshake_status",
+  "consent_sign",
+  "channel_send",
+  "channel_read",
+  "channel_status",
+  "channel_close",
+  "channel_revoke",
+]);
+
+/** Forward a visitor's tool call to the staging endpoint and narrate it. */
+async function proxyCall(name: string, args: Record<string, unknown>): Promise<{ ok: boolean; payload: unknown }> {
+  const res = await fetch(ENDPOINT, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const text = await res.text();
+  const dataLine = text.split("\n").find((l) => l.startsWith("data:"));
+  const body = JSON.parse(dataLine ? dataLine.slice(5) : text);
+  const inner = body.result?.content?.[0]?.text;
+  let payload: unknown = body.result;
+  if (typeof inner === "string") {
+    try {
+      payload = JSON.parse(inner);
+    } catch {
+      // Tool-level failures surface as plain text ("MCP error -32602: …").
+      payload = { error: inner.slice(0, 200) };
+    }
+  }
+  if (body.result?.isError || body.error) return { ok: false, payload: payload ?? body.error };
+  return { ok: true, payload };
+}
 
 // --- run registry (in-memory; replay reads the stored event log) ------------
 interface StoredRun {
@@ -99,7 +144,9 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
 
     if (req.method === "POST" && path === "/handshake/api/verify") {
-      const run = lastRunId ? runs.get(lastRunId) : undefined;
+      const body = (await readJson(req).catch(() => ({}))) as Record<string, unknown>;
+      const wanted = typeof body.runId === "string" ? body.runId : lastRunId;
+      const run = wanted ? runs.get(wanted) : undefined;
       const receipt = run?.result.openingReceipt;
       const anchors = [
         ...((receipt?.anchors as { kind: string; ledgerId: string; blockHeight: string; digest: string }[] | undefined) ?? []),
@@ -131,6 +178,49 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       const run = runs.get(replay[1] as string);
       if (!run) return send(res, 404, { error: "unknown run" });
       return send(res, 200, { events: run.result.events, sessionId: run.result.sessionId });
+    }
+
+    // --- visitor-as-responder routes --------------------------------------
+    if (req.method === "GET" && path === "/handshake/agent.js") {
+      try {
+        const js = await readFile(BROWSER_AGENT_JS);
+        res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" });
+        res.end(js);
+      } catch {
+        send(res, 404, { error: "agent bundle not built — run npm run build" });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && path === "/handshake/api/proxy") {
+      // The visitor's browser never holds credentials either way — this proxy is
+      // transport only; the signature it forwards was made by a key that never
+      // left the tab.
+      const { name, args } = await readJson(req);
+      if (typeof name !== "string" || !PROXYABLE_TOOLS.has(name)) return send(res, 400, { error: "tool_not_proxiable" });
+      const result = await proxyCall(name, (args ?? {}) as Record<string, unknown>);
+      emit({
+        ts: Date.now(),
+        pane: "responder",
+        kind: result.ok ? "action" : "refusal",
+        label: `${name} (visitor)`,
+        detail: result.ok ? "ok" : String((result.payload as { error?: string })?.error ?? "refused"),
+      });
+      return send(res, 200, result);
+    }
+
+    if (req.method === "POST" && path === "/handshake/api/host") {
+      const { step, args } = await readJson(req);
+      if (step === "invite") visitorHost = runVisitorHost(ENDPOINT, emit);
+      if (!visitorHost) return send(res, 400, { error: "no visitor session — invite first" });
+      try {
+        const result = await visitorHost.action(String(step ?? ""), (args ?? {}) as Record<string, unknown>);
+        return send(res, 200, { ok: true, payload: result });
+      } catch (e) {
+        const payload = (e as { payload?: unknown })?.payload;
+        emit({ ts: Date.now(), pane: "initiator", kind: "refusal", label: `host ${step}`, detail: String((payload as { error?: string })?.error ?? (e as Error).message).slice(0, 160) });
+        return send(res, 200, { ok: false, payload: payload ?? { error: String((e as Error).message).slice(0, 160) } });
+      }
     }
 
     send(res, 404, { error: "not_found" });
