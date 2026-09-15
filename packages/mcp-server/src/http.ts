@@ -583,6 +583,7 @@ export async function runHttp(): Promise<void> {
       try {
         await getStandaloneHandshakeHandler()(req, res);
       } catch {
+        console.warn(JSON.stringify({ event: "standalone_handshake_route_failure" }));
         if (!res.headersSent) {
           res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify({ error: "standalone_handshake_unavailable" }));

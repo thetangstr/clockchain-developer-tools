@@ -88,6 +88,8 @@ test("two unconnected agents go from invitation to anchored closure over HTTP", 
     assert.equal(c2.payload.stage, "consented");
     const open = await call("channel_open", { access: invite.payload.roleAccess });
     assert.deepEqual(open.payload.anchors.map((a) => a.kind), ["terms-readiness", "consent", "open"]);
+    const openStatus = await call("handshake_status", { access: accept.payload.roleAccess });
+    assert.equal(openStatus.payload.stage, "open");
 
     // Bounded exchange: an out-of-scope kind is refused before an in-scope one lands.
     const violation = await call("channel_send", { access: accept.payload.roleAccess, kind: "note", body: "off-scope" });
@@ -96,6 +98,14 @@ test("two unconnected agents go from invitation to anchored closure over HTTP", 
     assert.equal(sent.payload.seq, 1);
     const read = await call("channel_read", { access: invite.payload.roleAccess });
     assert.equal(read.payload.messages[0].body, "Ship Tuesdays.");
+    // A second in-scope message, the other direction, lands at seq 2.
+    const second = await call("channel_send", { access: invite.payload.roleAccess, kind: "question", body: "Can you confirm Tuesday?" });
+    assert.equal(second.payload.seq, 2);
+    // Reads are addressed: each role sees only messages sent to it, never its own.
+    const readAfter = await call("channel_read", { access: invite.payload.roleAccess });
+    assert.deepEqual(readAfter.payload.messages.map((m) => [m.fromRole, m.seq]), [["responder", 1]]);
+    const readResponder = await call("channel_read", { access: accept.payload.roleAccess });
+    assert.deepEqual(readResponder.payload.messages.map((m) => [m.fromRole, m.seq]), [["initiator", 2]]);
 
     // Buyer revokes; the channel is dead for both, and the closure is anchored.
     const revoked = await call("channel_revoke", { access: invite.payload.roleAccess });

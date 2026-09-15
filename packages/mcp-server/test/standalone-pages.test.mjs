@@ -1,13 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { INSTALL_TXT, LANDING_HTML, MODULE_COUNT } from "../dist/landing.js";
+import { INSTALL_TXT, LANDING_HTML } from "../dist/landing.js";
 import { buildStandaloneDiscovery } from "../dist/standalone-handshake/public-server.js";
 
 test("the landing page announces Standalone Handshake and stays consistent", () => {
   assert.match(LANDING_HTML, /Standalone Handshake/);
   assert.match(LANDING_HTML, /\/connect\/mcp/);
-  assert.equal(LANDING_HTML.includes(String(MODULE_COUNT)), true);
+  // The module badge renders zero-padded ("08"); a bare "8" could match anywhere.
+  assert.match(LANDING_HTML, /08/);
 });
 
 test("llms.txt carries the agent-readable handshake facts", () => {
