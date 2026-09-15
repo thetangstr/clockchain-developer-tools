@@ -393,3 +393,91 @@ test("status is role-gated: a bad access token is refused", async () => {
   const instance = coordinator();
   await assert.rejects(() => instance.invoke("handshake_status", { access: "sat_" + "Z".repeat(43) }), (error) => error?.name === "StandaloneCoordinatorError");
 });
+
+test("a transient identity-resolution failure restores the invitation and the retry succeeds", async () => {
+  let failIdentity = true;
+  const instance = coordinator(fakeLedger(), {
+    resolveIdentity: async () => {
+      if (failIdentity) throw new Error("sepolia rpc down");
+      return true;
+    },
+  });
+  const terms = { ...validTerms(), identityPolicy: REQUIRED_IDENTITY_POLICY };
+  const readiness = (addr, sig, agentId) => validReadiness({
+    sessionKeyAddress: addr,
+    authoritySignatureHex: sig,
+    identity: { agentId, chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" },
+  });
+  const invite = await instance.invoke("handshake_invite", { ...terms, readiness: readiness(ADDR_INITIATOR, SIG_INITIATOR, "1") });
+  // First accept: the identity RPC dies mid-checklist. The caller sees a retryable
+  // transient error, not a permanently bricked session.
+  await assert.rejects(
+    () => instance.invoke("handshake_accept_invitation", { invitation: invite.invitation, readiness: readiness(ADDR_RESPONDER, SIG_RESPONDER, "2") }),
+    (error) => error?.name === "StandaloneTransientCoordinatorError",
+  );
+  assert.equal(instance.store.getSession(invite.sessionId).stage, "invited");
+  // The same invitation is claimable again and the full flow completes.
+  failIdentity = false;
+  const accept = await instance.invoke("handshake_accept_invitation", { invitation: invite.invitation, readiness: readiness(ADDR_RESPONDER, SIG_RESPONDER, "2") });
+  assert.equal(accept.stage, "ready");
+  assert.equal(accept.checklist.passed, true);
+});
+
+test("a tampered or foreign invitation is refused", async () => {
+  const instance = coordinator();
+  const invite = (sid) => instance.invoke("handshake_invite", {
+    ...validTerms(),
+    readiness: validReadiness({ sessionKeyAddress: ADDR_INITIATOR, authoritySignatureHex: SIG_INITIATOR }),
+  });
+  const a = await invite();
+  const b = await invite();
+  const decoded = JSON.parse(Buffer.from(a.invitation, "base64url").toString("utf8"));
+  // Genuine unclaimed secret for session A, but the embedded sessionId points at B.
+  const tampered = Buffer.from(JSON.stringify({ ...decoded, sessionId: b.sessionId })).toString("base64url");
+  await assert.rejects(
+    () => instance.invoke("handshake_accept_invitation", { invitation: tampered, readiness: validReadiness({ sessionKeyAddress: ADDR_RESPONDER, authoritySignatureHex: SIG_RESPONDER }) }),
+    StandaloneCoordinatorErrorNamed(),
+  );
+  // A well-formed envelope with a fabricated secret is refused the same way.
+  const forged = Buffer.from(JSON.stringify({ v: 1, sessionId: b.sessionId, secret: "not-a-real-secret" })).toString("base64url");
+  await assert.rejects(
+    () => instance.invoke("handshake_accept_invitation", { invitation: forged, readiness: validReadiness({ sessionKeyAddress: ADDR_RESPONDER, authoritySignatureHex: SIG_RESPONDER }) }),
+    StandaloneCoordinatorErrorNamed(),
+  );
+  // The untampered invitation still claims cleanly.
+  const accept = await instance.invoke("handshake_accept_invitation", { invitation: a.invitation, readiness: validReadiness({ sessionKeyAddress: ADDR_RESPONDER, authoritySignatureHex: SIG_RESPONDER }) });
+  assert.equal(accept.sessionId, a.sessionId);
+});
+
+test("an access token only ever authenticates its own session and role", async () => {
+  const instance = coordinator();
+  const a = await openSession(instance);
+  const b = await openSession(instance);
+  const status = await instance.invoke("handshake_status", { access: a.invite.initiatorAccess });
+  assert.equal(status.sessionId, a.invite.sessionId);
+  assert.notEqual(status.sessionId, b.invite.sessionId);
+  // The token derives the session — A's initiator token can never act on B.
+  const statusB = await instance.invoke("handshake_status", { access: b.accept.responderAccess });
+  assert.equal(statusB.sessionId, b.invite.sessionId);
+});
+
+test("an unparseable open-anchor block time fails transiently and the retry succeeds", async () => {
+  const ledger = fakeLedger();
+  let blockTime = "not-a-timestamp";
+  const timed = { ...ledger, getBlock: async (h) => ({ blockHeight: String(h), blockTime }) };
+  const instance = coordinator(timed);
+  const session = await openSession(instance);
+  await instance.invoke("consent_sign", { access: session.invite.initiatorAccess, signatureHex: SIG_INITIATOR });
+  await instance.invoke("consent_sign", { access: session.accept.responderAccess, signatureHex: SIG_RESPONDER });
+  await assert.rejects(
+    () => instance.invoke("channel_open", { access: session.invite.initiatorAccess }),
+    (error) => error?.name === "StandaloneTransientCoordinatorError",
+  );
+  // The session is still consented — the anchors were written but the channel never opened.
+  const status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
+  assert.equal(status.stage, "consented");
+  blockTime = FAKE_BLOCK_TIME;
+  const receipt = await instance.invoke("channel_open", { access: session.invite.initiatorAccess });
+  assert.equal(receipt.openedAtMs, String(Date.parse(FAKE_BLOCK_TIME)));
+  assert.equal(receipt.anchors.length, 3);
+});

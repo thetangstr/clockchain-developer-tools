@@ -14,12 +14,23 @@ function firstHeader(value: string | string[] | undefined): string {
   return (Array.isArray(value) ? value[0] : value) ?? "";
 }
 
+// A listener bound to `::` (Node's default for listen(port)) reports IPv4 peers
+// in mapped form ("::ffff:172.30.0.3"), which never string-equals the configured
+// proxy address — collapsing every client into one rate-limit bucket. Normalize
+// both sides before comparing.
+function normalizePeerAddress(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(value.trim());
+  return mapped ? mapped[1] : value;
+}
+
 export function v2PublicClientIp(headers: IncomingHttpHeaders, remoteAddress: string | undefined, trustedProxy?: string): string {
-  if (trustedProxy && remoteAddress === trustedProxy) {
+  const peer = normalizePeerAddress(remoteAddress);
+  if (trustedProxy && peer === normalizePeerAddress(trustedProxy)) {
     const forwarded = firstHeader(headers["x-forwarded-for"]).split(",")[0]?.trim();
     if (forwarded) return forwarded;
   }
-  return remoteAddress ?? "unknown";
+  return peer ?? "unknown";
 }
 
 function limiter(limit: number, windowMs: number, now: () => number) {

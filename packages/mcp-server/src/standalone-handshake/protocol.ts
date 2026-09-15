@@ -8,10 +8,13 @@ export const DATA_HANDLING_CLASSES = ["public", "confidential", "restricted"] as
 
 type JsonRecord = Record<string, any>;
 
-const ADDRESS = /^0x[0-9a-f]{40}$/;
+// ADDRESS and SIGNATURE accept mixed-case hex (EIP-55 checksummed addresses,
+// uppercase signatures). Values are stored verbatim — the authority record must
+// byte-match what the signer signed — and every comparison lowercases both sides.
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const DIGEST = /^[0-9a-f]{64}$/;
-const SIGNATURE = /^0x[0-9a-f]{130}$/;
+const SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PRINTABLE = /^[ -~]+$/;
 const IDENTITY_MODES = ["required_fresh", "required_existing_or_fresh", "not_required"];
@@ -53,13 +56,22 @@ function decimalWithin(value: unknown, min: bigint, max: bigint): value is strin
   return typeof value === "string" && DECIMAL.test(value) && BigInt(value) >= min && BigInt(value) <= max;
 }
 
+// The pinned registry is matched case-insensitively on input but always stored in
+// its canonical lowercase form so digests are stable regardless of checksum casing.
+function canonicalRegistryAddress(value: unknown): string | undefined {
+  return typeof value === "string" && value.toLowerCase() === STANDALONE_REGISTRY_ADDRESS ? STANDALONE_REGISTRY_ADDRESS : undefined;
+}
+
 function identityPolicy(value: unknown): Readonly<JsonRecord> {
   const item = exact(value, ["erc8004", "chainId", "registryAddress"]);
   if (!IDENTITY_MODES.includes(item.erc8004)) invalid();
   if (item.erc8004 === "not_required") {
     if (item.chainId !== null || item.registryAddress !== null) invalid();
-  } else if (item.chainId !== STANDALONE_CHAIN_ID || item.registryAddress !== STANDALONE_REGISTRY_ADDRESS) invalid();
-  return Object.freeze(item);
+    return Object.freeze(item);
+  }
+  const registryAddress = canonicalRegistryAddress(item.registryAddress);
+  if (item.chainId !== STANDALONE_CHAIN_ID || registryAddress === undefined) invalid();
+  return Object.freeze({ erc8004: item.erc8004, chainId: item.chainId, registryAddress });
 }
 
 export function normalizeStandaloneTerms(value: unknown): Readonly<JsonRecord> {
@@ -81,8 +93,9 @@ export function normalizeStandaloneTerms(value: unknown): Readonly<JsonRecord> {
 
 function registration(value: unknown): Readonly<JsonRecord> {
   const item = exact(value, ["agentId", "chainId", "registryAddress"]);
-  if (typeof item.agentId !== "string" || !DECIMAL.test(item.agentId) || item.chainId !== STANDALONE_CHAIN_ID || item.registryAddress !== STANDALONE_REGISTRY_ADDRESS) invalid();
-  return Object.freeze(item);
+  const registryAddress = canonicalRegistryAddress(item.registryAddress);
+  if (typeof item.agentId !== "string" || !DECIMAL.test(item.agentId) || item.chainId !== STANDALONE_CHAIN_ID || registryAddress === undefined) invalid();
+  return Object.freeze({ agentId: item.agentId, chainId: item.chainId, registryAddress });
 }
 
 export function normalizeStandaloneReadiness(value: unknown, policyMode: string): Readonly<JsonRecord> {
@@ -95,10 +108,12 @@ export function normalizeStandaloneReadiness(value: unknown, policyMode: string)
   const manifest = exact(item.capabilityManifest, ["dataHandlingClass", "purpose"]);
   if (!DATA_HANDLING_CLASSES.includes(manifest.dataHandlingClass) || !printable(manifest.purpose, 256)) invalid();
   return Object.freeze({
-    sessionKeyAddress: item.sessionKeyAddress,
+    // Hex fields normalize to lowercase so canonical digests and the exact-match
+    // against the recovered EIP-191 address never depend on casing.
+    sessionKeyAddress: item.sessionKeyAddress.toLowerCase(),
     identity,
     authorityStatement: Object.freeze({ accountableParty: authority.accountableParty, statement: authority.statement }),
-    authoritySignatureHex: item.authoritySignatureHex,
+    authoritySignatureHex: item.authoritySignatureHex.toLowerCase(),
     capabilityManifest: Object.freeze({ dataHandlingClass: manifest.dataHandlingClass, purpose: manifest.purpose }),
   });
 }

@@ -26,11 +26,11 @@ export function buildStandaloneInstructions(): string {
   ].join("\n");
 }
 
-export function buildStandaloneDiscovery(): Record<string, unknown> {
+export function buildStandaloneDiscovery(endpoint: string = STANDALONE_ENDPOINT): Record<string, unknown> {
   return {
     name: "clockchain-standalone-handshake",
     protocol: STANDALONE_HANDSHAKE_PROTOCOL,
-    endpoint: STANDALONE_ENDPOINT,
+    endpoint,
     tools: [...STANDALONE_TOOL_NAMES],
     localSigningRequired: true,
     externalBusinessActionsAllowed: false,
@@ -41,17 +41,36 @@ function firstHeader(value: string | string[] | undefined): string {
   return (Array.isArray(value) ? value[0] : value) ?? "";
 }
 
+// A listener bound to `::` (Node's default for listen(port)) reports IPv4 peers
+// in mapped form ("::ffff:172.30.0.3"), which never string-equals the configured
+// proxy address — collapsing every client into one rate-limit bucket. Normalize
+// both sides before comparing.
+function normalizePeerAddress(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(value.trim());
+  return mapped ? mapped[1] : value;
+}
+
 export function standaloneClientIp(headers: IncomingHttpHeaders, remoteAddress: string | undefined, trustedProxy?: string): string {
-  if (trustedProxy && remoteAddress === trustedProxy) {
-    return firstHeader(headers["x-forwarded-for"]).split(",")[0]?.trim() || remoteAddress || "unknown";
+  const peer = normalizePeerAddress(remoteAddress);
+  if (trustedProxy && peer === normalizePeerAddress(trustedProxy)) {
+    return firstHeader(headers["x-forwarded-for"]).split(",")[0]?.trim() || peer || "unknown";
   }
-  return remoteAddress ?? "unknown";
+  return peer ?? "unknown";
 }
 
 function limiter(limit: number, windowMs: number, now: () => number) {
   const hits = new Map<string, { count: number; resetAt: number }>();
+  // Bounded: stale windows are swept once per window and whenever the map grows
+  // past this cap, so distinct-key churn cannot grow memory without bound.
+  const MAX_KEYS = 50_000;
+  let nextSweepAt = 0;
   return (key: string): boolean => {
     const current = now();
+    if (current >= nextSweepAt || hits.size > MAX_KEYS) {
+      for (const [k, v] of hits) if (current >= v.resetAt) hits.delete(k);
+      nextSweepAt = current + windowMs;
+    }
     const prior = hits.get(key);
     if (!prior || current >= prior.resetAt) {
       hits.set(key, { count: 1, resetAt: current + windowMs });

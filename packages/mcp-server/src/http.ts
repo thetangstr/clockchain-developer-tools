@@ -571,11 +571,19 @@ export async function runHttp(): Promise<void> {
     }
 
     if (req.method === "GET" && pathOf(req.url) === "/.well-known/standalone-handshake.json") {
+      // The advertised endpoint must match the address the caller actually used:
+      // behind a prefixed mount (e.g. Caddy `handle_path /staging/*`) the app never
+      // sees the prefix, so it arrives as X-Forwarded-Prefix. An explicit env
+      // override wins; absent both, the public production endpoint is the default.
+      const configured = (process.env.STANDALONE_PUBLIC_ENDPOINT ?? "").trim();
+      const prefix = firstHeader(req.headers["x-forwarded-prefix"]).trim().replace(/\/+$/, "");
+      const host = (firstHeader(req.headers["x-forwarded-host"]) || firstHeader(req.headers.host)).trim();
+      const endpoint = configured || (host ? `https://${host}${prefix}/connect/mcp` : undefined);
       res.writeHead(200, {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "public, max-age=300",
       });
-      res.end(JSON.stringify(buildStandaloneDiscovery(), null, 2));
+      res.end(JSON.stringify(buildStandaloneDiscovery(endpoint), null, 2));
       return;
     }
 

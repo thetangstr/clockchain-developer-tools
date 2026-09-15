@@ -7,6 +7,7 @@ import {
   buildStandaloneDiscovery,
   buildStandaloneInstructions,
   createStandaloneHttpHandler,
+  standaloneClientIp,
 } from "../dist/standalone-handshake/public-server.js";
 import { buildStandalonePublicServer } from "../dist/standalone-handshake/public-server.js";
 import { StandaloneAdmissionError } from "../dist/standalone-handshake/session-store.js";
@@ -40,6 +41,83 @@ test("discovery manifest names the endpoint and every tool", () => {
   assert.equal(discovery.name, "clockchain-standalone-handshake");
   assert.equal(discovery.endpoint, "https://mcp.clockchain.network/connect/mcp");
   assert.equal(discovery.tools.length, STANDALONE_TOOL_NAMES.length);
+});
+
+test("standaloneClientIp honors XFF through a trusted proxy in IPv6-mapped form", () => {
+  // The production listener binds ::, so an IPv4 Caddy peer reports as ::ffff:172.30.0.3.
+  assert.equal(standaloneClientIp({ "x-forwarded-for": "203.0.113.9" }, "::ffff:172.30.0.3", "172.30.0.3"), "203.0.113.9");
+  assert.equal(standaloneClientIp({ "x-forwarded-for": "203.0.113.9" }, "172.30.0.3", "::ffff:172.30.0.3"), "203.0.113.9");
+  // Without a trusted proxy match, a spoofed XFF is ignored entirely.
+  assert.equal(standaloneClientIp({ "x-forwarded-for": "203.0.113.9" }, "10.9.9.9", "172.30.0.3"), "10.9.9.9");
+  assert.equal(standaloneClientIp({ "x-forwarded-for": "203.0.113.9" }, "10.9.9.9", undefined), "10.9.9.9");
+  assert.equal(standaloneClientIp({}, "10.9.9.9", "172.30.0.3"), "10.9.9.9");
+});
+
+test("rate limits key per forwarded client IP and windows reset", async () => {
+  let t = 1_750_000_000_000;
+  const handler = createStandaloneHttpHandler({
+    invoke: async () => ({ ok: true, initiatorAccess: `sat_${"a".repeat(28)}` }),
+    trustedProxy: "127.0.0.1",
+    invitesPerHour: 1,
+    callsPerMinute: 4,
+    now: () => t,
+  });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
+  try {
+    const rpc = async (method, params = {}, ip = "198.51.100.10") => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT, "x-forwarded-for": ip },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      const text = await response.text();
+      const data = text.split("\n").find((line) => line.startsWith("data:"));
+      return { status: response.status, body: JSON.parse(data ? data.slice(5) : text) };
+    };
+    const inviteArgs = {
+      reference: "r",
+      purpose: "p",
+      channelLimits: { durationSeconds: "600", messageKinds: ["note"], maxMessageBytes: "4096" },
+      identityPolicy: { erc8004: "not_required", chainId: null, registryAddress: null },
+      readiness: {
+        sessionKeyAddress: `0x${"1".repeat(40)}`,
+        identity: null,
+        authorityStatement: { accountableParty: "party", statement: "statement" },
+        authoritySignatureHex: `0x${"2".repeat(130)}`,
+        capabilityManifest: { dataHandlingClass: "public", purpose: "test" },
+      },
+    };
+    const invite = (ip) => rpc("tools/call", { name: "handshake_invite", arguments: inviteArgs }, ip);
+
+    // Client A's first invite succeeds; its second is invite-limited.
+    const a1 = await invite("198.51.100.10");
+    assert.equal(a1.status, 200);
+    assert.equal(a1.body.result.isError, undefined);
+    const a2 = await invite("198.51.100.10");
+    assert.equal(a2.body.result.isError, true);
+    // A different client IP is not starved by A's budget.
+    const b1 = await invite("198.51.100.11");
+    assert.equal(b1.status, 200);
+    assert.equal(b1.body.result.isError, undefined);
+    // Each IP also has its own call budget: A has now made 2 calls of 4.
+    const a3 = await invite("198.51.100.10");
+    assert.equal(a3.status, 200);
+    const a4 = await invite("198.51.100.10");
+    assert.equal(a4.status, 200);
+    const a5 = await invite("198.51.100.10");
+    assert.equal(a5.status, 429);
+    // B's call budget is unaffected by A's exhaustion.
+    const b2 = await invite("198.51.100.11");
+    assert.equal(b2.status, 200);
+    // After the window, the stale bucket is swept and A is admitted again.
+    t += 61_000;
+    const a6 = await invite("198.51.100.10");
+    assert.equal(a6.status, 200);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("the HTTP handler serves /connect/mcp and rate-limits invites per IP", async () => {

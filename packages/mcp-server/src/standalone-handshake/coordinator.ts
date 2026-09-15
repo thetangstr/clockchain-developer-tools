@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
+import { ClockchainClock } from "@clockchain/clock-sdk";
 
 import { canonicalBytes } from "../handshake/protocol.js";
 import { recoverEip191Address, resolveOwnedAgentRegistration } from "../handshake/evm.js";
@@ -119,23 +120,40 @@ export function createStandaloneCoordinator(options: {
         }
         if (decoded?.v !== 1 || typeof decoded.sessionId !== "string" || typeof decoded.secret !== "string") throw new StandaloneCoordinatorError();
         const sessionId = store.claimInvitation(decoded.secret);
-        if (sessionId === undefined || sessionId !== decoded.sessionId) throw new StandaloneCoordinatorError();
+        if (sessionId === undefined || sessionId !== decoded.sessionId) {
+          // A claimed-but-mismatched envelope restores the claim so that tampering
+          // with the embedded sessionId cannot burn a genuine invitation.
+          if (sessionId !== undefined) store.putInvitation({ secret: decoded.secret, sessionId });
+          throw new StandaloneCoordinatorError();
+        }
         const session = store.requireSession(sessionId);
         if (session.stage !== "invited") throw new StandaloneCoordinatorError();
         const responderReadiness = normalizeStandaloneReadiness(args.readiness, session.terms.identityPolicy.erc8004);
         store.setResponderReadiness(sessionId, responderReadiness);
         store.setStage(sessionId, "readiness_pending");
-        const checklist = await evaluateStandaloneReadiness({
-          sessionId,
-          terms: session.terms,
-          termsDigest: session.termsDigest,
-          initiator: session.initiatorReadiness,
-          responder: responderReadiness,
-          resolveIdentity: requiredIdentity(session) ? resolveIdentity : async () => true,
-          recoverAddress: recover ?? (async () => {
-            throw new StandaloneCoordinatorError("Signature recovery is not configured.");
-          }),
-        });
+        let checklist;
+        try {
+          checklist = await evaluateStandaloneReadiness({
+            sessionId,
+            terms: session.terms,
+            termsDigest: session.termsDigest,
+            initiator: session.initiatorReadiness,
+            responder: responderReadiness,
+            resolveIdentity: requiredIdentity(session) ? resolveIdentity : async () => true,
+            recoverAddress: recover ?? (async () => {
+              throw new StandaloneCoordinatorError("Signature recovery is not configured.");
+            }),
+          });
+        } catch (error) {
+          // Evaluation died mid-flight (e.g. the identity-resolution RPC dropped) — never
+          // a completed checklist. Roll the session back to invited and restore the
+          // invitation so the responder can retry the identical claim instead of
+          // bricking the session in readiness_pending forever.
+          store.resetToInvited(sessionId);
+          store.putInvitation({ secret: decoded.secret, sessionId });
+          if (error instanceof StandaloneCoordinatorError || error instanceof StandaloneTransientCoordinatorError) throw error;
+          throw new StandaloneTransientCoordinatorError();
+        }
         store.setChecklist(sessionId, checklist);
         store.setStage(sessionId, checklist.passed ? "ready" : "ready_failed");
         const responderAccess = `sat_${randomBytes(32).toString("base64url")}`;
@@ -205,8 +223,12 @@ export function createStandaloneCoordinator(options: {
         // Anchor before mutate: every transition is witnessed before the session becomes an open, usable channel,
         // so a transient anchor failure leaves the stage at "consented" and channel_open can simply be retried.
         // The session's clock starts at the ledger's consensus time (the open anchor's block time), not the server clock.
+        // An unparseable block time is a transient upstream defect: fail rather than silently
+        // restarting the session clock on the server wall clock. The anchors already exist, so a
+        // retry re-anchors the identical records and re-reads the block.
         const anchorOpenMs = Date.parse(anchors[anchors.length - 1].blockTimeRaw);
-        const openedAtMs = Number.isNaN(anchorOpenMs) ? now() : anchorOpenMs;
+        if (Number.isNaN(anchorOpenMs)) throw new StandaloneTransientCoordinatorError();
+        const openedAtMs = anchorOpenMs;
         const expiresAtMs = openedAtMs + Number(session.terms.channelLimits.durationSeconds) * 1000;
         store.setStage(session.sessionId, "open");
         store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
@@ -280,9 +302,25 @@ export function createStandaloneCoordinator(options: {
 export function createRuntimeStandaloneCoordinator(env: Record<string, string | undefined> = process.env) {
   const rpcUrl = env.SEPOLIA_RPC_URL ?? "";
   const client = new ClockchainClient(readConfigFromEnv(env));
+  // All protocol time judgments run on Clockchain consensus time: a disciplined
+  // local clock synced against the ledger's timestamp endpoint, never the server
+  // wall clock. Until the first sync succeeds (and if it never does), calls that
+  // need time fail closed with a retryable transient error; housekeeping falls
+  // back to the wall clock inside the store.
+  const clock = new ClockchainClock(client, {
+    autoResyncMs: Number(env.STANDALONE_CLOCK_RESYNC_MS ?? "60000"),
+  });
+  void clock.sync().catch(() => undefined);
   return createStandaloneCoordinator({
     client,
     rpcUrl,
+    now: () => {
+      try {
+        return clock.now().epochMs;
+      } catch {
+        throw new StandaloneTransientCoordinatorError();
+      }
+    },
     recoverEip191Address: ({ bytes, signatureHex }) => recoverEip191Address({ bytes, signatureHex, rpcUrl }),
     resolveIdentity: async (identity, sessionKeyAddress) => {
       if (!identity) return false;

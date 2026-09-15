@@ -94,6 +94,9 @@ test("two unconnected agents go from invitation to anchored closure over HTTP", 
     // Bounded exchange: an out-of-scope kind is refused before an in-scope one lands.
     const violation = await call("channel_send", { access: accept.payload.roleAccess, kind: "note", body: "off-scope" });
     assert.match(violation.payload.error, /SCOPE_VIOLATION/);
+    // A non-string body reaches the admission check and surfaces the spec'd MALFORMED code.
+    const malformed = await call("channel_send", { access: accept.payload.roleAccess, kind: "proposal", body: 42 });
+    assert.match(malformed.payload.error, /MALFORMED/);
     const sent = await call("channel_send", { access: accept.payload.roleAccess, kind: "proposal", body: "Ship Tuesdays." });
     assert.equal(sent.payload.seq, 1);
     const read = await call("channel_read", { access: invite.payload.roleAccess });

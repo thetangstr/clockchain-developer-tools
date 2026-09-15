@@ -21,4 +21,8 @@ test("llms.txt carries the agent-readable handshake facts", () => {
 test("the discovery manifest matches what the page promises", () => {
   const discovery = buildStandaloneDiscovery();
   assert.match(LANDING_HTML, new RegExp(discovery.endpoint.replace(/\//g, "\\/")));
+  // A path-prefixed deployment passes its own endpoint through verbatim — the
+  // manifest must advertise where this instance actually answers.
+  const staged = buildStandaloneDiscovery("https://mcp.clockchain.network/staging/connect/mcp");
+  assert.equal(staged.endpoint, "https://mcp.clockchain.network/staging/connect/mcp");
 });

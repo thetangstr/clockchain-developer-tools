@@ -242,3 +242,62 @@ test("invitation claims are single-use and access tokens authenticate roles", ()
   assert.equal(store.authenticate(SESSION, "sat_" + "A".repeat(43)), "initiator");
   assert.equal(store.authenticate(SESSION, "sat_" + "B".repeat(43)), undefined);
 });
+
+test("an unclaimed invitation expires and cannot be claimed after its TTL", () => {
+  let nowMs = 1_750_000_000_000;
+  const store = createStandaloneSessionStore({ now: () => nowMs, invitationTtlMs: 1_000 });
+  store.createSession({ sessionId: SESSION, terms: validTerms(), termsDigest: "a".repeat(64), initiatorReadiness: validReadiness() });
+  store.putInvitation({ secret: "short-lived-secret", sessionId: SESSION });
+  assert.equal(store.claimInvitation("short-lived-secret"), SESSION);
+  store.putInvitation({ secret: "another-secret", sessionId: SESSION });
+  nowMs += 1_001;
+  assert.equal(store.claimInvitation("another-secret"), undefined);
+});
+
+test("idle non-terminal sessions are evicted while open and terminal sessions are not", () => {
+  let nowMs = 1_750_000_000_000;
+  const store = createStandaloneSessionStore({ now: () => nowMs, sessionTtlMs: 5_000 });
+  const terms = { ...validTerms() };
+  const readiness = validReadiness();
+  store.createSession({ sessionId: "idle", terms, termsDigest: "a".repeat(64), initiatorReadiness: readiness });
+  store.createSession({ sessionId: "active", terms, termsDigest: "a".repeat(64), initiatorReadiness: readiness });
+  nowMs += 6_000;
+  // A touch inside the TTL keeps the session alive.
+  store.getSession("active");
+  nowMs += 4_000;
+  // Trigger the sweep (runs on createSession).
+  store.createSession({ sessionId: "new", terms, termsDigest: "a".repeat(64), initiatorReadiness: readiness });
+  assert.equal(store.getSession("idle"), undefined);
+  assert.notEqual(store.getSession("active"), undefined);
+});
+
+test("housekeeping degrades to the wall clock when the protocol clock throws", () => {
+  const store = createStandaloneSessionStore({ now: () => { throw new Error("consensus clock unsynced"); }, sessionTtlMs: 1_000 });
+  store.createSession({ sessionId: SESSION, terms: validTerms(), termsDigest: "a".repeat(64), initiatorReadiness: validReadiness() });
+  assert.notEqual(store.getSession(SESSION), undefined);
+});
+
+test("a session admits at most the configured message cap, then refuses CHANNEL_FULL", () => {
+  const store = createStandaloneSessionStore({ now: () => 1_750_000_000_000, maxMessagesPerSession: 2 });
+  store.createSession({ sessionId: SESSION, terms: validTerms(), termsDigest: "a".repeat(64), initiatorReadiness: validReadiness() });
+  for (const stage of ["readiness_pending", "ready", "consent_pending", "consented", "open"]) store.setStage(SESSION, stage);
+  store.openChannel(SESSION, { openedAtMs: 1_750_000_000_000, expiresAtMs: 1_750_003_600_000 });
+  store.admitMessage(SESSION, "initiator", "question", "one");
+  store.admitMessage(SESSION, "responder", "proposal", "two");
+  try { store.admitMessage(SESSION, "initiator", "question", "three"); assert.fail("expected throw"); }
+  catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "CHANNEL_FULL"); }
+});
+
+test("resetToInvited rolls back only a pre-checklist readiness_pending session", () => {
+  const { store } = storeWithSession();
+  store.setStage(SESSION, "readiness_pending");
+  store.resetToInvited(SESSION);
+  assert.equal(store.getSession(SESSION).stage, "invited");
+  assert.equal(store.getSession(SESSION).responderReadiness, undefined);
+  // Once a checklist exists the session can never go back.
+  store.setStage(SESSION, "readiness_pending");
+  store.setChecklist(SESSION, { passed: false, checks: [], checklistDigest: "b".repeat(64) });
+  store.setStage(SESSION, "ready_failed");
+  assert.throws(() => store.resetToInvited(SESSION), StandaloneIllegalTransitionError);
+  assert.equal(store.getSession(SESSION).stage, "ready_failed");
+});

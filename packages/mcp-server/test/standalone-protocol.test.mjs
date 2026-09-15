@@ -52,6 +52,19 @@ test("readiness validates address, signature shape, class, and identity-vs-polic
   assert.throws(() => normalizeStandaloneReadiness(validReadiness(), "required_fresh"), StandaloneHandshakeValidationError);
 });
 
+test("readiness accepts checksummed mixed-case hex and normalizes it to canonical lowercase", () => {
+  const mixed = normalizeStandaloneReadiness(validReadiness({
+    sessionKeyAddress: "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01",
+    authoritySignatureHex: "0x" + "Ab".repeat(64) + "1B",
+    identity: null,
+  }), "not_required");
+  assert.equal(mixed.sessionKeyAddress, "0xabcdef0123456789abcdef0123456789abcdef01");
+  assert.equal(mixed.authoritySignatureHex, "0x" + "ab".repeat(64) + "1b");
+  // Non-hex garbage and bad lengths still refuse.
+  assert.throws(() => normalizeStandaloneReadiness(validReadiness({ sessionKeyAddress: "0xZZ" + "1".repeat(38) }), "not_required"), StandaloneHandshakeValidationError);
+  assert.throws(() => normalizeStandaloneReadiness(validReadiness({ authoritySignatureHex: "0x" + "ab".repeat(64) }), "not_required"), StandaloneHandshakeValidationError);
+});
+
 test("authority record and consent record have stable canonical digests", () => {
   const readiness = normalizeStandaloneReadiness(validReadiness(), "not_required");
   const authority = standaloneAuthorityRecord(readiness);
