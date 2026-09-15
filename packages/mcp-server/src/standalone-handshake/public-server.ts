@@ -59,7 +59,7 @@ export function standaloneClientIp(headers: IncomingHttpHeaders, remoteAddress: 
   return peer ?? "unknown";
 }
 
-function limiter(limit: number, windowMs: number, now: () => number) {
+export function limiter(limit: number, windowMs: number, now: () => number) {
   const hits = new Map<string, { count: number; resetAt: number }>();
   // Bounded: stale windows are swept once per window and whenever the map grows
   // past this cap, so distinct-key churn cannot grow memory without bound.

@@ -6,6 +6,11 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./standalone-handshake/*.js": "./dist/standalone-handshake/*.js",
+    "./handshake/*.js": "./dist/handshake/*.js"
+  },
   "bin": {
     "clockchain-mcp": "dist/stdio.js"
   },

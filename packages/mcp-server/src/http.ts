@@ -6,7 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { type ClockchainConfig } from "@clockchain/core";
+import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
 import { CLOCK_TOOLS_HTML, CLOCK_TOOLS_TXT } from "./clock-tools-page.js";
@@ -45,7 +45,7 @@ import {
   readV2ReleasePin,
 } from "./agent-handshake/v2/instructions.js";
 import { createRuntimeV2Coordinator } from "./agent-handshake/v2/coordinator.js";
-import { buildStandaloneDiscovery, createStandaloneHttpHandler } from "./standalone-handshake/public-server.js";
+import { buildStandaloneDiscovery, createStandaloneHttpHandler, limiter as keyedWindowLimiter } from "./standalone-handshake/public-server.js";
 import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 
 /**
@@ -469,6 +469,13 @@ export async function runHttp(): Promise<void> {
     return publicHandshakeHandler;
   };
 
+  // Keyless chain-verify route state: a shared client for the public
+  // /connect/verify route plus a per-IP limiter and an immutable-block cache.
+  let chainVerifyClient: ClockchainClient | undefined;
+  const getChainVerifyClient = () => (chainVerifyClient ??= new ClockchainClient(readConfigFromEnv(process.env)));
+  const chainVerifyCache = new Map<string, unknown>();
+  const allowChainVerify = keyedWindowLimiter(Number(process.env.STANDALONE_HANDSHAKE_VERIFY_PER_MINUTE ?? "60"), 60_000, Date.now);
+
   let standaloneHandshakeHandler: ReturnType<typeof createStandaloneHttpHandler> | undefined;
   let standaloneHandshakeCoordinator: ReturnType<typeof createRuntimeStandaloneCoordinator> | undefined;
   const getStandaloneHandshakeHandler = () => {
@@ -584,6 +591,44 @@ export async function runHttp(): Promise<void> {
         "cache-control": "public, max-age=300",
       });
       res.end(JSON.stringify(buildStandaloneDiscovery(endpoint), null, 2));
+      return;
+    }
+
+    if (req.method === "GET" && pathOf(req.url) === "/connect/verify") {
+      // Keyless receipt verification for anyone: the check reads the immutable
+      // on-chain block upstream (no API key on that read), so a counterparty —
+      // or a curious browser — can confirm a handshake anchor without an
+      // account. Public like the handshake endpoint; per-IP limited and briefly
+      // cached (an anchored block is immutable).
+      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const ledgerId = (q.get("ledgerId") ?? "").trim();
+      const blockHeight = (q.get("blockHeight") ?? "").trim();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ledgerId) || !/^\d{1,10}$/.test(blockHeight)) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_request" }));
+        return;
+      }
+      const ip = clientIp(req.headers, req.socket.remoteAddress);
+      if (!allowChainVerify(`chainverify:${ip}`)) {
+        res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "rate_limited" }));
+        return;
+      }
+      const cacheKey = `${blockHeight}:${ledgerId.toLowerCase()}`;
+      const cached = chainVerifyCache.get(cacheKey);
+      try {
+        const result = cached ?? (await getChainVerifyClient().verifyOnChain(ledgerId, blockHeight));
+        // Only confirmed positives are immutable; a "none" (pending anchor) must be re-checkable.
+        if (!cached && (result as { verifiedAgainst?: string }).verifiedAgainst === "on-chain block") {
+          chainVerifyCache.set(cacheKey, result);
+          if (chainVerifyCache.size > 10_000) chainVerifyCache.delete(chainVerifyCache.keys().next().value as string);
+        }
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=60" });
+        res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "verification_unavailable" }));
+      }
       return;
     }
 
