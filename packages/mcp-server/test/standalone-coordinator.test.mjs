@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordinator.js";
 import { normalizeStandaloneClosure, standaloneCanonicalRecord } from "../dist/standalone-handshake/protocol.js";
+import { StandaloneAdmissionError } from "../dist/standalone-handshake/session-store.js";
 import { validTerms, validReadiness } from "./helpers/standalone-fixtures.mjs";
 
 const SIG_INITIATOR = "0x" + "11".repeat(64) + "1b";
@@ -250,6 +251,10 @@ test("closure anchors before mutating: a transient failure leaves the channel op
   );
   let status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
   assert.equal(status.stage, "open");
+  // Pin-survival semantics: the failed anchor leaves the pin in place for the retry.
+  const pinnedAfterFailure = instance.store.pendingClosure(session.invite.sessionId);
+  assert.equal(pinnedAfterFailure?.outcome, "closed");
+  assert.equal(pinnedAfterFailure?.byRole, "initiator");
   ledger.repair();
   instance.advance(5_000); // a re-dated closure record would digest differently
   const closed = await instance.invoke("channel_close", { access: session.invite.initiatorAccess });
@@ -270,6 +275,71 @@ test("closure anchors before mutating: a transient failure leaves the channel op
   assert.equal(closed.closureAnchor.digest, pinnedDigest);
   status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
   assert.equal(status.stage, "closed");
+  // The pin clears only after the store mutation succeeds, as the last coordinator step.
+  assert.equal(instance.store.pendingClosure(session.invite.sessionId), undefined);
+});
+
+test("an expired channel refuses closure with EXPIRED before any ledger write", async () => {
+  let closureLogs = 0;
+  const ledger = fakeLedger();
+  const counting = { ...ledger, log: async (args) => { if (String(args.assetReferenceId).endsWith(":closure")) closureLogs += 1; return ledger.log(args); } };
+  const instance = coordinator(counting);
+  const session = await openSession(instance);
+  const receipt = await consentAndOpen(instance, session);
+  instance.advance(Number(receipt.expiresAtMs) + 1 - instance.peek()); // past the channel clock
+  for (const name of ["channel_close", "channel_revoke"]) {
+    let error = null;
+    try { await instance.invoke(name, { access: session.invite.initiatorAccess }); } catch (e) { error = e; }
+    assert.equal(error instanceof StandaloneAdmissionError && error.reason, "EXPIRED");
+  }
+  assert.equal(closureLogs, 0);
+  const reference = `standalone-handshake-v1:${session.invite.sessionId}:closure`;
+  assert.equal((await ledger.searchAsset(reference)).length, 0);
+  const status = await instance.invoke("handshake_status", { access: session.invite.initiatorAccess });
+  assert.equal(status.stage, "expired");
+});
+
+test("a different outcome while a closure pin exists refuses with CLOSURE_PENDING and the ledger is untouched", async () => {
+  const ledger = flakyLedger();
+  ledger.failClosureLogs();
+  const instance = coordinator(ledger);
+  const session = await openSession(instance);
+  await consentAndOpen(instance, session);
+  const reference = `standalone-handshake-v1:${session.invite.sessionId}:closure`;
+  await assert.rejects(
+    () => instance.invoke("channel_close", { access: session.invite.initiatorAccess }),
+    (error) => error instanceof Error && error.name === "TransientLedgerError",
+  );
+  assert.equal((await ledger.searchAsset(reference)).length, 0);
+  // The responder's revoke is a different outcome than the pinned close: refused before anchoring.
+  let error = null;
+  try { await instance.invoke("channel_revoke", { access: session.accept.responderAccess }); } catch (e) { error = e; }
+  assert.equal(error instanceof StandaloneAdmissionError && error.reason, "CLOSURE_PENDING");
+  assert.equal((await ledger.searchAsset(reference)).length, 0);
+  // The like-for-like retry still lands the identical pinned record once the ledger heals.
+  ledger.repair();
+  const closed = await instance.invoke("channel_close", { access: session.invite.initiatorAccess });
+  assert.equal(closed.outcome, "closed");
+  assert.equal((await ledger.searchAsset(reference)).length, 1);
+});
+
+test("the closure pin persists across a failed anchor and only clearPendingClosure removes it", async () => {
+  const ledger = flakyLedger();
+  ledger.failClosureLogs();
+  const instance = coordinator(ledger);
+  const session = await openSession(instance);
+  await consentAndOpen(instance, session);
+  const sessionId = session.invite.sessionId;
+  await assert.rejects(
+    () => instance.invoke("channel_close", { access: session.invite.initiatorAccess }),
+    (error) => error instanceof Error && error.name === "TransientLedgerError",
+  );
+  const pinned = instance.store.pendingClosure(sessionId);
+  assert.equal(pinned?.outcome, "closed");
+  assert.equal(pinned?.byRole, "initiator");
+  assert.equal(pinned?.closedAtMs, String(1_750_000_000_000)); // dated at prepare time, not re-dated
+  instance.store.clearPendingClosure(sessionId);
+  assert.equal(instance.store.pendingClosure(sessionId), undefined);
 });
 
 test("channel flows end to end: send, read, close — with an anchored closure", async () => {

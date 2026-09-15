@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createStandaloneSessionStore, StandaloneAdmissionError, StandaloneIllegalTransitionError } from "../dist/standalone-handshake/session-store.js";
+import { createStandaloneSessionStore, StandaloneAdmissionError, StandaloneIllegalTransitionError, TERMINAL_SESSION_RETENTION } from "../dist/standalone-handshake/session-store.js";
 import { validTerms, validReadiness } from "./helpers/standalone-fixtures.mjs";
 
 const SESSION = "0e2c8a34-9c1b-4f8e-9d0a-5f6a7b8c9d01";
@@ -121,6 +121,115 @@ test("explicit close records the closer and readMessages filters by addressee", 
   assert.equal(snapshot.closedBy, "responder");
   assert.equal(snapshot.messageCount, 2);
   assert.equal(snapshot.messages === undefined, true); // status never leaks bodies
+});
+
+test("closeChannel and revokeChannel refuse an unknown party before any state change", () => {
+  const context = storeWithSession();
+  toOpen(context);
+  const { store } = context;
+  for (const attempt of [
+    () => store.closeChannel(SESSION, "stranger"),
+    () => store.revokeChannel(SESSION, "stranger"),
+    () => store.closeChannel(SESSION, undefined),
+  ]) {
+    try { attempt(); assert.fail("expected throw"); }
+    catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "UNKNOWN_PARTY"); }
+  }
+  assert.equal(store.getSession(SESSION).stage, "open");
+  assert.equal(store.getSession(SESSION).closedBy, undefined);
+});
+
+test("status returns frozen copies: mutating the snapshot never reaches the store", () => {
+  const context = storeWithSession();
+  toOpen(context);
+  const { store } = context;
+  store.setChecklist(SESSION, { passed: true, checks: [], checklistDigest: "b".repeat(64) });
+  const snapshot = store.status(SESSION);
+  assert.equal(Object.isFrozen(snapshot.scope), true);
+  assert.equal(Object.isFrozen(snapshot.checklist), true);
+  assert.throws(() => { snapshot.scope.messageKinds = ["anything-goes"]; }, TypeError);
+  assert.throws(() => { snapshot.checklist.passed = false; }, TypeError);
+  assert.equal(store.getSession(SESSION).terms.channelLimits.messageKinds.includes("anything-goes"), false);
+  assert.equal(store.getSession(SESSION).checklist.passed, true);
+});
+
+test("sessionIds() lists every session, terminal ones included", () => {
+  const { store } = storeWithSession();
+  assert.deepEqual(store.sessionIds(), [SESSION]);
+  store.setStage(SESSION, "readiness_pending");
+  store.setStage(SESSION, "ready_failed");
+  assert.deepEqual(store.sessionIds(), [SESSION]);
+});
+
+test("terminal sessions beyond the retention cap are evicted oldest-first and active sessions are never evicted", () => {
+  let nowMs = 1_750_000_000_000;
+  const store = createStandaloneSessionStore({ now: () => nowMs, terminalRetention: 2 });
+  const terms = { ...validTerms() };
+  const readiness = validReadiness();
+  const create = (id) => store.createSession({ sessionId: id, terms, termsDigest: "c".repeat(64), initiatorReadiness: readiness });
+  const fail = (id) => { store.setStage(id, "readiness_pending"); store.setStage(id, "ready_failed"); };
+  for (const id of ["a1", "a2", "a3", "a4"]) create(id);
+  fail("a1");
+  fail("a2");
+  assert.deepEqual(store.sessionIds(), ["a1", "a2", "a3", "a4"]); // under the cap: nothing evicted
+  create("a5"); // still exactly at the cap: nothing evicted yet
+  fail("a5"); // now one over
+  assert.deepEqual(store.sessionIds(), ["a1", "a2", "a3", "a4", "a5"]);
+  create("a6"); // over the cap: a1, the oldest terminal, evicted; active a3/a4 untouched
+  assert.deepEqual(store.sessionIds(), ["a2", "a3", "a4", "a5", "a6"]);
+  assert.equal(store.getSession("a1"), undefined);
+  // a6 stays active (invited) on purpose: it must survive every later eviction.
+  // Keep filling with terminal sessions: the oldest terminal always goes, active sessions never do.
+  for (const id of ["a7", "a8", "a9"]) {
+    create(id);
+    fail(id);
+  }
+  assert.deepEqual(store.sessionIds(), ["a3", "a4", "a6", "a7", "a8", "a9"]);
+});
+
+test("pending-closure pins: like-for-like is accepted, a different outcome or role refuses with CLOSURE_PENDING", () => {
+  const { store } = storeWithSession();
+  const record = Object.freeze({ outcome: "closed", byRole: "initiator", closedAtMs: "1750000000000" });
+  store.setPendingClosure(SESSION, record);
+  assert.deepEqual(store.pendingClosure(SESSION), record);
+  // Identical outcome+role: accepted (an idempotent retry).
+  store.setPendingClosure(SESSION, { outcome: "closed", byRole: "initiator", closedAtMs: "1750000000000" });
+  assert.deepEqual(store.pendingClosure(SESSION), record);
+  // Different outcome, or different role, while pinned: refused, and the pin is untouched.
+  for (const intruder of [
+    { outcome: "revoked", byRole: "initiator", closedAtMs: "1750000000000" },
+    { outcome: "closed", byRole: "responder", closedAtMs: "1750000000000" },
+  ]) {
+    try { store.setPendingClosure(SESSION, intruder); assert.fail("expected throw"); }
+    catch (e) { assert.equal(e instanceof StandaloneAdmissionError && e.reason, "CLOSURE_PENDING"); }
+    assert.deepEqual(store.pendingClosure(SESSION), record);
+  }
+  // The pin clears only via clearPendingClosure, after which a fresh shape is accepted.
+  store.clearPendingClosure(SESSION);
+  assert.equal(store.pendingClosure(SESSION), undefined);
+  store.setPendingClosure(SESSION, { outcome: "revoked", byRole: "responder", closedAtMs: "1" });
+  assert.equal(store.pendingClosure(SESSION).outcome, "revoked");
+});
+
+test("the eviction retention defaults to TERMINAL_SESSION_RETENTION and tolerates a full cap", () => {
+  let nowMs = 1_750_000_000_000;
+  const store = createStandaloneSessionStore({ now: () => nowMs });
+  const terms = { ...validTerms() };
+  const readiness = validReadiness();
+  const count = TERMINAL_SESSION_RETENTION + 10;
+  for (let i = 0; i < count; i += 1) {
+    store.createSession({ sessionId: `t${i}`, terms, termsDigest: "c".repeat(64), initiatorReadiness: readiness });
+  }
+  for (let i = 0; i < count; i += 1) {
+    store.setStage(`t${i}`, "readiness_pending");
+    store.setStage(`t${i}`, "ready_failed");
+  }
+  assert.equal(store.sessionIds().length, count); // nothing evicted yet: eviction only runs on createSession
+  store.createSession({ sessionId: "final", terms, termsDigest: "c".repeat(64), initiatorReadiness: readiness });
+  const after = store.sessionIds();
+  assert.equal(after.length, TERMINAL_SESSION_RETENTION + 1); // the terminal cap, plus the new invited session
+  assert.equal(after[0], "t10"); // the ten oldest terminal sessions went
+  assert.equal(after[after.length - 1], "final");
 });
 
 test("invitation claims are single-use and access tokens authenticate roles", () => {

@@ -10,6 +10,11 @@ const LEGAL: Record<string, readonly string[]> = {
   open: ["closed", "revoked", "expired"],
 };
 const ROLES = ["initiator", "responder"];
+const TERMINAL_STAGES = new Set(["ready_failed", "closed", "revoked", "expired"]);
+
+// Terminal sessions are retained for post-hoc inspection up to this cap; the oldest
+// are evicted (Map insertion order) so a long-lived process cannot grow unbounded.
+export const TERMINAL_SESSION_RETENTION = 500;
 
 export class StandaloneIllegalTransitionError extends Error {
   constructor() {
@@ -25,8 +30,13 @@ export class StandaloneAdmissionError extends Error {
   }
 }
 
-export function createStandaloneSessionStore(options: { now?: () => number } = {}) {
+export function createStandaloneSessionStore(options: {
+  now?: () => number;
+  /** Cap on retained terminal-stage sessions; defaults to TERMINAL_SESSION_RETENTION. */
+  terminalRetention?: number;
+} = {}) {
   const now = options.now ?? Date.now;
+  const terminalRetention = options.terminalRetention ?? TERMINAL_SESSION_RETENTION;
   const sessions = new Map<string, any>();
   const invitations = new Map<string, string>();
   // Pinned closure records: prepared before anchoring so retries produce the identical digest.
@@ -37,6 +47,20 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
     const session = sessions.get(sessionId);
     if (!session) throw new StandaloneAdmissionError("NOT_OPEN");
     return session;
+  }
+
+  // Evicts the oldest terminal sessions while more than the retention cap are terminal.
+  // Runs on createSession; an active session is never evicted to make room.
+  function evictTerminalSessions(): void {
+    let terminal = 0;
+    for (const session of sessions.values()) if (TERMINAL_STAGES.has(session.stage)) terminal += 1;
+    for (const [sessionId, session] of sessions) {
+      if (terminal <= terminalRetention) return;
+      if (TERMINAL_STAGES.has(session.stage)) {
+        sessions.delete(sessionId);
+        terminal -= 1;
+      }
+    }
   }
 
   function expireIfDue(session: any): void {
@@ -65,6 +89,7 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
         messages: [],
         seq: 0,
       });
+      evictTerminalSessions();
     },
 
     putInvitation(input: { secret: string; sessionId: string }): void {
@@ -83,6 +108,10 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
       if (!session) return undefined;
       expireIfDue(session);
       return session;
+    },
+
+    sessionIds(): string[] {
+      return [...sessions.keys()];
     },
 
     requireSession,
@@ -169,18 +198,20 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
         sessionId: session.sessionId,
         reference: session.terms.reference,
         stage: session.stage,
-        checklist: session.checklist,
+        // Frozen copies: no live reference into the store's session state escapes.
+        checklist: session.checklist === undefined ? undefined : Object.freeze({ ...session.checklist }),
         consented: { initiator: session.consents.initiator !== undefined, responder: session.consents.responder !== undefined },
         openedAtMs: session.openedAtMs,
         expiresAtMs: session.expiresAtMs,
         remainingMs: session.stage === "open" ? Math.max(0, session.expiresAtMs - now()) : 0,
-        scope: session.terms.channelLimits,
+        scope: Object.freeze({ ...session.terms.channelLimits }),
         messageCount: session.messages.length,
         closedBy: session.closedBy,
       });
     },
 
     closeChannel(sessionId: string, role: string): void {
+      if (!ROLES.includes(role)) throw new StandaloneAdmissionError("UNKNOWN_PARTY");
       const session = requireSession(sessionId);
       expireIfDue(session);
       if (session.stage !== "open") throw new StandaloneAdmissionError("NOT_OPEN");
@@ -188,18 +219,28 @@ export function createStandaloneSessionStore(options: { now?: () => number } = {
       session.closedBy = role;
     },
 
+    pendingClosure(sessionId: string): Readonly<Record<string, any>> | undefined {
+      return pendingClosures.get(sessionId);
+    },
+
     setPendingClosure(sessionId: string, record: Readonly<Record<string, any>>): void {
       requireSession(sessionId);
+      const existing = pendingClosures.get(sessionId);
+      // A pin is only replaced by the same outcome+role (an idempotent retry). A different
+      // outcome or role while a pin exists refuses rather than silently re-dating — and
+      // re-anchoring — a different record under the same closure reference.
+      if (existing !== undefined && (existing.outcome !== record.outcome || existing.byRole !== record.byRole)) {
+        throw new StandaloneAdmissionError("CLOSURE_PENDING");
+      }
       pendingClosures.set(sessionId, record);
     },
 
-    takePendingClosure(sessionId: string): Readonly<Record<string, any>> | undefined {
-      const record = pendingClosures.get(sessionId);
-      if (record !== undefined) pendingClosures.delete(sessionId);
-      return record;
+    clearPendingClosure(sessionId: string): void {
+      pendingClosures.delete(sessionId);
     },
 
     revokeChannel(sessionId: string, role: string): void {
+      if (!ROLES.includes(role)) throw new StandaloneAdmissionError("UNKNOWN_PARTY");
       const session = requireSession(sessionId);
       expireIfDue(session);
       if (session.stage !== "open") throw new StandaloneAdmissionError("NOT_OPEN");

@@ -16,7 +16,7 @@ import {
   normalizeStandaloneTerms,
   standaloneCanonicalRecord,
 } from "./protocol.js";
-import { createStandaloneSessionStore } from "./session-store.js";
+import { createStandaloneSessionStore, StandaloneAdmissionError } from "./session-store.js";
 
 export class StandaloneCoordinatorError extends Error {
   constructor(message = "Standalone handshake coordinator refused.") {
@@ -83,16 +83,11 @@ export function createStandaloneCoordinator(options: {
     const access = args.access;
     if (typeof access !== "string" || !access.startsWith("sat_")) throw new StandaloneCoordinatorError();
     // Sessions are few in V1; linear scan keeps the store the single source of truth.
-    for (const sessionId of storeSessionIds()) {
+    for (const sessionId of store.sessionIds()) {
       const role = store.authenticate(sessionId, access);
       if (role !== undefined) return { session: store.requireSession(sessionId), role };
     }
     throw new StandaloneCoordinatorError();
-  }
-
-  let cachedIds: string[] = [];
-  function storeSessionIds(): string[] {
-    return cachedIds;
   }
 
   return {
@@ -109,7 +104,6 @@ export function createStandaloneCoordinator(options: {
         store.putInvitation({ secret, sessionId });
         const initiatorAccess = `sat_${randomBytes(32).toString("base64url")}`;
         store.setAccessToken(sessionId, "initiator", initiatorAccess);
-        cachedIds.push(sessionId);
         const invitation = Buffer.from(JSON.stringify({ v: 1, sessionId, secret })).toString("base64url");
         return { sessionId, reference: terms.reference, invitation, initiatorAccess };
       }
@@ -244,26 +238,29 @@ export function createStandaloneCoordinator(options: {
 
       if (name === "channel_close" || name === "channel_revoke") {
         const { session, role } = authedSession(args);
+        // Pre-touch: an expired channel was ended by the clock, so refuse before any ledger write.
+        if (store.getSession(session.sessionId)?.stage === "expired") throw new StandaloneAdmissionError("EXPIRED");
         const outcome = name === "channel_close" ? "closed" : "revoked";
-        // Anchor before mutate, idempotently: the closure record is pinned in the store before anchoring so a
-        // retry after a transient anchor failure re-anchors the identical digest instead of re-dating a new
-        // record. A like-for-like retry reuses the pin; a changed outcome/role replaces it.
-        let closureRecord = store.takePendingClosure(session.sessionId);
-        if (!closureRecord || closureRecord.outcome !== outcome || closureRecord.byRole !== role) {
-          closureRecord = normalizeStandaloneClosure({
-            schema: "clockchain.standalone-handshake-closure/v1",
-            protocol: STANDALONE_HANDSHAKE_PROTOCOL,
-            sessionId: session.sessionId,
-            outcome,
-            byRole: role,
-            closedAtMs: String(now()),
-            externalBusinessActionPerformed: false,
-          });
-        }
+        // Peek-then-clear-late: the closure record is pinned in the store before anchoring and
+        // cleared only after the store mutation succeeds, so the pin survives anchor failures
+        // AND store-mutation failures and a retry re-anchors the byte-identical record. The
+        // candidate reuses the pinned closedAtMs while a like-for-like pin exists; a different
+        // outcome or role while pinned is refused by setPendingClosure (CLOSURE_PENDING) before
+        // the ledger is touched.
+        const pinned = store.pendingClosure(session.sessionId);
+        const closureRecord = normalizeStandaloneClosure({
+          schema: "clockchain.standalone-handshake-closure/v1",
+          protocol: STANDALONE_HANDSHAKE_PROTOCOL,
+          sessionId: session.sessionId,
+          outcome,
+          byRole: role,
+          closedAtMs: String(pinned?.closedAtMs ?? now()),
+          externalBusinessActionPerformed: false,
+        });
         store.setPendingClosure(session.sessionId, closureRecord);
         const anchor = await anchorStandalone(client, closureRecord, `standalone-handshake-v1:${session.sessionId}:closure`, true);
-        store.takePendingClosure(session.sessionId);
         (outcome === "closed" ? store.closeChannel : store.revokeChannel).call(store, session.sessionId, role);
+        store.clearPendingClosure(session.sessionId);
         return { sessionId: session.sessionId, outcome, byRole: role, closureAnchor: anchor };
       }
 
