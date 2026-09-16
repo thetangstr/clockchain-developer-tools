@@ -37,6 +37,7 @@ const discovery = {
   sessionDeadlineMs: String(nowMs + 600000),
   sessionOpenedBlock: "6999",
   hostSessionKeyCertificate,
+  terms,
   externalBusinessActionPerformed: false,
 };
 
@@ -192,6 +193,156 @@ test("an expired current invitation window is retryable while the host rotates s
     () => coordinator.invite(terms),
     (error) => error?.name === "V2TransientCoordinatorError",
   );
+});
+
+test("an invite whose terms differ from the published host terms is rejected before minting or posting", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const calls = { create: 0, update: 0, post: 0 };
+  const store = createHandshakeStateStore({});
+  const countingStore = {
+    get: (keyValue) => store.get(keyValue),
+    put: (keyValue, record) => store.put(keyValue, record),
+    list: () => store.list(),
+    update: (keyValue, mutate) => { calls.update += 1; return store.update(keyValue, mutate); },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: {
+      create: async () => { calls.create += 1; return { initiatorAccess: "", responderInvitation: "" }; },
+      accept: async () => { throw new Error("unexpected accept"); },
+    },
+    relay: {
+      fetchDiscovery: async () => discovery,
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => { calls.post += 1; return { ok: true, seq: "1" }; },
+    },
+    stateStore: countingStore,
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite({ ...terms, reference: "NS-2000" }),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.deepEqual(calls, { create: 0, update: 0, post: 0 });
+});
+
+test("a discovery record with malformed host terms is rejected", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay: {
+      fetchDiscovery: async () => ({ ...discovery, terms: { ...terms, validForSeconds: "999" } }),
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => ({ ok: true, seq: "1" }),
+    },
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite(terms),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+});
+
+test("a discovery record with a present but undefined terms property is rejected", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const calls = { create: 0, update: 0, post: 0 };
+  const store = createHandshakeStateStore({});
+  const countingStore = {
+    get: (keyValue) => store.get(keyValue),
+    put: (keyValue, record) => store.put(keyValue, record),
+    list: () => store.list(),
+    update: (keyValue, mutate) => { calls.update += 1; return store.update(keyValue, mutate); },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: {
+      create: async () => { calls.create += 1; return { initiatorAccess: "", responderInvitation: "" }; },
+      accept: async () => { throw new Error("unexpected accept"); },
+    },
+    relay: {
+      fetchDiscovery: async () => ({ ...discovery, terms: undefined }),
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => { calls.post += 1; return { ok: true, seq: "1" }; },
+    },
+    stateStore: countingStore,
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite(terms),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.deepEqual(calls, { create: 0, update: 0, post: 0 });
+});
+
+test("a legacy discovery record without terms falls back to caller terms with bounded telemetry", async (t) => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const { terms: _publishedTerms, ...legacyDiscovery } = discovery;
+  const calls = { create: 0, update: 0, post: 0 };
+  const store = createHandshakeStateStore({});
+  const countingStore = {
+    get: (keyValue) => store.get(keyValue),
+    put: (keyValue, record) => store.put(keyValue, record),
+    list: () => store.list(),
+    update: (keyValue, mutate) => { calls.update += 1; return store.update(keyValue, mutate); },
+  };
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (entry) => warnings.push(entry);
+  t.after(() => { console.warn = originalWarn; });
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay: {
+      fetchDiscovery: async () => legacyDiscovery,
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => { calls.post += 1; return { ok: true, seq: "1" }; },
+    },
+    stateStore: countingStore,
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  const invited = await coordinator.invite({ ...terms, reference: "NS-2000" });
+  assert.equal(invited.terms.reference, "NS-2000");
+  assert.deepEqual(calls, { create: 0, update: 1, post: 1 });
+  assert.equal(warnings.length, 1);
+  const event = JSON.parse(warnings[0]);
+  assert.equal(event.event, "agent_handshake_v2_invite_without_host_terms");
+  assert.equal(event.sessionId, sessionId);
+  assert.deepEqual(Object.keys(event).sort(), ["event", "sessionId"]);
+  assert.equal(JSON.stringify(event).includes("statement"), false);
 });
 
 test("two distinct role capabilities drive the complete v2 local-signing state machine", async () => {

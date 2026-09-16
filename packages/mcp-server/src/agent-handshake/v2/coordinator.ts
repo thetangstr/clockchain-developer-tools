@@ -102,10 +102,12 @@ function exact(value: unknown, keys: readonly string[]): JsonObject {
 }
 
 function discovery(value: unknown): JsonObject {
+  const probe = value !== null && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
+  const hasTerms = probe.includes("terms");
   const item = exact(value, [
     "schema", "protocol", "sessionId", "repositorySha", "kitRepoUrl", "relayUrl",
     "createdAtMs", "invitationExpiresAtMs", "sessionDeadlineMs", "hostSessionKeyCertificate",
-    "sessionOpenedBlock", "externalBusinessActionPerformed",
+    "sessionOpenedBlock", ...(hasTerms ? ["terms"] : []), "externalBusinessActionPerformed",
   ]);
   if (
     item.schema !== "clockchain.agent-handshake-discovery/v2" ||
@@ -119,7 +121,10 @@ function discovery(value: unknown): JsonObject {
     item.hostSessionKeyCertificate === null || typeof item.hostSessionKeyCertificate !== "object" ||
     item.externalBusinessActionPerformed !== false
   ) fail();
-  return Object.freeze(JSON.parse(JSON.stringify(item)));
+  if (!hasTerms) return Object.freeze(JSON.parse(JSON.stringify(item)));
+  let terms: unknown;
+  try { terms = normalizeV2Terms(item.terms); } catch { fail(); }
+  return Object.freeze(JSON.parse(JSON.stringify({ ...item, terms })));
 }
 
 function key(principal: string, session: string, role: V2Role): HandshakeKey { return { principal, session, role }; }
@@ -437,11 +442,16 @@ export function createV2Coordinator(options: {
     async invite(value: unknown): Promise<JsonObject> {
       const terms = normalizeV2Terms(value) as JsonObject;
       const found = discovery(await options.relay.fetchDiscovery());
+      const hostTerms = found.terms as JsonObject | undefined;
+      if (hostTerms === undefined) {
+        console.warn(JSON.stringify({ event: "agent_handshake_v2_invite_without_host_terms", sessionId: found.sessionId }));
+      } else if (v2CanonicalRecord(terms).digest !== v2CanonicalRecord(hostTerms).digest) fail();
+      const activeTerms = hostTerms ?? terms;
       if (now() >= Number(found.invitationExpiresAtMs)) transient();
-      const metadata = metadataFrom(found, terms);
+      const metadata = metadataFrom(found, activeTerms);
       const created = await options.invitationService.create({
         sessionId: found.sessionId,
-        statementDigest: v2CanonicalRecord(terms).digest,
+        statementDigest: v2CanonicalRecord(activeTerms).digest,
         nbfMs: found.createdAtMs,
         expMs: found.sessionDeadlineMs,
         invitationExpMs: found.invitationExpiresAtMs,
@@ -453,11 +463,11 @@ export function createV2Coordinator(options: {
       await post(keyValue, "agent_v2_invitation_created", {
         createdAtMs: String(createdAtMs),
         externalBusinessActionPerformed: false,
-        statementDigest: v2CanonicalRecord(terms).digest,
-        terms,
+        statementDigest: v2CanonicalRecord(activeTerms).digest,
+        terms: activeTerms,
       });
-      const policy = localPolicy(terms, "initiator") as JsonObject;
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
+      const policy = localPolicy(activeTerms, "initiator") as JsonObject;
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
     },
 
     async acceptInvitation(invitation: string): Promise<JsonObject> {
