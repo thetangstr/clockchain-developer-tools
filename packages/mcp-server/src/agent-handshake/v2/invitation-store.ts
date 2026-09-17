@@ -25,7 +25,7 @@ const KID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const CLAIM_PHASES = ["claimed", "initialized", "posted", "completed"] as const;
 
-type ClaimPhase = typeof CLAIM_PHASES[number];
+export type ClaimPhase = typeof CLAIM_PHASES[number];
 type StoredClaim = Readonly<{
   phase: ClaimPhase;
   claimedAtMs: string;
@@ -59,6 +59,13 @@ export type V2InvitationMetadata = Readonly<{
   sessionDeadlineMs: string;
   createdAtMs: string;
   sessionOpenedBlock: string;
+}>;
+export type V2InvitationClaim = Readonly<{
+  invitationDigest: string;
+  jti: string;
+  acceptanceKey: Readonly<{ kid: string; digest: string }>;
+  phase: ClaimPhase;
+  claimedAtMs: string;
 }>;
 
 export class V2InvitationError extends Error {
@@ -503,6 +510,28 @@ export function createV2InvitationService(options: {
         claim: currentClaim && currentClaim.phase !== "legacy_terminal" ? Object.freeze({
           invitationDigest: claimed.invitationDigest,
           jti: claimed.jti,
+          acceptanceKey: Object.freeze({
+            kid: currentClaim.acceptanceKeyKid,
+            digest: currentClaim.acceptanceKeyDigest,
+          }),
+          phase: currentClaim.phase,
+          claimedAtMs: currentClaim.claimedAtMs,
+        }) : null,
+      });
+    },
+    async advanceClaim(input: { claim: V2InvitationClaim; phase: ClaimPhase; completedAtMs?: string }) {
+      const advanced = await options.store.advanceClaim({
+        invitationDigest: input.claim.invitationDigest,
+        jti: input.claim.jti,
+        acceptanceKey: input.claim.acceptanceKey,
+        phase: input.phase,
+        completedAtMs: input.completedAtMs,
+      });
+      const currentClaim = advanced.claim;
+      return Object.freeze({
+        claim: currentClaim && currentClaim.phase !== "legacy_terminal" ? Object.freeze({
+          invitationDigest: advanced.invitationDigest,
+          jti: advanced.jti,
           acceptanceKey: Object.freeze({
             kid: currentClaim.acceptanceKeyKid,
             digest: currentClaim.acceptanceKeyDigest,
