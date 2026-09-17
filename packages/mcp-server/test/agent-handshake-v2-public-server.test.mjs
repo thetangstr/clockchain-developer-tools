@@ -532,3 +532,45 @@ test("public tools distinguish retryable infrastructure failures from terminal p
   assert.equal(warnings.join("\n").includes("secret invalid role state"), false);
   assert.equal(warnings.join("\n").includes("unexpected internal state"), false);
 });
+
+test("public agent_handshake_next accepts bounded waitMs and rejects out-of-range waits", async () => {
+  const capability = roleAccess({ jti: "99999999-9999-4999-8999-999999999999", role: "initiator" });
+  const observed = [];
+  const handler = createV2PublicHttpHandler({
+    pin,
+    now: () => 1_000,
+    invoke: async (name, args) => {
+      observed.push({ name, args });
+      return { ok: true, name };
+    },
+  });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const waited = await rpc(url, "tools/call", {
+      name: "agent_handshake_next",
+      arguments: { access: capability, waitMs: 12_000 },
+    });
+    assert.notEqual(waited.body.result.isError, true);
+    assert.equal(observed.at(-1).args.waitMs, 12_000);
+
+    const omitted = await rpc(url, "tools/call", {
+      name: "agent_handshake_next",
+      arguments: { access: capability },
+    });
+    assert.notEqual(omitted.body.result.isError, true);
+    assert.equal(Object.hasOwn(observed.at(-1).args, "waitMs"), false);
+
+    for (const waitMs of [15_001, -1, 1.5, "5000"]) {
+      const rejected = await rpc(url, "tools/call", {
+        name: "agent_handshake_next",
+        arguments: { access: capability, waitMs },
+      });
+      assert.equal(rejected.body.result.isError, true);
+    }
+    assert.equal(observed.length, 2);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
