@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import { buildV2Instructions, type V2ReleasePin } from "./instructions.js";
 import { registerV2PublicTools, V2_PUBLIC_TOOL_NAMES, type V2PublicInvoke } from "./public-tools.js";
-import { V2RoleAccessError } from "./access.js";
+import { readV2RoleAccessPayload, V2RoleAccessError } from "./access.js";
 
 export { V2_PUBLIC_TOOL_NAMES } from "./public-tools.js";
 
@@ -49,7 +49,6 @@ function limiter(limit: number, windowMs: number, now: () => number) {
 }
 
 const ROLE_ACCESS_HANDLE = /^ccra_[A-Za-z0-9_-]{22}$/;
-const ROLE_ACCESS_HANDLE_TTL_MS = 60 * 60_000;
 const ROLE_ACCESS_HANDLE_LIMIT = 10_000;
 const ROLE_SCOPED_TOOLS = new Set([
   "agent_handshake_join",
@@ -66,28 +65,46 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 function createRoleAccessBroker(invoke: V2PublicInvoke, now: () => number): V2PublicInvoke {
-  const handles = new Map<string, { access: string; expiresAt: number }>();
+  const handles = new Map<string, { access: string; digest: string; expiresAt: number }>();
+  const handlesByDigest = new Map<string, { handle: string; expiresAt: number }>();
 
-  function prune(): void {
-    const current = now();
+  function prune(current = now()): void {
     for (const [handle, entry] of handles) {
-      if (current >= entry.expiresAt) handles.delete(handle);
+      if (current >= entry.expiresAt) {
+        handles.delete(handle);
+        const reverse = handlesByDigest.get(entry.digest);
+        if (reverse?.handle === handle) handlesByDigest.delete(entry.digest);
+      }
+    }
+    for (const [digest, entry] of handlesByDigest) {
+      if (current >= entry.expiresAt || !handles.has(entry.handle)) handlesByDigest.delete(digest);
     }
   }
 
   function issue(access: unknown): string {
     if (typeof access !== "string" || access.length < 80 || access.length > 4096) throw new V2RoleAccessError();
-    prune();
+    const current = now();
+    const expiresAt = Number(readV2RoleAccessPayload(access).expMs);
+    if (!Number.isSafeInteger(expiresAt) || current >= expiresAt) throw new V2RoleAccessError();
+    prune(current);
+    const digest = createHash("sha256").update(access).digest("base64url");
+    const existing = handlesByDigest.get(digest);
+    if (existing && current < existing.expiresAt && handles.get(existing.handle)?.access === access) return existing.handle;
     if (handles.size >= ROLE_ACCESS_HANDLE_LIMIT) throw new V2RoleAccessError();
     let handle: string;
     do { handle = `ccra_${randomBytes(16).toString("base64url")}`; } while (handles.has(handle));
-    handles.set(handle, { access, expiresAt: now() + ROLE_ACCESS_HANDLE_TTL_MS });
+    handles.set(handle, { access, digest, expiresAt });
+    handlesByDigest.set(digest, { handle, expiresAt });
     return handle;
   }
 
   function resolve(value: unknown): { clientAccess: string; signedAccess: string } {
     if (typeof value !== "string") throw new V2RoleAccessError();
-    if (!ROLE_ACCESS_HANDLE.test(value)) return { clientAccess: "", signedAccess: value };
+    if (!ROLE_ACCESS_HANDLE.test(value)) {
+      const expiresAt = Number(readV2RoleAccessPayload(value).expMs);
+      if (!Number.isSafeInteger(expiresAt) || now() >= expiresAt) throw new V2RoleAccessError();
+      return { clientAccess: "", signedAccess: value };
+    }
     prune();
     const entry = handles.get(value);
     if (!entry) throw new V2RoleAccessError();
