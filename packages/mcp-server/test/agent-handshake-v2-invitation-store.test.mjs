@@ -9,6 +9,7 @@ import {
   createV2InvitationService,
   createV2InvitationStore,
 } from "../dist/agent-handshake/v2/invitation-store.js";
+import { __runtimeV2KeyConfig } from "../dist/agent-handshake/v2/coordinator.js";
 import { readV2RoleAccessPayload } from "../dist/agent-handshake/v2/access.js";
 import { v2CanonicalRecord } from "../dist/agent-handshake/v2/protocol.js";
 
@@ -18,11 +19,43 @@ const statementDigest = "c".repeat(64);
 const nbfMs = 1786337000000;
 const expMs = 1786337600000;
 const invitationDigest = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+const encodedSecret = (char) => Buffer.alloc(32, char).toString("base64");
 const terms = Object.freeze({
   reference: "durable invitation retry",
   statement: "Retry the same accepted invitation without issuing a different responder principal.",
   validForSeconds: "60",
   identityPolicy: Object.freeze({ erc8004: "not_required", chainId: null, registryAddress: null }),
+});
+
+test("runtime key config keeps role signing and acceptance HMAC keys independent", () => {
+  const config = __runtimeV2KeyConfig({
+    AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: JSON.stringify({ kid: "role-active", secretBase64: encodedSecret("a") }),
+    AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: JSON.stringify({ kid: "role-previous", secretBase64: encodedSecret("b") }),
+    AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: JSON.stringify({ kid: "accept-active", secretBase64: encodedSecret("c") }),
+    AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: JSON.stringify({ kid: "accept-previous", secretBase64: encodedSecret("d") }),
+  });
+
+  assert.equal(config.activeAccessKey.kid, "role-active");
+  assert.deepEqual(config.accessKeys.map((entry) => entry.kid), ["role-active", "role-previous"]);
+  assert.deepEqual(config.acceptanceHmacKeys.map((entry) => entry.kid), ["accept-active", "accept-previous"]);
+  assert.notDeepEqual(config.activeAccessKey.secret, config.acceptanceHmacKeys[0].secret);
+});
+
+test("runtime key config rejects malformed base64 and cross-purpose key reuse", () => {
+  const valid = {
+    AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: JSON.stringify({ kid: "role-active", secretBase64: encodedSecret("a") }),
+    AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: JSON.stringify({ kid: "accept-active", secretBase64: encodedSecret("b") }),
+  };
+
+  for (const env of [
+    { ...valid, AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: JSON.stringify({ kid: "accept-active", secretBase64: "not-base64" }) },
+    { ...valid, AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: JSON.stringify({ kid: "accept-active", secretBase64: Buffer.alloc(31, "b").toString("base64") }) },
+    { ...valid, AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: JSON.stringify({ kid: "accept-active", secretBase64: encodedSecret("c") }) },
+    { ...valid, AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: JSON.stringify({ kid: "accept-active", secretBase64: encodedSecret("a") }) },
+    { ...valid, AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: JSON.stringify({ kid: "role-active", secretBase64: encodedSecret("b") }) },
+  ]) {
+    assert.throws(() => __runtimeV2KeyConfig(env));
+  }
 });
 
 test("copied invitation expires at rendezvous close", async () => {

@@ -23,6 +23,8 @@ CLOCKCHAIN_HOST_ROOT_KEY_ID="${CLOCKCHAIN_HOST_ROOT_KEY_ID:-root-2026-08}"
 AGENT_HANDSHAKE_RELEASE_PIN_PARAM="${AGENT_HANDSHAKE_RELEASE_PIN_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN}"
 AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE_PARAM="${AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE}"
 AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM="${AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS}"
+AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM="${AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE}"
+AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM="${AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS}"
 SECRET_SENTINEL=$'\001clockchain-mcp-secret-end\001'
 
 fetch_secret() {
@@ -45,6 +47,37 @@ read_secret() {
   fi
   if [[ "$payload" != *"$SECRET_SENTINEL" ]]; then
     printf 'missing secret sentinel for required SSM parameter: %s\n' "$parameter_name" >&2
+    return 1
+  fi
+  value="${payload%"$SECRET_SENTINEL"}"
+  printf -v "$env_name" '%s' "$value"
+  export "$env_name"
+}
+
+read_optional_secret() {
+  local env_name="$1"
+  local parameter_name="$2"
+  local error_file payload value
+  if [[ -z "$parameter_name" ]]; then
+    printf -v "$env_name" '%s' ''
+    export "$env_name"
+    return 0
+  fi
+  error_file="$(mktemp)"
+  if ! payload="$(fetch_secret "$parameter_name" 2>"$error_file")"; then
+    if grep -q 'ParameterNotFound' "$error_file"; then
+      rm -f "$error_file"
+      printf -v "$env_name" '%s' ''
+      export "$env_name"
+      return 0
+    fi
+    rm -f "$error_file"
+    printf 'failed to fetch optional SSM parameter: %s\n' "$parameter_name" >&2
+    return 1
+  fi
+  rm -f "$error_file"
+  if [[ "$payload" != *"$SECRET_SENTINEL" ]]; then
+    printf 'missing secret sentinel for optional SSM parameter: %s\n' "$parameter_name" >&2
     return 1
   fi
   value="${payload%"$SECRET_SENTINEL"}"
@@ -147,28 +180,55 @@ validate_mcp_runtime_config() {
 }
 
 validate_v2_server_config() {
-  local release_filter access_filter active_kid previous_kid
+  local release_filter
   release_filter='type == "object" and (keys | sort) == ["allowedAssetPrefix","hostRoots","manifestDigest","sourceCommit","version"] and .version == "2.1.3" and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.manifestDigest | test("^[0-9a-f]{64}$")) and .allowedAssetPrefix == "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/" and (.hostRoots | type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.fingerprint | test("^[0-9a-f]{64}$"))))'
-  access_filter='type == "object" and (keys | sort) == ["kid","secretBase64"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.secretBase64 | @base64d | length >= 32)'
 
   if ! jq -e "$release_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_RELEASE_PIN"; then
     printf 'invalid AGENT_HANDSHAKE_RELEASE_PIN configuration\n' >&2
     return 1
   fi
-  if ! jq -e "$access_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE"; then
-    printf 'invalid active role-access key configuration\n' >&2
-    return 1
-  fi
-  if ! jq -e "$access_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS"; then
-    printf 'invalid previous role-access key configuration\n' >&2
-    return 1
-  fi
-  active_kid="$(jq -r '.kid' <<<"$AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE")"
-  previous_kid="$(jq -r '.kid' <<<"$AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS")"
-  if [[ "$active_kid" == "$previous_kid" ]]; then
-    printf 'active and previous role-access keys must be distinct\n' >&2
-    return 1
-  fi
+  node <<'NODE'
+const specs = [
+  ["AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE", true],
+  ["AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS", true],
+  ["AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE", true],
+  ["AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS", false],
+];
+const kidPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const seenKids = new Set();
+const seenSecrets = new Set();
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+function readKey(name, required) {
+  const raw = process.env[name] ?? "";
+  if (raw === "" && !required) return;
+  if (raw === "") fail(`missing ${name} configuration`);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail(`invalid ${name} configuration`);
+  }
+  if (
+    parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
+    Object.keys(parsed).sort().join(",") !== "kid,secretBase64" ||
+    typeof parsed.kid !== "string" || !kidPattern.test(parsed.kid) ||
+    typeof parsed.secretBase64 !== "string"
+  ) fail(`invalid ${name} configuration`);
+  const secret = Buffer.from(parsed.secretBase64, "base64");
+  if (secret.length < 32 || secret.toString("base64") !== parsed.secretBase64) {
+    fail(`invalid ${name} configuration`);
+  }
+  const secretId = secret.toString("base64");
+  if (seenKids.has(parsed.kid)) fail("agent-handshake runtime key ids must be distinct");
+  if (seenSecrets.has(secretId)) fail("agent-handshake runtime key secrets must be distinct");
+  seenKids.add(parsed.kid);
+  seenSecrets.add(secretId);
+}
+for (const [name, required] of specs) readKey(name, required);
+NODE
 }
 
 materialize_host_secrets() {
@@ -221,6 +281,8 @@ read_secret KEEPER_WEBHOOK_SECRET /clockchain/mcp/KEEPER_WEBHOOK_SECRET
 read_secret AGENT_HANDSHAKE_RELEASE_PIN "$AGENT_HANDSHAKE_RELEASE_PIN_PARAM"
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE "$AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE_PARAM"
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS "$AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM"
+read_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM"
+read_optional_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM"
 validate_v2_server_config
 validate_handshake_checkout
 materialize_host_secrets

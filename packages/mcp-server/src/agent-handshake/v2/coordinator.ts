@@ -9,7 +9,7 @@ import { createHandshakeStateStore, createIsolatedHandshakeStateStore } from "..
 import { createHandshakeRelayClient, normalizeRelayBaseUrl } from "../../handshake/relay.js";
 import { readEvmBalance, recoverEip191Address, resolveOwnedAgentRegistration } from "../../handshake/evm.js";
 import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
-import type { ClaimPhase, V2InvitationClaim, V2InvitationMetadata } from "./invitation-store.js";
+import type { ClaimPhase, V2AcceptanceHmacKey, V2InvitationClaim, V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore } from "./invitation-store.js";
 import { readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
@@ -855,13 +855,60 @@ export function createV2Coordinator(options: {
   });
 }
 
-function accessKeyFromEnvironment(raw: string | undefined): V2AccessKey {
+const RUNTIME_KEY_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function runtimeKeyFromEnvironment(raw: string | undefined): V2AccessKey {
   if (!raw) fail();
   try {
     const parsed = JSON.parse(raw) as { kid?: unknown; secretBase64?: unknown };
-    if (typeof parsed.kid !== "string" || typeof parsed.secretBase64 !== "string") fail();
-    return Object.freeze({ kid: parsed.kid, secret: Buffer.from(parsed.secretBase64, "base64") });
+    if (
+      parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
+      Object.keys(parsed).sort().join(",") !== "kid,secretBase64" ||
+      typeof parsed.kid !== "string" || !RUNTIME_KEY_ID.test(parsed.kid) ||
+      typeof parsed.secretBase64 !== "string"
+    ) fail();
+    const secret = Buffer.from(parsed.secretBase64, "base64");
+    if (secret.length < 32 || secret.toString("base64") !== parsed.secretBase64) fail();
+    return Object.freeze({ kid: parsed.kid, secret });
   } catch { fail(); }
+}
+
+function optionalRuntimeKeyFromEnvironment(raw: string | undefined): V2AccessKey | null {
+  return raw ? runtimeKeyFromEnvironment(raw) : null;
+}
+
+function assertDistinctRuntimeKeys(groups: readonly (readonly V2AccessKey[])[]): void {
+  const seenKids = new Set<string>();
+  const seenSecrets = new Set<string>();
+  for (const group of groups) {
+    for (const keyValue of group) {
+      const secret = keyValue.secret.toString("base64");
+      if (seenKids.has(keyValue.kid) || seenSecrets.has(secret)) fail();
+      seenKids.add(keyValue.kid);
+      seenSecrets.add(secret);
+    }
+  }
+}
+
+export function __runtimeV2KeyConfig(env: Record<string, string | undefined>): {
+  activeAccessKey: V2AccessKey;
+  accessKeys: readonly V2AccessKey[];
+  acceptanceHmacKeys: readonly V2AcceptanceHmacKey[];
+} {
+  const activeAccessKey = runtimeKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE);
+  const accessKeys = [activeAccessKey];
+  const previousAccessKey = optionalRuntimeKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS);
+  if (previousAccessKey) accessKeys.push(previousAccessKey);
+  const activeAcceptanceHmacKey = runtimeKeyFromEnvironment(env.AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE);
+  const acceptanceHmacKeys = [activeAcceptanceHmacKey];
+  const previousAcceptanceHmacKey = optionalRuntimeKeyFromEnvironment(env.AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS);
+  if (previousAcceptanceHmacKey) acceptanceHmacKeys.push(previousAcceptanceHmacKey);
+  assertDistinctRuntimeKeys([accessKeys, acceptanceHmacKeys]);
+  return Object.freeze({
+    activeAccessKey,
+    accessKeys: Object.freeze(accessKeys),
+    acceptanceHmacKeys: Object.freeze(acceptanceHmacKeys),
+  });
 }
 
 async function fetchV2Discovery(relayUrl: string, sessionId?: string): Promise<unknown> {
@@ -943,13 +990,11 @@ export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonO
 
 export function createRuntimeV2Coordinator(env: Record<string, string | undefined> = process.env) {
   const releasePin = readV2ReleasePin(env);
-  const activeAccessKey = accessKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE);
-  const accessKeys = [activeAccessKey];
-  if (env.AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) accessKeys.push(accessKeyFromEnvironment(env.AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS));
+  const { activeAccessKey, accessKeys, acceptanceHmacKeys } = __runtimeV2KeyConfig(env);
   const relayUrl = normalizeRelayBaseUrl(env.HANDSHAKE_RELAY ?? "");
   const relay = runtimeRelay(relayUrl);
   const invitationStore = createV2InvitationStore({ path: env.AGENT_HANDSHAKE_V2_INVITATION_FILE });
-  const invitationService = createV2InvitationService({ activeKey: activeAccessKey, verificationKeys: accessKeys, store: invitationStore });
+  const invitationService = createV2InvitationService({ activeKey: activeAccessKey, verificationKeys: accessKeys, acceptanceHmacKeys, store: invitationStore });
   const clockchain = new ClockchainClient(readConfigFromEnv(env));
   const rpcUrl = env.EVM_RPC_URL ?? env.SEPOLIA_RPC_URL;
   if (!rpcUrl) fail();
