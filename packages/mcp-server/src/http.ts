@@ -10,6 +10,7 @@ import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clo
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
 import { CLOCK_TOOLS_HTML, CLOCK_TOOLS_TXT } from "./clock-tools-page.js";
+import { HANDSHAKE_SOP_HTML, HANDSHAKE_SOP_TXT } from "./handshake-sop-page.js";
 import {
   mintToken,
   verifyToken,
@@ -540,6 +541,19 @@ export async function runHttp(): Promise<void> {
         "cache-control": "public, max-age=300",
       });
       res.end(wantsHtml ? CLOCK_TOOLS_HTML : CLOCK_TOOLS_TXT);
+      return;
+    }
+    // The Agent Handshake operator SOP: HTML for a browser, plain text for
+    // everything else. /handshake/sop.txt is always text. Public — the SOP
+    // carries no credentials, only the endpoint, the eight-tool surface, and
+    // the pinned-helper discipline.
+    if (req.method === "GET" && (pathOf(req.url) === "/handshake/sop" || pathOf(req.url) === "/handshake/sop.txt")) {
+      const wantsHtml = pathOf(req.url) === "/handshake/sop" && firstHeader(req.headers.accept).includes("text/html");
+      res.writeHead(200, {
+        "content-type": wantsHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      });
+      res.end(wantsHtml ? HANDSHAKE_SOP_HTML : HANDSHAKE_SOP_TXT);
       return;
     }
     if (req.method === "GET" && (pathOf(req.url) === "/llms.txt" || pathOf(req.url) === "/install.txt")) {

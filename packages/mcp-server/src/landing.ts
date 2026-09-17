@@ -66,6 +66,7 @@ Transport:  streamable HTTP
 TWO-PERSON STAKEHOLDER HANDSHAKE — separate public surface:
   Endpoint: https://mcp.clockchain.network/handshake/mcp
   Manifest: https://mcp.clockchain.network/.well-known/agent-handshake.json
+  Operator SOP: https://mcp.clockchain.network/handshake/sop.txt
   This surface has exactly eight handshake tools. It uses single-use invitations
   and role capabilities, not an MCP token or Clockchain API key. Party keys and
   signatures stay local in Codex or Claude Code.
@@ -178,6 +179,8 @@ export const MCP_MANIFEST = {
   agentHandshake: {
     endpoint: "https://mcp.clockchain.network/handshake/mcp",
     manifest: "https://mcp.clockchain.network/.well-known/agent-handshake.json",
+    sop: "https://mcp.clockchain.network/handshake/sop",
+    sopText: "https://mcp.clockchain.network/handshake/sop.txt",
     authentication: "single-use invitation and role-scoped capability",
   },
   docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
@@ -360,6 +363,7 @@ ${BASE_CSS}</style>
     <a href="#demo">Demo</a>
     <a href="#modules">Modules</a>
     <a href="/clock-tools">Clock tools</a>
+    <a href="/handshake/sop">Handshake SOP</a>
     <a href="#install">Install</a>
     <a href="https://clockchain-research.vercel.app/dashboard"><span class="ndot"></span>Status</a>
     <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
@@ -427,6 +431,13 @@ ${BASE_CSS}</style>
   <p class="hint">No API key. Consent covers communication only — it is not an agreement, and it never authorizes a transaction.</p>
 </div></section>
 
+<section id="agent-handshake"><div class="wrap">
+  <div class="head"><span class="eyebrow">Agent Handshake</span><h2>Two agents prove control — mutually signed</h2>
+  <p>A dedicated public surface for the two-person stakeholder handshake: single-use invitations, role-scoped capabilities, and a pinned local helper that does all signing on each agent's own machine — the server never sees a private key. The result is a VERIFIED certificate both sides can hold up to anyone.</p></div>
+  <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="agentHandshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/handshake/mcp</code></pre></div>
+  <p class="hint">Exactly eight tools · protocol clockchain.agent-handshake/v2 · pinned helper, digest-verified at every step. <a href="/handshake/sop" style="color:var(--green);font-weight:600">Read the operator SOP →</a></p>
+</div></section>
+
 <section id="install"><div class="wrap install">
   <div class="head"><span class="eyebrow">Install</span><h2>Add Clockchain to your agent</h2><p>Hosted endpoint — connect any MCP client in under a minute.</p></div>
 
@@ -476,6 +487,7 @@ ${BASE_CSS}</style>
     <a class="brand" href="/">${LOGO_SVG}Clockchain</a>
     <div class="foot-links">
       <a href="/clock-tools">Clock tools</a>
+      <a href="/handshake/sop">Handshake SOP</a>
       <a href="https://clockchain-research.vercel.app/dashboard">Status</a>
       <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
       <a href="https://mcp.clockchain.network/health">Health</a>
