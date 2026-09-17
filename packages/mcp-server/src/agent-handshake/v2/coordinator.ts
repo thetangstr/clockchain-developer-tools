@@ -10,7 +10,7 @@ import { createHandshakeRelayClient, normalizeRelayBaseUrl } from "../../handsha
 import { readEvmBalance, recoverEip191Address, resolveOwnedAgentRegistration } from "../../handshake/evm.js";
 import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
 import type { ClaimPhase, V2AcceptanceHmacKey, V2InvitationClaim, V2InvitationMetadata } from "./invitation-store.js";
-import { createV2InvitationService, createV2InvitationStore } from "./invitation-store.js";
+import { createV2InvitationService, createV2InvitationStore, V2InvitationWindowUnavailableError } from "./invitation-store.js";
 import { V2_HELPER_VERSION, readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
   commitmentCheckpointDigest,
@@ -32,7 +32,7 @@ import {
 
 type JsonObject = Record<string, any>;
 type InvitationService = Readonly<{
-  create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; invitationExpMs?: string | number; metadata?: V2InvitationMetadata }): Promise<{ initiatorAccess: string; responderInvitation: string }>;
+  create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; invitationExpMs?: string | number; metadata?: V2InvitationMetadata; commitGuard?: () => boolean }): Promise<{ initiatorAccess: string; responderInvitation: string }>;
   accept(input: { invitation: string; acceptanceIdempotencyKey?: string }): Promise<{ claimedAtMs: string | null; responderAccess: string; metadata: V2InvitationMetadata | null; claim: V2InvitationClaim | null }>;
   advanceClaim(input: { claim: V2InvitationClaim; phase: ClaimPhase; completedAtMs?: string }): Promise<{ claim: V2InvitationClaim | null }>;
 }>;
@@ -71,6 +71,10 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SIGNATURE = /^0x[0-9a-f]{130}$/;
 const RETRY_AFTER_MS = 3000;
 const MIN_REGISTRATION_BALANCE_WEI = 5_000_000_000_000_000n;
+// Minimum remaining invitation-window runway required to mint responder role state. An invitation minted
+// at the window edge would expire before the Responder could be reached, and the host rotates a fresh
+// current session as soon as the window lapses, so the claim could never be observed.
+const INVITATION_MIN_RUNWAY_MS = 30_000;
 const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 
 function joinRequired(role: V2Role, sessionId: string): JsonObject {
@@ -551,18 +555,30 @@ export function createV2Coordinator(options: {
         console.warn(JSON.stringify({ event: "agent_handshake_v2_invite_without_host_terms", sessionId: found.sessionId }));
       } else if (v2CanonicalRecord(terms).digest !== v2CanonicalRecord(hostTerms).digest) fail();
       const activeTerms = hostTerms ?? terms;
-      if (now() >= Number(found.invitationExpiresAtMs)) transient();
+      // Reject before minting any state unless the window retains enough runway for the Responder's claim
+      // to land; an already-expired or near-expiry "current" session rolls over underneath the invite, so the
+      // caller must retry into the fresh session rather than hold an invitation nobody will observe.
+      if (now() + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) transient();
       const metadata = metadataFrom(found, activeTerms);
-      const created = await options.invitationService.create({
-        sessionId: found.sessionId,
-        statementDigest: v2CanonicalRecord(activeTerms).digest,
-        nbfMs: found.createdAtMs,
-        expMs: found.sessionDeadlineMs,
-        invitationExpMs: found.invitationExpiresAtMs,
-        metadata,
-      });
+      let created;
+      try {
+        created = await options.invitationService.create({
+          sessionId: found.sessionId,
+          statementDigest: v2CanonicalRecord(activeTerms).digest,
+          nbfMs: found.createdAtMs,
+          expMs: found.sessionDeadlineMs,
+          invitationExpMs: found.invitationExpiresAtMs,
+          metadata,
+          // Evaluated inside the store's serialized write: if the remaining window drops below the minimum
+          // runway during create, the commit is refused atomically so no unclaimed invitation record is
+          // left behind. Same invariant as the precheck above — a late commit must not shrink the runway.
+          commitGuard: () => now() + INVITATION_MIN_RUNWAY_MS < Number(found.invitationExpiresAtMs),
+        });
+      } catch (error) {
+        if (error instanceof V2InvitationWindowUnavailableError) transient();
+        throw error;
+      }
       const createdAtMs = now();
-      if (createdAtMs >= Number(found.invitationExpiresAtMs)) transient();
       const keyValue = await storeInitial(created.initiatorAccess, metadata, "initiator");
       await post(keyValue, "agent_v2_invitation_created", {
         createdAtMs: String(createdAtMs),

@@ -167,6 +167,7 @@ test("an unanchored Clockchain ledger response is retryable instead of a termina
 test("an expired current invitation window is retryable while the host rotates sessions", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const stateStore = createHandshakeStateStore({});
   const coordinator = createV2Coordinator({
     accessKeys: [key],
     activeAccessKey: key,
@@ -181,7 +182,7 @@ test("an expired current invitation window is retryable while the host rotates s
       getMessages: async () => ({ messages: [] }),
       postMessage: async () => ({ ok: true, seq: "1" }),
     },
-    stateStore: createHandshakeStateStore({}),
+    stateStore,
     now: () => nowMs + 120000,
     recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
     registrationFundingReady: async () => true,
@@ -194,6 +195,57 @@ test("an expired current invitation window is retryable while the host rotates s
     () => coordinator.invite(terms),
     (error) => error?.name === "V2TransientCoordinatorError",
   );
+  assert.equal((await stateStore.list()).length, 0);
+});
+
+test("a near-expiry current invitation window is retryable before any state is minted", async (t) => {
+  let createCalls = 0;
+  const harness = await createDurableAcceptHarness(t, {
+    now: () => nowMs + 120000 - 5_000,
+    wrapInvitationService: (service) => Object.freeze({
+      ...service,
+      create: async (input) => { createCalls += 1; return service.create(input); },
+    }),
+  });
+
+  await assert.rejects(
+    () => harness.coordinator.invite(terms),
+    (error) => error?.name === "V2TransientCoordinatorError",
+  );
+  assert.equal(createCalls, 0);
+  assert.equal((await harness.stateStore.list()).length, 0);
+});
+
+test("an invite whose clock crosses the invitation runway boundary during create rejects retryably with nothing persisted", async (t) => {
+  // 31s of runway passes the precheck; the clock then lands 10s before expiry — still inside the window but
+  // below the 30s runway — so the commit-time guard must refuse the write atomically.
+  const ticks = [nowMs + 120000 - 31_000, nowMs + 120000 - 10_000];
+  let createCalls = 0;
+  const attempted = [];
+  const innerStore = createV2InvitationStore();
+  const harness = await createDurableAcceptHarness(t, {
+    invitationStore: Object.freeze({
+      ...innerStore,
+      put: (value, commitGuard) => {
+        attempted.push(value);
+        return innerStore.put(value, commitGuard);
+      },
+    }),
+    now: () => (ticks.length > 1 ? ticks.shift() : ticks[0]),
+    wrapInvitationService: (service) => Object.freeze({
+      ...service,
+      create: async (input) => { createCalls += 1; return service.create(input); },
+    }),
+  });
+
+  await assert.rejects(
+    () => harness.coordinator.invite(terms),
+    (error) => error?.name === "V2TransientCoordinatorError",
+  );
+  assert.equal(createCalls, 1);
+  assert.equal(attempted.length, 1);
+  assert.equal(await innerStore.get(attempted[0].jti), null);
+  assert.equal((await harness.stateStore.list()).length, 0);
 });
 
 test("an invite whose terms differ from the published host terms is rejected before minting or posting", async () => {
@@ -353,11 +405,12 @@ async function createDurableAcceptHarness(t, options = {}) {
   const messages = [];
   const stateStore = createHandshakeStateStore({});
   let currentDiscovery = options.discovery ?? discovery;
+  const invitationStore = options.invitationStore ?? createV2InvitationStore();
   const baseInvitationService = createV2InvitationService({
     activeKey: key,
     verificationKeys: [key],
     acceptanceHmacKeys: [acceptanceKey],
-    store: createV2InvitationStore(),
+    store: invitationStore,
     nowMs: () => nowMs + 1,
   });
   const invitationService = options.wrapInvitationService
@@ -387,7 +440,7 @@ async function createDurableAcceptHarness(t, options = {}) {
     invitationService,
     relay,
     stateStore,
-    now: () => nowMs + 1,
+    now: options.now ?? (() => nowMs + 1),
     recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
     registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
@@ -402,6 +455,7 @@ async function createDurableAcceptHarness(t, options = {}) {
   }
   return {
     coordinator,
+    invitationStore,
     messages,
     setDiscovery: (next) => { currentDiscovery = next; },
     stateStore,
