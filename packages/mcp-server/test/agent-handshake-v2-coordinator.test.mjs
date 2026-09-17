@@ -865,6 +865,44 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   }
 });
 
+test("join rejects a stale helper version before access authorization and accepts the pinned release", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const relay = {
+    fetchDiscovery: async () => discovery,
+    getMessages: async () => ({ messages: [] }),
+    postMessage: async () => ({ ok: true, seq: "1" }),
+    getResult: async () => { throw new Error("pending"); },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay,
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 1,
+    verifiedHelperPrefix,
+  });
+
+  const invited = await coordinator.invite(terms);
+  const localPolicy = policy("initiator");
+  const joinInput = {
+    access: invited.initiatorAccess,
+    sessionKeyAddress: "0x7564105e977516c53be337314c7e53838967bdac",
+    policyDigest: v2CanonicalRecord(localPolicy).digest,
+  };
+  for (const stale of ["2.1.3", "2.1.5", ""]) {
+    await assert.rejects(
+      () => coordinator.join({ ...joinInput, helperVersion: stale }),
+      /coordination failed safely/,
+      `helperVersion ${JSON.stringify(stale)} is rejected`,
+    );
+  }
+  const joined = await coordinator.join({ ...joinInput, helperVersion: "2.1.4" });
+  const identityRequest = compactPayloadFrom(joined, "identity_claim");
+  assert.equal(identityRequest.policyDigest, joinInput.policyDigest);
+});
+
 test("fresh identity registration is returned as an executable pinned-helper action", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };

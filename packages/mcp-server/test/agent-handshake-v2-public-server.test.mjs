@@ -232,6 +232,14 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
     const roleAccess = "r".repeat(80);
     const status = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess } });
     assert.equal(status.body.result.structuredContent.roleAccess, roleAccess);
+    const staleJoined = await rpc(url, "tools/call", { name: "agent_handshake_join", arguments: {
+      access: roleAccess,
+      helperVersion: "2.1.3",
+      sessionKeyAddress: `0x${"1".repeat(40)}`,
+      policyDigest: "2".repeat(64),
+    } });
+    assert.equal(staleJoined.body.result.isError, true, "stale helperVersion is a schema rejection");
+    assert.equal(staleJoined.body.result.structuredContent, undefined, "stale helperVersion yields no structured payload");
     const joined = await rpc(url, "tools/call", { name: "agent_handshake_join", arguments: {
       access: roleAccess,
       helperVersion: "2.1.4",
