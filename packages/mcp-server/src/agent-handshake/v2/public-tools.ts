@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { V2_HELPER_VERSION } from "./instructions.js";
 import {
   AGENT_HANDSHAKE_V2_CHAIN_ID,
   AGENT_HANDSHAKE_V2_REGISTRY_ADDRESS,
@@ -20,6 +21,20 @@ export type V2PublicToolName = typeof V2_PUBLIC_TOOL_NAMES[number];
 export type V2PublicInvoke = (name: V2PublicToolName, args: Record<string, unknown>) => Promise<unknown>;
 
 const access = z.string().min(27).max(4096);
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID_V4_SHAPE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+const acceptanceIdempotencyKey = z.string().refine((value) => {
+  if (UUID_V4.test(value)) return true;
+  if (UUID_V4_SHAPE.test(value)) return false;
+  if (!BASE64URL.test(value)) return false;
+  try {
+    const decoded = Buffer.from(value, "base64url");
+    return decoded.length >= 16 && decoded.toString("base64url") === value;
+  } catch {
+    return false;
+  }
+}, "must be UUIDv4 or canonical base64url for at least 16 bytes");
 const ROLE_SCOPED_TOOLS = new Set([
   "agent_handshake_join",
   "agent_handshake_status",
@@ -78,10 +93,10 @@ const definitions = Object.freeze([
   {
     name: "agent_handshake_accept_invitation",
     title: "Accept stakeholder invitation",
-    description: "Claim one Responder invitation once and receive non-transferable Responder role access.",
-    schema: { invitation: z.string().min(80).max(4096) },
+    description: "Accept a Responder invitation with an optional acceptanceIdempotencyKey for retry-safe acceptance and receive non-transferable Responder role access.",
+    schema: { invitation: z.string().min(80).max(4096), acceptanceIdempotencyKey: acceptanceIdempotencyKey.optional() },
   },
-  { name: "agent_handshake_join", title: "Join handshake", description: "Bind this fresh local agent and its exact local policy to the assigned role.", schema: { access, helperVersion: z.literal("2.1.3"), sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/), policyDigest: z.string().regex(/^[0-9a-f]{64}$/) } },
+  { name: "agent_handshake_join", title: "Join handshake", description: "Bind this fresh local agent and its exact local policy to the assigned role.", schema: { access, helperVersion: z.literal(V2_HELPER_VERSION), sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/), policyDigest: z.string().regex(/^[0-9a-f]{64}$/) } },
   { name: "agent_handshake_status", title: "Read handshake status", description: "Read public progress for this role and session.", schema: { access } },
   { name: "agent_handshake_next", title: "Get next handshake operation", description: "Get the next typed local signing or registration operation, or wait safely.", schema: { access } },
   { name: "agent_handshake_submit_checkpoint", title: "Submit adapter release checkpoint", description: "Submit the signed private adapter checkpoint and exact artifact signature that authorize release of the pending proposal or acceptance.", schema: { access, artifactSignatureHex: z.string().regex(/^0x[0-9a-f]{130}$/), checkpoint: z.record(z.string(), z.unknown()) } },

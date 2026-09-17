@@ -12,12 +12,13 @@ import {
   v2PublicClientIp,
 } from "../dist/agent-handshake/v2/public-server.js";
 import { V2_VERIFIED_HELPER_BOOTSTRAP, buildV2Instructions, buildV2Manifest } from "../dist/agent-handshake/v2/instructions.js";
+import { AGENT_HANDSHAKE_ROLE_TOOLS, mintV2RoleAccess } from "../dist/agent-handshake/v2/access.js";
 
 const pin = {
-  version: "2.1.3",
+  version: "2.1.4",
   sourceCommit: "d".repeat(40),
   manifestDigest: "a".repeat(64),
-  allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/",
+  allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/",
   hostRoots: [
     { kid: "root-2026-08", fingerprint: "b".repeat(64) },
     { kid: "root-2026-07", fingerprint: "c".repeat(64) },
@@ -25,6 +26,24 @@ const pin = {
 };
 
 const ACCEPT = "application/json, text/event-stream";
+const roleKey = { kid: "role-test", secret: Buffer.alloc(32, "r") };
+const roleSessionId = "11111111-2222-4333-8444-555555555555";
+const roleStatementDigest = "f".repeat(64);
+
+function roleAccess(overrides = {}) {
+  return mintV2RoleAccess({
+    key: roleKey,
+    jti: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    sessionId: roleSessionId,
+    role: "initiator",
+    statementDigest: roleStatementDigest,
+    allowedTools: AGENT_HANDSHAKE_ROLE_TOOLS,
+    nbfMs: 0,
+    expMs: 60_000,
+    ...overrides,
+  });
+}
+
 async function rpc(url, method, params = {}, headers = {}) {
   const response = await fetch(url, {
     method: "POST",
@@ -40,7 +59,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   const instructions = buildV2Instructions(pin);
   const first = instructions.slice(0, 512);
   assert.match(first, /local signing/i);
-  assert.match(first, /2\.1\.3/);
+  assert.match(first, /2\.1\.4/);
   assert.equal(first.includes(pin.manifestDigest), false);
   assert.match(first, /digest is encoded only in the exact verified command below/i);
   assert.equal(instructions.split(pin.manifestDigest).length - 1, 1);
@@ -57,8 +76,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /do not send it to the other stakeholder or echo it into chat or logs/i);
   assert.match(instructions, /adapter asset path.*mandatory.*approvalCommand.*already preloaded.*do not download or overwrite.*inspect.*manifest.*helper source/is);
   assert.match(instructions, /portable fallback.*only when.*approvalCommand.*not available.*files are absent.*download/is);
-  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/manifest.json'"));
-  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/clockchain-agent-handshake.cjs'"));
+  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/manifest.json'"));
+  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/clockchain-agent-handshake.cjs'"));
   assert.match(instructions, /portable fallback.*each file as its own separate Bash tool call.*never prefix, wrap, combine/is);
   assert.match(instructions, /every Bash action.*one standalone Bash tool call.*never combine.*do not run.*stateDirectoryCommand.*until after.*assets.*inspected/is);
   assert.equal(instructions.includes(" ; then "), false);
@@ -66,7 +85,12 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /local stakeholder's own prompt explicitly confirms/i);
   assert.match(instructions, /needed.*erc8004_registration.*pinned helper.*register.*same absolute state directory.*agent_handshake_next/is);
   assert.match(instructions, /session-scoped \$TMPDIR path.*every local helper operation.*do not assign.*shell variable.*replace.*\$HOME.*\$PWD/is);
-  assert.match(instructions, /agent_handshake_accept_invitation exactly once.*first successful result.*never retry/is);
+  assert.match(instructions, /generate one fresh high-entropy acceptanceIdempotencyKey.*client-native secure randomness.*before.*first.*agent_handshake_accept_invitation/is);
+  assert.match(instructions, /retain.*acceptanceIdempotencyKey locally.*never share.*return.*log/is);
+  assert.match(instructions, /retry.*same invitation.*same acceptanceIdempotencyKey.*retryable.*transport uncertainty/is);
+  assert.match(instructions, /after.*success.*retain.*roleAccess.*stop accepting/is);
+  assert.match(instructions, /missing acceptanceIdempotencyKey.*transitional one-shot compatibility/is);
+  assert.doesNotMatch(instructions, /agent_handshake_accept_invitation exactly once.*first successful result.*never retry/is);
   assert.match(instructions, /Every needed or stage response is nonterminal.*retryAfterMs.*agent_handshake_next.*final certificate.*unrecoverable error/is);
   assert.match(instructions, /every successful role-scoped response echoes roleAccess.*use it byte-for-byte.*immediately following.*access argument/is);
   assert.match(instructions, /exact localPolicy object returned by Clockchain.*do not construct, infer, or alter.*helper policy operation/is);
@@ -171,6 +195,11 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
     const listed = await rpc(url, "tools/list");
     assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), V2_PUBLIC_TOOL_NAMES);
     assert.ok(listed.body.result.tools.some((tool) => tool.name === "agent_handshake_submit_checkpoint"));
+    const accept = listed.body.result.tools.find((tool) => tool.name === "agent_handshake_accept_invitation");
+    assert.equal(accept.inputSchema.required.includes("acceptanceIdempotencyKey"), false);
+    assert.equal(accept.inputSchema.properties.acceptanceIdempotencyKey.type, "string");
+    assert.doesNotMatch(accept.description, /\bonce\b/i);
+    assert.match(accept.description, /optional.*acceptanceIdempotencyKey.*retry-safe/is);
     const invite = listed.body.result.tools.find((tool) => tool.name === "agent_handshake_invite");
     const inviteSchema = JSON.stringify(invite.inputSchema);
     assert.match(inviteSchema, /eip155:11155111/);
@@ -203,9 +232,17 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
     const roleAccess = "r".repeat(80);
     const status = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess } });
     assert.equal(status.body.result.structuredContent.roleAccess, roleAccess);
-    const joined = await rpc(url, "tools/call", { name: "agent_handshake_join", arguments: {
+    const staleJoined = await rpc(url, "tools/call", { name: "agent_handshake_join", arguments: {
       access: roleAccess,
       helperVersion: "2.1.3",
+      sessionKeyAddress: `0x${"1".repeat(40)}`,
+      policyDigest: "2".repeat(64),
+    } });
+    assert.equal(staleJoined.body.result.isError, true, "stale helperVersion is a schema rejection");
+    assert.equal(staleJoined.body.result.structuredContent, undefined, "stale helperVersion yields no structured payload");
+    const joined = await rpc(url, "tools/call", { name: "agent_handshake_join", arguments: {
+      access: roleAccess,
+      helperVersion: "2.1.4",
       sessionKeyAddress: `0x${"1".repeat(40)}`,
       policyDigest: "2".repeat(64),
     } });
@@ -224,10 +261,70 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
   }
 });
 
+test("accept invitation validates optional acceptance idempotency key and passes it through unchanged", async () => {
+  const observed = [];
+  const handler = createV2PublicHttpHandler({
+    pin,
+    now: () => 1_000,
+    invoke: async (name, args) => {
+      observed.push({ name, args });
+      if (name === "agent_handshake_accept_invitation") return { responderAccess: roleAccess({ role: "responder" }), sessionId: "session" };
+      return { ok: true, name };
+    },
+  });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const uuidKey = "11111111-2222-4333-8444-555555555555";
+    const accepted = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: uuidKey },
+    });
+    assert.equal(accepted.body.result.isError, undefined);
+    assert.equal(observed.at(-1).args.acceptanceIdempotencyKey, uuidKey);
+
+    const uppercaseUuidKey = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const beforeUppercase = observed.length;
+    const uppercaseUuid = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: uppercaseUuidKey },
+    });
+    assert.equal(observed.length, beforeUppercase);
+    assert.ok(uppercaseUuid.body.error || uppercaseUuid.body.result?.isError);
+
+    const base64urlKey = Buffer.from("0123456789abcdef", "utf8").toString("base64url");
+    const acceptedWithBase64url = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: base64urlKey },
+    });
+    assert.equal(acceptedWithBase64url.body.result.isError, undefined);
+    assert.equal(observed.at(-1).args.acceptanceIdempotencyKey, base64urlKey);
+
+    const absentKey = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80) },
+    });
+    assert.equal(absentKey.body.result.isError, undefined);
+    assert.equal("acceptanceIdempotencyKey" in observed.at(-1).args, false);
+
+    const beforeMalformed = observed.length;
+    const malformed = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: "not-a-valid-key" },
+    });
+    assert.equal(observed.length, beforeMalformed);
+    assert.ok(malformed.body.error || malformed.body.result?.isError);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
 test("public HTTP routing ignores full-surface credentials, trusts only configured proxies, and rate limits", async () => {
   assert.equal(v2PublicClientIp({ "x-forwarded-for": "203.0.113.9" }, "198.51.100.2", "198.51.100.1"), "198.51.100.2");
   assert.equal(v2PublicClientIp({ "x-forwarded-for": "203.0.113.9, 198.51.100.1" }, "198.51.100.1", "198.51.100.1"), "203.0.113.9");
   let now = 1000;
+  const validInitiatorAccess = roleAccess({ jti: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expMs: 60 * 60_000 + 10_000 });
   const handler = createV2PublicHttpHandler({
     pin,
     now: () => now,
@@ -236,7 +333,7 @@ test("public HTTP routing ignores full-surface credentials, trusts only configur
     invoke: async (name) => ({
       ok: true,
       name,
-      ...(name === "agent_handshake_invite" ? { initiatorAccess: `${"a".repeat(160)}.${"b".repeat(43)}` } : {}),
+      ...(name === "agent_handshake_invite" ? { initiatorAccess: validInitiatorAccess } : {}),
     }),
   });
   const httpServer = createServer((req, res) => handler(req, res));
@@ -258,11 +355,13 @@ test("public HTTP routing ignores full-surface credentials, trusts only configur
 });
 
 test("public HTTP keeps signed role capabilities behind short opaque handles", async () => {
-  const initiatorCapability = `${"a".repeat(160)}.${"b".repeat(43)}`;
-  const responderCapability = `${"c".repeat(160)}.${"d".repeat(43)}`;
+  const initiatorCapability = roleAccess({ jti: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", role: "initiator" });
+  const responderCapability = roleAccess({ jti: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", role: "responder" });
   const observed = [];
+  let now = 1_000;
   const handler = createV2PublicHttpHandler({
     pin,
+    now: () => now,
     invoke: async (name, args) => {
       observed.push({ name, args });
       if (name === "agent_handshake_invite") {
@@ -322,6 +421,77 @@ test("public HTTP keeps signed role capabilities behind short opaque handles", a
   }
 });
 
+test("public HTTP reuses role-access handles by signed access digest until expiry", async () => {
+  let now = 1000;
+  const firstCapability = roleAccess({ jti: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", role: "responder", expMs: 5_000 });
+  const secondCapability = roleAccess({ jti: "ffffffff-ffff-4fff-8fff-ffffffffffff", role: "responder", expMs: 6_000 });
+  const freshCapability = roleAccess({ jti: "11111111-2222-4333-8444-555555555555", role: "responder", expMs: 10_000 });
+  const expiredCapability = roleAccess({ jti: "22222222-3333-4444-8555-666666666666", role: "responder", expMs: 999 });
+  let nextCapability = firstCapability;
+  const handler = createV2PublicHttpHandler({
+    pin,
+    now: () => now,
+    invoke: async (name) => {
+      if (name === "agent_handshake_accept_invitation") {
+        return { responderAccess: nextCapability, sessionId: "session" };
+      }
+      return { ok: true, name };
+    },
+  });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const first = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: "11111111-2222-4333-8444-555555555555" },
+    });
+    const firstHandle = first.body.result.structuredContent.roleAccess;
+    const sameAccess = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: "22222222-3333-4444-8555-666666666666" },
+    });
+    assert.equal(sameAccess.body.result.structuredContent.roleAccess, firstHandle);
+
+    nextCapability = secondCapability;
+    const differentAccess = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: "33333333-4444-4555-8666-777777777777" },
+    });
+    assert.notEqual(differentAccess.body.result.structuredContent.roleAccess, firstHandle);
+
+    nextCapability = expiredCapability;
+    const alreadyExpired = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: "44444444-5555-4666-8777-888888888888" },
+    });
+    assert.equal(alreadyExpired.body.result.isError, true);
+
+    now = 5_000;
+    nextCapability = firstCapability;
+    const afterExpiry = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: "55555555-6666-4777-8888-999999999999" },
+    });
+    assert.equal(afterExpiry.body.result.isError, true);
+
+    const expiredHandle = await rpc(url, "tools/call", {
+      name: "agent_handshake_status",
+      arguments: { access: firstHandle },
+    });
+    assert.equal(expiredHandle.body.result.isError, true);
+
+    nextCapability = freshCapability;
+    const freshAfterExpiry = await rpc(url, "tools/call", {
+      name: "agent_handshake_accept_invitation",
+      arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: "66666666-7777-4888-8999-aaaaaaaaaaaa" },
+    });
+    assert.notEqual(freshAfterExpiry.body.result.structuredContent.roleAccess, firstHandle);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
 test("public tools distinguish retryable infrastructure failures from terminal protocol rejection", async () => {
   const warnings = [];
   const originalWarn = console.warn;
@@ -333,12 +503,12 @@ test("public tools distinguish retryable infrastructure failures from terminal p
       { error: Object.assign(new Error("secret invalid role state"), { name: "V2CoordinatorError" }), retryable: false },
       { error: new Error("unexpected internal state"), retryable: false },
     ]) {
-      const handler = createV2PublicHttpHandler({ pin, invoke: async () => { throw candidate.error; } });
+      const handler = createV2PublicHttpHandler({ pin, now: () => 1_000, invoke: async () => { throw candidate.error; } });
       const httpServer = createServer((req, res) => handler(req, res));
       await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
       const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
       try {
-        const result = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: "a".repeat(80) } });
+        const result = await rpc(url, "tools/call", { name: "agent_handshake_status", arguments: { access: roleAccess({ jti: "77777777-8888-4999-8aaa-bbbbbbbbbbbb" }) } });
         const body = JSON.parse(result.body.result.content[0].text);
         assert.equal(body.retryable, candidate.retryable);
         assert.equal(result.body.result.isError === true, !candidate.retryable);

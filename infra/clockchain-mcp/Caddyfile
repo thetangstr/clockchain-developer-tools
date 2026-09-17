@@ -6,5 +6,15 @@ mcp.clockchain.network {
 	tls {
 		on_demand
 	}
+	# Staging is a path prefix on the production hostname: /staging/* is stripped
+	# and proxied to the isolated staging container (no published ports; edge
+	# network only). X-Forwarded-Prefix tells the app which public prefix it was
+	# reached through so its discovery manifest advertises the real endpoint.
+	# Production paths fall through to the mcp service untouched.
+	handle_path /staging/* {
+		reverse_proxy mcp-staging:8080 {
+			header_up X-Forwarded-Prefix /staging
+		}
+	}
 	reverse_proxy mcp:8080
 }

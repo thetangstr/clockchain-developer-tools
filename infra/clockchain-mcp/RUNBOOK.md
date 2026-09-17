@@ -27,6 +27,9 @@ Provisioning does not report success until the exact new instance is SSM
 - `/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS`
+- `/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE`
+- `/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS` — optional; keep only while
+  durable keyed accepts minted under the prior HMAC key can still retry
 - `/clockchain/host/FUNDING_WALLET_JSON`
 - `/clockchain/host/FUNDING_WALLET_PUBLIC_JSON`
 - `/clockchain/host/FUNDING_PASSWORD`
@@ -36,7 +39,12 @@ Provisioning does not report success until the exact new instance is SSM
 The release pin is public metadata held in SSM so that the deploy is atomic. It
 must name the immutable helper release, manifest digest, and active/previous
 host-root fingerprints. Role-access keys are server signing keys; generated
-stakeholder capabilities are never stored in SSM.
+stakeholder capabilities are never stored in SSM. Acceptance HMAC keys are
+separate from role-access signing keys and bind responder idempotency keys inside
+the persistent invitation store. Rotate them independently: promote a new active
+acceptance HMAC key, keep the old key as `AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS`
+until every referenced responder-access expiry has passed, and never rotate both
+active and previous acceptance HMAC keys away in one deploy.
 
 ## The anchoring gateway (owned time + ledger)
 

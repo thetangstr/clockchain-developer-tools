@@ -6,7 +6,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { type ClockchainConfig } from "@clockchain/core";
+import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
 import { CLOCK_TOOLS_HTML, CLOCK_TOOLS_TXT } from "./clock-tools-page.js";
@@ -45,6 +45,8 @@ import {
   readV2ReleasePin,
 } from "./agent-handshake/v2/instructions.js";
 import { createRuntimeV2Coordinator } from "./agent-handshake/v2/coordinator.js";
+import { buildStandaloneDiscovery, createStandaloneHttpHandler, limiter as keyedWindowLimiter } from "./standalone-handshake/public-server.js";
+import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -467,6 +469,27 @@ export async function runHttp(): Promise<void> {
     return publicHandshakeHandler;
   };
 
+  // Keyless chain-verify route state: a shared client for the public
+  // /connect/verify route plus a per-IP limiter and an immutable-block cache.
+  let chainVerifyClient: ClockchainClient | undefined;
+  const getChainVerifyClient = () => (chainVerifyClient ??= new ClockchainClient(readConfigFromEnv(process.env)));
+  const chainVerifyCache = new Map<string, unknown>();
+  const allowChainVerify = keyedWindowLimiter(Number(process.env.STANDALONE_HANDSHAKE_VERIFY_PER_MINUTE ?? "60"), 60_000, Date.now);
+
+  let standaloneHandshakeHandler: ReturnType<typeof createStandaloneHttpHandler> | undefined;
+  let standaloneHandshakeCoordinator: ReturnType<typeof createRuntimeStandaloneCoordinator> | undefined;
+  const getStandaloneHandshakeHandler = () => {
+    if (standaloneHandshakeHandler) return standaloneHandshakeHandler;
+    standaloneHandshakeCoordinator ??= createRuntimeStandaloneCoordinator(process.env);
+    standaloneHandshakeHandler = createStandaloneHttpHandler({
+      trustedProxy: process.env.STANDALONE_HANDSHAKE_TRUSTED_PROXY,
+      invitesPerHour: Number(process.env.STANDALONE_HANDSHAKE_INVITES_PER_HOUR ?? "5"),
+      callsPerMinute: Number(process.env.STANDALONE_HANDSHAKE_CALLS_PER_MINUTE ?? "120"),
+      invoke: (name, args) => standaloneHandshakeCoordinator!.invoke(name, args),
+    });
+    return standaloneHandshakeHandler;
+  };
+
   // A request is authorized if it carries a valid static MCP token OR a valid
   // self-serve signed token (v:1 demo or v:2 trial). Static tokens and v:1 demo
   // tokens resolve to AUTHENTICATED and bypass the trial/keeper layer (LLD §13);
@@ -550,6 +573,74 @@ export async function runHttp(): Promise<void> {
       } catch {
         res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
+      }
+      return;
+    }
+
+    if (req.method === "GET" && pathOf(req.url) === "/.well-known/standalone-handshake.json") {
+      // The advertised endpoint must match the address the caller actually used:
+      // behind a prefixed mount (e.g. Caddy `handle_path /staging/*`) the app never
+      // sees the prefix, so it arrives as X-Forwarded-Prefix. An explicit env
+      // override wins; absent both, the public production endpoint is the default.
+      const configured = (process.env.STANDALONE_PUBLIC_ENDPOINT ?? "").trim();
+      const prefix = firstHeader(req.headers["x-forwarded-prefix"]).trim().replace(/\/+$/, "");
+      const host = (firstHeader(req.headers["x-forwarded-host"]) || firstHeader(req.headers.host)).trim();
+      const endpoint = configured || (host ? `https://${host}${prefix}/connect/mcp` : undefined);
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "public, max-age=300",
+      });
+      res.end(JSON.stringify(buildStandaloneDiscovery(endpoint), null, 2));
+      return;
+    }
+
+    if (req.method === "GET" && pathOf(req.url) === "/connect/verify") {
+      // Keyless receipt verification for anyone: the check reads the immutable
+      // on-chain block upstream (no API key on that read), so a counterparty —
+      // or a curious browser — can confirm a handshake anchor without an
+      // account. Public like the handshake endpoint; per-IP limited and briefly
+      // cached (an anchored block is immutable).
+      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const ledgerId = (q.get("ledgerId") ?? "").trim();
+      const blockHeight = (q.get("blockHeight") ?? "").trim();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ledgerId) || !/^\d{1,10}$/.test(blockHeight)) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "bad_request" }));
+        return;
+      }
+      const ip = clientIp(req.headers, req.socket.remoteAddress);
+      if (!allowChainVerify(`chainverify:${ip}`)) {
+        res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "rate_limited" }));
+        return;
+      }
+      const cacheKey = `${blockHeight}:${ledgerId.toLowerCase()}`;
+      const cached = chainVerifyCache.get(cacheKey);
+      try {
+        const result = cached ?? (await getChainVerifyClient().verifyOnChain(ledgerId, blockHeight));
+        // Only confirmed positives are immutable; a "none" (pending anchor) must be re-checkable.
+        if (!cached && (result as { verifiedAgainst?: string }).verifiedAgainst === "on-chain block") {
+          chainVerifyCache.set(cacheKey, result);
+          if (chainVerifyCache.size > 10_000) chainVerifyCache.delete(chainVerifyCache.keys().next().value as string);
+        }
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=60" });
+        res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "verification_unavailable" }));
+      }
+      return;
+    }
+
+    if (pathOf(req.url) === "/connect/mcp") {
+      try {
+        await getStandaloneHandshakeHandler()(req, res);
+      } catch {
+        console.warn(JSON.stringify({ event: "standalone_handshake_route_failure" }));
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "standalone_handshake_unavailable" }));
+        }
       }
       return;
     }

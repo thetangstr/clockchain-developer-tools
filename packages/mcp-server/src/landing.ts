@@ -109,6 +109,15 @@ Docs:  https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTAL
 Page:  https://mcp.clockchain.network/  (open in a browser for the full page)
 Clock tools (stopwatch, timer, alarm — how to use them, exact arguments, the recipe):
        https://mcp.clockchain.network/clock-tools.txt
+
+Standalone Handshake — two agents opening a bounded, witnessed conversation
+
+The same host also serves clockchain-standalone-handshake at /connect/mcp (no API key):
+  claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/connect/mcp
+Flow: handshake_invite → handshake_accept_invitation (readiness checklist) → consent_sign
+(both roles, local signing) → channel_open (anchored opening receipt) → channel_send /
+channel_read within the consented scope → channel_close / channel_revoke (anchored closure).
+Consent covers communication only. Discovery: GET /.well-known/standalone-handshake.json
 `;
 
 // Machine-readable manifest served at GET /.well-known/mcp.json for ANY Accept
@@ -185,6 +194,7 @@ const MODULES = [
   { i: "05", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
   { i: "06", name: "Commitments", body: "Issue, checkpoint, attest, settle — every commitment's outcome, kept or broken, on the record." },
   { i: "07", name: "Verified time tools", wide: true, href: "/clock-tools", cta: "How to use the stopwatch, timer and alarm →", body: `Stopwatch, timer, alarm on consensus time — hosted. stopwatch_start / stop / verify: elapsed time between two anchored markers, re-verifiable from the blocks. timer_set / alarm_set: fire on verified time while your client is offline, never early; poll timer_status for the receipt, or receive a signed webhook. Every fire is a keyless-verifiable anchor on the ${SUBSTRATE_LABEL}.` },
+  { i: "08", name: "Standalone Handshake", wide: true, href: "/.well-known/standalone-handshake.json", cta: "Discovery manifest →", body: `The pre-negotiation gateway for two previously unconnected agents: mutually authenticated identity, a deterministic readiness checklist, signed consent to a stated purpose and scope — then a witnessed, bounded channel. Opening decisions and closures are anchored on the ${SUBSTRATE_LABEL}; consent authorizes communication only, never a transaction. Credential-light at /connect/mcp.` },
 ];
 export const MODULE_COUNT = MODULES.length;
 const MODULE_WORD = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][MODULE_COUNT] ?? String(MODULE_COUNT);
@@ -408,6 +418,13 @@ ${BASE_CSS}</style>
     <div class="tenet"><h3><span class="n">02</span>Self-verifying receipts</h3><p>A receipt carries its own payload and anchor. Recompute the hash, compare to the on-chain block. Proof, not a screenshot.</p></div>
     <div class="tenet"><h3><span class="n">03</span>Tamper-evident</h3><p>Change one byte and verification fails. The ledger is append-only; the immutable block is authoritative.</p></div>
   </div>
+</div></section>
+
+<section class="tint" id="handshake"><div class="wrap">
+  <div class="head"><span class="eyebrow">Standalone Handshake</span><h2>Two strangers, one bounded conversation</h2>
+  <p>Before agents talk business, they establish who is present, whether entry conditions are met, and what each side consented to discuss. Identity, authority, and capability checks run deterministically on both sides; consent is signed locally over the exact terms; the opening decision is anchored where anyone can re-verify it.</p></div>
+  <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="handshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/connect/mcp</code></pre></div>
+  <p class="hint">No API key. Consent covers communication only — it is not an agreement, and it never authorizes a transaction.</p>
 </div></section>
 
 <section id="install"><div class="wrap install">

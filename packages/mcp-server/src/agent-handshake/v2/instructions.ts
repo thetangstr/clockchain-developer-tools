@@ -1,5 +1,15 @@
+// The one place the deployed helper release line is declared. The pin
+// validator, the verified bootstrap, the join tool's helperVersion literal,
+// and the server's advertised version all derive from this — they may not
+// drift apart, because the published release embeds the same value in every
+// surface. The SSM release pin itself stays runtime data; only its shape and
+// version gate live here.
+export const V2_HELPER_VERSION = "2.1.4";
+export const V2_HELPER_ASSET_PREFIX =
+  `https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${V2_HELPER_VERSION}/`;
+
 export type V2ReleasePin = Readonly<{
-  version: "2.1.3";
+  version: "2.1.4";
   sourceCommit: string;
   manifestDigest: string;
   allowedAssetPrefix: string;
@@ -9,10 +19,10 @@ export type V2ReleasePin = Readonly<{
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const KID = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const PREFIX = "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/";
+const PREFIX = V2_HELPER_ASSET_PREFIX;
 const HELPER_FILENAME = "clockchain-agent-handshake.cjs";
 
-export const V2_VERIFIED_HELPER_BOOTSTRAP = 'const fs=require("node:fs");const crypto=require("node:crypto");const Module=require("node:module");const argv=process.argv.slice(1);const expected=argv.shift();const manifestPath=argv.shift();const helperPath=argv.shift();const manifestBytes=fs.readFileSync(manifestPath);const manifestDigest=crypto.createHash("sha256").update(manifestBytes).digest("hex");if(manifestDigest!==expected)process.exit(86);const manifest=JSON.parse(manifestBytes);if(manifest.schema!=="clockchain.agent-handshake-release-manifest/v1"||manifest.version!=="2.1.3"||!/^24\\./.test(manifest.nodeRuntime)||!/^24\\./.test(process.versions.node)||!Array.isArray(manifest.assets)||manifest.assets.length!==1)process.exit(86);const asset=manifest.assets[0];if(asset.filename!=="clockchain-agent-handshake.cjs"||asset.url!=="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/clockchain-agent-handshake.cjs"||typeof asset.sha256!=="string"||!/^[0-9a-f]{64}$/.test(asset.sha256))process.exit(86);const helperBytes=fs.readFileSync(helperPath);const helperDigest=crypto.createHash("sha256").update(helperBytes).digest("hex");if(helperDigest!==asset.sha256)process.exit(86);process.argv=[process.execPath].concat(helperPath).concat(argv);const loaded=new Module(helperPath);loaded.filename=helperPath;loaded.paths=[];const compile=loaded._compile.bind(loaded);compile(...[helperBytes.toString("utf8")].concat(helperPath));';
+export const V2_VERIFIED_HELPER_BOOTSTRAP = `const fs=require("node:fs");const crypto=require("node:crypto");const Module=require("node:module");const argv=process.argv.slice(1);const expected=argv.shift();const manifestPath=argv.shift();const helperPath=argv.shift();const manifestBytes=fs.readFileSync(manifestPath);const manifestDigest=crypto.createHash("sha256").update(manifestBytes).digest("hex");if(manifestDigest!==expected)process.exit(86);const manifest=JSON.parse(manifestBytes);if(manifest.schema!=="clockchain.agent-handshake-release-manifest/v1"||manifest.version!=="${V2_HELPER_VERSION}"||!/^24\\./.test(manifest.nodeRuntime)||!/^24\\./.test(process.versions.node)||!Array.isArray(manifest.assets)||manifest.assets.length!==1)process.exit(86);const asset=manifest.assets[0];if(asset.filename!=="${HELPER_FILENAME}"||asset.url!=="${V2_HELPER_ASSET_PREFIX}${HELPER_FILENAME}"||typeof asset.sha256!=="string"||!/^[0-9a-f]{64}$/.test(asset.sha256))process.exit(86);const helperBytes=fs.readFileSync(helperPath);const helperDigest=crypto.createHash("sha256").update(helperBytes).digest("hex");if(helperDigest!==asset.sha256)process.exit(86);process.argv=[process.execPath].concat(helperPath).concat(argv);const loaded=new Module(helperPath);loaded.filename=helperPath;loaded.paths=[];const compile=loaded._compile.bind(loaded);compile(...[helperBytes.toString("utf8")].concat(helperPath));`;
 
 export function verifiedV2HelperPrefix(pin: V2ReleasePin): string {
   return `node --input-type=commonjs --eval '${V2_VERIFIED_HELPER_BOOTSTRAP}' ${pin.manifestDigest} ./manifest.json ./${HELPER_FILENAME}`;
@@ -23,7 +33,7 @@ export function validateV2ReleasePin(value: unknown): V2ReleasePin {
   const item = value as Record<string, any>;
   if (Object.keys(item).sort().join(",") !== "allowedAssetPrefix,hostRoots,manifestDigest,sourceCommit,version") throw new Error("Agent handshake release pin is unavailable.");
   if (
-    item.version !== "2.1.3" || !SHA.test(item.sourceCommit) || !DIGEST.test(item.manifestDigest) ||
+    item.version !== V2_HELPER_VERSION || !SHA.test(item.sourceCommit) || !DIGEST.test(item.manifestDigest) ||
     item.allowedAssetPrefix !== PREFIX || !Array.isArray(item.hostRoots) ||
     item.hostRoots.length < 1 || item.hostRoots.length > 2
   ) throw new Error("Agent handshake release pin is unavailable.");
@@ -59,7 +69,7 @@ export function buildV2Instructions(rawPin: unknown): string {
     "After agent_handshake_invite, use only the returned roleAccess for Initiator role-scoped tools; responderInvitation is the single-use value to copy to the Responder. Never substitute responderInvitation for roleAccess.",
     "Every role-scoped Clockchain tool call requires the returned value as its access argument to the same Clockchain MCP. Supplying it there is required credential use, not credential disclosure; never omit it from agent_handshake_join, agent_handshake_status, agent_handshake_next, agent_handshake_submit_checkpoint, agent_handshake_submit, or agent_handshake_get_certificate.",
     "Every successful role-scoped response echoes roleAccess. Use it byte-for-byte as the immediately following role-scoped tool call's access argument; never replace it with a label, summary, placeholder, invitation, or remembered reconstruction.",
-    "As the Responder, call agent_handshake_accept_invitation exactly once. Its first successful result is authoritative: retain the returned roleAccess and never retry the consumed invitation.",
+    "As the Responder, generate one fresh high-entropy acceptanceIdempotencyKey with client-native secure randomness before the first agent_handshake_accept_invitation call. Retain that acceptanceIdempotencyKey locally, never share it, never return it, and never log it. Retry the same invitation with the same acceptanceIdempotencyKey only after retryable infrastructure failure or transport uncertainty. After success, retain the returned roleAccess and stop accepting. Missing acceptanceIdempotencyKey is transitional one-shot compatibility for older clients, not the durable retry path.",
     "After invitation acceptance, use only the returned roleAccess for Responder role-scoped tools. The original invitation is consumed; never use it as an access argument.",
     "statementDigest is the SHA-256 digest of Clockchain's canonical full terms object, not the SHA-256 of the raw statement text by itself. Verify the returned terms fields exactly and preserve the returned statementDigest; do not recompute it from only the human-readable statement.",
     "Use the exact localPolicy object returned by Clockchain for your role. Do not construct, infer, or alter its JSON shape. Pass those exact canonical bytes to the pinned helper policy operation and use the returned digest for agent_handshake_join.",

@@ -6,13 +6,25 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./standalone-handshake/*.js": "./dist/standalone-handshake/*.js",
+    "./handshake/*.js": "./dist/handshake/*.js"
+  },
   "bin": {
     "clockchain-mcp": "dist/stdio.js"
   },
   "files": [
     "dist"
   ],
-  "keywords": ["clockchain", "mcp", "model-context-protocol", "agent", "blockchain", "timestamp"],
+  "keywords": [
+    "clockchain",
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "blockchain",
+    "timestamp"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thetangstr/clockchain-developer-tools.git",
@@ -28,6 +40,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@clockchain/clock-sdk": "0.1.0",
     "@clockchain/core": "0.1.0",
     "@clockchain/keeper": "0.1.0",
     "@modelcontextprotocol/sdk": "1.30.0",

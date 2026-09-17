@@ -30,3 +30,6 @@ scripts/.omc/
 feedback.jsonl
 packages/web-demo/feedback.jsonl
 scripts/slides-created.json
+
+# SDD scratch workspaces (skill artifact, never committed)
+.superpowers/

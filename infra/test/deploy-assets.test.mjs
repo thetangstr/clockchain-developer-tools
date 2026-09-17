@@ -26,6 +26,11 @@ const expectedSecretNames = [
   "/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN",
   "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE",
   "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS",
+  "/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE",
+];
+
+const expectedOptionalSecretNames = [
+  "/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS",
 ];
 
 const expectedHostSecretNames = [
@@ -43,9 +48,11 @@ const expectedEnv = {
   MCP_TOKEN_SIGNING_SECRET: "signing-secret\nwith-newline\n",
   CLOCKCHAIN_SIGNING_SECRET: "gateway-signing-secret\n",
   KEEPER_WEBHOOK_SECRET: "whsec_a2VlcGVy\n",
-  AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.3","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
+  AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.4","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: '{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: '{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\n',
+  AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: '{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\n',
+  AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: '{"kid":"accept-previous","secretBase64":"ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ="}\n',
 };
 
 const expectedHostSecrets = {
@@ -115,6 +122,7 @@ async function createWrapperFixture(options = {}) {
   const fakeHandshakeDir = path.join(temp, "handshake");
   const hostSecretDir = path.join(temp, "host-secrets");
   const callsFile = path.join(temp, "aws-calls.txt");
+  const dockerInvokedFile = path.join(temp, "docker-invoked.txt");
   const dockerOkFile = path.join(temp, "docker-ok.txt");
   const envJson = JSON.stringify(expectedEnv);
   const hostSecretsJson = JSON.stringify(expectedHostSecrets);
@@ -191,15 +199,35 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$with_decryption" == 1 ]]
+if [[ "\${AWS_PARAMETER_NOT_FOUND:-}" == "$name" ]]; then
+  echo "An error occurred (ParameterNotFound) when calling the GetParameter operation: Parameter $name not found." >&2
+  exit 254
+fi
+if [[ "\${AWS_DENY_PARAMETER:-}" == "$name" ]]; then
+  echo "An error occurred (AccessDeniedException) when calling the GetParameter operation: access denied" >&2
+  exit 254
+fi
+if [[ "\${AWS_TRANSIENT_PARAMETER:-}" == "$name" ]]; then
+  echo "An error occurred (ThrottlingException) when calling the GetParameter operation: rate exceeded" >&2
+  exit 254
+fi
+if [[ "\${AWS_MALFORMED_PARAMETER:-}" == "$name" ]]; then
+  printf '{not-json'
+  exit 0
+fi
 case "$name" in
   /clockchain/mcp/CLOCKCHAIN_API_KEY) value=$'api-key-line-1\\napi-key-line-2\\n' ;;
   /clockchain/mcp/MCP_AUTH_TOKENS) value=$'token-a,token-b\\n' ;;
   /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET) value=$'signing-secret\\nwith-newline\\n' ;;
   /clockchain/mcp/GATEWAY_SIGNING_SECRET) value=$'gateway-signing-secret\\n' ;;
   /clockchain/mcp/KEEPER_WEBHOOK_SECRET) value=$'whsec_a2VlcGVy\\n' ;;
-  /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.3","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.4","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE) value=$'{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) value=$'{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS) value=$'{"kid":"accept-previous","secretBase64":"ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ="}\\n' ;;
+  /clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=="}\\n' ;;
+  /clockchain/mcp/SHORT_ACCEPTANCE_HMAC) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw="}\\n' ;;
   /clockchain/host/FUNDING_WALLET_JSON) value=$'{"wallet":"line-1\\\\nline-2"}\\n' ;;
   /clockchain/host/FUNDING_WALLET_PUBLIC_JSON) value=$'{"public":"wallet"}\\n' ;;
   /clockchain/host/FUNDING_PASSWORD) value=$'pass line 1\\npass line 2\\n' ;;
@@ -241,6 +269,7 @@ esac
 set -euo pipefail
 [[ "$1" == "compose" ]]
 shift
+printf 'invoked\\n' > "$DOCKER_INVOKED_FILE"
 has_wait=0
 has_wait_timeout=0
 while [[ $# -gt 0 ]]; do
@@ -269,6 +298,7 @@ printf 'docker compose invoked\\n'
   const env = {
     PATH: `${binDir}:${process.env.PATH}`,
     AWS_CALLS_FILE: callsFile,
+    DOCKER_INVOKED_FILE: dockerInvokedFile,
     DOCKER_OK_FILE: dockerOkFile,
     ENV_CHECK_FILE: path.join(temp, "env-check.mjs"),
     EXPECTED_ENV_FILE: path.join(temp, "expected-env.json"),
@@ -285,7 +315,7 @@ printf 'docker compose invoked\\n'
     ...options.env,
   };
 
-  return { temp, callsFile, dockerOkFile, env };
+  return { temp, callsFile, dockerInvokedFile, dockerOkFile, env };
 }
 
 async function resolvedComposeConfig() {
@@ -313,14 +343,16 @@ async function resolvedComposeConfig() {
       MCP_TOKEN_SIGNING_SECRET: "dummy-signing",
       CLOCKCHAIN_SIGNING_SECRET: "dummy-gateway-signing",
       AGENT_HANDSHAKE_RELEASE_PIN: JSON.stringify({
-        version: "2.1.3",
+        version: "2.1.4",
         sourceCommit: expectedHandshakeSha,
         manifestDigest: "a".repeat(64),
-        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/",
+        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/",
         hostRoots: [{ kid: "root-2026-08", fingerprint: "b".repeat(64) }],
       }),
       AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: "dummy-role-active",
       AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: "dummy-role-previous",
+      AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: "dummy-accept-active",
+      AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: "dummy-accept-previous",
       HANDSHAKE_APP_ROOT: "/tmp/handshake-app",
       HANDSHAKE_RELAY: "http://44.249.47.220:8080",
       HANDSHAKE_ALLOW_DEGRADED: "false",
@@ -426,7 +458,7 @@ test("deployment assets define the locked EC2 compose target", async () => {
 
 test("deployment runbook fixes the release order, secret boundary, canaries, and rollback", async () => {
   const source = await readFile(runbook, "utf8");
-  for (const name of [...expectedSecretNames, ...expectedHostSecretNames]) {
+  for (const name of [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedHostSecretNames]) {
     assert.match(source, new RegExp(name.replaceAll("/", "\\/")));
   }
   assert.match(source, /helper release[\s\S]*host[\s\S]*MCP[\s\S]*Research/i);
@@ -568,7 +600,7 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      [...expectedSecretNames, ...expectedHostSecretNames],
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedHostSecretNames],
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
     for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
@@ -600,6 +632,47 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
   }
 });
 
+test("deploy wrapper and v2 runtime declare one helper release line and derive the asset prefix", async () => {
+  const wrapperBody = await readFile(wrapper, "utf8");
+  const instructions = await readFile(
+    path.join(repoRoot, "packages", "mcp-server", "src", "agent-handshake", "v2", "instructions.ts"),
+    "utf8",
+  );
+
+  const wrapperVersion = wrapperBody.match(/^[ \t]*v2_helper_version="([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
+  const runtimeVersion = instructions.match(/^export const V2_HELPER_VERSION = "([0-9]+\.[0-9]+\.[0-9]+)";$/m)?.[1];
+  assert.ok(wrapperVersion, "compose-up.sh declares v2_helper_version");
+  assert.ok(runtimeVersion, "instructions.ts declares V2_HELPER_VERSION");
+  assert.equal(wrapperVersion, runtimeVersion, "deploy wrapper and runtime pin the same helper release");
+
+  const expectedPrefix =
+    `https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${runtimeVersion}/`;
+  assert.match(
+    wrapperBody,
+    /^[ \t]*v2_helper_asset_prefix="https:\/\/github\.com\/thetangstr\/clockchain-handshake-v2\/releases\/download\/v\$\{v2_helper_version\}\/"$/m,
+    "compose-up.sh derives the asset prefix from its declared version",
+  );
+  assert.match(
+    instructions,
+    /^export const V2_HELPER_ASSET_PREFIX =\s*\n?\s*`https:\/\/github\.com\/thetangstr\/clockchain-handshake-v2\/releases\/download\/v\$\{V2_HELPER_VERSION\}\/`;/m,
+    "instructions.ts derives the asset prefix from V2_HELPER_VERSION",
+  );
+  for (const body of [wrapperBody, instructions]) {
+    assert.equal(body.includes(expectedPrefix) || body.includes(`v${runtimeVersion}/`), false,
+      "no literal release prefix is scattered outside the derived declarations");
+  }
+  assert.equal(
+    instructions.includes('manifest.version!=="${V2_HELPER_VERSION}"'),
+    true,
+    "the verified bootstrap checks the declared version, not a literal",
+  );
+  assert.equal(
+    wrapperBody.includes("$helperVersion") && wrapperBody.includes("$helperPrefix"),
+    true,
+    "the jq release filter consumes the declared version and prefix",
+  );
+});
+
 test("compose wrapper rejects invalid degraded handshake mode before docker", async () => {
   const { temp, dockerOkFile, env } = await createWrapperFixture({
     env: { HANDSHAKE_ALLOW_DEGRADED: "yes" },
@@ -621,10 +694,87 @@ test("compose wrapper rejects invalid release metadata and repeated role signing
     { AGENT_HANDSHAKE_RELEASE_PIN_PARAM: "/clockchain/host/MISSING_SECRET" },
     { AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM: "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE" },
   ]) {
+    const { temp, dockerInvokedFile, dockerOkFile, env } = await createWrapperFixture({ env: extra });
+    try {
+      const result = await run(wrapper, [], { cwd: temp, env });
+      assert.notEqual(result.code, 0);
+      assert.equal(await pathExists(dockerInvokedFile), false, "docker compose was not invoked");
+      assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+      for (const secret of Object.values(expectedEnv)) {
+        assert.equal(result.stdout.includes(secret), false);
+        assert.equal(result.stderr.includes(secret), false);
+      }
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("compose wrapper rejects unsafe acceptance HMAC rotation before docker", async () => {
+  for (const extra of [
+    { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM: "/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE" },
+    { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE" },
+    { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64" },
+    { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/SHORT_ACCEPTANCE_HMAC" },
+  ]) {
     const { temp, dockerOkFile, env } = await createWrapperFixture({ env: extra });
     try {
       const result = await run(wrapper, [], { cwd: temp, env });
       assert.notEqual(result.code, 0);
+      assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+      for (const secret of Object.values(expectedEnv)) {
+        assert.equal(result.stdout.includes(secret), false);
+        assert.equal(result.stderr.includes(secret), false);
+      }
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("compose wrapper treats missing optional previous acceptance HMAC as absent", async () => {
+  const { temp, callsFile, dockerOkFile, env } = await createWrapperFixture({
+    env: { AWS_PARAMETER_NOT_FOUND: "/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS" },
+  });
+
+  try {
+    await writeFile(
+      env.EXPECTED_ENV_FILE,
+      JSON.stringify({ ...expectedEnv, AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: "" }),
+      "utf8",
+    );
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
+    assert.deepEqual(
+      calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedHostSecretNames],
+    );
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+    for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
+      assert.equal(result.stdout.includes(secret), false);
+      assert.equal(result.stderr.includes(secret), false);
+    }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper fails closed on optional previous acceptance HMAC fetch corruption", async () => {
+  const previousParam = "/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS";
+  for (const extra of [
+    { AWS_DENY_PARAMETER: previousParam },
+    { AWS_TRANSIENT_PARAMETER: previousParam },
+    { AWS_MALFORMED_PARAMETER: previousParam },
+    { AWS_FAIL_PARAMETER: previousParam },
+  ]) {
+    const { temp, dockerInvokedFile, dockerOkFile, env } = await createWrapperFixture({ env: extra });
+    try {
+      const result = await run(wrapper, [], { cwd: temp, env });
+      assert.notEqual(result.code, 0);
+      assert.equal(await pathExists(dockerInvokedFile), false, "docker compose was not invoked");
       assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
       for (const secret of Object.values(expectedEnv)) {
         assert.equal(result.stdout.includes(secret), false);

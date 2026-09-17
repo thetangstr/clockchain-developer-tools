@@ -6,6 +6,7 @@ import test from "node:test";
 import { createHandshakeStateStore, __resetHandshakeStateStore } from "../dist/handshake/state.js";
 import { createV2InvitationService, createV2InvitationStore } from "../dist/agent-handshake/v2/invitation-store.js";
 import { readV2RoleAccessPayload } from "../dist/agent-handshake/v2/access.js";
+import { generateRelayKeyPair } from "../dist/handshake/protocol.js";
 import * as v2CoordinatorModule from "../dist/agent-handshake/v2/coordinator.js";
 import { v2CanonicalRecord } from "../dist/agent-handshake/v2/protocol.js";
 
@@ -37,6 +38,7 @@ const discovery = {
   sessionDeadlineMs: String(nowMs + 600000),
   sessionOpenedBlock: "6999",
   hostSessionKeyCertificate,
+  terms,
   externalBusinessActionPerformed: false,
 };
 
@@ -194,6 +196,428 @@ test("an expired current invitation window is retryable while the host rotates s
   );
 });
 
+test("an invite whose terms differ from the published host terms is rejected before minting or posting", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const calls = { create: 0, update: 0, post: 0 };
+  const store = createHandshakeStateStore({});
+  const countingStore = {
+    get: (keyValue) => store.get(keyValue),
+    put: (keyValue, record) => store.put(keyValue, record),
+    list: () => store.list(),
+    update: (keyValue, mutate) => { calls.update += 1; return store.update(keyValue, mutate); },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: {
+      create: async () => { calls.create += 1; return { initiatorAccess: "", responderInvitation: "" }; },
+      accept: async () => { throw new Error("unexpected accept"); },
+    },
+    relay: {
+      fetchDiscovery: async () => discovery,
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => { calls.post += 1; return { ok: true, seq: "1" }; },
+    },
+    stateStore: countingStore,
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite({ ...terms, reference: "NS-2000" }),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.deepEqual(calls, { create: 0, update: 0, post: 0 });
+});
+
+test("a discovery record with malformed host terms is rejected", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay: {
+      fetchDiscovery: async () => ({ ...discovery, terms: { ...terms, validForSeconds: "999" } }),
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => ({ ok: true, seq: "1" }),
+    },
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite(terms),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+});
+
+test("a discovery record with a present but undefined terms property is rejected", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const calls = { create: 0, update: 0, post: 0 };
+  const store = createHandshakeStateStore({});
+  const countingStore = {
+    get: (keyValue) => store.get(keyValue),
+    put: (keyValue, record) => store.put(keyValue, record),
+    list: () => store.list(),
+    update: (keyValue, mutate) => { calls.update += 1; return store.update(keyValue, mutate); },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: {
+      create: async () => { calls.create += 1; return { initiatorAccess: "", responderInvitation: "" }; },
+      accept: async () => { throw new Error("unexpected accept"); },
+    },
+    relay: {
+      fetchDiscovery: async () => ({ ...discovery, terms: undefined }),
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => { calls.post += 1; return { ok: true, seq: "1" }; },
+    },
+    stateStore: countingStore,
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  await assert.rejects(
+    () => coordinator.invite(terms),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.deepEqual(calls, { create: 0, update: 0, post: 0 });
+});
+
+test("a legacy discovery record without terms falls back to caller terms with bounded telemetry", async (t) => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const { terms: _publishedTerms, ...legacyDiscovery } = discovery;
+  const calls = { create: 0, update: 0, post: 0 };
+  const store = createHandshakeStateStore({});
+  const countingStore = {
+    get: (keyValue) => store.get(keyValue),
+    put: (keyValue, record) => store.put(keyValue, record),
+    list: () => store.list(),
+    update: (keyValue, mutate) => { calls.update += 1; return store.update(keyValue, mutate); },
+  };
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (entry) => warnings.push(entry);
+  t.after(() => { console.warn = originalWarn; });
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay: {
+      fetchDiscovery: async () => legacyDiscovery,
+      getMessages: async () => ({ messages: [] }),
+      postMessage: async () => { calls.post += 1; return { ok: true, seq: "1" }; },
+    },
+    stateStore: countingStore,
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+
+  const invited = await coordinator.invite({ ...terms, reference: "NS-2000" });
+  assert.equal(invited.terms.reference, "NS-2000");
+  assert.deepEqual(calls, { create: 0, update: 1, post: 1 });
+  assert.equal(warnings.length, 1);
+  const event = JSON.parse(warnings[0]);
+  assert.equal(event.event, "agent_handshake_v2_invite_without_host_terms");
+  assert.equal(event.sessionId, sessionId);
+  assert.deepEqual(Object.keys(event).sort(), ["event", "sessionId"]);
+  assert.equal(JSON.stringify(event).includes("statement"), false);
+});
+
+async function createDurableAcceptHarness(t, options = {}) {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const acceptanceKey = { kid: "accept-2026-08", secret: randomBytes(32) };
+  const messages = [];
+  const stateStore = createHandshakeStateStore({});
+  let currentDiscovery = options.discovery ?? discovery;
+  const baseInvitationService = createV2InvitationService({
+    activeKey: key,
+    verificationKeys: [key],
+    acceptanceHmacKeys: [acceptanceKey],
+    store: createV2InvitationStore(),
+    nowMs: () => nowMs + 1,
+  });
+  const invitationService = options.wrapInvitationService
+    ? options.wrapInvitationService(baseInvitationService)
+    : baseInvitationService;
+  const relay = {
+    fetchDiscovery: async (requested) => {
+      assert.ok(requested === undefined || requested === sessionId);
+      return currentDiscovery;
+    },
+    getMessages: async () => ({ messages }),
+    postMessage: async (input) => {
+      if (options.onPostMessage) await options.onPostMessage(input, messages);
+      messages.push({
+        body: input.body,
+        kind: input.kind,
+        role: input.role,
+        senderKey: input.senderKey,
+        sessionId: input.sessionId,
+      });
+      return { ok: true, seq: String(messages.length) };
+    },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService,
+    relay,
+    stateStore,
+    now: () => nowMs + 1,
+    recoverEip191Address: async () => "0x7564105e977516c53be337314c7e53838967bdac",
+    registrationFundingReady: async () => true,
+    resolveRegistration: async () => null,
+    advanceTransitions: async () => [],
+    verifiedHelperPrefix,
+  });
+  const warnings = [];
+  if (t) {
+    const originalWarn = console.warn;
+    console.warn = (entry) => warnings.push(entry);
+    t.after(() => { console.warn = originalWarn; });
+  }
+  return {
+    coordinator,
+    messages,
+    setDiscovery: (next) => { currentDiscovery = next; },
+    stateStore,
+    warnings,
+  };
+}
+
+test("a keyed invitation accept retries after relay post failure with one responder relay identity", async (t) => {
+  let failClaimPost = true;
+  const harness = await createDurableAcceptHarness(t, {
+    onPostMessage: async (input) => {
+      if (input.kind === "agent_v2_invitation_claimed" && failClaimPost) {
+        failClaimPost = false;
+        throw new Error("relay unavailable after state insert");
+      }
+    },
+  });
+  const invited = await harness.coordinator.invite(terms);
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, "8ec16f1f-1cf5-4e9a-86c6-a17164d834af"),
+    /relay unavailable/,
+  );
+  const failedState = (await harness.stateStore.list()).find((record) => record.role === "responder");
+  assert.ok(failedState);
+  const retried = await harness.coordinator.acceptInvitation(invited.responderInvitation, "8ec16f1f-1cf5-4e9a-86c6-a17164d834af");
+  const completed = await harness.coordinator.acceptInvitation(invited.responderInvitation, "8ec16f1f-1cf5-4e9a-86c6-a17164d834af");
+  const finalState = (await harness.stateStore.list()).find((record) => record.role === "responder");
+  assert.equal(retried.responderAccess, completed.responderAccess);
+  assert.equal(finalState.relayEd25519Pem, failedState.relayEd25519Pem);
+  assert.equal(finalState.data.relay.senderKey, failedState.data.relay.senderKey);
+  assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 1);
+});
+
+test("a legacy responder state retries after discovery later publishes matching terms", async (t) => {
+  const { terms: _publishedTerms, ...legacyDiscovery } = discovery;
+  let failClaimPost = true;
+  const harness = await createDurableAcceptHarness(t, {
+    discovery: legacyDiscovery,
+    onPostMessage: async (input) => {
+      if (input.kind === "agent_v2_invitation_claimed" && failClaimPost) {
+        failClaimPost = false;
+        throw new Error("relay unavailable after legacy state insert");
+      }
+    },
+  });
+  const activeTerms = { ...terms, reference: "NS-LEGACY-RETRY" };
+  const invited = await harness.coordinator.invite(activeTerms);
+  const key = "6d0f29af-1954-4dc3-9541-642e2ea40c0e";
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+    /relay unavailable/,
+  );
+  const failedState = (await harness.stateStore.list()).find((record) => record.role === "responder");
+  assert.ok(failedState);
+  assert.equal(Object.hasOwn(failedState.data.discovery, "terms"), false);
+  harness.setDiscovery({ ...legacyDiscovery, terms: activeTerms });
+  const retried = await harness.coordinator.acceptInvitation(invited.responderInvitation, key);
+  const finalState = (await harness.stateStore.list()).find((record) => record.role === "responder");
+  assert.equal(retried.terms.reference, "NS-LEGACY-RETRY");
+  assert.equal(finalState.relayEd25519Pem, failedState.relayEd25519Pem);
+  assert.equal(finalState.data.relay.senderKey, failedState.data.relay.senderKey);
+  assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 1);
+});
+
+test("accept revalidates refreshed host terms before creating responder state", async (t) => {
+  const harness = await createDurableAcceptHarness(t);
+  const invited = await harness.coordinator.invite(terms);
+  harness.setDiscovery({ ...discovery, terms: { ...terms, reference: "NS-ROTATED" } });
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, "aa31486d-c7f5-4549-8778-184cd98c1a58"),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.equal((await harness.stateStore.list()).some((record) => record.role === "responder"), false);
+  assert.equal(harness.messages.some((message) => message.kind === "agent_v2_invitation_claimed"), false);
+});
+
+test("accepting a legacy discovery without host terms emits bounded compatibility telemetry", async (t) => {
+  const { terms: _publishedTerms, ...legacyDiscovery } = discovery;
+  const harness = await createDurableAcceptHarness(t, { discovery: legacyDiscovery });
+  const invited = await harness.coordinator.invite({ ...terms, reference: "NS-LEGACY" });
+  harness.warnings.length = 0;
+  const accepted = await harness.coordinator.acceptInvitation(invited.responderInvitation, "5c690be0-4490-4806-8890-0f647939ec6d");
+  assert.equal(accepted.terms.reference, "NS-LEGACY");
+  assert.equal(harness.warnings.length, 1);
+  const event = JSON.parse(harness.warnings[0]);
+  assert.equal(event.event, "agent_handshake_v2_accept_without_host_terms");
+  assert.equal(event.sessionId, sessionId);
+  assert.deepEqual(Object.keys(event).sort(), ["event", "sessionId"]);
+  assert.equal(JSON.stringify(event).includes("statement"), false);
+});
+
+test("same-key accept retries through each durable phase acknowledgement", async (t) => {
+  for (const phase of ["initialized", "posted", "completed"]) {
+    let failed = false;
+    const harness = await createDurableAcceptHarness(t, {
+      wrapInvitationService: (service) => ({
+        ...service,
+        advanceClaim: async (input) => {
+          if (input.phase === phase && !failed) {
+            failed = true;
+            throw new Error(`failed ${phase} acknowledgement`);
+          }
+          return service.advanceClaim(input);
+        },
+      }),
+    });
+    const invited = await harness.coordinator.invite(terms);
+    const key = randomUUID();
+    await assert.rejects(
+      () => harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+      new RegExp(`failed ${phase}`),
+    );
+    const retried = await harness.coordinator.acceptInvitation(invited.responderInvitation, key);
+    const completed = await harness.coordinator.acceptInvitation(invited.responderInvitation, key);
+    assert.equal(retried.responderAccess, completed.responderAccess);
+    assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 1);
+  }
+});
+
+test("a different acceptance idempotency key cannot take over an existing claim", async (t) => {
+  const harness = await createDurableAcceptHarness(t);
+  const invited = await harness.coordinator.invite(terms);
+  await harness.coordinator.acceptInvitation(invited.responderInvitation, "11111111-1111-4111-8111-111111111111");
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, "22222222-2222-4222-8222-222222222222"),
+    (error) => error?.name === "V2InvitationError",
+  );
+  assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 1);
+});
+
+test("a conflicting responder claim duplicate is terminal instead of reposted", async (t) => {
+  const harness = await createDurableAcceptHarness(t);
+  const invited = await harness.coordinator.invite(terms);
+  const key = "33333333-3333-4333-8333-333333333333";
+  await harness.coordinator.acceptInvitation(invited.responderInvitation, key);
+  const claimed = harness.messages.find((message) => message.kind === "agent_v2_invitation_claimed");
+  claimed.body = { ...claimed.body, claimedAtMs: String(nowMs + 99) };
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 1);
+});
+
+test("a historical conflicting duplicate fails even when a newer exact duplicate exists", async (t) => {
+  const harness = await createDurableAcceptHarness(t);
+  const invited = await harness.coordinator.invite(terms);
+  const key = "55555555-5555-4555-8555-555555555555";
+  await harness.coordinator.acceptInvitation(invited.responderInvitation, key);
+  const claimedIndex = harness.messages.findIndex((message) => message.kind === "agent_v2_invitation_claimed");
+  const claimed = harness.messages[claimedIndex];
+  harness.messages.splice(claimedIndex, 0, {
+    ...claimed,
+    body: { ...claimed.body, claimedAtMs: String(nowMs + 77) },
+  });
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 2);
+});
+
+test("existing responder state must prove relay private key matches the stored sender key", async (t) => {
+  let failClaimPost = true;
+  let postCalls = 0;
+  let advanceAfterMismatch = 0;
+  const harness = await createDurableAcceptHarness(t, {
+    onPostMessage: async (input) => {
+      if (input.kind === "agent_v2_invitation_claimed") {
+        postCalls += 1;
+        if (failClaimPost) {
+          failClaimPost = false;
+          throw new Error("relay unavailable after state insert");
+        }
+      }
+    },
+    wrapInvitationService: (service) => ({
+      ...service,
+      advanceClaim: async (input) => {
+        if (!failClaimPost) advanceAfterMismatch += 1;
+        return service.advanceClaim(input);
+      },
+    }),
+  });
+  const invited = await harness.coordinator.invite(terms);
+  const key = "66666666-6666-4666-8666-666666666666";
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+    /relay unavailable/,
+  );
+  const responder = (await harness.stateStore.list()).find((record) => record.role === "responder");
+  assert.ok(responder);
+  const wrongRelayKey = generateRelayKeyPair();
+  await harness.stateStore.update(responder, (current) => ({ ...current, relayEd25519Pem: wrongRelayKey.privateKeyPem }));
+  advanceAfterMismatch = 0;
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+    (error) => error?.name === "V2CoordinatorError",
+  );
+  assert.equal(postCalls, 1);
+  assert.equal(advanceAfterMismatch, 0);
+  assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 0);
+});
+
+test("concurrent same-key accepts return one responder access and one logical relay message", async (t) => {
+  const harness = await createDurableAcceptHarness(t);
+  const invited = await harness.coordinator.invite(terms);
+  const key = "44444444-4444-4444-8444-444444444444";
+  const [left, right] = await Promise.all([
+    harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+    harness.coordinator.acceptInvitation(invited.responderInvitation, key),
+  ]);
+  assert.equal(left.responderAccess, right.responderAccess);
+  assert.equal(harness.messages.filter((message) => message.kind === "agent_v2_invitation_claimed").length, 1);
+});
+
 test("two distinct role capabilities drive the complete v2 local-signing state machine", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
@@ -294,7 +718,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.deepEqual(await coordinator.status({ access: accesses[role] }), joinRequired);
     assert.deepEqual(await coordinator.next({ access: accesses[role] }), joinRequired);
     const localPolicy = policy(role);
-    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.3", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
+    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.4", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
     const identityRequest = compactPayloadFrom(joined, "identity_claim");
     assert.equal(identityRequest.descriptorEnvelope, null);
     assert.equal(identityRequest.policyDigest, v2CanonicalRecord(localPolicy).digest);
@@ -441,6 +865,44 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   }
 });
 
+test("join rejects a stale helper version before access authorization and accepts the pinned release", async () => {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const relay = {
+    fetchDiscovery: async () => discovery,
+    getMessages: async () => ({ messages: [] }),
+    postMessage: async () => ({ ok: true, seq: "1" }),
+    getResult: async () => { throw new Error("pending"); },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => nowMs + 1 }),
+    relay,
+    stateStore: createHandshakeStateStore({}),
+    now: () => nowMs + 1,
+    verifiedHelperPrefix,
+  });
+
+  const invited = await coordinator.invite(terms);
+  const localPolicy = policy("initiator");
+  const joinInput = {
+    access: invited.initiatorAccess,
+    sessionKeyAddress: "0x7564105e977516c53be337314c7e53838967bdac",
+    policyDigest: v2CanonicalRecord(localPolicy).digest,
+  };
+  for (const stale of ["2.1.3", "2.1.5", ""]) {
+    await assert.rejects(
+      () => coordinator.join({ ...joinInput, helperVersion: stale }),
+      /coordination failed safely/,
+      `helperVersion ${JSON.stringify(stale)} is rejected`,
+    );
+  }
+  const joined = await coordinator.join({ ...joinInput, helperVersion: "2.1.4" });
+  const identityRequest = compactPayloadFrom(joined, "identity_claim");
+  assert.equal(identityRequest.policyDigest, joinInput.policyDigest);
+});
+
 test("fresh identity registration is returned as an executable pinned-helper action", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
@@ -475,7 +937,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
   const digest = v2CanonicalRecord(localPolicy).digest;
   await coordinator.join({
     access: invited.initiatorAccess,
-    helperVersion: "2.1.3",
+    helperVersion: "2.1.4",
     sessionKeyAddress: presentedAddress,
     policyDigest: digest,
   });
