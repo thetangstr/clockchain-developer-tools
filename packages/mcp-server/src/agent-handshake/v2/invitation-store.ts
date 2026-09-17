@@ -75,7 +75,15 @@ export class V2InvitationError extends Error {
   }
 }
 
+export class V2InvitationWindowUnavailableError extends Error {
+  constructor() {
+    super("Agent handshake invitation window no longer has usable runway.");
+    this.name = "V2InvitationWindowUnavailableError";
+  }
+}
+
 function unavailable(): never { throw new V2InvitationError(); }
+function windowUnavailable(): never { throw new V2InvitationWindowUnavailableError(); }
 function digest(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 function hmacDigest(secret: Buffer, value: string): string { return createHmac("sha256", secret).update(value, "utf8").digest("hex"); }
 
@@ -268,7 +276,7 @@ function persist(path: string, records: Map<string, StoredInvitation>): void {
 }
 
 export interface V2InvitationStore {
-  put(value: StoredInvitation): Promise<void>;
+  put(value: StoredInvitation, commitGuard?: () => boolean): Promise<void>;
   get(jti: string): Promise<StoredInvitation | null>;
   claim(input: { invitationDigest: string; jti: string; nowMs: string }): Promise<StoredInvitation>;
   beginClaim(input: {
@@ -301,10 +309,13 @@ export function createV2InvitationStore(options: { path?: string } = {}): V2Invi
       const current = records.get(jti);
       return Promise.resolve(current ? v2Record(current) : null);
     },
-    put(value: StoredInvitation): Promise<void> {
+    put(value: StoredInvitation, commitGuard?: () => boolean): Promise<void> {
       return exclusively(() => {
         const verified = v2Record(value);
         if (records.has(verified.jti)) unavailable();
+        // The guard runs inside the serialized write so a lapsed invitation window cannot orphan a record
+        // between an earlier check and the actual commit.
+        if (commitGuard !== undefined && !commitGuard()) windowUnavailable();
         records = new Map(records).set(verified.jti, verified);
         save();
       });
@@ -437,7 +448,7 @@ export function createV2InvitationService(options: {
     });
   }
   return Object.freeze({
-    async create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; invitationExpMs?: string | number; metadata?: V2InvitationMetadata }) {
+    async create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; invitationExpMs?: string | number; metadata?: V2InvitationMetadata; commitGuard?: () => boolean }) {
       const invitationExpMs = input.invitationExpMs ?? input.expMs;
       const initiatorAccess = mintV2RoleAccess({
         key: options.activeKey, jti: nextId(), sessionId: input.sessionId, role: "initiator",
@@ -454,7 +465,7 @@ export function createV2InvitationService(options: {
         invitationDigest: digest(responderInvitation), jti: invitationJti,
         sessionId: input.sessionId, statementDigest: input.statementDigest,
         expMs: String(invitationExpMs), claim: null, metadata: input.metadata ?? null,
-      });
+      }, input.commitGuard);
       return Object.freeze({ initiatorAccess, responderInvitation });
     },
     async accept(input: { invitation: string; sessionId?: string; statementDigest?: string; expMs?: string | number; acceptanceIdempotencyKey?: string }) {
