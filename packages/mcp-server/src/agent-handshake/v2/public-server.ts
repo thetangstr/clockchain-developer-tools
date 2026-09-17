@@ -4,7 +4,7 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { buildV2Instructions, type V2ReleasePin } from "./instructions.js";
+import { V2_HELPER_VERSION, buildV2Instructions, type V2ReleasePin } from "./instructions.js";
 import { registerV2PublicTools, V2_PUBLIC_TOOL_NAMES, type V2PublicInvoke } from "./public-tools.js";
 import { readV2RoleAccessPayload, V2RoleAccessError } from "./access.js";
 
@@ -135,7 +135,7 @@ function createRoleAccessBroker(invoke: V2PublicInvoke, now: () => number): V2Pu
 }
 
 export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2PublicInvoke }): McpServer {
-  const server = new McpServer({ name: "clockchain-agent-handshake", version: "2.1.3" }, {
+  const server = new McpServer({ name: "clockchain-agent-handshake", version: V2_HELPER_VERSION }, {
     instructions: buildV2Instructions(options.pin),
   });
   registerV2PublicTools(server, options.invoke);

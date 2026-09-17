@@ -48,7 +48,7 @@ const expectedEnv = {
   MCP_TOKEN_SIGNING_SECRET: "signing-secret\nwith-newline\n",
   CLOCKCHAIN_SIGNING_SECRET: "gateway-signing-secret\n",
   KEEPER_WEBHOOK_SECRET: "whsec_a2VlcGVy\n",
-  AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.3","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
+  AGENT_HANDSHAKE_RELEASE_PIN: '{"version":"2.1.4","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: '{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\n',
   AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: '{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\n',
   AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: '{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\n',
@@ -221,7 +221,7 @@ case "$name" in
   /clockchain/mcp/MCP_TOKEN_SIGNING_SECRET) value=$'signing-secret\\nwith-newline\\n' ;;
   /clockchain/mcp/GATEWAY_SIGNING_SECRET) value=$'gateway-signing-secret\\n' ;;
   /clockchain/mcp/KEEPER_WEBHOOK_SECRET) value=$'whsec_a2VlcGVy\\n' ;;
-  /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.3","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN) value=$'{"version":"2.1.4","sourceCommit":"0123456789abcdef0123456789abcdef01234567","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE) value=$'{"kid":"role-active","secretBase64":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) value=$'{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\\n' ;;
@@ -343,10 +343,10 @@ async function resolvedComposeConfig() {
       MCP_TOKEN_SIGNING_SECRET: "dummy-signing",
       CLOCKCHAIN_SIGNING_SECRET: "dummy-gateway-signing",
       AGENT_HANDSHAKE_RELEASE_PIN: JSON.stringify({
-        version: "2.1.3",
+        version: "2.1.4",
         sourceCommit: expectedHandshakeSha,
         manifestDigest: "a".repeat(64),
-        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/",
+        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/",
         hostRoots: [{ kid: "root-2026-08", fingerprint: "b".repeat(64) }],
       }),
       AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: "dummy-role-active",
@@ -630,6 +630,47 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
+});
+
+test("deploy wrapper and v2 runtime declare one helper release line and derive the asset prefix", async () => {
+  const wrapperBody = await readFile(wrapper, "utf8");
+  const instructions = await readFile(
+    path.join(repoRoot, "packages", "mcp-server", "src", "agent-handshake", "v2", "instructions.ts"),
+    "utf8",
+  );
+
+  const wrapperVersion = wrapperBody.match(/^[ \t]*v2_helper_version="([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
+  const runtimeVersion = instructions.match(/^export const V2_HELPER_VERSION = "([0-9]+\.[0-9]+\.[0-9]+)";$/m)?.[1];
+  assert.ok(wrapperVersion, "compose-up.sh declares v2_helper_version");
+  assert.ok(runtimeVersion, "instructions.ts declares V2_HELPER_VERSION");
+  assert.equal(wrapperVersion, runtimeVersion, "deploy wrapper and runtime pin the same helper release");
+
+  const expectedPrefix =
+    `https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${runtimeVersion}/`;
+  assert.match(
+    wrapperBody,
+    /^[ \t]*v2_helper_asset_prefix="https:\/\/github\.com\/thetangstr\/clockchain-handshake-v2\/releases\/download\/v\$\{v2_helper_version\}\/"$/m,
+    "compose-up.sh derives the asset prefix from its declared version",
+  );
+  assert.match(
+    instructions,
+    /^export const V2_HELPER_ASSET_PREFIX =\s*\n?\s*`https:\/\/github\.com\/thetangstr\/clockchain-handshake-v2\/releases\/download\/v\$\{V2_HELPER_VERSION\}\/`;/m,
+    "instructions.ts derives the asset prefix from V2_HELPER_VERSION",
+  );
+  for (const body of [wrapperBody, instructions]) {
+    assert.equal(body.includes(expectedPrefix) || body.includes(`v${runtimeVersion}/`), false,
+      "no literal release prefix is scattered outside the derived declarations");
+  }
+  assert.equal(
+    instructions.includes('manifest.version!=="${V2_HELPER_VERSION}"'),
+    true,
+    "the verified bootstrap checks the declared version, not a literal",
+  );
+  assert.equal(
+    wrapperBody.includes("$helperVersion") && wrapperBody.includes("$helperPrefix"),
+    true,
+    "the jq release filter consumes the declared version and prefix",
+  );
 });
 
 test("compose wrapper rejects invalid degraded handshake mode before docker", async () => {

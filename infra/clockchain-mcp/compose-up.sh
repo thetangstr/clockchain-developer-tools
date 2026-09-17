@@ -180,10 +180,16 @@ validate_mcp_runtime_config() {
 }
 
 validate_v2_server_config() {
-  local release_filter
-  release_filter='type == "object" and (keys | sort) == ["allowedAssetPrefix","hostRoots","manifestDigest","sourceCommit","version"] and .version == "2.1.3" and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.manifestDigest | test("^[0-9a-f]{64}$")) and .allowedAssetPrefix == "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.3/" and (.hostRoots | type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.fingerprint | test("^[0-9a-f]{64}$"))))'
+  # The pinned helper release line is declared once here; the asset prefix is
+  # derived from it so the two can never drift. Keep in sync with
+  # V2_HELPER_VERSION in packages/mcp-server/src/agent-handshake/v2/instructions.ts
+  # — infra/test/deploy-assets.test.mjs enforces that they match.
+  local release_filter v2_helper_version v2_helper_asset_prefix
+  v2_helper_version="2.1.4"
+  v2_helper_asset_prefix="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${v2_helper_version}/"
+  release_filter='type == "object" and (keys | sort) == ["allowedAssetPrefix","hostRoots","manifestDigest","sourceCommit","version"] and .version == $helperVersion and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.manifestDigest | test("^[0-9a-f]{64}$")) and .allowedAssetPrefix == $helperPrefix and (.hostRoots | type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.fingerprint | test("^[0-9a-f]{64}$"))))'
 
-  if ! jq -e "$release_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_RELEASE_PIN"; then
+  if ! jq -e --arg helperVersion "$v2_helper_version" --arg helperPrefix "$v2_helper_asset_prefix" "$release_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_RELEASE_PIN"; then
     printf 'invalid AGENT_HANDSHAKE_RELEASE_PIN configuration\n' >&2
     return 1
   fi

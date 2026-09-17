@@ -11,7 +11,7 @@ import { readEvmBalance, recoverEip191Address, resolveOwnedAgentRegistration } f
 import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
 import type { ClaimPhase, V2AcceptanceHmacKey, V2InvitationClaim, V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore } from "./invitation-store.js";
-import { readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
+import { V2_HELPER_VERSION, readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
   commitmentCheckpointDigest,
   commitmentCheckpointSigningBytes,
@@ -220,7 +220,7 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
   if (operation === "evidence" && !descriptorEnvelope) fail();
   return Object.freeze({
     schema: "clockchain.agent-handshake-signing-request/v1",
-    helperVersion: "2.1.3",
+    helperVersion: V2_HELPER_VERSION,
     operation,
     role,
     sessionId: current.discovery.sessionId,
@@ -337,7 +337,7 @@ function certificateLocalAction(verifiedHelperPrefix: string, input: {
 }): JsonObject {
   const payload = Object.freeze({
     schema: "clockchain.agent-handshake-certificate-verification/v1",
-    helperVersion: "2.1.3",
+    helperVersion: V2_HELPER_VERSION,
     role: input.role,
     sessionId: input.sessionId,
     repositorySha: input.discovery.repositorySha,
@@ -595,7 +595,7 @@ export function createV2Coordinator(options: {
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
-      if (input.helperVersion !== "2.1.3" || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
+      if (input.helperVersion !== V2_HELPER_VERSION || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
       const sessionKeyAddress = input.sessionKeyAddress.toLowerCase();
       const auth = await authorize(input.access, "agent_handshake_join");
       const expectedPolicy = localPolicy(auth.current.terms, auth.verified.payload.role);

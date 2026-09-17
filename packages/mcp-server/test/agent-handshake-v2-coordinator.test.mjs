@@ -718,7 +718,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.deepEqual(await coordinator.status({ access: accesses[role] }), joinRequired);
     assert.deepEqual(await coordinator.next({ access: accesses[role] }), joinRequired);
     const localPolicy = policy(role);
-    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.3", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
+    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.4", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
     const identityRequest = compactPayloadFrom(joined, "identity_claim");
     assert.equal(identityRequest.descriptorEnvelope, null);
     assert.equal(identityRequest.policyDigest, v2CanonicalRecord(localPolicy).digest);
@@ -899,7 +899,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
   const digest = v2CanonicalRecord(localPolicy).digest;
   await coordinator.join({
     access: invited.initiatorAccess,
-    helperVersion: "2.1.3",
+    helperVersion: "2.1.4",
     sessionKeyAddress: presentedAddress,
     policyDigest: digest,
   });

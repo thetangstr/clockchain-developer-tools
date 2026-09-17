@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { V2_HELPER_VERSION } from "./instructions.js";
 import {
   AGENT_HANDSHAKE_V2_CHAIN_ID,
   AGENT_HANDSHAKE_V2_REGISTRY_ADDRESS,
@@ -95,7 +96,7 @@ const definitions = Object.freeze([
     description: "Accept a Responder invitation with an optional acceptanceIdempotencyKey for retry-safe acceptance and receive non-transferable Responder role access.",
     schema: { invitation: z.string().min(80).max(4096), acceptanceIdempotencyKey: acceptanceIdempotencyKey.optional() },
   },
-  { name: "agent_handshake_join", title: "Join handshake", description: "Bind this fresh local agent and its exact local policy to the assigned role.", schema: { access, helperVersion: z.literal("2.1.3"), sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/), policyDigest: z.string().regex(/^[0-9a-f]{64}$/) } },
+  { name: "agent_handshake_join", title: "Join handshake", description: "Bind this fresh local agent and its exact local policy to the assigned role.", schema: { access, helperVersion: z.literal(V2_HELPER_VERSION), sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/), policyDigest: z.string().regex(/^[0-9a-f]{64}$/) } },
   { name: "agent_handshake_status", title: "Read handshake status", description: "Read public progress for this role and session.", schema: { access } },
   { name: "agent_handshake_next", title: "Get next handshake operation", description: "Get the next typed local signing or registration operation, or wait safely.", schema: { access } },
   { name: "agent_handshake_submit_checkpoint", title: "Submit adapter release checkpoint", description: "Submit the signed private adapter checkpoint and exact artifact signature that authorize release of the pending proposal or acceptance.", schema: { access, artifactSignatureHex: z.string().regex(/^0x[0-9a-f]{130}$/), checkpoint: z.record(z.string(), z.unknown()) } },
