@@ -74,8 +74,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /compile only those verified bytes in memory/i);
   assert.match(instructions, /short opaque local handle/i);
   assert.match(instructions, /do not send it to the other stakeholder or echo it into chat or logs/i);
-  assert.match(instructions, /adapter asset path.*mandatory.*approvalCommand.*already preloaded.*do not download or overwrite.*inspect.*manifest.*helper source/is);
-  assert.match(instructions, /portable fallback.*only when.*approvalCommand.*not available.*files are absent.*download/is);
+  assert.match(instructions, /adapter asset path.*mandatory.*approvalTool.*already preloaded.*do not download or overwrite.*inspect.*manifest.*helper source/is);
+  assert.match(instructions, /portable fallback.*only when.*approvalTool.*not available.*files are absent.*download/is);
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.6/manifest.json'"));
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.6/clockchain-agent-handshake.cjs'"));
   assert.match(instructions, /portable fallback.*each file as its own separate Bash tool call.*never prefix, wrap, combine/is);
@@ -100,10 +100,10 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /manifest digest.*applies only.*manifest\.json.*helper.*separate.*sha-256.*verified manifest/is);
   assert.match(instructions, /trust root separation.*manifest digest.*independent pin.*manifest bytes.*asset hash.*helper bytes.*host-root fingerprint.*separate.*session-key certificate.*closing certificate.*not expected.*asset bootstrap/is);
   assert.match(instructions, /after.*init.*policy.*inspect.*call agent_handshake_join.*do not.*register.*before.*join.*fund.*agent_handshake_next.*erc8004_registration/is);
-  assert.match(instructions, /approvalCommand.*exact digest-bound local action.*adapter executes.*structured arguments.*Never run helperStep\.shellCommand.*approvalCommand is available/is);
+  assert.match(instructions, /approvalTool.*exact digest-bound local action.*adapter executes.*structured arguments.*Never run helperStep\.shellCommand.*approvalTool is available/is);
   assert.match(instructions, /Compatibility clients.*stateDirectoryCommand.*helperStep\.shellCommand verbatim.*never.*concatenate.*re-encode.*payload/is);
   assert.match(instructions, /operation.*does not include.*--payload-base64url.*do not add/is);
-  assert.match(instructions, /signing and certificate response.*authoritative payload-bearing.*helperStep\.shellCommand.*short digest-bound approvalCommand.*Prefer approvalCommand through the adapter/is);
+  assert.match(instructions, /signing and certificate response.*authoritative payload-bearing.*helperStep\.shellCommand.*fixed adapter approvalTool.*Prefer approvalTool through the adapter/is);
   assert.match(instructions, /summary fields.*confirmation only.*never.*reconstruct.*payload/is);
   assert.match(instructions, /Never infer that the other stakeholder stopped from a waiting response/is);
   assert.match(instructions, /HANDSHAKE_TEMPORARILY_UNAVAILABLE.*retryable: true.*retryAfterMs.*retry the same tool.*terminal protocol rejection/is);
@@ -140,7 +140,7 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
             operation: ["init", "policy", "inspect"][index],
             role: "initiator",
             sessionId: "11111111-2222-4333-8444-555555555555",
-            approvalCommand: `clockchain-agent-authorize ${createHash("sha256").update(shellCommand).digest("hex")}`,
+            approvalTool: "mcp__clockchain-local-adapter__authorize_local_action",
             commandLength: Buffer.byteLength(shellCommand),
             commandSha256: createHash("sha256").update(shellCommand).digest("hex"),
             shellCommand,
@@ -154,7 +154,7 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
             operation: ["init", "policy", "inspect"][index],
             role: "responder",
             sessionId: "11111111-2222-4333-8444-555555555555",
-            approvalCommand: `clockchain-agent-authorize ${createHash("sha256").update(shellCommand).digest("hex")}`,
+            approvalTool: "mcp__clockchain-local-adapter__authorize_local_action",
             commandLength: Buffer.byteLength(shellCommand),
             commandSha256: createHash("sha256").update(shellCommand).digest("hex"),
             shellCommand,
@@ -167,7 +167,7 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
           operation: "sign",
           role: "initiator",
           sessionId: "11111111-2222-4333-8444-555555555555",
-          approvalCommand: `clockchain-agent-authorize ${createHash("sha256").update(signingCommand).digest("hex")}`,
+          approvalTool: "mcp__clockchain-local-adapter__authorize_local_action",
           commandLength: Buffer.byteLength(signingCommand),
           commandSha256: createHash("sha256").update(signingCommand).digest("hex"),
           shellCommand: signingCommand,
@@ -213,7 +213,7 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
     assert.equal("initiatorAccess" in invitedText, false);
     for (const [index, command] of setupCommands.entries()) {
       assert.equal(invitedText.localAction.helperSteps[index].shellCommand, command);
-      assert.equal(invitedText.localAction.helperSteps[index].approvalCommand, `clockchain-agent-authorize ${invitedText.localAction.helperSteps[index].commandSha256}`);
+      assert.equal(invitedText.localAction.helperSteps[index].approvalTool, "mcp__clockchain-local-adapter__authorize_local_action");
       assert.equal(JSON.stringify(invited.body.result).split(command).length - 1, 1);
     }
     const accepted = await rpc(url, "tools/call", {
@@ -226,7 +226,7 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
     assert.equal("responderAccess" in acceptedText, false);
     for (const [index, command] of setupCommands.entries()) {
       assert.equal(acceptedText.localAction.helperSteps[index].shellCommand, command);
-      assert.equal(acceptedText.localAction.helperSteps[index].approvalCommand, `clockchain-agent-authorize ${acceptedText.localAction.helperSteps[index].commandSha256}`);
+      assert.equal(acceptedText.localAction.helperSteps[index].approvalTool, "mcp__clockchain-local-adapter__authorize_local_action");
       assert.equal(JSON.stringify(accepted.body.result).split(command).length - 1, 1);
     }
     const roleAccess = "r".repeat(80);
@@ -253,7 +253,7 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
     assert.equal(joinedText.localAction.helperStep.shellCommand, signingCommand);
     assert.equal(joinedText.localAction.helperStep.commandLength, Buffer.byteLength(signingCommand));
     assert.equal(joinedText.localAction.helperStep.commandSha256, createHash("sha256").update(signingCommand).digest("hex"));
-    assert.equal(joinedText.localAction.helperStep.approvalCommand, `clockchain-agent-authorize ${joinedText.localAction.helperStep.commandSha256}`);
+    assert.equal(joinedText.localAction.helperStep.approvalTool, "mcp__clockchain-local-adapter__authorize_local_action");
     assert.equal((await rpc(url, "resources/list")).body.error.code, -32601);
     assert.equal((await rpc(url, "prompts/list")).body.error.code, -32601);
   } finally {
