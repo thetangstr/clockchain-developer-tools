@@ -193,48 +193,46 @@ validate_v2_server_config() {
     printf 'invalid AGENT_HANDSHAKE_RELEASE_PIN configuration\n' >&2
     return 1
   fi
-  node <<'NODE'
-const specs = [
-  ["AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE", true],
-  ["AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS", true],
-  ["AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE", true],
-  ["AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS", false],
-];
-const kidPattern = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const seenKids = new Set();
-const seenSecrets = new Set();
-function fail(message) {
-  console.error(message);
-  process.exit(1);
-}
-function readKey(name, required) {
-  const raw = process.env[name] ?? "";
-  if (raw === "" && !required) return;
-  if (raw === "") fail(`missing ${name} configuration`);
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    fail(`invalid ${name} configuration`);
-  }
-  if (
-    parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
-    Object.keys(parsed).sort().join(",") !== "kid,secretBase64" ||
-    typeof parsed.kid !== "string" || !kidPattern.test(parsed.kid) ||
-    typeof parsed.secretBase64 !== "string"
-  ) fail(`invalid ${name} configuration`);
-  const secret = Buffer.from(parsed.secretBase64, "base64");
-  if (secret.length < 32 || secret.toString("base64") !== parsed.secretBase64) {
-    fail(`invalid ${name} configuration`);
-  }
-  const secretId = secret.toString("base64");
-  if (seenKids.has(parsed.kid)) fail("agent-handshake runtime key ids must be distinct");
-  if (seenSecrets.has(secretId)) fail("agent-handshake runtime key secrets must be distinct");
-  seenKids.add(parsed.kid);
-  seenSecrets.add(secretId);
-}
-for (const [name, required] of specs) readKey(name, required);
-NODE
+  # Runtime keys are {"kid","secretBase64"} JSON. Validate with jq + coreutils
+  # only: the service runs under systemd, whose PATH does not provide node.
+  local key_filter name raw kid secret
+  local seen_kids="" seen_secrets=""
+  key_filter='type == "object" and (keys | sort) == ["kid","secretBase64"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.secretBase64 | type == "string")'
+  for name in \
+    AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE \
+    AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS \
+    AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE \
+    AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS
+  do
+    raw="${!name:-}"
+    if [[ -z "$raw" ]]; then
+      # Only the previous acceptance HMAC may be absent.
+      [[ "$name" == "AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS" ]] && continue
+      printf 'missing %s configuration\n' "$name" >&2
+      return 1
+    fi
+    if ! jq -e "$key_filter" >/dev/null 2>&1 <<<"$raw"; then
+      printf 'invalid %s configuration\n' "$name" >&2
+      return 1
+    fi
+    kid="$(jq -r '.kid' <<<"$raw")"
+    secret="$(jq -r '.secretBase64' <<<"$raw")"
+    # Canonical base64 of >=32 decoded bytes: a non-decodable or non-canonical
+    # value never round-trips to itself.
+    if [[ "$(printf '%s' "$secret" | base64 -d 2>/dev/null | base64 | tr -d '\n')" != "$secret" ]] ||
+       (( $(printf '%s' "$secret" | base64 -d | wc -c) < 32 )); then
+      printf 'invalid %s configuration\n' "$name" >&2
+      return 1
+    fi
+    case "|$seen_kids|" in
+      *"|$kid|"*) printf 'agent-handshake runtime key ids must be distinct\n' >&2; return 1 ;;
+    esac
+    case "|$seen_secrets|" in
+      *"|$secret|"*) printf 'agent-handshake runtime key secrets must be distinct\n' >&2; return 1 ;;
+    esac
+    seen_kids="$seen_kids|$kid"
+    seen_secrets="$seen_secrets|$secret"
+  done
 }
 
 materialize_host_secrets() {

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
@@ -284,7 +284,7 @@ done
 if [[ "\${DOCKER_FAIL_HEALTH:-0}" == "1" ]]; then
   exit 78
 fi
-node "$ENV_CHECK_FILE"
+"$TEST_NODE_BIN" "$ENV_CHECK_FILE"
 printf 'docker compose invoked\\n'
 `,
     { mode: 0o755 },
@@ -301,6 +301,9 @@ printf 'docker compose invoked\\n'
     DOCKER_INVOKED_FILE: dockerInvokedFile,
     DOCKER_OK_FILE: dockerOkFile,
     ENV_CHECK_FILE: path.join(temp, "env-check.mjs"),
+    // Absolute node path so the fixture's own checks still work when a test
+    // strips node from PATH to simulate the systemd unit environment.
+    TEST_NODE_BIN: process.execPath,
     EXPECTED_ENV_FILE: path.join(temp, "expected-env.json"),
     EXPECTED_HOST_SECRETS_FILE: path.join(temp, "expected-host-secrets.json"),
     EXPECTED_HOST_SECRET_DIR: hostSecretDir,
@@ -671,6 +674,31 @@ test("deploy wrapper and v2 runtime declare one helper release line and derive t
     true,
     "the jq release filter consumes the declared version and prefix",
   );
+});
+
+test("compose wrapper runs under a systemd PATH with no node on it", async () => {
+  // Production runs the wrapper as a systemd unit; that PATH has no node.
+  // Reproduce it here: PATH is only the fixture bin dir plus the system dirs,
+  // with a `node` stub that exits 127 in case node lives in a system dir on
+  // the test host. Any bare `node` invocation in the wrapper fails the run.
+  const { temp, dockerOkFile, env } = await createWrapperFixture();
+  try {
+    const jqPath = spawnSync("which", ["jq"], { encoding: "utf8" }).stdout.trim();
+    assert.ok(jqPath, "jq must be installed to run this test");
+    const binDir = path.join(temp, "bin");
+    await symlink(jqPath, path.join(binDir, "jq"));
+    await writeFile(path.join(binDir, "node"), "#!/usr/bin/env bash\nexit 127\n", { mode: 0o755 });
+
+    const result = await run(wrapper, [], {
+      cwd: temp,
+      env: { ...env, PATH: `${binDir}:/usr/bin:/bin` },
+    });
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
 });
 
 test("compose wrapper rejects invalid degraded handshake mode before docker", async () => {
