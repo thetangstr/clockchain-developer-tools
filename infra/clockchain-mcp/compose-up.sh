@@ -187,7 +187,11 @@ validate_v2_server_config() {
   local release_filter v2_helper_version v2_helper_asset_prefix
   v2_helper_version="2.1.4"
   v2_helper_asset_prefix="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${v2_helper_version}/"
-  release_filter='type == "object" and (keys | sort) == ["allowedAssetPrefix","hostRoots","manifestDigest","sourceCommit","version"] and .version == $helperVersion and (.sourceCommit | test("^[0-9a-f]{40}$")) and (.manifestDigest | test("^[0-9a-f]{64}$")) and .allowedAssetPrefix == $helperPrefix and (.hostRoots | type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.fingerprint | test("^[0-9a-f]{64}$"))))'
+  # jq regexes use Oniguruma: $ matches BEFORE a trailing newline, so every
+  # anchored pattern must use \A...\z to bind the true ends of the string —
+  # a newline-suffixed value would otherwise pass here and fail the stricter
+  # runtime validator inside the container.
+  release_filter='type == "object" and (keys | sort) == ["allowedAssetPrefix","hostRoots","manifestDigest","sourceCommit","version"] and .version == $helperVersion and (.sourceCommit | test("\\A[0-9a-f]{40}\\z")) and (.manifestDigest | test("\\A[0-9a-f]{64}\\z")) and .allowedAssetPrefix == $helperPrefix and (.hostRoots | type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid"] and (.kid | test("\\A[a-z0-9][a-z0-9-]{0,63}\\z")) and (.fingerprint | test("\\A[0-9a-f]{64}\\z"))))'
 
   if ! jq -e --arg helperVersion "$v2_helper_version" --arg helperPrefix "$v2_helper_asset_prefix" "$release_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_RELEASE_PIN"; then
     printf 'invalid AGENT_HANDSHAKE_RELEASE_PIN configuration\n' >&2
@@ -195,9 +199,16 @@ validate_v2_server_config() {
   fi
   # Runtime keys are {"kid","secretBase64"} JSON. Validate with jq + coreutils
   # only: the service runs under systemd, whose PATH does not provide node.
+  # jq regexes are Oniguruma — $ anchors BEFORE a trailing newline — so the
+  # patterns use \A...\z to bind true string ends. The secretBase64 pattern is
+  # structural only: it guarantees the alphabet and padding shape (and hence
+  # that command substitution cannot alter the value by stripping newlines),
+  # but it does NOT prove canonical pad bits. Canonicality is still proven by
+  # the decode-and-reencode equality check below, exactly as the old node
+  # validator did.
   local key_filter name raw kid secret
   local seen_kids="" seen_secrets=""
-  key_filter='type == "object" and (keys | sort) == ["kid","secretBase64"] and (.kid | test("^[a-z0-9][a-z0-9-]{0,63}$")) and (.secretBase64 | type == "string")'
+  key_filter='type == "object" and (keys | sort) == ["kid","secretBase64"] and (.kid | test("\\A[a-z0-9][a-z0-9-]{0,63}\\z")) and (.secretBase64 | type == "string" and test("\\A([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?\\z"))'
   for name in \
     AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE \
     AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS \
@@ -218,7 +229,9 @@ validate_v2_server_config() {
     kid="$(jq -r '.kid' <<<"$raw")"
     secret="$(jq -r '.secretBase64' <<<"$raw")"
     # Canonical base64 of >=32 decoded bytes: a non-decodable or non-canonical
-    # value never round-trips to itself.
+    # value (e.g. nonzero pad bits) never round-trips to itself. Safe to run
+    # on the extracted value only because the \z-anchored jq pattern above
+    # already proved it contains no whitespace for $(...) to strip.
     if [[ "$(printf '%s' "$secret" | base64 -d 2>/dev/null | base64 | tr -d '\n')" != "$secret" ]] ||
        (( $(printf '%s' "$secret" | base64 -d | wc -c) < 32 )); then
       printf 'invalid %s configuration\n' "$name" >&2

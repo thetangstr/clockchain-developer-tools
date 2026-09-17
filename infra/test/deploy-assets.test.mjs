@@ -228,6 +228,14 @@ case "$name" in
   /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS) value=$'{"kid":"accept-previous","secretBase64":"ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ="}\\n' ;;
   /clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=="}\\n' ;;
   /clockchain/mcp/SHORT_ACCEPTANCE_HMAC) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw="}\\n' ;;
+  /clockchain/mcp/NEWLINE_KID_HMAC) value=$'{"kid":"accept-fresh\\n","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU="}\\n' ;;
+  /clockchain/mcp/NEWLINE_SECRET_HMAC) value=$'{"kid":"accept-fresh","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\\n"}\\n' ;;
+  # 44 chars ending ZWV= : structurally valid but nonzero pad bits — decodes
+  # but re-encodes to ...ZWU=, so only the decode-and-reencode check catches it.
+  /clockchain/mcp/NONCANONICAL_PAD_HMAC) value=$'{"kid":"accept-fresh","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWV="}\\n' ;;
+  # Valid pin except sourceCommit carries an escaped trailing newline —
+  # passes a dollar-anchored jq regex and fails the strict runtime validator.
+  /clockchain/mcp/NEWLINE_RELEASE_PIN) value=$'{"version":"2.1.4","sourceCommit":"0123456789abcdef0123456789abcdef01234567\\n","manifestDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","allowedAssetPrefix":"https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/","hostRoots":[{"kid":"root-2026-08","fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}\\n' ;;
   /clockchain/host/FUNDING_WALLET_JSON) value=$'{"wallet":"line-1\\\\nline-2"}\\n' ;;
   /clockchain/host/FUNDING_WALLET_PUBLIC_JSON) value=$'{"public":"wallet"}\\n' ;;
   /clockchain/host/FUNDING_PASSWORD) value=$'pass line 1\\npass line 2\\n' ;;
@@ -720,6 +728,9 @@ test("compose wrapper rejects invalid degraded handshake mode before docker", as
 test("compose wrapper rejects invalid release metadata and repeated role signing keys", async () => {
   for (const extra of [
     { AGENT_HANDSHAKE_RELEASE_PIN_PARAM: "/clockchain/host/MISSING_SECRET" },
+    // Trailing \n in sourceCommit: slips past a $-anchored jq regex — must
+    // still fail closed via \z anchoring.
+    { AGENT_HANDSHAKE_RELEASE_PIN_PARAM: "/clockchain/mcp/NEWLINE_RELEASE_PIN" },
     { AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM: "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE" },
   ]) {
     const { temp, dockerInvokedFile, dockerOkFile, env } = await createWrapperFixture({ env: extra });
@@ -744,11 +755,19 @@ test("compose wrapper rejects unsafe acceptance HMAC rotation before docker", as
     { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE" },
     { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64" },
     { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/SHORT_ACCEPTANCE_HMAC" },
+    // Escaped trailing newline: jq's $ anchors before \n and $() strips it —
+    // these must still fail closed, matching the strict runtime validator.
+    { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/NEWLINE_KID_HMAC" },
+    { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/NEWLINE_SECRET_HMAC" },
+    // Nonzero pad bits at valid apparent length: structurally plausible but
+    // not canonical base64 — must fail the decode-and-reencode check.
+    { AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM: "/clockchain/mcp/NONCANONICAL_PAD_HMAC" },
   ]) {
-    const { temp, dockerOkFile, env } = await createWrapperFixture({ env: extra });
+    const { temp, dockerInvokedFile, dockerOkFile, env } = await createWrapperFixture({ env: extra });
     try {
       const result = await run(wrapper, [], { cwd: temp, env });
       assert.notEqual(result.code, 0);
+      assert.equal(await pathExists(dockerInvokedFile), false, "docker compose was not invoked");
       assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
       for (const secret of Object.values(expectedEnv)) {
         assert.equal(result.stdout.includes(secret), false);
