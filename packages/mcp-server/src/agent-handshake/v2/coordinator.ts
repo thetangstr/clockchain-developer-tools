@@ -302,7 +302,7 @@ function compactHelperStep(step: JsonObject, role: V2Role, sessionId: string): J
     operation: step.operation,
     role,
     sessionId,
-    approvalCommand: `clockchain-agent-authorize ${commandSha256}`,
+    approvalTool: "mcp__clockchain-local-adapter__authorize_local_action",
     commandLength: Buffer.byteLength(shellCommand),
     commandSha256,
     shellCommand,
