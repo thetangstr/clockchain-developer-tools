@@ -185,7 +185,7 @@ validate_v2_server_config() {
   # V2_HELPER_VERSION in packages/mcp-server/src/agent-handshake/v2/instructions.ts
   # — infra/test/deploy-assets.test.mjs enforces that they match.
   local release_filter v2_helper_version v2_helper_asset_prefix
-  v2_helper_version="2.1.4"
+  v2_helper_version="2.1.5"
   v2_helper_asset_prefix="https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${v2_helper_version}/"
   # jq regexes use Oniguruma: $ matches BEFORE a trailing newline, so every
   # anchored pattern must use \A...\z to bind the true ends of the string —
