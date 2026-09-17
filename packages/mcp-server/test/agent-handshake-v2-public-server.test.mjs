@@ -15,10 +15,10 @@ import { V2_VERIFIED_HELPER_BOOTSTRAP, buildV2Instructions, buildV2Manifest } fr
 import { AGENT_HANDSHAKE_ROLE_TOOLS, mintV2RoleAccess } from "../dist/agent-handshake/v2/access.js";
 
 const pin = {
-  version: "2.1.4",
+  version: "2.1.5",
   sourceCommit: "d".repeat(40),
   manifestDigest: "a".repeat(64),
-  allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/",
+  allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.5/",
   hostRoots: [
     { kid: "root-2026-08", fingerprint: "b".repeat(64) },
     { kid: "root-2026-07", fingerprint: "c".repeat(64) },
@@ -59,7 +59,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   const instructions = buildV2Instructions(pin);
   const first = instructions.slice(0, 512);
   assert.match(first, /local signing/i);
-  assert.match(first, /2\.1\.4/);
+  assert.match(first, /2\.1\.5/);
   assert.equal(first.includes(pin.manifestDigest), false);
   assert.match(first, /digest is encoded only in the exact verified command below/i);
   assert.equal(instructions.split(pin.manifestDigest).length - 1, 1);
@@ -76,8 +76,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /do not send it to the other stakeholder or echo it into chat or logs/i);
   assert.match(instructions, /adapter asset path.*mandatory.*approvalCommand.*already preloaded.*do not download or overwrite.*inspect.*manifest.*helper source/is);
   assert.match(instructions, /portable fallback.*only when.*approvalCommand.*not available.*files are absent.*download/is);
-  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/manifest.json'"));
-  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.4/clockchain-agent-handshake.cjs'"));
+  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.5/manifest.json'"));
+  assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.5/clockchain-agent-handshake.cjs'"));
   assert.match(instructions, /portable fallback.*each file as its own separate Bash tool call.*never prefix, wrap, combine/is);
   assert.match(instructions, /every Bash action.*one standalone Bash tool call.*never combine.*do not run.*stateDirectoryCommand.*until after.*assets.*inspected/is);
   assert.equal(instructions.includes(" ; then "), false);
@@ -242,7 +242,7 @@ test("the dedicated MCP server exposes exactly eight tools and no prompts or res
     assert.equal(staleJoined.body.result.structuredContent, undefined, "stale helperVersion yields no structured payload");
     const joined = await rpc(url, "tools/call", { name: "agent_handshake_join", arguments: {
       access: roleAccess,
-      helperVersion: "2.1.4",
+      helperVersion: "2.1.5",
       sessionKeyAddress: `0x${"1".repeat(40)}`,
       policyDigest: "2".repeat(64),
     } });

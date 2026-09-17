@@ -4,12 +4,12 @@
 // drift apart, because the published release embeds the same value in every
 // surface. The SSM release pin itself stays runtime data; only its shape and
 // version gate live here.
-export const V2_HELPER_VERSION = "2.1.4";
+export const V2_HELPER_VERSION = "2.1.5";
 export const V2_HELPER_ASSET_PREFIX =
   `https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${V2_HELPER_VERSION}/`;
 
 export type V2ReleasePin = Readonly<{
-  version: "2.1.4";
+  version: "2.1.5";
   sourceCommit: string;
   manifestDigest: string;
   allowedAssetPrefix: string;
