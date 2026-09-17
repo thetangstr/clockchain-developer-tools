@@ -157,6 +157,26 @@ test("gets relay messages with nonblocking waitMs=0 and validates response shape
   });
 });
 
+test("forwards bounded waitMs on relay message polls", async () => {
+  const urls = [];
+  const fetch = async (url) => {
+    urls.push(url);
+    return jsonResponse({ ok: true, messages: [] });
+  };
+  const client = createHandshakeRelayClient({ fetch, relayUrl: TRUSTED_RELAY });
+
+  await client.getMessages({ after: "3", sessionId: SESSION_ID, waitMs: 1500 });
+  assert.equal(urls.at(-1), `${TRUSTED_RELAY}/v1/sessions/${SESSION_ID}/messages?after=3&waitMs=1500`);
+
+  // Out-of-range or malformed waits degrade to the bounded nonblocking poll.
+  await client.getMessages({ after: "3", sessionId: SESSION_ID, waitMs: 120_000 });
+  assert.equal(urls.at(-1), `${TRUSTED_RELAY}/v1/sessions/${SESSION_ID}/messages?after=3&waitMs=60000`);
+  await client.getMessages({ after: "3", sessionId: SESSION_ID, waitMs: -5 });
+  assert.equal(urls.at(-1), `${TRUSTED_RELAY}/v1/sessions/${SESSION_ID}/messages?after=3&waitMs=0`);
+  await client.getMessages({ after: "3", sessionId: SESSION_ID, waitMs: 1.5 });
+  assert.equal(urls.at(-1), `${TRUSTED_RELAY}/v1/sessions/${SESSION_ID}/messages?after=3&waitMs=0`);
+});
+
 test("derives highest seq from verified relay messages", async () => {
   const keys = generateRelayKeyPair();
   const envelope = {

@@ -147,10 +147,11 @@ export function createHandshakeRelayClient(options: {
       return result;
     },
 
-    getMessages: async ({ after = "0", sessionId }: { after?: string; sessionId: string }): Promise<HandshakeRelayMessages> => {
+    getMessages: async ({ after = "0", sessionId, waitMs = 0 }: { after?: string; sessionId: string; waitMs?: number }): Promise<HandshakeRelayMessages> => {
       validateSessionId(sessionId);
       validateDecimal(after, "MESSAGE_AFTER_INVALID");
-      const json = await requestJson(`/v1/sessions/${encodeURIComponent(sessionId)}/messages?after=${after}&waitMs=0`);
+      const boundedWait = Number.isSafeInteger(waitMs) && waitMs > 0 ? Math.min(waitMs, 60_000) : 0;
+      const json = await requestJson(`/v1/sessions/${encodeURIComponent(sessionId)}/messages?after=${after}&waitMs=${boundedWait}`);
       return validateMessages(json, sessionId, after);
     },
 

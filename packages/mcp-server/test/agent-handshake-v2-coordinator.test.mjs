@@ -188,6 +188,7 @@ test("an expired current invitation window is retryable while the host rotates s
     registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -277,6 +278,7 @@ test("an invite whose terms differ from the published host terms is rejected bef
     registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -305,6 +307,7 @@ test("a discovery record with malformed host terms is rejected", async () => {
     registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -343,6 +346,7 @@ test("a discovery record with a present but undefined terms property is rejected
     registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -384,6 +388,7 @@ test("a legacy discovery record without terms falls back to caller terms with bo
     registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -445,6 +450,7 @@ async function createDurableAcceptHarness(t, options = {}) {
     registrationFundingReady: async () => true,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
   const warnings = [];
@@ -717,6 +723,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
       message: { kind, sessionDigest: v2CanonicalRecord(descriptor).digest },
       onChain: { blockHeight: String(7010 + index), ledgerId: `33333333-4444-4555-8666-77777777777${index}` },
     })),
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -935,6 +942,7 @@ test("join rejects a stale helper version before access authorization and accept
     relay,
     stateStore: createHandshakeStateStore({}),
     now: () => nowMs + 1,
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -983,6 +991,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
     registrationFundingReady: async ({ address: requested }) => fundingVisible && requested === address,
     resolveRegistration: async () => null,
     advanceTransitions: async () => [],
+    nextWaitDefaultMs: 0,
     verifiedHelperPrefix,
   });
 
@@ -1028,4 +1037,322 @@ test("fresh identity registration is returned as an executable pinned-helper act
       afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
     },
   });
+});
+
+async function createBoundedWaitHarness(overrides = {}) {
+  __resetHandshakeStateStore();
+  const key = { kid: "role-2026-08", secret: randomBytes(32) };
+  const addresses = {
+    initiator: "0x7564105e977516c53be337314c7e53838967bdac",
+    responder: "0xe1fae9b4fab2f5726677ecfa912d96b0b683e6a9",
+  };
+  const registrations = {
+    [addresses.initiator]: { agentId: "9452", chainId: terms.identityPolicy.chainId, registryAddress: terms.identityPolicy.registryAddress, reference: `${terms.identityPolicy.chainId}:${terms.identityPolicy.registryAddress}:9452`, registrationTx: `0x${"a".repeat(64)}`, registrationBlock: "7000" },
+    [addresses.responder]: { agentId: "9453", chainId: terms.identityPolicy.chainId, registryAddress: terms.identityPolicy.registryAddress, reference: `${terms.identityPolicy.chainId}:${terms.identityPolicy.registryAddress}:9453`, registrationTx: `0x${"b".repeat(64)}`, registrationBlock: "7001" },
+  };
+  const messages = [];
+  const messageCalls = [];
+  let clock = overrides.clock ?? nowMs + 1;
+  let result = overrides.result ?? null;
+  let registrationAvailable = overrides.registrationAvailable ?? true;
+  const harness = { onWaitPoll: overrides.onWaitPoll };
+  const relay = {
+    fetchDiscovery: async () => discovery,
+    getMessages: async ({ after = "0", waitMs = 0 } = {}) => {
+      messageCalls.push({ after, waitMs });
+      if (waitMs > 0) {
+        if (harness.onWaitPoll) await harness.onWaitPoll({ clock, messages, poll: messageCalls.filter((call) => call.waitMs > 0).length });
+        if (overrides.advanceClockOnWaitPoll) clock += waitMs;
+      }
+      const page = messages.filter((message) => BigInt(message.seq ?? "0") > BigInt(after));
+      const response = { messages: page };
+      if (messages.length) response.highestSeq = messages.at(-1).seq;
+      return response;
+    },
+    postMessage: async (input) => {
+      messages.push({ seq: String(messages.length + 1), body: input.body, kind: input.kind, role: input.role, senderKey: input.senderKey, sessionId: input.sessionId });
+      return { ok: true, seq: String(messages.length) };
+    },
+    getResult: async () => {
+      if (!result) throw new Error("pending");
+      return result;
+    },
+  };
+  const coordinator = createV2Coordinator({
+    accessKeys: [key],
+    activeAccessKey: key,
+    invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => clock }),
+    relay,
+    stateStore: createHandshakeStateStore({}),
+    now: () => clock,
+    recoverEip191Address: async ({ signatureHex }) => signatureHex.endsWith("1b") ? addresses.initiator : addresses.responder,
+    registrationFundingReady: async () => (overrides.registrationFundingReady ? overrides.registrationFundingReady() : true),
+    resolveRegistration: async ({ address }) => {
+      if (overrides.resolveRegistration) return overrides.resolveRegistration({ address });
+      return registrationAvailable ? registrations[address] ?? null : null;
+    },
+    advanceTransitions: async ({ descriptor }) => (overrides.advanceTransitions ? overrides.advanceTransitions(descriptor) : []),
+    nextWaitDefaultMs: overrides.nextWaitDefaultMs,
+    verifiedHelperPrefix,
+  });
+  const invited = await coordinator.invite(terms);
+  const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
+  Object.assign(harness, {
+    accesses: { initiator: invited.initiatorAccess, responder: accepted.responderAccess },
+    addresses,
+    coordinator,
+    fund: (role) => messages.push({ seq: String(messages.length + 1), kind: "agent_v2_funding_record", role: "host", body: { role, address: addresses[role] }, sessionId }),
+    join: async (role) => {
+      const localPolicy = policy(role);
+      await coordinator.join({ access: harness.accesses[role], helperVersion: "2.1.6", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
+      await coordinator.submit({ access: harness.accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
+    },
+    messageCalls,
+    messages,
+    registrations,
+    setClock: (value) => { clock = value; },
+    setResult: (value) => { result = value; },
+  });
+  harness.waitPolls = () => messageCalls.filter((call) => call.waitMs > 0);
+  return harness;
+}
+
+test("agent_handshake_next bridges funding visibility to the registration local action in one call", async () => {
+  let fundingReady = false;
+  const harness = await createBoundedWaitHarness({
+    advanceClockOnWaitPoll: true,
+    registrationAvailable: false,
+    registrationFundingReady: () => fundingReady,
+    onWaitPoll: () => { fundingReady = true; },
+  });
+  await harness.join("initiator");
+  harness.fund("initiator");
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 10_000 });
+  assert.equal(outcome.stage, "awaiting_identity_registration");
+  assert.equal(outcome.needed, "erc8004_registration");
+  assert.equal(outcome.localAction.executor, "pinned_helper");
+  assert.equal(outcome.localAction.operation, "register");
+  assert.deepEqual(harness.waitPolls().map((poll) => poll.waitMs), [2000]);
+});
+
+test("agent_handshake_next bridges counterpart and proposal arrival to sign_acceptance", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true });
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.fund("responder");
+  assert.equal((await harness.coordinator.next({ access: harness.accesses.responder })).stage, "party_ready");
+  harness.onWaitPoll = async ({ poll }) => {
+    if (poll === 1) {
+      assert.equal((await harness.coordinator.next({ access: harness.accesses.initiator })).stage, "party_ready");
+      return;
+    }
+    const proposal = await harness.coordinator.next({ access: harness.accesses.initiator });
+    assert.equal(proposal.stage, "sign_proposal");
+    const proposalRequest = compactPayloadFrom(proposal, "proposal");
+    const proposalEnvelope = {
+      payload: JSON.parse(gunzipSync(Buffer.from(proposalRequest.bytesGzipBase64Url, "base64url")).toString("utf8")),
+      schema: "clockchain.agent-handshake-proposal-envelope/v2",
+      signature: { address: harness.addresses.initiator, algorithm: "eip191", value: `0x${"2".repeat(128)}1b` },
+    };
+    harness.messages.push({ seq: String(harness.messages.length + 1), kind: "agent_v2_proposal", role: "initiator", body: { proposalEnvelope }, sessionId });
+  };
+  const acceptance = await harness.coordinator.next({ access: harness.accesses.responder, waitMs: 10_000 });
+  assert.equal(acceptance.stage, "sign_acceptance");
+  assert.equal(acceptance.localAction.operation, "sign");
+  assert.deepEqual(harness.waitPolls().map((poll) => poll.waitMs), [2000, 2000]);
+});
+
+test("agent_handshake_next returns dependency waits with retryAfterMs and nextAction once the wait budget expires", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true });
+  await harness.join("initiator");
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 4_500 });
+  assert.equal(outcome.stage, "awaiting_funding");
+  assert.equal(outcome.needed, "funding_record");
+  assert.equal(outcome.retryAfterMs, 3000);
+  assert.equal(outcome.nextAction, "wait_for_clockchain_host_funding_then_call_agent_handshake_next_with_unchanged_role_access");
+  assert.deepEqual(harness.waitPolls().map((poll) => poll.waitMs), [2000, 2000, 500]);
+});
+
+test("agent_handshake_next clamps the wait to the remaining session deadline", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true });
+  await harness.join("initiator");
+  // Move the injected clock to 150ms before the session deadline; role access
+  // (expMs == sessionDeadlineMs) is still valid, but the wait must stop there.
+  harness.setClock(Number(discovery.sessionDeadlineMs) - 150);
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 15_000 });
+  assert.equal(outcome.stage, "awaiting_funding");
+  assert.equal(outcome.retryAfterMs, 3000);
+  assert.equal(outcome.nextAction, "wait_for_clockchain_host_funding_then_call_agent_handshake_next_with_unchanged_role_access");
+  assert.deepEqual(harness.waitPolls().map((poll) => poll.waitMs), [150]);
+});
+
+test("agent_handshake_next returns actionable and terminal outcomes without waiting", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true });
+  const joinRequired = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 15_000 });
+  assert.equal(joinRequired.needed, "agent_handshake_join");
+  assert.equal(harness.waitPolls().length, 0);
+
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.fund("responder");
+  assert.equal((await harness.coordinator.next({ access: harness.accesses.initiator })).stage, "party_ready");
+  assert.equal((await harness.coordinator.next({ access: harness.accesses.responder })).stage, "party_ready");
+  const proposal = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 15_000 });
+  assert.equal(proposal.stage, "sign_proposal");
+  assert.equal(proposal.localAction.operation, "sign");
+  assert.equal(harness.waitPolls().length, 0);
+  const pending = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 15_000 });
+  assert.equal(pending.stage, "sign_proposal");
+  assert.equal(pending.localAction.operation, "sign");
+  assert.equal(harness.waitPolls().length, 0);
+});
+
+test("agent_handshake_next returns the registration local action and terminal errors without waiting", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true, registrationAvailable: false });
+  await harness.join("initiator");
+  harness.fund("initiator");
+  const registration = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 15_000 });
+  assert.equal(registration.stage, "awaiting_identity_registration");
+  assert.equal(registration.localAction.operation, "register");
+  assert.equal(harness.waitPolls().length, 0);
+
+  const broken = await createBoundedWaitHarness({
+    advanceClockOnWaitPoll: true,
+    resolveRegistration: () => { throw new Error("rpc unavailable"); },
+  });
+  await broken.join("initiator");
+  broken.fund("initiator");
+  await assert.rejects(
+    () => broken.coordinator.next({ access: broken.accesses.initiator, waitMs: 15_000 }),
+    /rpc unavailable|coordination failed safely/,
+  );
+  assert.equal(broken.waitPolls().length, 0);
+});
+
+test("agent_handshake_next applies the bounded default wait when waitMs is omitted", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true });
+  await harness.join("initiator");
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator });
+  assert.equal(outcome.stage, "awaiting_funding");
+  assert.equal(outcome.retryAfterMs, 3000);
+  // Default budget is 12s in 2s slices.
+  assert.deepEqual(harness.waitPolls().map((poll) => poll.waitMs), [2000, 2000, 2000, 2000, 2000, 2000]);
+});
+
+test("agent_handshake_next rejects malformed waitMs and clamps oversized waitMs", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true });
+  await harness.join("initiator");
+  await assert.rejects(() => harness.coordinator.next({ access: harness.accesses.initiator, waitMs: -1 }), /coordination failed safely/);
+  await assert.rejects(() => harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 1.5 }), /coordination failed safely/);
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 60_000 });
+  assert.equal(outcome.stage, "awaiting_funding");
+  // waitMs is clamped to the 15s maximum; each poll slice is at most 2s.
+  assert.ok(harness.waitPolls().length <= 8);
+  assert.ok(harness.waitPolls().every((poll) => poll.waitMs <= 2000 && poll.waitMs > 0));
+});
+
+test("agent_handshake_next long-polls only for relay messages after the observed cursor", async () => {
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true });
+  await harness.join("initiator");
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 4_500 });
+  assert.equal(outcome.stage, "awaiting_funding");
+  const polls = harness.waitPolls();
+  assert.ok(polls.length >= 2);
+  const backlogSeq = String(harness.messages.length);
+  assert.equal(polls[0].after, backlogSeq);
+  assert.ok(polls.every((poll) => poll.after === backlogSeq));
+});
+
+test("agent_handshake_next waits across certificate availability in one call", async () => {
+  const harness = await createBoundedWaitHarness({
+    advanceClockOnWaitPoll: true,
+    advanceTransitions: (descriptor) => ["proposal", "acceptance", "acknowledgment"].map((kind, index) => ({
+      blockTimeRaw: `2026-08-09T17:0${index}:00.000Z`,
+      digest: String(index + 1).repeat(64),
+      message: { kind, sessionDigest: v2CanonicalRecord(descriptor).digest },
+      onChain: { blockHeight: String(7010 + index), ledgerId: `33333333-4444-4555-8666-77777777777${index}` },
+    })),
+  });
+  const { accesses, addresses, coordinator, messages } = harness;
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.fund("responder");
+  await coordinator.next({ access: accesses.initiator });
+  await coordinator.next({ access: accesses.responder });
+  const proposal = await coordinator.next({ access: accesses.initiator });
+  const proposalRequest = compactPayloadFrom(proposal, "proposal");
+  const proposalSignatureHex = `0x${"2".repeat(128)}1b`;
+  const proposalEnvelope = {
+    payload: JSON.parse(gunzipSync(Buffer.from(proposalRequest.bytesGzipBase64Url, "base64url")).toString("utf8")),
+    schema: "clockchain.agent-handshake-proposal-envelope/v2",
+    signature: { address: addresses.initiator, algorithm: "eip191", value: proposalSignatureHex },
+  };
+  const proposalCheckpoint = {
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: "1",
+    protocol: "clockchain.agent-handshake/v2", sessionId, role: "initiator", artifactType: "proposal",
+    artifactDigest: v2CanonicalRecord(proposalEnvelope).digest, sequence: "1", previousCheckpointDigest: null,
+    issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: addresses.initiator,
+    signature: { address: addresses.initiator, algorithm: "eip191", value: `0x${"6".repeat(128)}1b` },
+  };
+  const submittedProposalCheckpoint = await coordinator.submitCheckpoint({ access: accesses.initiator, artifactSignatureHex: proposalSignatureHex, checkpoint: proposalCheckpoint });
+  await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: proposalSignatureHex });
+  const acceptance = await coordinator.next({ access: accesses.responder });
+  const acceptanceRequest = compactPayloadFrom(acceptance, "acceptance");
+  const acceptanceSignatureHex = `0x${"3".repeat(128)}1c`;
+  const acceptanceEnvelope = {
+    payload: JSON.parse(gunzipSync(Buffer.from(acceptanceRequest.bytesGzipBase64Url, "base64url")).toString("utf8")),
+    schema: "clockchain.agent-handshake-acceptance-envelope/v2",
+    signature: { address: addresses.responder, algorithm: "eip191", value: acceptanceSignatureHex },
+  };
+  const acceptanceCheckpoint = {
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: "1",
+    protocol: "clockchain.agent-handshake/v2", sessionId, role: "responder", artifactType: "acceptance",
+    artifactDigest: v2CanonicalRecord(acceptanceEnvelope).digest, sequence: "2",
+    previousCheckpointDigest: submittedProposalCheckpoint.checkpointDigest,
+    issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: addresses.responder,
+    signature: { address: addresses.responder, algorithm: "eip191", value: `0x${"7".repeat(128)}1c` },
+  };
+  await coordinator.submitCheckpoint({ access: accesses.responder, artifactSignatureHex: acceptanceSignatureHex, checkpoint: acceptanceCheckpoint });
+  await coordinator.submit({ access: accesses.responder, policyDigest: v2CanonicalRecord(policy("responder")).digest, signatureHex: acceptanceSignatureHex });
+  const proposalPayload = messages.find((message) => message.kind === "agent_v2_proposal").body.proposalEnvelope.payload;
+  const parties = { initiator: proposalPayload.initiator, responder: proposalPayload.responder };
+  const descriptor = {
+    agreementExpiresAtMs: proposalPayload.expiresAtMs,
+    externalBusinessActionPerformed: false,
+    hostSessionKeyCertificateDigest: "f".repeat(64),
+    identityPolicy: terms.identityPolicy,
+    initiator: parties.initiator,
+    operatorPublicKey: hostSessionKeyCertificate.certificate.sessionPublicKey,
+    protocol: "clockchain.agent-handshake/v2",
+    reference: terms.reference,
+    repositorySha,
+    responder: parties.responder,
+    schema: "clockchain.agent-handshake-descriptor/v2",
+    sessionId,
+    sessionOpenedAtMs: String(nowMs),
+    sessionOpenedBlock: "6999",
+    statementDigest: v2CanonicalRecord(terms).digest,
+  };
+  messages.push({ seq: String(messages.length + 1), kind: "agent_v2_handshake_required", role: "host", body: { descriptorEnvelope: { descriptor, operator: {} }, sessionDigest: v2CanonicalRecord(descriptor).digest }, sessionId });
+  const evidence = await coordinator.next({ access: accesses.initiator });
+  assert.equal(evidence.stage, "sign_evidence");
+  await coordinator.submit({ access: accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: `0x${"4".repeat(128)}1b` });
+  harness.onWaitPoll = () => {
+    harness.setResult({ result: {
+      anchors: ["proposal", "acceptance", "acknowledgment"].map((kind, index) => ({ blockHeight: String(7010 + index), blockTimeRaw: `2026-08-09T17:0${index}:00.000Z`, digest: String(index + 1).repeat(64), kind, ledgerId: `33333333-4444-4555-8666-77777777777${index}` })),
+      externalBusinessActionPerformed: false, hostSessionKeyCertificateDigest: "f".repeat(64), identityPolicy: terms.identityPolicy,
+      issuedAtMs: String(nowMs + 5000), outcome: "VERIFIED", parties,
+      policyDigests: { initiator: parties.initiator.policyDigest, responder: parties.responder.policyDigest },
+      reference: terms.reference, schema: "clockchain.agent-handshake-result/v2", sessionDigest: v2CanonicalRecord(descriptor).digest,
+      sessionId, statementDigest: v2CanonicalRecord(terms).digest, subjectRun: "stakeholder",
+    }, signer: {}, hostSessionKeyCertificate });
+  };
+  const certificate = await coordinator.next({ access: accesses.initiator, waitMs: 10_000 });
+  assert.equal(certificate.certificateSummary.schema, "clockchain.agent-handshake-certificate-summary/v1");
+  assert.equal(certificate.certificateSummary.outcome, "VERIFIED");
+  assert.equal(certificate.localAction.operation, "verify-certificate");
+  assert.ok(harness.waitPolls().length >= 1);
 });
