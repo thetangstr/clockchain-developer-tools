@@ -575,10 +575,19 @@ export async function runHttp(): Promise<void> {
   // the session deadline passes.
   const inflight = new Map<string, number>();
   const counted = new Map<string, number>();
+  // Drop sessions whose deadline already passed and refresh the gauge.
+  // Called on every tool invocation AND before every /metrics collection +
+  // performance snapshot — otherwise the gauge would stay stale forever when
+  // no further handshake call arrives.
+  function pruneSessions(nowMs: number): void {
+    let changed = false;
+    for (const [id, exp] of inflight) if (nowMs >= exp) { inflight.delete(id); changed = true; }
+    for (const [id, exp] of counted) if (nowMs >= exp) counted.delete(id);
+    if (changed) inflightGauge.set({}, inflight.size);
+  }
   function trackSession(sessionId: unknown, deadlineMs: unknown, nowMs: number): void {
     if (typeof sessionId !== "string") return;
-    for (const [id, exp] of inflight) if (nowMs >= exp) inflight.delete(id);
-    for (const [id, exp] of counted) if (nowMs >= exp) counted.delete(id);
+    pruneSessions(nowMs);
     if (!inflight.has(sessionId)) {
       inflight.set(sessionId, typeof deadlineMs === "string" ? Number(deadlineMs) || nowMs + 600_000 : nowMs + 600_000);
     }
@@ -710,6 +719,7 @@ export async function runHttp(): Promise<void> {
     // members by construction; percentiles come from the same histogram
     // buckets /metrics exposes (histogram_quantile interpolation).
     performance: (): PerformanceSnapshot => {
+      pruneSessions(Date.now()); // keep inflight honest even between calls
       const routes = ROUTE_CLASSES.map((route) => {
         const requests = STATUS_CLASSES.reduce((n, status) => n + httpRequests.value({ route, status }), 0);
         const errors = httpRequests.value({ route, status: "5xx" });
@@ -858,17 +868,27 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
-    // Readiness — the dependency-gated complement to the /health liveness
-    // probe. 200 when no hard dependency is down (a degraded dependency still
-    // counts as ready: the handshake surface fails closed by design in that
-    // state, which is serving, not down). 503 otherwise.
-    if (req.method === "GET" && pathOf(req.url) === "/readyz") {
+    // Readiness — TWO scopes, kept strictly separate:
+    //   /readyz           = CORE MCP HOST readiness only. The host serves the
+    //                       MCP surface (connect/mcp, keeper, token, manifests)
+    //                       without any handshake-only dependency, so relay /
+    //                       gateway / pool / EVM failures MUST NOT 503 this
+    //                       route. 200 whenever the host can compute and serve;
+    //                       handshake readiness is reported in the body.
+    //   /readyz/handshake = HANDSHAKE dependency readiness. 503 when any
+    //                       handshake-only dependency is down or unconfirmed
+    //                       (the surface fails closed in those states, which
+    //                       is correctly "not ready" for handshake traffic).
+    if (req.method === "GET" && (pathOf(req.url) === "/readyz" || pathOf(req.url) === "/readyz/handshake")) {
+      const handshakeScope = pathOf(req.url) === "/readyz/handshake";
       try {
         const report = await statusCache();
-        const ready = report.overall !== "outage";
+        const ready = handshakeScope ? report.handshake_ready : report.components.mcp_host.state === "ok";
         res.writeHead(ready ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({
           status: ready ? "ready" : "not_ready",
+          scope: handshakeScope ? "handshake" : "mcp_host",
+          handshake_ready: report.handshake_ready,
           overall: report.overall,
           components: Object.fromEntries(Object.entries(report.components).map(([k, v]) => [k, v.state])),
         }));
@@ -888,6 +908,7 @@ export async function runHttp(): Promise<void> {
         res.end(JSON.stringify({ error: metricsTokenDigest ? "unauthorized" : "not_found" }));
         return;
       }
+      pruneSessions(Date.now()); // refresh inflight even with no new tool calls
       uptimeGauge.set({}, (Date.now() - processStartedAtMs) / 1000);
       res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store" });
       res.end(metrics.collect());

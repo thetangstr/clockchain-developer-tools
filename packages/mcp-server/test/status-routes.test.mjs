@@ -161,8 +161,19 @@ test("GET /readyz is a dependency-gated readiness view", async () => {
   assert.match(res.headers.get("cache-control") ?? "", /no-store/);
   const body = await res.json();
   assert.equal(body.status, "ready");
+  assert.equal(body.scope, "mcp_host");
+  assert.equal(body.handshake_ready, true);
   assert.equal(body.overall, "operational");
   assert.equal(body.components.relay_supervisor, "ok");
+});
+
+test("GET /readyz/handshake → 200 when handshake deps are ok", async () => {
+  const res = await fetch(`${BASE}/readyz/handshake`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.status, "ready");
+  assert.equal(body.scope, "handshake");
+  assert.equal(body.handshake_ready, true);
 });
 
 test("GET /metrics requires the bearer token and serves Prometheus text", async () => {

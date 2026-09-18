@@ -34,6 +34,13 @@ export interface StatusReport {
   processStartedAtMs: number;
   overall: OverallState;
   components: Record<string, ProbeResult>;
+  /**
+   * Handshake-dependency readiness, SEPARATE from core MCP-host readiness.
+   * True iff every handshake-only dependency (relay, gateway, pool, EVM) is
+   * ok — i.e. the handshake surface would serve rather than fail closed.
+   * /readyz (core MCP host) must NOT gate on this; /readyz/handshake does.
+   */
+  handshake_ready: boolean;
   build: { service: string; helperVersion: string; protocolRepositorySha?: string };
   /**
    * Protocol-evidence field — informational only, NEVER part of `overall`.
@@ -342,6 +349,11 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
     processStartedAtMs: deps.processStartedAtMs,
     overall,
     components,
+    // Handshake readiness = the full handshake dependency set is confirmed
+    // ok (surface would serve, not fail closed). Deliberately separate from
+    // core MCP-host readiness: /readyz answers "is the MCP host serving",
+    // /readyz/handshake answers this.
+    handshake_ready: components.handshake_surface.state == "ok",
     build: { service: deps.serviceVersion, helperVersion: V2_HELPER_VERSION, ...(repositorySha ? { protocolRepositorySha: repositorySha } : {}) },
     lastVerifiedHandshake: lastVerified,
     performance: {

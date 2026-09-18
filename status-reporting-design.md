@@ -45,7 +45,8 @@ functionality that is ~150 lines.
 | Layer | Route | Question it answers |
 |---|---|---|
 | Liveness | `GET /health` | Is the process serving HTTP? (cheap, no deps — load-balancer probe) |
-| Readiness | `GET /readyz` | Should traffic be sent? 503 when a hard dependency is down |
+| Core readiness | `GET /readyz` | Is the **MCP host** ready to serve? 200 whenever the host can compute and serve — handshake-only dependencies (relay/gateway/pool/EVM) **never** gate this route. Reports `handshake_ready` + per-component states in the body |
+| Handshake readiness | `GET /readyz/handshake` + `handshake_ready` field in status.json | Would the handshake surface serve rather than fail closed? 503 when any handshake-only dep is down or unconfirmed |
 | Component health | `GET /status{,.json}` | Which dependency is degraded/down and when was it observed? |
 | Protocol/business health | `lastVerifiedHandshake` evidence in status | Did a real handshake recently complete end-to-end — **informational only** |
 
@@ -103,18 +104,21 @@ block is the sanitized user-facing summary of the same numbers.
 |---|---|---|
 | All probes ok | operational | — |
 | Any dep `unknown`/degraded, none down | degraded | warn if >10min: `clockchain_dependency_up == 0` for 10m |
-| Any hard dep down | outage | page: `/readyz` 503 for 2 consecutive scrapes, or `clockchain_dependency_up{dep="gateway_pool"|"relay_discovery"} == 0` for 5m |
-| Supervisor stopped minting (session age > staleAfter) | outage | `clockchain_dependency_up{dep="relay_discovery"} == 0` — supervisor cron/loop stalled |
+| Any handshake dep down | outage (status) — `/readyz` stays 200, `/readyz/handshake` 503 | page: `/readyz/handshake` 503 for 2 consecutive scrapes, or `clockchain_dependency_up{dep="gateway_pool"|"relay_discovery"} == 0` for 5m |
+| Supervisor stopped minting (`sessionDeadlineMs` lapsed past grace, or `createdAtMs` stale) | outage | `clockchain_dependency_up{dep="relay_discovery"} == 0` — supervisor cron/loop stalled |
 | Invite/join error rate | metric | `rate(clockchain_handshake_failures_total[5m]) > 0.1/s` or `failures/ calls > 25%` |
 | Rate-limit abuse | metric | `increase(clockchain_rate_limit_events_total[5m]) > 50` |
 | Handshake completions halt | business (does NOT degrade `/status` overall) | `increase(clockchain_handshake_completed_total[1h]) == 0` during expected canary windows — alert on evidence `stale`/`unavailable`, never on `none_observed` |
 
 ## 5. Runbook
 
-- **`/readyz` 503, `/status` shows `relay_supervisor` down, detail "unreachable"**
+- **`/readyz/handshake` 503, `/status` shows `relay_supervisor` down, detail "unreachable"**
   → relay process/host down or network partition. Check the relay service on
   the box (`docker compose ps`), then the host network.
-- **`relay_supervisor` down, detail "session stale"**
+- **`/readyz` 503**
+  → the core MCP host itself cannot compute/serve — not a dependency issue;
+  check process health and logs.
+- **`relay_supervisor` down, detail "session expired" or "session stale"**
   → supervisor stopped minting rolling sessions. Check the host supervisor
   logs (`agent-handshake-host` container); invites will fail closed.
 - **`pool_participation` degraded**
