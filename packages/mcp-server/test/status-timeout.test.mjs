@@ -12,7 +12,9 @@ const PORT = 39551;
 const BASE = `http://127.0.0.1:${PORT}`;
 const SESSION_ID = "7f3e2d1c-0b9a-4f8e-9d6c-5b4a3f2e1d0c";
 const PROBE_TIMEOUT_MS = 400;
-const BOUND_MS = 5_000; // generous CI ceiling — far below an unbounded hang
+// Route ceiling = dependency timeout + a small explicit allowance for
+// HTTP handling, the parallel probe set, and report serialization.
+const BOUND_MS = PROBE_TIMEOUT_MS + 750;
 const entry = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
 
 let upstream;
@@ -99,7 +101,10 @@ test("/status.json returns inside the probe bound with gateway+pool down when /g
   const res = await fetch(`${BASE}/status.json`);
   const elapsed = Date.now() - started;
   assert.equal(res.status, 200);
-  assert.ok(elapsed < BOUND_MS, `/status.json took ${elapsed}ms — probe bound not enforced`);
+  assert.ok(
+    elapsed < BOUND_MS,
+    `/status.json took ${elapsed}ms — exceeds probe timeout ${PROBE_TIMEOUT_MS}ms + overhead allowance (${BOUND_MS}ms)`,
+  );
 
   const body = await res.json();
   assert.equal(body.components.anchoring_gateway.state, "down");
@@ -117,5 +122,9 @@ test("/status.json returns inside the probe bound with gateway+pool down when /g
   const res2 = await fetch(`${BASE}/status.json`);
   const elapsed2 = Date.now() - second;
   assert.equal(res2.status, 200);
-  assert.ok(elapsed2 < BOUND_MS, `second /status.json took ${elapsed2}ms`);
+  assert.ok(
+    elapsed2 < BOUND_MS,
+    `second /status.json took ${elapsed2}ms — exceeds probe timeout ${PROBE_TIMEOUT_MS}ms + overhead allowance (${BOUND_MS}ms)`,
+  );
+  console.log(`hung-gateway probe bound: first=${elapsed}ms second=${elapsed2}ms ceiling=${BOUND_MS}ms (probe ${PROBE_TIMEOUT_MS}ms + overhead)`);
 });
