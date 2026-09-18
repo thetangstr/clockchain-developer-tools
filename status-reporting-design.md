@@ -66,17 +66,36 @@ Probes (each ≤ `STATUS_PROBE_TIMEOUT_MS`, default 2s):
 | Component | Probe |
 |---|---|
 | `mcp_host` | in-process (serving + uptime) |
-| `relay_supervisor` | `GET {RELAY}/v1/discovery/current` — session `issuedAtMs` must be < `STATUS_SESSION_STALE_MS` (default 20min ≈ 2× mint cadence) |
+| `relay_supervisor` | `GET {RELAY}/v1/discovery/current` — the real `clockchain.agent-handshake-discovery/v2` document (`createdAtMs` / `invitationExpiresAtMs` / `sessionDeadlineMs`, decimal strings). Healthy iff `createdAtMs` is fresh (< `STATUS_SESSION_STALE_MS`, default 20min) AND the session deadline has not lapsed beyond `STATUS_SESSION_GRACE_MS` (default 60s) — a dead session with no fresh mint means the supervisor stalled |
 | `anchoring_gateway` | `GET /getTime` reachability (gateway answered at all) |
 | `pool_participation` | same call, separate component: `ok` (>0%), `degraded` (0%), `unknown` (field unreported — gateway reachable but pool state indeterminate), `down` (unreachable) |
 | `evm_rpc` | `eth_chainId` == `0xaa36a7` (Sepolia; required for `required_fresh` ERC-8004) |
 | `handshake_surface` | derived: down if any hard dep down, degraded if any dep degraded/unknown |
-| `lastVerifiedHandshake` | `GET {RELAY}/v1/sessions/{current}/result` → `outcome=="VERIFIED"` + `issuedAtMs` — evidence field only, see independence invariant above |
+| `lastVerifiedHandshake` | `GET {RELAY}/v1/sessions/{current}/result` → the certificate envelope `{hostSessionKeyCertificate, result, signer}`; `result.outcome=="VERIFIED"` + `result.issuedAtMs` — evidence field only, see independence invariant above |
 
-Responses are TTL-cached (`STATUS_CACHE_MS`, default 15s) so a busy status page
-cannot amplify dependency probes; `window.cacheTtlMs` is disclosed on every
-response, and all public status responses carry `Cache-Control: no-store` —
-a CDN/browser may never serve a stale snapshot.
+Responses are TTL-cached (`STATUS_CACHE_MS`, default 15s) **and single-flight**:
+concurrent callers inside a cold/expired window share one in-flight
+computation, so the probe bound is traffic-independent — N simultaneous
+requests can never fan out into N probe rounds. `window.cacheTtlMs` is
+disclosed on every response, and all public status responses carry
+`Cache-Control: no-store` — a CDN/browser may never serve a stale snapshot.
+
+### Public performance block
+
+`/status` + `/status.json` carry a `performance` section — REAL bounded
+aggregates only, labeled `since process start` (no persistence exists, so no
+24h/7d claims):
+
+- `http`: total requests, 5xx errors + error rate, active requests, and a
+  per-route-class table (requests, 5xx, samples, **p50/p95/p99** estimated via
+  `histogram_quantile`-style interpolation on the same buckets `/metrics`
+  exposes).
+- `handshakeTools`: total calls, failures, active calls, completions,
+  in-flight sessions.
+
+All labels are route-class/tool-name allowlist members — no request-specific
+data. The private `/metrics` endpoint remains the operator feed; the public
+block is the sanitized user-facing summary of the same numbers.
 
 ## 4. Degradation rules & alert thresholds
 

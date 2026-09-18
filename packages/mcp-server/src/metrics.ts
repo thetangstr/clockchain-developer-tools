@@ -59,6 +59,12 @@ class Counter implements Series {
   value(labels: MetricLabels = {}): number {
     return this.values.get(seriesKey(this.name, labels)) ?? 0;
   }
+  /** Total across all series in this counter. */
+  sum(): number {
+    let total = 0;
+    for (const v of this.values.values()) total += v;
+    return total;
+  }
 }
 
 class Gauge implements Series {
@@ -123,6 +129,32 @@ class Histogram implements Series {
   }
   count(labels: MetricLabels = {}): number {
     return this.totals.get(seriesKey(this.name, labels)) ?? 0;
+  }
+  /**
+   * Prometheus histogram_quantile for one label set: finds the first bucket
+   * whose cumulative count reaches q*total and linearly interpolates within
+   * it. Returns undefined when the series has no observations. Clamped to the
+   * top finite bucket when the quantile lands in the +Inf gap.
+   */
+  quantile(labels: MetricLabels, q: number): number | undefined {
+    const k = seriesKey(this.name, labels);
+    const counts = this.counts.get(k);
+    const total = this.totals.get(k) ?? 0;
+    if (!counts || total === 0) return undefined;
+    const rank = Math.min(Math.max(q, 0), 1) * total;
+    let prevCount = 0;
+    let prevBound = 0;
+    for (let i = 0; i < this.buckets.length; i++) {
+      const cumulative = counts[i];
+      if (cumulative >= rank) {
+        const upper = this.buckets[i];
+        if (cumulative === prevCount) return upper;
+        return prevBound + (upper - prevBound) * ((rank - prevCount) / (cumulative - prevCount));
+      }
+      prevCount = cumulative;
+      prevBound = this.buckets[i];
+    }
+    return this.buckets[this.buckets.length - 1];
   }
 }
 

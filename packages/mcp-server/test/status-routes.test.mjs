@@ -18,19 +18,36 @@ let upstream;
 let upstreamPort;
 let proc;
 
+// Stubs mirror the REAL production v2 payloads:
+//   discovery: clockchain.agent-handshake-discovery/v2 — createdAtMs,
+//     invitationExpiresAtMs, sessionDeadlineMs, sessionOpenedBlock.
+//   result:    certificate envelope {hostSessionKeyCertificate, result, signer}
+//     with result = clockchain.agent-handshake-result/v2 (outcome+issuedAtMs).
 const DISCOVERY = {
+  schema: "clockchain.agent-handshake-discovery/v2",
+  protocol: "clockchain.agent-handshake/v2",
   sessionId: SESSION_ID,
-  issuedAtMs: String(Date.now()),
-  expiresAtMs: String(Date.now() + 540_000),
+  repositorySha: "deadbeefcafe1234deadbeefcafe1234deadbeef",
+  kitRepoUrl: "https://example.invalid/kit",
   relayUrl: "",
-  repositorySha: "deadbeefcafe1234",
+  invitationExpiresAtMs: String(Date.now() + 120_000),
+  sessionDeadlineMs: String(Date.now() + 600_000),
+  sessionOpenedBlock: "17100",
+  hostSessionKeyCertificate: { certificate: { sessionId: SESSION_ID } },
+  externalBusinessActionPerformed: false,
 };
 const RESULT = {
-  outcome: "VERIFIED",
-  issuedAtMs: String(Date.now() - 20_000),
-  sessionId: SESSION_ID,
-  sessionDigest: "f".repeat(64),
-  statementDigest: "e".repeat(64),
+  hostSessionKeyCertificate: { certificate: { sessionId: SESSION_ID } },
+  result: {
+    schema: "clockchain.agent-handshake-result/v2",
+    outcome: "VERIFIED",
+    issuedAtMs: String(Date.now() - 20_000),
+    sessionId: SESSION_ID,
+    sessionDigest: "f".repeat(64),
+    statementDigest: "e".repeat(64),
+    externalBusinessActionPerformed: false,
+  },
+  signer: "0xdeadbeef",
 };
 
 before(async () => {
@@ -48,7 +65,7 @@ before(async () => {
     }
     if (url === "/v1/discovery/current") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ...DISCOVERY, issuedAtMs: String(Date.now()), relayUrl: `http://127.0.0.1:${upstreamPort}` }));
+      res.end(JSON.stringify({ ...DISCOVERY, createdAtMs: String(Date.now()), relayUrl: `http://127.0.0.1:${upstreamPort}` }));
       return;
     }
     if (/^\/v1\/sessions\/[^/]+\/result$/.test(url)) {
@@ -115,6 +132,10 @@ test("GET /status.json returns the sanitized report, unauthenticated", async () 
   assert.equal(body.lastVerifiedHandshake.evidence, "fresh");
   assert.equal(body.lastVerifiedHandshake.outcome, "VERIFIED");
   assert.equal(body.build.helperVersion, "2.1.6");
+  // Public performance block: real aggregates, labeled since process start.
+  assert.equal(body.performance.windowLabel, "since process start");
+  assert.equal(typeof body.performance.http.totalRequests, "number");
+  assert.equal(typeof body.performance.uptimeSeconds, "number");
   // Non-leakage: no session ids or digests from upstream data.
   const raw = JSON.stringify(body);
   assert.ok(!raw.includes(SESSION_ID), "session id leaked");

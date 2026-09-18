@@ -50,7 +50,7 @@ import { buildStandaloneDiscovery, createStandaloneHttpHandler, limiter as keyed
 import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 import { normalizeRelayBaseUrl } from "./handshake/relay.js";
 import { MetricsRegistry, bounded } from "./metrics.js";
-import { createStatusCache, type StatusDeps } from "./status.js";
+import { createStatusCache, type PerformanceSnapshot, type StatusDeps } from "./status.js";
 import { renderStatusPage } from "./status-page.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 import { V2RoleAccessError } from "./agent-handshake/v2/access.js";
@@ -679,13 +679,18 @@ export async function runHttp(): Promise<void> {
     },
     fetchPoolParticipation: async (timeoutMs) => {
       const started = Date.now();
-      void timeoutMs; // the gateway client carries its own timeout
       try {
         // getTimestamp resolves whenever the gateway answers; participation
         // is read rename-tolerantly ("nodeParticipation%" vs "nodeParticipation",
         // same as getPoolHealth) but a missing field yields undefined — gateway
-        // reachable yet pool state unreported, not "unreachable".
-        const ts = await getChainVerifyClient().getTimestamp();
+        // reachable yet pool state unreported, not "unreachable". The caller's
+        // hard timeout is enforced with a race — the client call itself is not
+        // abortable, but the probe must bound its wait like every other dep.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const ts = await Promise.race([
+          getChainVerifyClient().getTimestamp(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("probe_timeout")), timeoutMs); }),
+        ]).finally(() => clearTimeout(timer));
         depDuration.observe({ dep: bounded("gateway_pool", DEP_NAMES) }, (Date.now() - started) / 1000);
         depUp.set({ dep: bounded("gateway_pool", DEP_NAMES) }, 1);
         const raw = ts["nodeParticipation%"] ?? ts.nodeParticipation;
@@ -700,9 +705,45 @@ export async function runHttp(): Promise<void> {
         throw e;
       }
     },
+    // Public performance block — real bounded aggregates from the in-process
+    // registry, "since process start" only. Route/tool labels are allowlist
+    // members by construction; percentiles come from the same histogram
+    // buckets /metrics exposes (histogram_quantile interpolation).
+    performance: (): PerformanceSnapshot => {
+      const routes = ROUTE_CLASSES.map((route) => {
+        const requests = STATUS_CLASSES.reduce((n, status) => n + httpRequests.value({ route, status }), 0);
+        const errors = httpRequests.value({ route, status: "5xx" });
+        const samples = httpDuration.count({ route });
+        const p50 = httpDuration.quantile({ route }, 0.5);
+        const p95 = httpDuration.quantile({ route }, 0.95);
+        const p99 = httpDuration.quantile({ route }, 0.99);
+        return {
+          route, requests, errors, samples,
+          ...(p50 !== undefined ? { p50Seconds: p50 } : {}),
+          ...(p95 !== undefined ? { p95Seconds: p95 } : {}),
+          ...(p99 !== undefined ? { p99Seconds: p99 } : {}),
+        };
+      }).filter((r) => r.requests > 0 || r.samples > 0);
+      return {
+        http: {
+          totalRequests: httpRequests.sum(),
+          totalErrors: ROUTE_CLASSES.reduce((n, route) => n + httpRequests.value({ route, status: "5xx" }), 0),
+          activeRequests: httpActiveGauge.value({}),
+          routes,
+        },
+        handshakeTools: {
+          totalCalls: toolCalls.sum(),
+          totalFailures: failCounter.sum(),
+          activeCalls: toolActiveGauge.value({}),
+          completions: completedCounter.sum(),
+          inflightSessions: inflightGauge.value({}),
+        },
+      };
+    },
     relayBaseUrl: (() => { try { return normalizeRelayBaseUrl(process.env.HANDSHAKE_RELAY ?? ""); } catch { return ""; } })(),
     probeTimeoutMs: Number(process.env.STATUS_PROBE_TIMEOUT_MS ?? "2000"),
     sessionStaleAfterMs: Number(process.env.STATUS_SESSION_STALE_MS ?? "1200000"),
+    sessionMintGraceMs: Number(process.env.STATUS_SESSION_GRACE_MS ?? "60000"),
     evidenceStaleAfterMs: Number(process.env.STATUS_EVIDENCE_STALE_MS ?? "1200000"),
     processStartedAtMs,
     serviceVersion: "0.1.0",

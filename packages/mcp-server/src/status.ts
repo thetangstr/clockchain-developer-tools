@@ -55,7 +55,65 @@ export interface StatusReport {
     observedAtMs?: number;
     ageSeconds?: number;
   };
+  /**
+   * Public performance summary — REAL bounded aggregates only, all covering
+   * "since process start" and labeled as such. No persistence exists yet, so
+   * nothing here may claim a 24h/7d window. Percentiles are estimated from
+   * the same histogram buckets Prometheus scrapes; every label comes from
+   * bounded allowlists (route class, tool name) — never request-specific data.
+   */
+  performance: {
+    windowLabel: "since process start";
+    uptimeSeconds: number;
+    http: {
+      totalRequests: number;
+      totalErrors: number;
+      errorRate: number;
+      activeRequests: number;
+      routes: {
+        route: string;
+        requests: number;
+        errors: number;
+        samples: number;
+        p50Seconds?: number;
+        p95Seconds?: number;
+        p99Seconds?: number;
+      }[];
+    };
+    handshakeTools: {
+      totalCalls: number;
+      totalFailures: number;
+      activeCalls: number;
+      completions: number;
+      inflightSessions: number;
+    };
+  };
   window: { label: string; sinceProcessStartMs: number; cacheTtlMs: number };
+}
+
+/** What the HTTP layer supplies from its in-process metrics registry. */
+export interface PerformanceSnapshot {
+  http: {
+    totalRequests: number;
+    totalErrors: number;
+    activeRequests: number;
+    routes: {
+      route: string;
+      requests: number;
+      errors: number;
+      samples: number;
+      p50Seconds?: number;
+      p95Seconds?: number;
+      p99Seconds?: number;
+    }[];
+  };
+  handshakeTools: {
+    totalCalls: number;
+    totalFailures: number;
+    activeCalls: number;
+    completions: number;
+    inflightSessions: number;
+  };
 }
 
 export interface StatusDeps {
@@ -71,10 +129,14 @@ export interface StatusDeps {
    * must stay distinct from both "down" (unreachable) and "degraded" (0%).
    */
   fetchPoolParticipation(timeoutMs: number): Promise<{ totalNodes: number; nodeParticipationPct?: number }>;
+  /** In-process bounded aggregates for the public performance block. */
+  performance(): PerformanceSnapshot;
   relayBaseUrl: string;
   probeTimeoutMs: number;
   /** Sessions mint on a rolling cadence; older than this means the supervisor stalled. */
   sessionStaleAfterMs: number;
+  /** Grace after sessionDeadlineMs before the supervisor counts as behind. */
+  sessionMintGraceMs: number;
   /** Verified-handshake evidence older than this is labeled stale. */
   evidenceStaleAfterMs: number;
   processStartedAtMs: number;
@@ -119,9 +181,13 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
     meta: { uptimeSeconds: Math.max(0, Math.floor((observedAt - deps.processStartedAtMs) / 1000)) },
   };
 
-  // Relay + supervisor: the rolling session must be fresh. A stale session
-  // means the supervisor stopped minting; an unreachable relay means every
-  // invite/join/next will fail.
+  // Relay + supervisor: the discovery document is the real v2 shape
+  // (clockchain.agent-handshake-discovery/v2 — createdAtMs /
+  // invitationExpiresAtMs / sessionDeadlineMs as decimal strings). A live
+  // session must cover "now": an expired deadline with no fresh mint means
+  // the supervisor stalled; a very old createdAtMs with a far-future deadline
+  // is caught by the staleness bound. Unreachable relay = every invite/join/
+  // next will fail.
   const relayBase = deps.relayBaseUrl.replace(/\/+$/, "");
   let relayUp = false;
   let currentSessionId: string | undefined;
@@ -132,12 +198,20 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
       deps.fetchJson(`${relayBase}/v1/discovery/current`, deps.probeTimeoutMs));
     relayUp = true;
     const disc = asObj(value);
-    const createdAtMs = num(disc.issuedAtMs);
+    const createdAtMs = num(disc.createdAtMs);
+    const sessionDeadlineMs = num(disc.sessionDeadlineMs);
     if (typeof disc.sessionId === "string") currentSessionId = disc.sessionId;
     repositorySha = typeof disc.repositorySha === "string" ? disc.repositorySha : undefined;
     const ageMs = createdAtMs === undefined ? Number.NaN : observedAt - createdAtMs;
+    const expired = sessionDeadlineMs !== undefined && observedAt > sessionDeadlineMs + deps.sessionMintGraceMs;
     if (createdAtMs === undefined) {
       components.relay_supervisor = { state: "degraded", detail: "discovery missing session timing", observedAtMs: observedAt, latencyMs };
+    } else if (expired) {
+      components.relay_supervisor = {
+        state: "down", detail: "session expired — supervisor not minting",
+        observedAtMs: observedAt, latencyMs,
+        meta: { sessionAgeSeconds: Math.floor(ageMs / 1000), deadlineAgeSeconds: Math.floor((observedAt - sessionDeadlineMs!) / 1000) },
+      };
     } else if (ageMs > deps.sessionStaleAfterMs) {
       components.relay_supervisor = {
         state: "down", detail: "session stale — supervisor not minting",
@@ -224,7 +298,11 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
       const { value } = await timed(() =>
         deps.fetchJson(`${relayBase}/v1/sessions/${encodeURIComponent(currentSessionId)}/result`, deps.probeTimeoutMs));
       const snap = asObj(value);
-      const cert = asObj(snap.certificate ?? snap);
+      // The relay returns the certificate envelope
+      // {hostSessionKeyCertificate, result, signer}; the v2 result record
+      // inside carries outcome + issuedAtMs (decimal string). Fall back to
+      // the bare object if the endpoint ever serves the result directly.
+      const cert = asObj(snap.result ?? snap.certificate ?? snap);
       const issuedAt = num(cert.issuedAtMs);
       if (cert.outcome === "VERIFIED" && issuedAt !== undefined) {
         const ageSeconds = Math.max(0, Math.floor((observedAt - issuedAt) / 1000));
@@ -249,6 +327,15 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
     components.evm_rpc.state,
   ]);
 
+  const perf = deps.performance();
+  const httpPerf = {
+    totalRequests: perf.http.totalRequests,
+    totalErrors: perf.http.totalErrors,
+    errorRate: perf.http.totalRequests === 0 ? 0 : perf.http.totalErrors / perf.http.totalRequests,
+    activeRequests: perf.http.activeRequests,
+    routes: perf.http.routes,
+  };
+
   return {
     schema: "clockchain.status/v1",
     computedAtMs: observedAt,
@@ -257,6 +344,12 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
     components,
     build: { service: deps.serviceVersion, helperVersion: V2_HELPER_VERSION, ...(repositorySha ? { protocolRepositorySha: repositorySha } : {}) },
     lastVerifiedHandshake: lastVerified,
+    performance: {
+      windowLabel: "since process start",
+      uptimeSeconds: Math.max(0, Math.floor((observedAt - deps.processStartedAtMs) / 1000)),
+      http: httpPerf,
+      handshakeTools: perf.handshakeTools,
+    },
     window: {
       label: "live dependency probes; counters since process start",
       sinceProcessStartMs: deps.processStartedAtMs,
@@ -265,15 +358,27 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
   };
 }
 
-/** TTL-cached status computation for the public routes. */
+/**
+ * TTL-cached, single-flight status computation for the public routes.
+ * Concurrent callers during a cold/expired window share ONE in-flight
+ * computation — the design doc's probe bound (traffic-independent) depends
+ * on this: N simultaneous requests can never fan out into N probe rounds.
+ */
 export function createStatusCache(deps: StatusDeps, cacheTtlMs: number) {
   let cached: { report: StatusReport; expiresAt: number } | undefined;
-  return async (): Promise<StatusReport> => {
+  let inflight: Promise<StatusReport> | undefined;
+  return (): Promise<StatusReport> => {
     const now = deps.now();
-    if (cached && now < cached.expiresAt) return cached.report;
-    const report = await computeStatus(deps);
-    report.window.cacheTtlMs = cacheTtlMs;
-    cached = { report, expiresAt: now + cacheTtlMs };
-    return report;
+    if (cached && now < cached.expiresAt) return Promise.resolve(cached.report);
+    inflight ??= computeStatus(deps).then((report) => {
+      report.window.cacheTtlMs = cacheTtlMs;
+      cached = { report, expiresAt: deps.now() + cacheTtlMs };
+      inflight = undefined;
+      return report;
+    }, (err: unknown) => {
+      inflight = undefined;
+      throw err;
+    });
+    return inflight;
   };
 }

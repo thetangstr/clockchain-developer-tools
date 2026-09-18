@@ -109,3 +109,32 @@ test("empty registry still emits valid HELP/TYPE scaffolding", () => {
   assert.ok(out.endsWith("\n"));
   assert.match(out, /# TYPE empty_total counter\n?$/);
 });
+
+test("histogram quantile interpolates within the ranked bucket", () => {
+  const r = new MetricsRegistry();
+  const h = r.histogram("q_seconds", "Q.", [0.1, 0.5, 1, 5]);
+  // 10 observations at 0.05 (all in the first bucket): p50 interpolates
+  // rank 5/10 across the 0–0.1 bucket → 0.05; p99 → 0.099.
+  for (let i = 0; i < 10; i++) h.observe({ route: "x" }, 0.05);
+  assert.equal(h.quantile({ route: "x" }, 0.5), 0.05);
+  assert.equal(h.quantile({ route: "x" }, 0.99), 0.099);
+  // Add 10 more at 2s — now p95 interpolates inside the 1–5s bucket.
+  for (let i = 0; i < 10; i++) h.observe({ route: "x" }, 2);
+  const p95 = h.quantile({ route: "x" }, 0.95);
+  assert.ok(p95 > 1 && p95 <= 5, `p95 ${p95} outside the 1-5 bucket`);
+});
+
+test("quantile on an empty series returns undefined; out-of-range q clamps", () => {
+  const r = new MetricsRegistry();
+  const h = r.histogram("empty_q_seconds", "Q.", [0.1, 1]);
+  assert.equal(h.quantile({ route: "x" }, 0.5), undefined);
+  h.observe({}, 0.05);
+  assert.equal(h.quantile({}, 1.5), h.quantile({}, 1)); // clamped q
+});
+
+test("counter and gauge sum() totals across series", () => {
+  const r = new MetricsRegistry();
+  const c = r.counter("s_total", "S.");
+  c.inc({ a: "1" }); c.inc({ a: "2" }, 4);
+  assert.equal(c.sum(), 5);
+});

@@ -22,6 +22,21 @@ function makeReport(overrides = {}) {
     },
     build: { service: "0.1.0", helperVersion: "2.1.6", protocolRepositorySha: "abc123def4567890" },
     lastVerifiedHandshake: { evidence: "fresh", outcome: "VERIFIED", observedAtMs: T0 - 30_000, ageSeconds: 30 },
+    performance: {
+      windowLabel: "since process start",
+      uptimeSeconds: 300,
+      http: {
+        totalRequests: 128,
+        totalErrors: 2,
+        errorRate: 2 / 128,
+        activeRequests: 3,
+        routes: [
+          { route: "mcp_rpc", requests: 100, errors: 2, samples: 100, p50Seconds: 0.018, p95Seconds: 0.42, p99Seconds: 0.91 },
+          { route: "status", requests: 28, errors: 0, samples: 28, p50Seconds: 0.012 },
+        ],
+      },
+      handshakeTools: { totalCalls: 17, totalFailures: 2, activeCalls: 1, completions: 3, inflightSessions: 1 },
+    },
     window: { label: "live dependency probes; counters since process start", sinceProcessStartMs: T0 - 300_000, cacheTtlMs: 15_000 },
     ...overrides,
   };
@@ -122,4 +137,32 @@ test("long latency and meta values render in mono detail lines", () => {
   const html = renderStatusPage(makeReport());
   assert.match(html, /42ms/);
   assert.ok(html.includes("nodeParticipationPct=100"));
+});
+
+test("performance section: since-process-start label, volume, error rate, percentiles", () => {
+  const html = renderStatusPage(makeReport());
+  assert.match(html, /Performance — <span class="perf-window">since process start<\/span>/);
+  assert.match(html, /128 total · 3 active/);
+  assert.match(html, /2 server errors \(1\.6% error rate\)/);
+  assert.match(html, /17 calls · 1 active/);
+  assert.match(html, /2 failures · 3 completions · 1 sessions in flight/);
+  // Route table: real bounded aggregates — percentiles as ms.
+  assert.match(html, /<th>Route<\/th><th>Requests<\/th><th>5xx<\/th><th>p50<\/th><th>p95<\/th><th>p99<\/th>/);
+  assert.ok(html.includes("mcp_rpc"));
+  assert.ok(html.includes("420ms"), "p95 0.42s should render as 420ms");
+  assert.ok(html.includes("18ms"), "p50 0.018s should render as 18ms");
+  assert.ok(html.includes("—"), "missing p95 on 'status' route renders as dash");
+});
+
+test("zero-traffic performance renders an honest empty state", () => {
+  const r = makeReport();
+  r.performance = {
+    windowLabel: "since process start",
+    uptimeSeconds: 5,
+    http: { totalRequests: 0, totalErrors: 0, errorRate: 0, activeRequests: 0, routes: [] },
+    handshakeTools: { totalCalls: 0, totalFailures: 0, activeCalls: 0, completions: 0, inflightSessions: 0 },
+  };
+  const html = renderStatusPage(r);
+  assert.match(html, /No HTTP traffic observed since process start/);
+  assert.match(html, /0 total · 0 active/);
 });

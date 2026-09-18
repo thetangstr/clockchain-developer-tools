@@ -41,9 +41,14 @@ const CSS = `
   .card code { font-family: var(--mono); font-size: 12px; word-break: break-all; }
   .st-note { max-width: 880px; margin: 26px auto 0; font-size: 13px; color: var(--fg-3); line-height: 1.6; }
   .st-note code { font-family: var(--mono); font-size: 11.5px; }
+  .perf-head { max-width: 880px; margin: 34px auto 14px; font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-3); }
+  .perf-head .perf-window { color: var(--fg-2); letter-spacing: normal; text-transform: none; }
+  .perf-table { margin-top: 14px; }
+  .perf-table td { font-family: var(--mono); font-size: 12.5px; }
+  .perf-table td:first-child { font-family: inherit; font-size: 14px; }
   @media (max-width: 760px) {
     .cards { grid-template-columns: 1fr; }
-    .banner, .st-table, .cards, .st-note { margin-left: 14px; margin-right: 14px; }
+    .banner, .st-table, .cards, .st-note, .perf-head { margin-left: 14px; margin-right: 14px; }
     .banner { flex-wrap: wrap; padding: 20px 18px; }
     .banner .ts { margin-left: 0; }
     .st-table { width: auto; font-size: 13px; }
@@ -103,6 +108,26 @@ export function renderStatusPage(r: StatusReport): string {
       : `<div class="big">None observed</div>
          <div class="sub-line">No completed handshake certificate in the current session window — normal on an idle service; not an availability signal.</div>`;
 
+  // Public performance block — real bounded aggregates since process start.
+  // Percentiles render as ms; absent percentiles (no samples) render as —.
+  const ms = (s: number | undefined) => s === undefined ? "—" : s < 1 ? `${Math.round(s * 1000)}ms` : `${s.toFixed(2)}s`;
+  const perf = r.performance;
+  const pct = (rate: number) => `${(rate * 100).toFixed(rate > 0 && rate < 0.01 ? 2 : 1)}%`;
+  const perfRows = perf.http.routes.map((row) => `<tr>
+    <td>${esc(row.route)}</td>
+    <td>${row.requests}</td>
+    <td>${row.errors}</td>
+    <td>${ms(row.p50Seconds)}</td>
+    <td>${ms(row.p95Seconds)}</td>
+    <td>${ms(row.p99Seconds)}</td>
+  </tr>`).join("");
+  const perfTable = perfRows
+    ? `<table class="st-table perf-table">
+  <thead><tr><th>Route</th><th>Requests</th><th>5xx</th><th>p50</th><th>p95</th><th>p99</th></tr></thead>
+  <tbody>${perfRows}</tbody>
+</table>`
+    : `<p class="st-note">No HTTP traffic observed since process start — aggregates appear here as requests arrive.</p>`;
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -152,6 +177,21 @@ ${CSS}</style>
     <div class="sub-line">process uptime ${ago(uptimeS).replace(" ago", "")} · since ${esc(new Date(r.processStartedAtMs).toISOString())}</div>
   </div>
 </div>
+
+<div class="perf-head">Performance — <span class="perf-window">${esc(perf.windowLabel)}</span></div>
+<div class="cards">
+  <div class="card">
+    <h3>HTTP requests</h3>
+    <div class="big">${perf.http.totalRequests} total · ${perf.http.activeRequests} active</div>
+    <div class="sub-line">${perf.http.totalErrors} server errors (${pct(perf.http.errorRate)} error rate) · uptime ${ago(perf.uptimeSeconds).replace(" ago", "")}</div>
+  </div>
+  <div class="card">
+    <h3>Handshake tools</h3>
+    <div class="big">${perf.handshakeTools.totalCalls} calls · ${perf.handshakeTools.activeCalls} active</div>
+    <div class="sub-line">${perf.handshakeTools.totalFailures} failures · ${perf.handshakeTools.completions} completions · ${perf.handshakeTools.inflightSessions} sessions in flight</div>
+  </div>
+</div>
+${perfTable}
 
 <p class="st-note">Component states come from live dependency probes run at the observation times shown —
 a probe that fails reports down/degraded, never a remembered "healthy". The machine-readable view is
