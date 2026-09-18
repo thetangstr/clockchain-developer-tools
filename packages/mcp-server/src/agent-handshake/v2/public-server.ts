@@ -149,6 +149,7 @@ export function createV2PublicHttpHandler(options: {
   invitePerHour?: number;
   callsPerMinute?: number;
   now?: () => number;
+  onRateLimited?: (surface: "handshake_call" | "handshake_invite") => void;
 }) {
   const now = options.now ?? Date.now;
   const allowInvite = limiter(options.invitePerHour ?? 5, 60 * 60_000, now);
@@ -162,6 +163,7 @@ export function createV2PublicHttpHandler(options: {
     }
     const ip = v2PublicClientIp(req.headers, req.socket.remoteAddress, options.trustedProxy);
     if (!allowCall(`call:${ip}`)) {
+      options.onRateLimited?.("handshake_call");
       res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify({ error: "rate_limited" }));
       return;
@@ -169,7 +171,10 @@ export function createV2PublicHttpHandler(options: {
     const server = buildV2PublicServer({
       pin: options.pin,
       invoke: async (name, args) => {
-        if (name === "agent_handshake_invite" && !allowInvite(`invite:${ip}`)) throw new Error("rate_limited");
+        if (name === "agent_handshake_invite" && !allowInvite(`invite:${ip}`)) {
+          options.onRateLimited?.("handshake_invite");
+          throw new Error("rate_limited");
+        }
         return invoke(name, args);
       },
     });

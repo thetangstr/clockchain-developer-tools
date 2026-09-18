@@ -299,7 +299,7 @@ alarm:      alarm_set {fire_at ISO-8601 UTC, label} â†’ timer_list {} shows it â
     <div class="foot-links">
       <a href="/">All modules</a>
       <a href="/clock-tools.txt">Text version</a>
-      <a href="https://clockchain-research.vercel.app/dashboard">Status</a>
+      <a href="/status">Status</a>
       <a href="${REPO}">Docs</a>
     </div>
   </div>
