@@ -121,12 +121,16 @@ test("responsive markup: viewport meta and a mobile breakpoint", () => {
   assert.match(html, /@media \(max-width: 760px\)/);
 });
 
-test("nav + footer link to status.json, /health liveness, and /readyz is referenced", () => {
+test("nav + footer link to status.json, /health liveness, and the readiness split is stated", () => {
   const html = renderStatusPage(makeReport());
   assert.ok(html.includes('href="/status.json"'));
   assert.ok(html.includes('href="/health"'));
-  assert.ok(html.includes("/readyz"));
   assert.ok(html.includes("/health"));
+  // Footer must distinguish core MCP-host /readyz from handshake /readyz/handshake —
+  // it must not describe /readyz as the dependency-gated view.
+  assert.match(html, /GET \/readyz<\/code> reports core MCP-host readiness/);
+  assert.match(html, /GET \/readyz\/handshake<\/code> is the dependency-gated/);
+  assert.doesNotMatch(html, /dependency-gated\s*\n?\s*readiness view is <code>GET \/readyz<\/code>/);
 });
 
 test("meta refresh keeps the page live without JS", () => {

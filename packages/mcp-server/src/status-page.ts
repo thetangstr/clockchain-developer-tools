@@ -195,8 +195,10 @@ ${perfTable}
 
 <p class="st-note">Component states come from live dependency probes run at the observation times shown —
 a probe that fails reports down/degraded, never a remembered "healthy". The machine-readable view is
-<code>GET /status.json</code>; the cheap liveness probe is <code>GET /health</code>; the dependency-gated
-readiness view is <code>GET /readyz</code>. Last-verified evidence is informational only — an idle
+<code>GET /status.json</code>; the cheap liveness probe is <code>GET /health</code>. Readiness is split:
+<code>GET /readyz</code> reports core MCP-host readiness and stays ready while the host can serve,
+even if handshake dependencies are down; <code>GET /readyz/handshake</code> is the dependency-gated
+handshake readiness view. Last-verified evidence is informational only — an idle
 service with no recent canary stays operational; only a scheduled read-only synthetic protocol probe
 may feed protocol readiness. Counter data covers <b>since process start</b> only — no
 long-term history is fabricated. Anchored on the ${SUBSTRATE_LABEL}.</p>

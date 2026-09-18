@@ -27,7 +27,7 @@ sessions are not authentication.
 |---|---|
 | `/health` + `/metrics` (official registry) | `GET /health` stays a cheap liveness probe; `GET /metrics` serves Prometheus text exposition — **Bearer-gated** by `MCP_METRICS_TOKEN`, 404 when unset (fails closed, unlike the registry's public metrics) |
 | Public status page | `GET /status` (HTML for browsers, JSON otherwise) + `GET /status.json` — computed from **live dependency probes**, not remembered state |
-| Dependency readiness | `GET /readyz` — 200 unless a hard dependency is down; separate from liveness and from component health detail |
+| Dependency readiness | Split: `GET /readyz` — core MCP-host readiness, 200 whenever the host can serve; `GET /readyz/handshake` + `handshakeReady` in status.json — handshake dependency readiness, 503 on any handshake dep down; both separate from liveness and component health detail |
 | Per-tool/stage counts + latencies | `clockchain_handshake_tool_{calls_total,duration_seconds}` by `{tool,result}`; `clockchain_handshake_stage_total{stage}`; `clockchain_handshake_failures_total{reason}`; `clockchain_handshake_completed_total{outcome}` (deduped per session); `clockchain_handshake_inflight` + `clockchain_handshake_tool_active` + `clockchain_http_requests_active` gauges |
 | Concurrency without drift | Active gauges are inc/dec under `try/finally` (tool invocations) and the `close` event (HTTP requests — fires exactly once, including aborts), so counters can never wedge positive |
 | Gateway connection/timeout/error metrics | `clockchain_dependency_up{dep}` + `clockchain_dependency_probe_seconds{dep}` for `relay_discovery`, `relay_result`, `gateway_pool`, `evm_rpc` |
