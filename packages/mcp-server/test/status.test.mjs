@@ -92,7 +92,7 @@ test("all probes ok → operational with VERIFIED last handshake", async () => {
   assert.equal(r.build.helperVersion.length > 0, true);
   assert.equal(r.build.protocolRepositorySha, "abc123def4567890abc123def4567890abc12345");
   assert.match(r.window.label, /since process start/);
-  assert.equal(r.handshake_ready, true);
+  assert.equal(r.handshakeReady, true);
   assert.equal(r.computedAtMs, T0);
 });
 
@@ -102,7 +102,7 @@ test("unreachable relay → relay down → handshake surface down → outage", a
   assert.equal(r.components.relay_supervisor.state, "down");
   assert.equal(r.components.handshake_surface.state, "down");
   assert.equal(r.overall, "outage");
-  assert.equal(r.handshake_ready, false);
+  assert.equal(r.handshakeReady, false);
   assert.equal(r.lastVerifiedHandshake.evidence, "unavailable");
 });
 
@@ -271,7 +271,7 @@ test("gateway answers but participation unreported → gateway ok, pool unknown,
   assert.match(r.components.pool_participation.detail, /unreported/);
   assert.equal(r.components.handshake_surface.state, "degraded");
   // Pool unconfirmed → handshake would fail closed → not handshake-ready.
-  assert.equal(r.handshake_ready, false);
+  assert.equal(r.handshakeReady, false);
   assert.equal(r.overall, "degraded");
 });
 

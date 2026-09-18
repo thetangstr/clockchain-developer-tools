@@ -40,7 +40,7 @@ export interface StatusReport {
    * ok — i.e. the handshake surface would serve rather than fail closed.
    * /readyz (core MCP host) must NOT gate on this; /readyz/handshake does.
    */
-  handshake_ready: boolean;
+  handshakeReady: boolean;
   build: { service: string; helperVersion: string; protocolRepositorySha?: string };
   /**
    * Protocol-evidence field — informational only, NEVER part of `overall`.
@@ -353,7 +353,7 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
     // ok (surface would serve, not fail closed). Deliberately separate from
     // core MCP-host readiness: /readyz answers "is the MCP host serving",
     // /readyz/handshake answers this.
-    handshake_ready: components.handshake_surface.state == "ok",
+    handshakeReady: components.handshake_surface.state == "ok",
     build: { service: deps.serviceVersion, helperVersion: V2_HELPER_VERSION, ...(repositorySha ? { protocolRepositorySha: repositorySha } : {}) },
     lastVerifiedHandshake: lastVerified,
     performance: {

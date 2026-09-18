@@ -56,21 +56,21 @@ test("status still reports degraded/outage when every dependency is down", async
   assert.equal(body.overall, "outage");
   assert.equal(body.components.relay_supervisor.state, "down");
   assert.equal(body.lastVerifiedHandshake.evidence, "unavailable");
-  assert.equal(body.handshake_ready, false);
+  assert.equal(body.handshakeReady, false);
 });
 
 // /readyz is CORE MCP HOST readiness: it must NOT 503 just because
 // handshake-only dependencies (relay/gateway/pool/EVM) are down — the MCP
 // host still serves connect/mcp, keeper, token, manifests. Handshake
 // dependency readiness is exposed separately at /readyz/handshake and via
-// the handshake_ready field.
+// the handshakeReady field.
 test("GET /readyz → 200 ready (core MCP host) even with all handshake deps down", async () => {
   const res = await fetch(`${BASE}/readyz`);
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.status, "ready");
   assert.equal(body.scope, "mcp_host");
-  assert.equal(body.handshake_ready, false);
+  assert.equal(body.handshakeReady, false);
   assert.equal(body.overall, "outage");
 });
 
@@ -80,5 +80,5 @@ test("GET /readyz/handshake → 503 when handshake dependencies are down", async
   const body = await res.json();
   assert.equal(body.status, "not_ready");
   assert.equal(body.scope, "handshake");
-  assert.equal(body.handshake_ready, false);
+  assert.equal(body.handshakeReady, false);
 });

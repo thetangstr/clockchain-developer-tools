@@ -883,12 +883,12 @@ export async function runHttp(): Promise<void> {
       const handshakeScope = pathOf(req.url) === "/readyz/handshake";
       try {
         const report = await statusCache();
-        const ready = handshakeScope ? report.handshake_ready : report.components.mcp_host.state === "ok";
+        const ready = handshakeScope ? report.handshakeReady : report.components.mcp_host.state === "ok";
         res.writeHead(ready ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({
           status: ready ? "ready" : "not_ready",
           scope: handshakeScope ? "handshake" : "mcp_host",
-          handshake_ready: report.handshake_ready,
+          handshakeReady: report.handshakeReady,
           overall: report.overall,
           components: Object.fromEntries(Object.entries(report.components).map(([k, v]) => [k, v.state])),
         }));

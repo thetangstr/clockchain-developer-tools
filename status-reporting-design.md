@@ -45,8 +45,8 @@ functionality that is ~150 lines.
 | Layer | Route | Question it answers |
 |---|---|---|
 | Liveness | `GET /health` | Is the process serving HTTP? (cheap, no deps — load-balancer probe) |
-| Core readiness | `GET /readyz` | Is the **MCP host** ready to serve? 200 whenever the host can compute and serve — handshake-only dependencies (relay/gateway/pool/EVM) **never** gate this route. Reports `handshake_ready` + per-component states in the body |
-| Handshake readiness | `GET /readyz/handshake` + `handshake_ready` field in status.json | Would the handshake surface serve rather than fail closed? 503 when any handshake-only dep is down or unconfirmed |
+| Core readiness | `GET /readyz` | Is the **MCP host** ready to serve? 200 whenever the host can compute and serve — handshake-only dependencies (relay/gateway/pool/EVM) **never** gate this route. Reports `handshakeReady` + per-component states in the body |
+| Handshake readiness | `GET /readyz/handshake` + `handshakeReady` field in status.json | Would the handshake surface serve rather than fail closed? 503 when any handshake-only dep is down or unconfirmed |
 | Component health | `GET /status{,.json}` | Which dependency is degraded/down and when was it observed? |
 | Protocol/business health | `lastVerifiedHandshake` evidence in status | Did a real handshake recently complete end-to-end — **informational only** |
 
