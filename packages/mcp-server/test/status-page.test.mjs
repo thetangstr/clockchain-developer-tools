@@ -21,7 +21,7 @@ function makeReport(overrides = {}) {
       evm_rpc: { state: "ok", detail: "eip155:11155111", observedAtMs: T0, latencyMs: 55 },
     },
     build: { service: "0.1.0", helperVersion: "2.1.6", protocolRepositorySha: "abc123def4567890" },
-    lastVerifiedHandshake: { outcome: "VERIFIED", observedAtMs: T0 - 30_000, ageSeconds: 30 },
+    lastVerifiedHandshake: { evidence: "fresh", outcome: "VERIFIED", observedAtMs: T0 - 30_000, ageSeconds: 30 },
     window: { label: "live dependency probes; counters since process start", sinceProcessStartMs: T0 - 300_000, cacheTtlMs: 15_000 },
     ...overrides,
   };
@@ -69,9 +69,20 @@ test("VERIFIED handshake card shows outcome and age; absent shows 'none observed
   const withCert = renderStatusPage(makeReport());
   assert.match(withCert, /VERIFIED/);
   assert.match(withCert, /30s ago/);
-  const without = renderStatusPage(makeReport({ lastVerifiedHandshake: null }));
+  const without = renderStatusPage(makeReport({ lastVerifiedHandshake: { evidence: "none_observed" } }));
   assert.match(without, /None observed/);
-  assert.match(without, /normal when a session just started/);
+  assert.match(without, /not an availability signal/);
+});
+
+test("stale and unavailable evidence render their own labels", () => {
+  const stale = renderStatusPage(makeReport({
+    lastVerifiedHandshake: { evidence: "stale", outcome: "VERIFIED", observedAtMs: T0 - 300_000, ageSeconds: 300 },
+  }));
+  assert.match(stale, /VERIFIED — stale/);
+  assert.match(stale, /older than the evidence window/);
+  const unavail = renderStatusPage(makeReport({ lastVerifiedHandshake: { evidence: "unavailable" } }));
+  assert.match(unavail, /Evidence unavailable/);
+  assert.match(unavail, /does not affect availability/i);
 });
 
 test("build card shows service + helper version and truncated repo sha", () => {

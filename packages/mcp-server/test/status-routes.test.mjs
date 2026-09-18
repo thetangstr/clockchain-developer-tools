@@ -105,12 +105,14 @@ test("GET /health stays cheap liveness (no auth, instant)", async () => {
 test("GET /status.json returns the sanitized report, unauthenticated", async () => {
   const res = await fetch(`${BASE}/status.json`);
   assert.equal(res.status, 200);
+  assert.match(res.headers.get("cache-control") ?? "", /no-store/);
   const body = await res.json();
   assert.equal(body.schema, "clockchain.status/v1");
   assert.equal(body.overall, "operational");
   for (const k of ["mcp_host", "handshake_surface", "relay_supervisor", "anchoring_gateway", "pool_participation", "evm_rpc"]) {
     assert.equal(body.components[k].state, "ok", k);
   }
+  assert.equal(body.lastVerifiedHandshake.evidence, "fresh");
   assert.equal(body.lastVerifiedHandshake.outcome, "VERIFIED");
   assert.equal(body.build.helperVersion, "2.1.6");
   // Non-leakage: no session ids or digests from upstream data.
@@ -135,6 +137,7 @@ test("GET /status serves HTML to browsers, JSON to agents", async () => {
 test("GET /readyz is a dependency-gated readiness view", async () => {
   const res = await fetch(`${BASE}/readyz`);
   assert.equal(res.status, 200);
+  assert.match(res.headers.get("cache-control") ?? "", /no-store/);
   const body = await res.json();
   assert.equal(body.status, "ready");
   assert.equal(body.overall, "operational");

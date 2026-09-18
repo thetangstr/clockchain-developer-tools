@@ -55,7 +55,7 @@ test("status still reports degraded/outage when every dependency is down", async
   const body = await res.json();
   assert.equal(body.overall, "outage");
   assert.equal(body.components.relay_supervisor.state, "down");
-  assert.equal(body.lastVerifiedHandshake, null);
+  assert.equal(body.lastVerifiedHandshake.evidence, "unavailable");
 });
 
 test("GET /readyz → 503 not_ready when dependencies are down", async () => {

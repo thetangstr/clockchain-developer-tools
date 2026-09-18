@@ -35,7 +35,26 @@ export interface StatusReport {
   overall: OverallState;
   components: Record<string, ProbeResult>;
   build: { service: string; helperVersion: string; protocolRepositorySha?: string };
-  lastVerifiedHandshake: { outcome: string; observedAtMs: number; ageSeconds: number } | null;
+  /**
+   * Protocol-evidence field — informational only, NEVER part of `overall`.
+   * An idle service with no recent user traffic reports evidence
+   * "none_observed" and stays fully operational; absence of a recent canary
+   * is not an availability signal. Only a scheduled read-only synthetic
+   * protocol probe may ever feed protocol readiness — user traffic never can.
+   *   - fresh:          current session's relay result carries outcome VERIFIED
+   *                     within the evidence window.
+   *   - stale:          a VERIFIED result exists but is older than the window.
+   *   - none_observed:  no verified certificate in the current session window
+   *                     (normal on an idle service or early in a session).
+   *   - unavailable:    the evidence probe itself failed — distinct from
+   *                     "no evidence", and labeled as such.
+   */
+  lastVerifiedHandshake: {
+    evidence: "fresh" | "stale" | "none_observed" | "unavailable";
+    outcome?: string;
+    observedAtMs?: number;
+    ageSeconds?: number;
+  };
   window: { label: string; sinceProcessStartMs: number; cacheTtlMs: number };
 }
 
@@ -45,12 +64,19 @@ export interface StatusDeps {
   fetchJson(url: string, timeoutMs: number): Promise<unknown>;
   /** eth_chainId via the configured EVM RPC; throws on failure. */
   fetchEvmChainId(timeoutMs: number): Promise<string>;
-  /** Clockchain gateway pool health; throws when undeterminable. */
-  fetchPoolHealth(timeoutMs: number): Promise<{ totalNodes: number; nodeParticipationPct: number; degraded: boolean }>;
+  /**
+   * Gateway pool participation, from the public time endpoint. Resolves when
+   * the gateway answers; `nodeParticipationPct` is undefined when the gateway
+   * answered but reported no participation field — that is "unknown", which
+   * must stay distinct from both "down" (unreachable) and "degraded" (0%).
+   */
+  fetchPoolParticipation(timeoutMs: number): Promise<{ totalNodes: number; nodeParticipationPct?: number }>;
   relayBaseUrl: string;
   probeTimeoutMs: number;
   /** Sessions mint on a rolling cadence; older than this means the supervisor stalled. */
   sessionStaleAfterMs: number;
+  /** Verified-handshake evidence older than this is labeled stale. */
+  evidenceStaleAfterMs: number;
   processStartedAtMs: number;
   serviceVersion: string;
 }
@@ -85,7 +111,6 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
   const observedAt = now();
   const components: Record<string, ProbeResult> = {};
   let repositorySha: string | undefined;
-  let lastVerified: StatusReport["lastVerifiedHandshake"] = null;
 
   components.mcp_host = {
     state: "ok",
@@ -129,13 +154,14 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
     components.relay_supervisor = { state: "down", detail: "unreachable", observedAtMs: observedAt };
   }
 
-  // Anchoring gateway + pool participation: one upstream call answers both.
-  // The gateway being unreachable is down; a degraded pool is degraded (the
-  // handshake surface intentionally fails closed in that state).
-  let gateway: { totalNodes: number; nodeParticipationPct: number; degraded: boolean } | undefined;
+  // Anchoring gateway + pool participation: separate components even though
+  // one call supplies both. Unreachable ⇒ both down; reachable but the pool
+  // reports no participation field ⇒ gateway ok, pool "unknown" (degraded
+  // overall — missing data can never look healthy); 0% ⇒ degraded; >0% ⇒ ok.
+  let gateway: { totalNodes: number; nodeParticipationPct?: number } | undefined;
   let gatewayLatency: number | undefined;
   try {
-    const r = await timed(() => deps.fetchPoolHealth(deps.probeTimeoutMs));
+    const r = await timed(() => deps.fetchPoolParticipation(deps.probeTimeoutMs));
     gateway = r.value;
     gatewayLatency = r.latencyMs;
   } catch {
@@ -146,11 +172,15 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
     components.pool_participation = { state: "down", detail: "unreachable", observedAtMs: observedAt };
   } else {
     components.anchoring_gateway = { state: "ok", detail: "reachable", observedAtMs: observedAt, latencyMs: gatewayLatency };
-    components.pool_participation = gateway.degraded
-      ? { state: "degraded", detail: "pool reports degraded participation", observedAtMs: observedAt, latencyMs: gatewayLatency,
-          meta: { nodeParticipationPct: gateway.nodeParticipationPct, totalNodes: gateway.totalNodes } }
-      : { state: "ok", detail: "pool participating", observedAtMs: observedAt, latencyMs: gatewayLatency,
-          meta: { nodeParticipationPct: gateway.nodeParticipationPct, totalNodes: gateway.totalNodes } };
+    const pct = gateway.nodeParticipationPct;
+    components.pool_participation = pct === undefined
+      ? { state: "unknown", detail: "participation unreported", observedAtMs: observedAt, latencyMs: gatewayLatency,
+          meta: { totalNodes: gateway.totalNodes } }
+      : pct === 0
+        ? { state: "degraded", detail: "pool reports degraded participation", observedAtMs: observedAt, latencyMs: gatewayLatency,
+            meta: { nodeParticipationPct: pct, totalNodes: gateway.totalNodes } }
+        : { state: "ok", detail: "pool participating", observedAtMs: observedAt, latencyMs: gatewayLatency,
+            meta: { nodeParticipationPct: pct, totalNodes: gateway.totalNodes } };
   }
 
   // EVM RPC (Sepolia): required_fresh registrations fail without it.
@@ -176,26 +206,38 @@ export async function computeStatus(deps: StatusDeps): Promise<StatusReport> {
       ? { state: "degraded", detail: "dependency degraded — will fail closed", observedAtMs: observedAt }
       : { state: "ok", detail: "accepting", observedAtMs: observedAt };
 
-  // Last verified handshake — evidence only. The current rolling session's
-  // snapshot either shows a completed certificate or it does not; absence is
-  // normal early in a session and is reported as "none observed", never as
-  // a failure of the service.
-  if (relayUp && currentSessionId !== undefined) {
+  // Last verified handshake — evidence only, never an availability signal.
+  // The current rolling session's result either shows a completed VERIFIED
+  // certificate or it does not; absence on an idle service is "none_observed",
+  // NOT degradation. A result-pending (404) is also "none_observed"; any other
+  // probe failure is "unavailable" — distinct from "no evidence". Only a
+  // scheduled read-only synthetic protocol probe may ever feed protocol
+  // readiness; user-traffic-derived evidence never can.
+  let lastVerified: StatusReport["lastVerifiedHandshake"] = { evidence: "none_observed" };
+  if (!relayUp || currentSessionId === undefined) {
+    // The evidence probe cannot run at all — relay unreachable or the
+    // discovery document carried no session id. Labeled "unavailable",
+    // distinct from "no certificate observed".
+    lastVerified = { evidence: "unavailable" };
+  } else {
     try {
       const { value } = await timed(() =>
         deps.fetchJson(`${relayBase}/v1/sessions/${encodeURIComponent(currentSessionId)}/result`, deps.probeTimeoutMs));
       const snap = asObj(value);
       const cert = asObj(snap.certificate ?? snap);
-      if (cert.outcome === "VERIFIED" && num(cert.issuedAtMs) !== undefined) {
-        const issuedAt = num(cert.issuedAtMs)!;
+      const issuedAt = num(cert.issuedAtMs);
+      if (cert.outcome === "VERIFIED" && issuedAt !== undefined) {
+        const ageSeconds = Math.max(0, Math.floor((observedAt - issuedAt) / 1000));
         lastVerified = {
+          evidence: ageSeconds * 1000 <= deps.evidenceStaleAfterMs ? "fresh" : "stale",
           outcome: "VERIFIED",
           observedAtMs: issuedAt,
-          ageSeconds: Math.max(0, Math.floor((observedAt - issuedAt) / 1000)),
+          ageSeconds,
         };
       }
-    } catch {
-      // Result pending or unavailable — lastVerified stays null; not a component.
+    } catch (e) {
+      // 404 = result pending (normal mid-session); anything else = probe failed.
+      lastVerified = { evidence: (e as { httpStatus?: number }).httpStatus === 404 ? "none_observed" : "unavailable" };
     }
   }
 

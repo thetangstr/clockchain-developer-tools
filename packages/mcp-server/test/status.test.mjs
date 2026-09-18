@@ -22,10 +22,11 @@ function makeDeps(overrides = {}) {
       throw new Error(`unexpected url ${url}`);
     },
     fetchEvmChainId: async () => "0xaa36a7",
-    fetchPoolHealth: async () => ({ totalNodes: 12, nodeParticipationPct: 100, degraded: false }),
+    fetchPoolParticipation: async () => ({ totalNodes: 12, nodeParticipationPct: 100 }),
     relayBaseUrl: "http://relay.test",
     probeTimeoutMs: 2000,
     sessionStaleAfterMs: 1_200_000,
+    evidenceStaleAfterMs: 1_200_000,
     processStartedAtMs: T0 - 300_000,
     serviceVersion: "0.1.0-test",
     ...overrides,
@@ -41,6 +42,7 @@ test("all probes ok → operational with VERIFIED last handshake", async () => {
     assert.equal(r.components[k].state, "ok", k);
     assert.equal(typeof r.components[k].observedAtMs, "number", k);
   }
+  assert.equal(r.lastVerifiedHandshake.evidence, "fresh");
   assert.equal(r.lastVerifiedHandshake.outcome, "VERIFIED");
   assert.equal(r.lastVerifiedHandshake.ageSeconds, 30);
   assert.equal(r.build.helperVersion.length > 0, true);
@@ -55,7 +57,7 @@ test("unreachable relay → relay down → handshake surface down → outage", a
   assert.equal(r.components.relay_supervisor.state, "down");
   assert.equal(r.components.handshake_surface.state, "down");
   assert.equal(r.overall, "outage");
-  assert.equal(r.lastVerifiedHandshake, null);
+  assert.equal(r.lastVerifiedHandshake.evidence, "unavailable");
 });
 
 test("stale rolling session → supervisor down → outage", async () => {
@@ -94,7 +96,7 @@ test("unconfigured relay base → down with 'not configured'", async () => {
 
 test("degraded pool → pool degraded, gateway ok, overall degraded", async () => {
   const deps = makeDeps({
-    fetchPoolHealth: async () => ({ totalNodes: 12, nodeParticipationPct: 0, degraded: true }),
+    fetchPoolParticipation: async () => ({ totalNodes: 12, nodeParticipationPct: 0 }),
   });
   const r = await computeStatus(deps);
   assert.equal(r.components.anchoring_gateway.state, "ok");
@@ -105,7 +107,7 @@ test("degraded pool → pool degraded, gateway ok, overall degraded", async () =
 });
 
 test("gateway unreachable → gateway and pool both down → outage", async () => {
-  const deps = makeDeps({ fetchPoolHealth: async () => { throw new Error("timeout"); } });
+  const deps = makeDeps({ fetchPoolParticipation: async () => { throw new Error("timeout"); } });
   const r = await computeStatus(deps);
   assert.equal(r.components.anchoring_gateway.state, "down");
   assert.equal(r.components.pool_participation.state, "down");
@@ -126,18 +128,62 @@ test("unreachable EVM RPC → evm_rpc down", async () => {
   assert.equal(r.components.evm_rpc.state, "down");
 });
 
-test("result pending → lastVerifiedHandshake null but overall still operational", async () => {
+test("result pending (404) → none_observed; idle service stays operational", async () => {
   const deps = makeDeps({
     fetchJson: async (url) => {
       if (url.endsWith("/v1/discovery/current")) {
         return { sessionId: SESSION_ID, issuedAtMs: String(T0 - 60_000), expiresAtMs: String(T0 + 540_000) };
       }
-      throw new Error("RESULT_PENDING");
+      throw Object.assign(new Error("RESULT_PENDING"), { httpStatus: 404 });
     },
   });
   const r = await computeStatus(deps);
+  assert.equal(r.lastVerifiedHandshake.evidence, "none_observed");
+  // Zero traffic: no recent canary evidence, still fully operational.
   assert.equal(r.overall, "operational");
-  assert.equal(r.lastVerifiedHandshake, null);
+});
+
+test("stale VERIFIED evidence → labeled stale, never affects overall", async () => {
+  const deps = makeDeps({
+    evidenceStaleAfterMs: 60_000, // 60s evidence window; cert is 300s old
+    fetchJson: async (url) => {
+      if (url.endsWith("/v1/discovery/current")) {
+        return { sessionId: SESSION_ID, issuedAtMs: String(T0 - 60_000), expiresAtMs: String(T0 + 540_000) };
+      }
+      return { outcome: "VERIFIED", issuedAtMs: String(T0 - 300_000) };
+    },
+  });
+  const r = await computeStatus(deps);
+  assert.equal(r.lastVerifiedHandshake.evidence, "stale");
+  assert.equal(r.lastVerifiedHandshake.outcome, "VERIFIED");
+  assert.equal(r.lastVerifiedHandshake.ageSeconds, 300);
+  assert.equal(r.overall, "operational");
+});
+
+test("evidence probe failure → labeled unavailable, overall stays operational", async () => {
+  const deps = makeDeps({
+    fetchJson: async (url) => {
+      if (url.endsWith("/v1/discovery/current")) {
+        return { sessionId: SESSION_ID, issuedAtMs: String(T0 - 60_000), expiresAtMs: String(T0 + 540_000) };
+      }
+      throw Object.assign(new Error("boom"), { httpStatus: 500 });
+    },
+  });
+  const r = await computeStatus(deps);
+  assert.equal(r.lastVerifiedHandshake.evidence, "unavailable");
+  assert.equal(r.overall, "operational");
+});
+
+test("gateway answers but participation unreported → gateway ok, pool unknown, degraded", async () => {
+  const deps = makeDeps({
+    fetchPoolParticipation: async () => ({ totalNodes: 12, nodeParticipationPct: undefined }),
+  });
+  const r = await computeStatus(deps);
+  assert.equal(r.components.anchoring_gateway.state, "ok");
+  assert.equal(r.components.pool_participation.state, "unknown");
+  assert.match(r.components.pool_participation.detail, /unreported/);
+  assert.equal(r.components.handshake_surface.state, "degraded");
+  assert.equal(r.overall, "degraded");
 });
 
 test("non-VERIFIED result → no lastVerified claim", async () => {
@@ -150,7 +196,7 @@ test("non-VERIFIED result → no lastVerified claim", async () => {
     },
   });
   const r = await computeStatus(deps);
-  assert.equal(r.lastVerifiedHandshake, null);
+  assert.equal(r.lastVerifiedHandshake.evidence, "none_observed");
 });
 
 test("public report never leaks the session id", async () => {
@@ -197,7 +243,7 @@ test("cached report records its TTL", async () => {
 });
 
 test("every component carries an observation timestamp and safe detail", async () => {
-  const r = await computeStatus(makeDeps({ fetchPoolHealth: async () => { throw new Error("boom-secret-internal"); } }));
+  const r = await computeStatus(makeDeps({ fetchPoolParticipation: async () => { throw new Error("boom-secret-internal"); } }));
   for (const [k, c] of Object.entries(r.components)) {
     assert.equal(typeof c.observedAtMs, "number", k);
     assert.equal(typeof c.detail, "string", k);

@@ -534,6 +534,8 @@ export async function runHttp(): Promise<void> {
   const failCounter = metrics.counter("clockchain_handshake_failures_total", "Handshake tool failures by bounded reason.");
   const completedCounter = metrics.counter("clockchain_handshake_completed_total", "Completed handshakes by outcome.");
   const inflightGauge = metrics.gauge("clockchain_handshake_inflight", "Handshake sessions currently in flight (not yet terminal).");
+  const httpActiveGauge = metrics.gauge("clockchain_http_requests_active", "HTTP requests currently being served.");
+  const toolActiveGauge = metrics.gauge("clockchain_handshake_tool_active", "Handshake tool invocations currently in flight.");
   const depUp = metrics.gauge("clockchain_dependency_up", "Dependency probe result: 1 up, 0 down.");
   const depDuration = metrics.histogram("clockchain_dependency_probe_seconds", "Dependency probe latency by probe.");
   const rlEvents = metrics.counter("clockchain_rate_limit_events_total", "Rate-limit rejections by surface.");
@@ -589,10 +591,12 @@ export async function runHttp(): Promise<void> {
     completedCounter.inc({ outcome: "verified" });
   }
 
-  function instrumentedInvoke(name: string, args: Record<string, unknown>, invoke: (n: string, a: unknown) => Promise<unknown>) {
+  async function instrumentedInvoke(name: string, args: Record<string, unknown>, invoke: (n: string, a: unknown) => Promise<unknown>) {
     const tool = bounded(name, V2_PUBLIC_TOOL_NAMES as readonly string[], "other");
     const started = Date.now();
-    return invoke(name, args).then((result) => {
+    toolActiveGauge.inc();
+    try {
+      const result = await invoke(name, args);
       toolDuration.observe({ tool }, (Date.now() - started) / 1000);
       const r = (result && typeof result === "object" && !Array.isArray(result) ? result : {}) as Record<string, unknown>;
       trackSession(r.sessionId, r.sessionDeadlineMs ?? r.invitationExpiresAtMs, started);
@@ -607,7 +611,7 @@ export async function runHttp(): Promise<void> {
         completeSession(r.sessionId, started);
       }
       return result;
-    }, (err: unknown) => {
+    } catch (err) {
       toolDuration.observe({ tool }, (Date.now() - started) / 1000);
       const reason = err instanceof V2RoleAccessError ? "role_access"
         : /rate_limit/i.test(String((err as Error)?.message ?? "")) ? "rate_limited"
@@ -615,7 +619,9 @@ export async function runHttp(): Promise<void> {
       toolCalls.inc({ tool, result: bounded(reason === "rate_limited" ? "rate_limited" : "error", RESULT_KINDS) });
       failCounter.inc({ reason: bounded(reason, FAIL_REASONS) });
       throw err;
-    });
+    } finally {
+      toolActiveGauge.dec();
+    }
   }
 
   // Live dependency probes for /status + /readyz. Each probe also feeds the
@@ -626,7 +632,7 @@ export async function runHttp(): Promise<void> {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
-      if (!response.ok) throw new Error(`http_${response.status}`);
+      if (!response.ok) throw Object.assign(new Error(`http_${response.status}`), { httpStatus: response.status });
       return await response.json();
     } finally {
       clearTimeout(timer);
@@ -671,14 +677,23 @@ export async function runHttp(): Promise<void> {
         clearTimeout(timer);
       }
     },
-    fetchPoolHealth: async (timeoutMs) => {
+    fetchPoolParticipation: async (timeoutMs) => {
       const started = Date.now();
       void timeoutMs; // the gateway client carries its own timeout
       try {
-        const health = await getChainVerifyClient().getPoolHealth();
+        // getTimestamp resolves whenever the gateway answers; participation
+        // is read rename-tolerantly ("nodeParticipation%" vs "nodeParticipation",
+        // same as getPoolHealth) but a missing field yields undefined — gateway
+        // reachable yet pool state unreported, not "unreachable".
+        const ts = await getChainVerifyClient().getTimestamp();
         depDuration.observe({ dep: bounded("gateway_pool", DEP_NAMES) }, (Date.now() - started) / 1000);
         depUp.set({ dep: bounded("gateway_pool", DEP_NAMES) }, 1);
-        return health;
+        const raw = ts["nodeParticipation%"] ?? ts.nodeParticipation;
+        const parsed = raw == null ? undefined : Number(raw);
+        return {
+          totalNodes: Number(ts.totalNodes ?? 0) || 0,
+          nodeParticipationPct: parsed === undefined || Number.isNaN(parsed) ? undefined : parsed,
+        };
       } catch (e) {
         depDuration.observe({ dep: bounded("gateway_pool", DEP_NAMES) }, (Date.now() - started) / 1000);
         depUp.set({ dep: bounded("gateway_pool", DEP_NAMES) }, 0);
@@ -688,19 +703,22 @@ export async function runHttp(): Promise<void> {
     relayBaseUrl: (() => { try { return normalizeRelayBaseUrl(process.env.HANDSHAKE_RELAY ?? ""); } catch { return ""; } })(),
     probeTimeoutMs: Number(process.env.STATUS_PROBE_TIMEOUT_MS ?? "2000"),
     sessionStaleAfterMs: Number(process.env.STATUS_SESSION_STALE_MS ?? "1200000"),
+    evidenceStaleAfterMs: Number(process.env.STATUS_EVIDENCE_STALE_MS ?? "1200000"),
     processStartedAtMs,
     serviceVersion: "0.1.0",
   };
   const statusCache = createStatusCache(statusDeps, Number(process.env.STATUS_CACHE_MS ?? "15000"));
 
   const metricsToken = (process.env.MCP_METRICS_TOKEN ?? "").trim();
-  const metricsTokenBytes = metricsToken ? Buffer.from(metricsToken) : undefined;
+  // Constant-time compare on fixed-size SHA-256 digests — never leaks token
+  // length or a partial-match prefix through timing.
+  const metricsTokenDigest = metricsToken ? createHash("sha256").update(metricsToken).digest() : undefined;
   function metricsAuthorized(req: IncomingMessage): boolean {
-    if (!metricsTokenBytes) return false;
+    if (!metricsTokenDigest) return false;
     const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
     if (!bearer) return false;
-    const presented = Buffer.from(bearer[1].trim());
-    return presented.length === metricsTokenBytes.length && timingSafeEqual(presented, metricsTokenBytes);
+    const presented = createHash("sha256").update(bearer[1].trim()).digest();
+    return timingSafeEqual(presented, metricsTokenDigest);
   }
 
   // A request is authorized if it carries a valid static MCP token OR a valid
@@ -732,6 +750,10 @@ export async function runHttp(): Promise<void> {
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestStarted = Date.now();
     const routeClass = bounded(classifyRoute(req.method, req.url, firstHeader(req.headers.accept)), ROUTE_CLASSES, "other");
+    httpActiveGauge.inc();
+    // "close" fires exactly once per response — including client aborts, which
+    // "finish" misses — so the active gauge can never drift positive.
+    res.on("close", () => httpActiveGauge.dec());
     res.on("finish", () => {
       httpRequests.inc({ route: routeClass, status: statusClass(res.statusCode) });
       httpDuration.observe({ route: routeClass }, (Date.now() - requestStarted) / 1000);
@@ -785,7 +807,7 @@ export async function runHttp(): Promise<void> {
         const wantsHtml = pathOf(req.url) === "/status" && firstHeader(req.headers.accept).includes("text/html");
         res.writeHead(200, {
           "content-type": wantsHtml ? "text/html; charset=utf-8" : "application/json; charset=utf-8",
-          "cache-control": "public, max-age=10",
+          "cache-control": "no-store",
         });
         res.end(wantsHtml ? renderStatusPage(report) : JSON.stringify(report, null, 2));
       } catch {
@@ -821,8 +843,8 @@ export async function runHttp(): Promise<void> {
     // route doesn't exist (404) rather than serving or failing open.
     if (req.method === "GET" && pathOf(req.url) === "/metrics") {
       if (!metricsAuthorized(req)) {
-        res.writeHead(metricsTokenBytes ? 401 : 404, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: metricsTokenBytes ? "unauthorized" : "not_found" }));
+        res.writeHead(metricsTokenDigest ? 401 : 404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: metricsTokenDigest ? "unauthorized" : "not_found" }));
         return;
       }
       uptimeGauge.set({}, (Date.now() - processStartedAtMs) / 1000);

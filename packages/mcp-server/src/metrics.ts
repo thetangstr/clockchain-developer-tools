@@ -68,6 +68,13 @@ class Gauge implements Series {
   set(labels: MetricLabels, v: number): void {
     this.values.set(seriesKey(this.name, labels), v);
   }
+  inc(labels: MetricLabels = {}, n = 1): void {
+    const k = seriesKey(this.name, labels);
+    this.values.set(k, (this.values.get(k) ?? 0) + n);
+  }
+  dec(labels: MetricLabels = {}, n = 1): void {
+    this.inc(labels, -n);
+  }
   render(): string {
     return [...this.values.entries()].map(([k, v]) => `${k} ${v}`).join("\n");
   }

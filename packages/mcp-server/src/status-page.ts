@@ -94,11 +94,14 @@ export function renderStatusPage(r: StatusReport): string {
   }).join("");
 
   const lv = r.lastVerifiedHandshake;
-  const lvCard = lv
-    ? `<div class="big st-ok">VERIFIED</div>
-       <div class="sub-line">Certificate issued ${ago(lv.ageSeconds)} (observed at ${esc(new Date(lv.observedAtMs).toISOString())})</div>`
-    : `<div class="big">None observed</div>
-       <div class="sub-line">No completed handshake certificate in the current session window yet — normal when a session just started.</div>`;
+  const lvCard = lv.evidence === "fresh" || lv.evidence === "stale"
+    ? `<div class="big ${lv.evidence === "fresh" ? "st-ok" : "st-degraded"}">VERIFIED${lv.evidence === "stale" ? " — stale" : ""}</div>
+       <div class="sub-line">Certificate issued ${ago(lv.ageSeconds ?? 0)} (observed at ${esc(lv.observedAtMs !== undefined ? new Date(lv.observedAtMs).toISOString() : "unknown")})${lv.evidence === "stale" ? " — older than the evidence window" : ""}</div>`
+    : lv.evidence === "unavailable"
+      ? `<div class="big st-degraded">Evidence unavailable</div>
+         <div class="sub-line">The evidence probe failed — distinct from "no certificate". Does not affect availability.</div>`
+      : `<div class="big">None observed</div>
+         <div class="sub-line">No completed handshake certificate in the current session window — normal on an idle service; not an availability signal.</div>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -153,7 +156,9 @@ ${CSS}</style>
 <p class="st-note">Component states come from live dependency probes run at the observation times shown —
 a probe that fails reports down/degraded, never a remembered "healthy". The machine-readable view is
 <code>GET /status.json</code>; the cheap liveness probe is <code>GET /health</code>; the dependency-gated
-readiness view is <code>GET /readyz</code>. Counter data covers <b>since process start</b> only — no
+readiness view is <code>GET /readyz</code>. Last-verified evidence is informational only — an idle
+service with no recent canary stays operational; only a scheduled read-only synthetic protocol probe
+may feed protocol readiness. Counter data covers <b>since process start</b> only — no
 long-term history is fabricated. Anchored on the ${SUBSTRATE_LABEL}.</p>
 
 <footer><div class="wrap">
