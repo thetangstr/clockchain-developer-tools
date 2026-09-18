@@ -155,7 +155,7 @@ test("GET /status serves HTML to browsers, JSON to agents", async () => {
   assert.equal((await json.json()).schema, "clockchain.status/v1");
 });
 
-test("GET /readyz is a dependency-gated readiness view", async () => {
+test("GET /readyz is the core MCP-host readiness view", async () => {
   const res = await fetch(`${BASE}/readyz`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("cache-control") ?? "", /no-store/);
