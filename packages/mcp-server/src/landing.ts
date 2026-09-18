@@ -365,7 +365,7 @@ ${BASE_CSS}</style>
     <a href="/clock-tools">Clock tools</a>
     <a href="/handshake/sop">Handshake SOP</a>
     <a href="#install">Install</a>
-    <a href="https://clockchain-research.vercel.app/dashboard"><span class="ndot"></span>Status</a>
+    <a href="/status"><span class="ndot"></span>Status</a>
     <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
     <a class="pill" href="#install">Add to your agent</a>
   </div>
@@ -377,7 +377,7 @@ ${BASE_CSS}</style>
   <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — ${TOOL_COUNT} tools across ${MODULE_WORD} modules, one endpoint.</p>
   <div class="cta">
     <a class="btn btn-green" href="#install">Add to your agent</a>
-    <a class="btn btn-ghost" href="https://clockchain-research.vercel.app/dashboard">View live status</a>
+    <a class="btn btn-ghost" href="/status">View live status</a>
   </div>
   <div class="endpoint">
     <code>mcp.clockchain.network/mcp</code>
@@ -488,7 +488,7 @@ ${BASE_CSS}</style>
     <div class="foot-links">
       <a href="/clock-tools">Clock tools</a>
       <a href="/handshake/sop">Handshake SOP</a>
-      <a href="https://clockchain-research.vercel.app/dashboard">Status</a>
+      <a href="/status">Status</a>
       <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
       <a href="https://mcp.clockchain.network/health">Health</a>
     </div>

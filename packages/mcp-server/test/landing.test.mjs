@@ -51,8 +51,8 @@ test("landing page lists the verified time tools module (stopwatch / timer / ala
 test("landing page points agents at the real endpoint + key headers, not a fake", () => {
   assert.match(LANDING_HTML, /https:\/\/mcp\.clockchain\.network\/mcp/);
   assert.match(LANDING_HTML, /x-api-key/);
-  // Links humans to the live status dashboard (the working URL until status DNS lands).
-  assert.match(LANDING_HTML, /clockchain-research\.vercel\.app\/dashboard/);
+  // Links humans to the same-origin live status page.
+  assert.match(LANDING_HTML, /href="\/status"/);
 });
 
 test("landing page clearly calls out testnet", () => {

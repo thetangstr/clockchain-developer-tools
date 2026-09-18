@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -48,6 +48,12 @@ import {
 import { createRuntimeV2Coordinator } from "./agent-handshake/v2/coordinator.js";
 import { buildStandaloneDiscovery, createStandaloneHttpHandler, limiter as keyedWindowLimiter } from "./standalone-handshake/public-server.js";
 import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
+import { normalizeRelayBaseUrl } from "./handshake/relay.js";
+import { MetricsRegistry, bounded } from "./metrics.js";
+import { createStatusCache, type StatusDeps } from "./status.js";
+import { renderStatusPage } from "./status-page.js";
+import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
+import { V2RoleAccessError } from "./agent-handshake/v2/access.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -465,7 +471,8 @@ export async function runHttp(): Promise<void> {
       trustedProxy: process.env.AGENT_HANDSHAKE_TRUSTED_PROXY,
       invitePerHour: Number(process.env.AGENT_HANDSHAKE_INVITES_PER_HOUR ?? "5"),
       callsPerMinute: Number(process.env.AGENT_HANDSHAKE_CALLS_PER_MINUTE ?? "120"),
-      invoke: (name, args) => publicHandshakeCoordinator!.invoke(name, args),
+      invoke: (name, args) => instrumentedInvoke(name, args as Record<string, unknown>, (n, a) => publicHandshakeCoordinator!.invoke(n, a as Record<string, never>)),
+      onRateLimited: (surface) => rlEvents.inc({ surface: bounded(surface, RL_SURFACES) }),
     });
     return publicHandshakeHandler;
   };
@@ -490,6 +497,211 @@ export async function runHttp(): Promise<void> {
     });
     return standaloneHandshakeHandler;
   };
+
+  // ---- Status + operational metrics -------------------------------------
+  // Bounded label vocabularies: every label value funnels through `bounded()`
+  // so a surprise value collapses to "other" instead of minting a series.
+  // Session ids, role-access handles, keys, addresses, digests, statements,
+  // and raw error text are never labels.
+  const metrics = new MetricsRegistry();
+  const ROUTE_CLASSES = [
+    "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
+    "llms", "manifest", "handshake_manifest", "standalone_manifest", "connect_verify",
+    "connect_mcp", "handshake_mcp", "invitation_exchange", "token", "promote",
+    "landing", "mcp_rpc", "keeper", "other",
+  ] as const;
+  const STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
+  const RESULT_KINDS = ["ok", "fail_closed", "error", "rate_limited"] as const;
+  const FAIL_REASONS = [
+    "unavailable", "role_access", "rate_limited", "bad_request", "internal",
+  ] as const;
+  const HANDSHAKE_STAGES = [
+    "invited", "joined", "identity_claimed", "awaiting_funding",
+    "awaiting_identity_registration", "awaiting_counterpart", "awaiting_proposal",
+    "party_ready", "sign_proposal", "proposal_checkpoint_submitted",
+    "proposal_submitted", "sign_acceptance", "acceptance_checkpoint_submitted",
+    "acceptance_submitted", "awaiting_descriptor", "awaiting_anchors",
+    "sign_evidence", "evidence_submitted", "certificate_available",
+  ] as const;
+  const DEP_NAMES = ["relay_discovery", "relay_result", "gateway_pool", "evm_rpc"] as const;
+  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call"] as const;
+
+  const httpRequests = metrics.counter("clockchain_http_requests_total", "HTTP requests by route class and status class.");
+  const httpDuration = metrics.histogram("clockchain_http_request_duration_seconds", "HTTP request duration by route class.");
+  const toolCalls = metrics.counter("clockchain_handshake_tool_calls_total", "Agent-handshake tool invocations by tool and result kind.");
+  const toolDuration = metrics.histogram("clockchain_handshake_tool_duration_seconds", "Agent-handshake tool invocation duration by tool.");
+  const stageCounter = metrics.counter("clockchain_handshake_stage_total", "Handshake stage observations by stage name.");
+  const failCounter = metrics.counter("clockchain_handshake_failures_total", "Handshake tool failures by bounded reason.");
+  const completedCounter = metrics.counter("clockchain_handshake_completed_total", "Completed handshakes by outcome.");
+  const inflightGauge = metrics.gauge("clockchain_handshake_inflight", "Handshake sessions currently in flight (not yet terminal).");
+  const depUp = metrics.gauge("clockchain_dependency_up", "Dependency probe result: 1 up, 0 down.");
+  const depDuration = metrics.histogram("clockchain_dependency_probe_seconds", "Dependency probe latency by probe.");
+  const rlEvents = metrics.counter("clockchain_rate_limit_events_total", "Rate-limit rejections by surface.");
+  const uptimeGauge = metrics.gauge("process_uptime_seconds", "Process uptime in seconds.");
+
+  function classifyRoute(method: string | undefined, url: string | undefined, accept: string): string {
+    const p = pathOf(url);
+    if (method === "GET" && (p === "/health" || p === "/healthz")) return "health";
+    if (method === "GET" && p === "/status") return "status";
+    if (method === "GET" && p === "/status.json") return "status_json";
+    if (method === "GET" && p === "/readyz") return "readyz";
+    if (method === "GET" && p === "/metrics") return "metrics";
+    if (method === "GET" && (p === "/clock-tools" || p === "/clock-tools.txt")) return "clock_tools";
+    if (method === "GET" && (p === "/handshake/sop" || p === "/handshake/sop.txt")) return "sop";
+    if (method === "GET" && (p === "/llms.txt" || p === "/install.txt")) return "llms";
+    if (method === "GET" && p === "/.well-known/mcp.json") return "manifest";
+    if (method === "GET" && p === "/.well-known/agent-handshake.json") return "handshake_manifest";
+    if (method === "GET" && p === "/.well-known/standalone-handshake.json") return "standalone_manifest";
+    if (method === "GET" && p === "/connect/verify") return "connect_verify";
+    if (p === "/connect/mcp") return "connect_mcp";
+    if (p === "/handshake/mcp") return "handshake_mcp";
+    if (p === "/handshake/invitations/exchange") return "invitation_exchange";
+    if (method === "POST" && p === "/token") return "token";
+    if (method === "POST" && p === "/promote") return "promote";
+    if (p === "/keeper" || p.startsWith("/keeper/")) return "keeper";
+    if (method === "GET" && accept.includes("text/html")) return "landing";
+    if (p === "/mcp") return "mcp_rpc";
+    return "other";
+  }
+
+  function statusClass(code: number): string {
+    return bounded(`${Math.floor(code / 100)}xx`, STATUS_CLASSES, "5xx");
+  }
+
+  // In-flight handshake sessions: sessionId -> expiry. Session ids live only
+  // inside this map (never as labels); entries drop on terminal stage or when
+  // the session deadline passes.
+  const inflight = new Map<string, number>();
+  const counted = new Map<string, number>();
+  function trackSession(sessionId: unknown, deadlineMs: unknown, nowMs: number): void {
+    if (typeof sessionId !== "string") return;
+    for (const [id, exp] of inflight) if (nowMs >= exp) inflight.delete(id);
+    for (const [id, exp] of counted) if (nowMs >= exp) counted.delete(id);
+    if (!inflight.has(sessionId)) {
+      inflight.set(sessionId, typeof deadlineMs === "string" ? Number(deadlineMs) || nowMs + 600_000 : nowMs + 600_000);
+    }
+    inflightGauge.set({}, inflight.size);
+  }
+  function completeSession(sessionId: unknown, nowMs: number): void {
+    if (typeof sessionId !== "string" || counted.has(sessionId)) return;
+    counted.set(sessionId, inflight.get(sessionId) ?? nowMs + 600_000);
+    if (inflight.delete(sessionId)) inflightGauge.set({}, inflight.size);
+    completedCounter.inc({ outcome: "verified" });
+  }
+
+  function instrumentedInvoke(name: string, args: Record<string, unknown>, invoke: (n: string, a: unknown) => Promise<unknown>) {
+    const tool = bounded(name, V2_PUBLIC_TOOL_NAMES as readonly string[], "other");
+    const started = Date.now();
+    return invoke(name, args).then((result) => {
+      toolDuration.observe({ tool }, (Date.now() - started) / 1000);
+      const r = (result && typeof result === "object" && !Array.isArray(result) ? result : {}) as Record<string, unknown>;
+      trackSession(r.sessionId, r.sessionDeadlineMs ?? r.invitationExpiresAtMs, started);
+      if (typeof r.error === "string") {
+        toolCalls.inc({ tool, result: bounded("fail_closed", RESULT_KINDS) });
+        failCounter.inc({ reason: bounded(r.error === "HANDSHAKE_UNAVAILABLE" ? "unavailable" : undefined, FAIL_REASONS) });
+        return result;
+      }
+      toolCalls.inc({ tool, result: bounded("ok", RESULT_KINDS) });
+      if (typeof r.stage === "string") stageCounter.inc({ stage: bounded(r.stage, HANDSHAKE_STAGES) });
+      if (r.stage === "certificate_available" || r.certificateSummary) {
+        completeSession(r.sessionId, started);
+      }
+      return result;
+    }, (err: unknown) => {
+      toolDuration.observe({ tool }, (Date.now() - started) / 1000);
+      const reason = err instanceof V2RoleAccessError ? "role_access"
+        : /rate_limit/i.test(String((err as Error)?.message ?? "")) ? "rate_limited"
+        : "internal";
+      toolCalls.inc({ tool, result: bounded(reason === "rate_limited" ? "rate_limited" : "error", RESULT_KINDS) });
+      failCounter.inc({ reason: bounded(reason, FAIL_REASONS) });
+      throw err;
+    });
+  }
+
+  // Live dependency probes for /status + /readyz. Each probe also feeds the
+  // dependency metrics — probe latency and up/down are operational signals too.
+  const processStartedAtMs = Date.now();
+  async function fetchJsonTimed(url: string, timeoutMs: number): Promise<unknown> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
+      if (!response.ok) throw new Error(`http_${response.status}`);
+      return await response.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const statusDeps: StatusDeps = {
+    now: () => Date.now(),
+    fetchJson: async (url, timeoutMs) => {
+      const dep = bounded(url.includes("/v1/discovery/") ? "relay_discovery" : "relay_result", DEP_NAMES);
+      const started = Date.now();
+      try {
+        const out = await fetchJsonTimed(url, timeoutMs);
+        depDuration.observe({ dep }, (Date.now() - started) / 1000);
+        depUp.set({ dep }, 1);
+        return out;
+      } catch (e) {
+        depDuration.observe({ dep }, (Date.now() - started) / 1000);
+        depUp.set({ dep }, 0);
+        throw e;
+      }
+    },
+    fetchEvmChainId: async (timeoutMs) => {
+      const started = Date.now();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(process.env.EVM_RPC_URL ?? process.env.SEPOLIA_RPC_URL ?? "", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
+          signal: controller.signal,
+        });
+        const json = await response.json() as { result?: unknown };
+        depDuration.observe({ dep: bounded("evm_rpc", DEP_NAMES) }, (Date.now() - started) / 1000);
+        depUp.set({ dep: bounded("evm_rpc", DEP_NAMES) }, 1);
+        return String(json.result ?? "");
+      } catch (e) {
+        depDuration.observe({ dep: bounded("evm_rpc", DEP_NAMES) }, (Date.now() - started) / 1000);
+        depUp.set({ dep: bounded("evm_rpc", DEP_NAMES) }, 0);
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    fetchPoolHealth: async (timeoutMs) => {
+      const started = Date.now();
+      void timeoutMs; // the gateway client carries its own timeout
+      try {
+        const health = await getChainVerifyClient().getPoolHealth();
+        depDuration.observe({ dep: bounded("gateway_pool", DEP_NAMES) }, (Date.now() - started) / 1000);
+        depUp.set({ dep: bounded("gateway_pool", DEP_NAMES) }, 1);
+        return health;
+      } catch (e) {
+        depDuration.observe({ dep: bounded("gateway_pool", DEP_NAMES) }, (Date.now() - started) / 1000);
+        depUp.set({ dep: bounded("gateway_pool", DEP_NAMES) }, 0);
+        throw e;
+      }
+    },
+    relayBaseUrl: (() => { try { return normalizeRelayBaseUrl(process.env.HANDSHAKE_RELAY ?? ""); } catch { return ""; } })(),
+    probeTimeoutMs: Number(process.env.STATUS_PROBE_TIMEOUT_MS ?? "2000"),
+    sessionStaleAfterMs: Number(process.env.STATUS_SESSION_STALE_MS ?? "1200000"),
+    processStartedAtMs,
+    serviceVersion: "0.1.0",
+  };
+  const statusCache = createStatusCache(statusDeps, Number(process.env.STATUS_CACHE_MS ?? "15000"));
+
+  const metricsToken = (process.env.MCP_METRICS_TOKEN ?? "").trim();
+  const metricsTokenBytes = metricsToken ? Buffer.from(metricsToken) : undefined;
+  function metricsAuthorized(req: IncomingMessage): boolean {
+    if (!metricsTokenBytes) return false;
+    const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
+    if (!bearer) return false;
+    const presented = Buffer.from(bearer[1].trim());
+    return presented.length === metricsTokenBytes.length && timingSafeEqual(presented, metricsTokenBytes);
+  }
 
   // A request is authorized if it carries a valid static MCP token OR a valid
   // self-serve signed token (v:1 demo or v:2 trial). Static tokens and v:1 demo
@@ -518,6 +730,12 @@ export async function runHttp(): Promise<void> {
   };
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const requestStarted = Date.now();
+    const routeClass = bounded(classifyRoute(req.method, req.url, firstHeader(req.headers.accept)), ROUTE_CLASSES, "other");
+    res.on("finish", () => {
+      httpRequests.inc({ route: routeClass, status: statusClass(res.statusCode) });
+      httpDuration.observe({ route: routeClass }, (Date.now() - requestStarted) / 1000);
+    });
     // Unauthenticated, lightweight health check for the Mac mini runbook and the
     // AWS ALB / GCP Cloud Run health probes. Must be before auth (probes send no
     // token) and must not touch the gateway.
@@ -556,6 +774,63 @@ export async function runHttp(): Promise<void> {
       res.end(wantsHtml ? HANDSHAKE_SOP_HTML : HANDSHAKE_SOP_TXT);
       return;
     }
+
+    // Public operational status. /status serves HTML to browsers and JSON to
+    // everything else; /status.json is always JSON. Both are computed from
+    // live dependency probes (TTL-cached) and carry freshness labels — a
+    // failed probe reports down/degraded, never a remembered "healthy".
+    if (req.method === "GET" && (pathOf(req.url) === "/status" || pathOf(req.url) === "/status.json")) {
+      try {
+        const report = await statusCache();
+        const wantsHtml = pathOf(req.url) === "/status" && firstHeader(req.headers.accept).includes("text/html");
+        res.writeHead(200, {
+          "content-type": wantsHtml ? "text/html; charset=utf-8" : "application/json; charset=utf-8",
+          "cache-control": "public, max-age=10",
+        });
+        res.end(wantsHtml ? renderStatusPage(report) : JSON.stringify(report, null, 2));
+      } catch {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "status_unavailable" }));
+      }
+      return;
+    }
+
+    // Readiness — the dependency-gated complement to the /health liveness
+    // probe. 200 when no hard dependency is down (a degraded dependency still
+    // counts as ready: the handshake surface fails closed by design in that
+    // state, which is serving, not down). 503 otherwise.
+    if (req.method === "GET" && pathOf(req.url) === "/readyz") {
+      try {
+        const report = await statusCache();
+        const ready = report.overall !== "outage";
+        res.writeHead(ready ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({
+          status: ready ? "ready" : "not_ready",
+          overall: report.overall,
+          components: Object.fromEntries(Object.entries(report.components).map(([k, v]) => [k, v.state])),
+        }));
+      } catch {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ status: "not_ready", error: "status_unavailable" }));
+      }
+      return;
+    }
+
+    // Operational metrics (Prometheus text exposition). Private: requires
+    // Authorization: Bearer ${MCP_METRICS_TOKEN}. When the token is unset the
+    // route doesn't exist (404) rather than serving or failing open.
+    if (req.method === "GET" && pathOf(req.url) === "/metrics") {
+      if (!metricsAuthorized(req)) {
+        res.writeHead(metricsTokenBytes ? 401 : 404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: metricsTokenBytes ? "unauthorized" : "not_found" }));
+        return;
+      }
+      uptimeGauge.set({}, (Date.now() - processStartedAtMs) / 1000);
+      res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store" });
+      res.end(metrics.collect());
+      return;
+    }
+
     if (req.method === "GET" && (pathOf(req.url) === "/llms.txt" || pathOf(req.url) === "/install.txt")) {
       res.writeHead(200, {
         "content-type": "text/plain; charset=utf-8",
@@ -624,6 +899,7 @@ export async function runHttp(): Promise<void> {
       }
       const ip = clientIp(req.headers, req.socket.remoteAddress);
       if (!allowChainVerify(`chainverify:${ip}`)) {
+        rlEvents.inc({ surface: bounded("chain_verify", RL_SURFACES) });
         res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ error: "rate_limited" }));
         return;
@@ -722,6 +998,7 @@ export async function runHttp(): Promise<void> {
       // not let a caller escape this ceiling and drain the shared budget (per-user auth).
       const mintCheck = mintLimiter.enabled ? mintLimiter.allow(`mint:ip:${ip}`) : null;
       if (mintCheck && !mintCheck.allowed) {
+        rlEvents.inc({ surface: bounded("token_mint", RL_SURFACES) });
         const headers = rateLimitHeaders(mintCheck);
         res.writeHead(429, { "content-type": "application/json", ...headers });
         res.end(JSON.stringify({
@@ -957,6 +1234,7 @@ export async function runHttp(): Promise<void> {
         )
       : null;
     if (rl && !rl.allowed) {
+      rlEvents.inc({ surface: bounded("mcp_call", RL_SURFACES) });
       const headers = rateLimitHeaders(rl);
       res.writeHead(429, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify({

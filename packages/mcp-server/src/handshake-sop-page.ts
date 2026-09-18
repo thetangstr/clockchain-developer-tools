@@ -63,6 +63,7 @@ ${SOP_CSS}</style>
     <a href="/">Overview</a>
     <a href="/clock-tools">Clock tools</a>
     <a href="/llms.txt">llms.txt</a>
+    <a href="/status">Status</a>
     <a class="pill" href="${MANIFEST}">Manifest</a>
   </div>
 </div></nav>
@@ -165,6 +166,7 @@ claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}</c
       <a href="/">Overview</a>
       <a href="${MANIFEST}">Manifest</a>
       <a href="/llms.txt">llms.txt</a>
+      <a href="/status">Status</a>
       <a href="/health">Health</a>
     </div>
   </div>
