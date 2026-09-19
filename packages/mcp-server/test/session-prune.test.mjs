@@ -106,10 +106,10 @@ before(async () => {
       EVM_RPC_URL: `http://127.0.0.1:${upstreamPort}`,
       MCP_METRICS_TOKEN: METRICS_TOKEN,
       AGENT_HANDSHAKE_RELEASE_PIN: JSON.stringify({
-        version: "2.1.6",
+        version: "2.1.7",
         sourceCommit: "a".repeat(40),
         manifestDigest: "b".repeat(64),
-        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.6/",
+        allowedAssetPrefix: "https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.7/",
         hostRoots: [{ kid: "root-test", fingerprint: "c".repeat(64) }],
       }),
       AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE: key("access-active", 1),

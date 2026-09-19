@@ -1,5 +1,5 @@
 // The Agent Handshake SOP (/handshake/sop for people, /handshake/sop.txt for
-// agents) must present the production 2.1.6 surface: the same endpoint, tool
+// agents) must present the production 2.1.7 surface: the same endpoint, tool
 // list, and helper pin the public server publishes — no staging or 2.1.3
 // leftovers, and both renderings carrying the same facts.
 import assert from "node:assert/strict";
@@ -91,6 +91,10 @@ test("the SOP ships drop-in initiator and responder prompts with placeholders", 
     // The prompts drive the real invite shape: string validity, fresh ERC-8004.
     assert.ok(flat.includes('validForSeconds "90"'), "string validForSeconds in prompt");
     assert.ok(flat.includes('"required_fresh"'), "fresh ERC-8004 policy in prompt");
+    // The prompts must not read as concealment instructions: secrecy is
+    // scoped to transmission and the operator may observe everything.
+    assert.ok(flat.includes("Conceal nothing from your operator"), "operator transparency clause");
+    assert.ok(!flat.includes("never print it"), "no hide-from-operator phrasing");
   }
 });
 

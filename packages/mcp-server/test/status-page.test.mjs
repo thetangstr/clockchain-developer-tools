@@ -20,7 +20,7 @@ function makeReport(overrides = {}) {
       pool_participation: { state: "ok", detail: "pool participating", observedAtMs: T0, latencyMs: 80, meta: { nodeParticipationPct: 100, totalNodes: 12 } },
       evm_rpc: { state: "ok", detail: "eip155:11155111", observedAtMs: T0, latencyMs: 55 },
     },
-    build: { service: "0.1.0", helperVersion: "2.1.6", protocolRepositorySha: "abc123def4567890" },
+    build: { service: "0.1.0", helperVersion: "2.1.7", protocolRepositorySha: "abc123def4567890" },
     lastVerifiedHandshake: { evidence: "fresh", outcome: "VERIFIED", observedAtMs: T0 - 30_000, ageSeconds: 30 },
     performance: {
       windowLabel: "since process start",
@@ -102,7 +102,7 @@ test("stale and unavailable evidence render their own labels", () => {
 
 test("build card shows service + helper version and truncated repo sha", () => {
   const html = renderStatusPage(makeReport());
-  assert.match(html, /mcp-server 0\.1\.0 · helper 2\.1\.6/);
+  assert.match(html, /mcp-server 0\.1\.0 · helper 2\.1\.7/);
   assert.ok(html.includes("abc123def456…"), "truncated sha missing");
   assert.ok(!html.includes("abc123def4567890"), "full sha leaked");
 });
