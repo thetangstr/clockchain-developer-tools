@@ -14,6 +14,40 @@ const MANIFEST_URL = `${V2_HELPER_ASSET_PREFIX}manifest.json`;
 const HELPER_URL = `${V2_HELPER_ASSET_PREFIX}clockchain-agent-handshake.cjs`;
 const TOOL_LIST = V2_PUBLIC_TOOL_NAMES.join(", ");
 
+// Drop-in prompts for the no-adapter path: the agent's own shell runs only the
+// exact commands the server returns verbatim (each shellCommand already embeds
+// the verified bootstrap and payload). Placeholders stay in place so a local
+// harness or operator can substitute them before pasting.
+const ASSET_DOWNLOADS = `curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json '${MANIFEST_URL}'
+curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs '${HELPER_URL}'`;
+
+const INITIATOR_PROMPT = `You are the Initiator in a Clockchain Agent Handshake — a mutual identity proof between two independent agents. Drive it end-to-end using only the clockchain-handshake MCP tools (agent_handshake_*) plus your shell for the exact commands the server returns.
+
+Setup: work in a fresh empty directory. Download the two pinned helper assets as two separate commands, then inspect both files:
+${ASSET_DOWNLOADS}
+
+Flow:
+1. Call agent_handshake_invite with reference "<YOUR_REFERENCE>", statement "<YOUR_STATEMENT>", validForSeconds "90", and identityPolicy {"erc8004":"required_fresh","chainId":"eip155:11155111","registryAddress":"0x8004a818bfb912233c491871b3d84c89a494bd9e"}.
+2. Keep roleAccess private — never print it. Output ONLY the responderInvitation so the operator can deliver it to the other agent, then keep going — the server holds you on waits until the responder joins.
+3. For every localAction: run stateDirectoryCommand once, then each helperStep.shellCommand verbatim via your shell, once, in returned order. Never edit, decode, re-encode, or reconstruct commands or payloads; never hand-sign.
+4. Call agent_handshake_join with the returned values — never register before join.
+5. Poll agent_handshake_next and dispatch on needed: signing step → run its localAction immediately, then agent_handshake_submit_checkpoint, then agent_handshake_submit; erc8004_registration → run the register command, then poll again; wait/stage → sleep retryAfterMs, poll again.
+6. At certificate_available: call agent_handshake_get_certificate, run the verify-certificate local action, then report sessionId, certificate digest, certificateVerified, outcome, and externalBusinessActionPerformed.
+
+Enforce a policy permitting only your chosen statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration for both roles, and no external business action. Signing payloads expire in ≤90 seconds — run each signing localAction the moment it appears.`;
+
+const RESPONDER_PROMPT = `You are the Responder in a Clockchain Agent Handshake. The invitation from the Initiator:
+
+<PASTE_THE_RESPONDER_INVITATION_HERE>
+
+It is single-use and short-lived — start now.
+1. Generate one fresh acceptanceIdempotencyKey (UUIDv4 or ≥16-byte base64url) and call agent_handshake_accept_invitation with the invitation and that key — exactly once; retry only retryable failures with the same key. Keep the returned roleAccess private — never print it.
+2. Work in a fresh empty directory; download the two pinned helper assets as two separate commands and inspect them:
+${ASSET_DOWNLOADS}
+3. Then run the same server-driven flow: stateDirectoryCommand once, each helperStep.shellCommand verbatim via your shell in returned order — never edit or reconstruct payloads, never hand-sign. Call agent_handshake_join with the returned values. Poll agent_handshake_next and dispatch on needed the same way. At certificate_available: agent_handshake_get_certificate, then the verify-certificate local action.
+4. Enforce a policy permitting only the invited statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration, and no external business action. If any check fails, refuse and report the failure.
+5. Report sessionId, certificate digest, certificateVerified, outcome, and externalBusinessActionPerformed.`;
+
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 // Scoped additions to BASE_CSS for SOP content (notes, fact tables).
@@ -34,6 +68,10 @@ const SOP_CSS = `
   .sop .role-a { background: var(--green); color: #fff; }
   .sop .role-b { background: var(--ink); color: #fff; }
   .sop .playbook { list-style: none; }
+  .qs-step { margin: 18px 0; }
+  .qs-step h4 { margin: 0 0 8px; font-size: 15px; }
+  .qs-step h4 .tag { font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--green); margin-right: 8px; }
+  .code.prompt code { white-space: pre-wrap; overflow-wrap: anywhere; }
   /* The hero endpoint pill is inline-flex with an unbreakable code child;
      the 36-char handshake URL overflows narrow viewports without this. */
   .endpoint { max-width: 100%; }
@@ -83,6 +121,33 @@ ${SOP_CSS}</style>
   <div class="sop-note warn">
     <b>Scope boundary — read before integrating.</b> The certificate proves identity, live key control, ordering, freshness, and peer binding. It does <b>not</b> prove employment, organizational delegation, spending limits, payment authority, or contract authority, and it authorizes nothing downstream. <code>externalBusinessActionPerformed</code> is always <code>false</code>. The server never receives a private key and never signs for either stakeholder.
   </div>
+
+  <h3 style="margin-top:26px"><span class="n">▶</span>Try it in five minutes — two prompts</h3>
+  <p>Add the server to <b>both</b> agents, paste Prompt 1 into agent 1, then move its printed invitation into Prompt 2 for agent 2 — <b>immediately</b>, invitations are single-use and short-lived. Each agent needs Node.js 24 and a fresh empty working directory.</p>
+
+  <div class="qs-step">
+    <h4><span class="tag">Step A</span>Add the server to both agents</h4>
+    <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>codex mcp add clockchain-handshake --url ${ENDPOINT}
+claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}</code></pre></div>
+  </div>
+
+  <div class="qs-step">
+    <h4><span class="tag">Step B</span>Prompt 1 — paste into agent 1 (Initiator)</h4>
+    <p style="margin:0 0 8px">Replace <code>&lt;YOUR_REFERENCE&gt;</code> and <code>&lt;YOUR_STATEMENT&gt;</code> with your own bounded test terms first.</p>
+    <div class="code prompt"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(INITIATOR_PROMPT)}</code></pre></div>
+  </div>
+
+  <div class="qs-step">
+    <h4><span class="tag">Step C</span>Prompt 2 — paste into agent 2 (Responder)</h4>
+    <p style="margin:0 0 8px">Agent 1 prints a <code>responderInvitation</code> — drop it into the marked slot below and paste the whole block into agent 2 right away.</p>
+    <div class="code prompt"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(RESPONDER_PROMPT)}</code></pre></div>
+  </div>
+
+  <div class="sop-note">
+    <b>Done when</b> both agents report <code>outcome: "VERIFIED"</code> with the <b>same sessionId and the same certificate digest</b>, and <code>externalBusinessActionPerformed: false</code>. If either agent stops early or a check fails, see the timing and error table below before retrying — invites are capped at 5/hour.
+  </div>
+
+  <p style="margin-top:26px">The sections below are the full protocol reference the prompts follow.</p>
 
   <h3><span class="n">0</span>What you need</h3>
   <table class="sop-table">
@@ -191,6 +256,23 @@ Helper:     v${V2_HELPER_VERSION} · Node.js 24 only
             ${MANIFEST_URL}
             ${HELPER_URL}
 Tools:      ${TOOL_LIST}
+
+QUICK START — TWO PROMPTS
+  Add the server to BOTH agents, paste Prompt 1 into agent 1, then move its
+  printed responderInvitation into Prompt 2 for agent 2 — immediately;
+  invitations are single-use and short-lived. Each agent needs Node.js 24
+  and a fresh empty working directory. Done when both agents report
+  outcome "VERIFIED" with the same sessionId and certificate digest and
+  externalBusinessActionPerformed false.
+
+  codex mcp add clockchain-handshake --url ${ENDPOINT}
+  claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}
+
+PROMPT 1 — INITIATOR (replace <YOUR_REFERENCE> and <YOUR_STATEMENT> first)
+${INITIATOR_PROMPT}
+
+PROMPT 2 — RESPONDER (drop the invitation into the marked slot)
+${RESPONDER_PROMPT}
 
 SCOPE BOUNDARY
   The certificate proves identity, live key control, ordering, freshness, and
