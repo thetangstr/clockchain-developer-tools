@@ -68,6 +68,32 @@ test("the SOP states the operator hygiene rule without claiming server-log guara
   }
 });
 
+test("the SOP ships drop-in initiator and responder prompts with placeholders", () => {
+  for (const body of [HANDSHAKE_SOP_HTML, HANDSHAKE_SOP_TXT]) {
+    const flat = body.replace(/<[a-zA-Z/][^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\s+/g, " ");
+    // Entity-decoded form keeps the literal angle-bracket placeholders the
+    // tag-stripper would otherwise remove.
+    const decoded = body.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\s+/g, " ");
+    // Both roles get a paste-ready prompt, marked as such.
+    assert.ok(flat.includes("You are the Initiator"), "initiator prompt present");
+    assert.ok(flat.includes("You are the Responder"), "responder prompt present");
+    // Placeholders stay literal so a local harness or operator substitutes them.
+    assert.ok(decoded.includes("<YOUR_REFERENCE>"), "reference placeholder");
+    assert.ok(decoded.includes("<YOUR_STATEMENT>"), "statement placeholder");
+    assert.ok(decoded.includes("<PASTE_THE_RESPONDER_INVITATION_HERE>"), "invitation slot");
+    // The prompts carry the no-adapter contract: verbatim shellCommands, no hand-signing.
+    assert.ok(flat.includes("helperStep.shellCommand verbatim"), "verbatim shellCommand rule");
+    assert.ok(flat.includes("never hand-sign"), "no hand-signing rule");
+    // The responder prompt demands a fresh idempotency key and single acceptance.
+    assert.ok(flat.includes("acceptanceIdempotencyKey"), "idempotency key instruction");
+    // The operator-facing pass check names the shared evidence fields.
+    assert.ok(flat.includes("same sessionId"), "same-session check");
+    // The prompts drive the real invite shape: string validity, fresh ERC-8004.
+    assert.ok(flat.includes('validForSeconds "90"'), "string validForSeconds in prompt");
+    assert.ok(flat.includes('"required_fresh"'), "fresh ERC-8004 policy in prompt");
+  }
+});
+
 test("the SOP contains no staging or superseded-helper language", () => {
   for (const body of [HANDSHAKE_SOP_HTML, HANDSHAKE_SOP_TXT]) {
     assert.ok(!body.includes("sslip.io"), "staging host");
