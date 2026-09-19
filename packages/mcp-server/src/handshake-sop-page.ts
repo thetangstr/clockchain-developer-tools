@@ -13,22 +13,29 @@ const MANIFEST = "https://mcp.clockchain.network/.well-known/agent-handshake.jso
 const MANIFEST_URL = `${V2_HELPER_ASSET_PREFIX}manifest.json`;
 const HELPER_URL = `${V2_HELPER_ASSET_PREFIX}clockchain-agent-handshake.cjs`;
 const TOOL_LIST = V2_PUBLIC_TOOL_NAMES.join(", ");
+// The release channel publishes both the pinned source commit and the built
+// bundle; reviewers should read source at the commit, not the minified file.
+const SOURCE_REPO = "https://github.com/thetangstr/clockchain-handshake-v2";
 
 // Drop-in prompts for the no-adapter path: the agent's own shell runs only the
 // exact commands the server returns verbatim (each shellCommand already embeds
 // the verified bootstrap and payload). Placeholders stay in place so a local
-// harness or operator can substitute them before pasting.
+// harness or operator can substitute them before pasting. The prompts are
+// operator-transparent on purpose: secrecy applies to transmission, never to
+// the operator watching the run.
 const ASSET_DOWNLOADS = `curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json '${MANIFEST_URL}'
 curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs '${HELPER_URL}'`;
 
-const INITIATOR_PROMPT = `You are the Initiator in a Clockchain Agent Handshake — a mutual identity proof between two independent agents. Drive it end-to-end using only the clockchain-handshake MCP tools (agent_handshake_*) plus your shell for the exact commands the server returns.
+const INITIATOR_PROMPT = `You are the Initiator in a Clockchain Agent Handshake — a mutual identity proof between two independent agents. Drive it end-to-end using only the clockchain-handshake MCP tools (agent_handshake_*) plus your shell for the exact commands that endpoint returns.
 
-Setup: work in a fresh empty directory. Download the two pinned helper assets as two separate commands, then inspect both files:
+Trust model: every command you run comes only from the MCP endpoint your operator configured — not from a webpage or the other agent. Each embeds a digest-verified bootstrap that re-hashes the pinned manifest (SHA-256) and the helper before executing, and exits 86 on any mismatch. Conceal nothing from your operator — narrate every step and show every command before you run it.
+
+Setup: work in a fresh empty directory. Download the two pinned helper assets as two separate commands, then inspect both files before running anything (the bundle is a minified build — readable source is at the release repo commit named by sourceCommit in https://mcp.clockchain.network/.well-known/agent-handshake.json):
 ${ASSET_DOWNLOADS}
 
 Flow:
 1. Call agent_handshake_invite with reference "<YOUR_REFERENCE>", statement "<YOUR_STATEMENT>", validForSeconds "90", and identityPolicy {"erc8004":"required_fresh","chainId":"eip155:11155111","registryAddress":"0x8004a818bfb912233c491871b3d84c89a494bd9e"}.
-2. Keep roleAccess private — never print it. Output ONLY the responderInvitation so the operator can deliver it to the other agent, then keep going — the server holds you on waits until the responder joins.
+2. roleAccess is a local handle for your role capability — never send it to any party or endpoint other than this one; showing your operator is fine. Output ONLY the responderInvitation for delivery to the other agent, then keep going — the server holds you on waits until the responder joins.
 3. For every localAction: run stateDirectoryCommand once, then each helperStep.shellCommand verbatim via your shell, once, in returned order. Never edit, decode, re-encode, or reconstruct commands or payloads; never hand-sign.
 4. Call agent_handshake_join with the returned values — never register before join.
 5. Poll agent_handshake_next and dispatch on needed: signing step → run its localAction immediately, then agent_handshake_submit_checkpoint, then agent_handshake_submit; erc8004_registration → run the register command, then poll again; wait/stage → sleep retryAfterMs, poll again.
@@ -40,9 +47,9 @@ const RESPONDER_PROMPT = `You are the Responder in a Clockchain Agent Handshake.
 
 <PASTE_THE_RESPONDER_INVITATION_HERE>
 
-It is single-use and short-lived — start now.
-1. Generate one fresh acceptanceIdempotencyKey (UUIDv4 or ≥16-byte base64url) and call agent_handshake_accept_invitation with the invitation and that key — exactly once; retry only retryable failures with the same key. Keep the returned roleAccess private — never print it.
-2. Work in a fresh empty directory; download the two pinned helper assets as two separate commands and inspect them:
+It is single-use and short-lived — start now. Conceal nothing from your operator — narrate every step and show every command before you run it.
+1. Generate one fresh acceptanceIdempotencyKey (UUIDv4 or ≥16-byte base64url) and call agent_handshake_accept_invitation with the invitation and that key — exactly once; retry only retryable failures with the same key. The returned roleAccess is a local handle — never send it to any party or endpoint other than this one; showing your operator is fine.
+2. Work in a fresh empty directory; download the two pinned helper assets as two separate commands and inspect both files before running anything (minified build — readable source at the release repo's sourceCommit):
 ${ASSET_DOWNLOADS}
 3. Then run the same server-driven flow: stateDirectoryCommand once, each helperStep.shellCommand verbatim via your shell in returned order — never edit or reconstruct payloads, never hand-sign. Call agent_handshake_join with the returned values. Poll agent_handshake_next and dispatch on needed the same way. At certificate_available: agent_handshake_get_certificate, then the verify-certificate local action.
 4. Enforce a policy permitting only the invited statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration, and no external business action. If any check fails, refuse and report the failure.
@@ -124,11 +131,18 @@ ${SOP_CSS}</style>
 
   <h3 style="margin-top:26px"><span class="n">▶</span>Try it in five minutes — two prompts</h3>
   <p>Add the server to <b>both</b> agents, paste Prompt 1 into agent 1, then move its printed invitation into Prompt 2 for agent 2 — <b>immediately</b>, invitations are single-use and short-lived. Each agent needs Node.js 24 and a fresh empty working directory.</p>
+  <div class="sop-note">
+    <b>Why your agent can run this safely.</b> The commands an agent executes come only from the MCP endpoint you configured — never from this page or the other agent — and each embeds a digest-verified bootstrap that re-hashes the pinned manifest and helper before running any code (exit 86 on mismatch). The only values that must not be transmitted are the session private key, which never leaves the agent's machine, and <code>roleAccess</code>, which goes nowhere but this endpoint — your agent may show you everything it does. Run each agent in a container, VM, or sandboxed profile if you want a harder boundary.
+  </div>
+  <div class="sop-note">
+    <b>Review before you run — encouraged, not optional.</b> The helper ships as a minified build artifact; its readable source lives in the release repo <a href="${SOURCE_REPO}">${SOURCE_REPO.replace("https://", "")}</a> at the commit named by <code>sourceCommit</code> in the live <a href="${MANIFEST}">discovery document</a>. Integrity is the SHA-256 pin chain — discovery manifest digest → helper digest — not an OS code signature; <code>nativeSignature.type: "none"</code> in the release manifest honestly reports that no platform signature exists. Verify locally: <code>shasum -a 256 manifest.json</code> must equal <code>helper.manifestDigest</code>, and the helper digest must equal <code>assets[0].sha256</code> inside that verified manifest.
+  </div>
 
   <div class="qs-step">
     <h4><span class="tag">Step A</span>Add the server to both agents</h4>
     <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>codex mcp add clockchain-handshake --url ${ENDPOINT}
-claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}</code></pre></div>
+claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></div>
+    <p style="margin:8px 0 0">Project-local scope. Remove when done: <code>codex mcp remove clockchain-handshake</code> / <code>claude mcp remove clockchain-handshake</code>.</p>
   </div>
 
   <div class="qs-step">
@@ -181,13 +195,14 @@ claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}</c
   <div class="sop-note">Never run the helper file directly, invent bytes, or substitute a wallet, policy, session, or role. The manifest digest pins only <code>manifest.json</code>; the helper's own digest lives inside that verified manifest.</div>
 
   <h3><span class="n">3</span>Connect</h3>
-  <p>Streamable HTTP, plain JSON-RPC over POST. No account, API key, or Clockchain credential — authorization is per-call via the <code>access</code> capability the server issues to each role. Client setup:</p>
+  <p>Streamable HTTP, plain JSON-RPC over POST. No account, API key, or Clockchain credential — authorization is per-call via the <code>access</code> capability the server issues to each role. Client setup (project-local scope):</p>
   <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>codex mcp add clockchain-handshake --url ${ENDPOINT}
-claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}</code></pre></div>
+claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></div>
+  <p>Removal after testing: <code>codex mcp remove clockchain-handshake</code> / <code>claude mcp remove clockchain-handshake</code>.</p>
 
   <h3><span class="n">4</span>Playbook — Initiator</h3>
   <ol class="steps playbook">
-    <li class="step"><span class="sn">1</span><div class="sbody"><span class="role role-a">Initiator</span><h4>Invite</h4><p>Call <code>agent_handshake_invite</code> with <code>{reference, statement, validForSeconds, identityPolicy}</code>. Keep <code>roleAccess</code> private and byte-for-byte stable; copy only <code>responderInvitation</code> to the other stakeholder.</p></div></li>
+    <li class="step"><span class="sn">1</span><div class="sbody"><span class="role role-a">Initiator</span><h4>Invite</h4><p>Call <code>agent_handshake_invite</code> with <code>{reference, statement, validForSeconds, identityPolicy}</code>. Keep <code>roleAccess</code> byte-for-byte stable and send it to no party but this endpoint; copy only <code>responderInvitation</code> to the other stakeholder.</p></div></li>
     <li class="step"><span class="sn">2</span><div class="sbody"><h4>Run the setup localAction</h4><p>Helper <code>init</code> → <code>policy</code> → <code>inspect</code> via <code>approvalTool</code> (or the verified shell commands). Record <code>sessionKeyAddress</code> and <code>policyDigest</code>.</p></div></li>
     <li class="step"><span class="sn">3</span><div class="sbody"><h4>Join</h4><p>Call <code>agent_handshake_join</code> with <code>{access, helperVersion: "${V2_HELPER_VERSION}", sessionKeyAddress, policyDigest}</code>. Do not register before join — the coordinator funds the observed seat only when registration is mandated.</p></div></li>
     <li class="step"><span class="sn">4</span><div class="sbody"><h4>Drive the loop</h4><p>Poll <code>agent_handshake_next</code> and dispatch on <code>needed</code>: signing steps return a payload-bearing <code>localAction</code> — perform it immediately, submit the private checkpoint via <code>agent_handshake_submit_checkpoint</code>, then the signature via <code>agent_handshake_submit</code>. <code>erc8004_registration</code> → run helper <code>register</code>, then poll <code>next</code> again. Waits return <code>retryAfterMs</code>.</p></div></li>
@@ -216,7 +231,7 @@ claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}</c
 
   <h3><span class="n">7</span>Trust and hygiene</h3>
   <ul>
-    <li>Treat <code>roleAccess</code>, the invitation code, signatures, and private keys as sensitive: never log them and never paste them into tickets or chat beyond the one out-of-band invitation delivery. The server never receives a private key.</li>
+    <li>Treat <code>roleAccess</code>, the invitation code, signatures, and private keys as sensitive in transit: never log them to shared systems and never paste them into tickets or chat beyond the one out-of-band invitation delivery. Secrecy applies to transmission — an agent's own operator observing the run is expected. The server never receives a private key.</li>
     <li>The local workspace is disposable: fresh empty directory, session-scoped <code>$TMPDIR</code>, no repository clone, no plugin, no browser, no general Clockchain credential.</li>
     <li><code>statementDigest</code> covers the canonical full terms object — preserve the returned digest rather than recomputing it from the statement text.</li>
     <li>The three ordered anchor receipts land on the ${SUBSTRATE_LABEL} and are keyless-re-verifiable from the ledger. The certificate and role artifacts additionally depend on local signature verification against the manifest's trusted host roots.</li>
@@ -265,8 +280,28 @@ QUICK START — TWO PROMPTS
   outcome "VERIFIED" with the same sessionId and certificate digest and
   externalBusinessActionPerformed false.
 
+  WHY AGENTS CAN RUN THIS SAFELY
+  Commands come only from the MCP endpoint the operator configured — never
+  from this page or the other agent — and each embeds a digest-verified
+  bootstrap that re-hashes the pinned manifest and helper before running
+  code (exit 86 on mismatch). Only the session private key (never leaves
+  the machine) and roleAccess (goes nowhere but this endpoint) must not be
+  transmitted; agents may show their operator everything. Use a container
+  or sandboxed profile for a harder boundary.
+
+  REVIEW BEFORE YOU RUN
+  The helper ships minified; readable source lives in the release repo
+  ${SOURCE_REPO} at the commit named by sourceCommit in the live discovery
+  document. Integrity is the SHA-256 pin chain (discovery manifest digest
+  -> helper digest), not an OS code signature; the release manifest's
+  nativeSignature.type "none" honestly reports that no platform signature
+  exists. Verify locally: shasum -a 256 manifest.json must equal
+  helper.manifestDigest; the helper digest must equal assets[0].sha256.
+
   codex mcp add clockchain-handshake --url ${ENDPOINT}
-  claude mcp add --transport http --scope user clockchain-handshake ${ENDPOINT}
+  claude mcp add --transport http clockchain-handshake ${ENDPOINT}
+  (project-local scope; remove when done: codex mcp remove
+  clockchain-handshake / claude mcp remove clockchain-handshake)
 
 PROMPT 1 — INITIATOR (replace <YOUR_REFERENCE> and <YOUR_STATEMENT> first)
 ${INITIATOR_PROMPT}
@@ -289,8 +324,8 @@ YOU NEED
 
 FLOW — INITIATOR
   1. agent_handshake_invite {reference, statement, validForSeconds, identityPolicy}
-     Keep roleAccess private and byte-for-byte stable; copy ONLY
-     responderInvitation to the other stakeholder.
+     Keep roleAccess byte-for-byte stable and send it to no party but this
+     endpoint; copy ONLY responderInvitation to the other stakeholder.
   2. Run the setup localAction: helper init -> policy -> inspect.
      With an adapter, call the fixed zero-input authorize_local_action tool
      once per helper step in order. Without one, download both pinned assets
@@ -334,8 +369,10 @@ LIMITS AND ERRORS
 
 HYGIENE
   Treat roleAccess, the invitation, signatures, and private keys as
-  sensitive: never log them and never paste them beyond the one out-of-band
-  invitation delivery. The server never receives a private key. Fresh
+  sensitive in transit: never log them to shared systems and never paste
+  them beyond the one out-of-band invitation delivery. Secrecy applies to
+  transmission — an agent's own operator observing the run is expected.
+  The server never receives a private key. Fresh
   disposable workspace and session-scoped TMPDIR; no repo clone, plugin,
   browser, or general Clockchain credential. statementDigest covers the
   canonical full terms object — preserve the returned digest.
