@@ -295,18 +295,21 @@ test("every issued helperStep command is fetchable verbatim by its commandSha256
   assert.equal(harness.coordinator.localActionCommand(invited.localAction.helperSteps[0].commandSha256), null);
 });
 
-test("a late-minted invitation keeps a full mint-relative claim window", async (t) => {
+test("a late-minted invitation's claim window stays inside the session's invitation window", async (t) => {
   // Mint at 89s into the session's 120s invitation window (just above the 30s
-  // runway guard): the claim deadline must be mint+120s, not the 31s remnant
-  // of the session's window — a terms_mismatch retry must not shrink it.
+  // runway guard): the host observes claims only until the session's
+  // invitationExpiresAtMs, so the claim deadline must be capped at that bound
+  // minus the landing margin — never mint-relative past it. A claim window
+  // that outlived the bound would let the Responder accept into a session the
+  // host has already rotated away from.
   const mintAt = nowMs + 89_000;
   const harness = await createDurableAcceptHarness(t, { now: () => mintAt });
   const invited = await harness.coordinator.invite(terms);
   assert.equal(
     readV2RoleAccessPayload(invited.responderInvitation).expMs,
-    String(mintAt + 120_000),
+    String(nowMs + 120_000 - 5_000),
   );
-  assert.equal(invited.invitationExpiresAtMs, String(mintAt + 120_000));
+  assert.equal(invited.invitationExpiresAtMs, String(nowMs + 120_000 - 5_000));
 });
 
 test("a fresh accept past the invitation expiry fails with a distinct expired reason", async (t) => {
@@ -834,7 +837,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
   assert.equal(readV2RoleAccessPayload(invited.initiatorAccess).expMs, discovery.sessionDeadlineMs);
-  assert.equal(readV2RoleAccessPayload(invited.responderInvitation).expMs, String(nowMs + 1 + 120000));
+  assert.equal(readV2RoleAccessPayload(invited.responderInvitation).expMs, String(nowMs + 120000 - 5_000));
   assert.equal(readV2RoleAccessPayload(accepted.responderAccess).expMs, discovery.sessionDeadlineMs);
   assert.deepEqual(accepted.localPolicy, policy("responder"));
   assert.equal(Object.hasOwn(accepted.localAction, "policyPayload"), false);
@@ -1393,6 +1396,38 @@ test("agent_handshake_next reports an expired acceptance window as terminal", as
   await assert.rejects(
     () => harness.coordinator.next({ access: harness.accesses.responder }),
     (error) => error.name === "V2SigningWindowExpiredError",
+  );
+});
+
+test("an expired role access reports funding_timeout when the session died awaiting host funding", async () => {
+  const harness = await createBoundedWaitHarness();
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.setClock(Number(discovery.sessionDeadlineMs));
+  await assert.rejects(
+    () => harness.coordinator.next({ access: harness.accesses.initiator }),
+    (error) => error.name === "V2FundingTimeoutError",
+  );
+  await assert.rejects(
+    () => harness.coordinator.next({ access: harness.accesses.responder }),
+    (error) => error.name === "V2FundingTimeoutError",
+  );
+});
+
+test("an expired role access stays role_access_invalid when funding landed before the deadline", async () => {
+  const harness = await createBoundedWaitHarness({ registrationAvailable: false });
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.setClock(Number(discovery.sessionDeadlineMs));
+  await assert.rejects(
+    () => harness.coordinator.next({ access: harness.accesses.initiator }),
+    (error) => error.name === "V2RoleAccessError",
+  );
+  // A forged or malformed token still reports role_access_invalid regardless.
+  await assert.rejects(
+    () => harness.coordinator.next({ access: `${harness.accesses.initiator}x` }),
+    (error) => error.name === "V2RoleAccessError",
   );
 });
 

@@ -8,7 +8,7 @@ import type { HandshakeKey, HandshakeRecord, HandshakeStateStore } from "../../h
 import { createHandshakeStateStore, createIsolatedHandshakeStateStore } from "../../handshake/state.js";
 import { createHandshakeRelayClient, normalizeRelayBaseUrl } from "../../handshake/relay.js";
 import { readEvmBalance, recoverEip191Address, resolveOwnedAgentRegistration } from "../../handshake/evm.js";
-import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
+import { authorizeV2RoleAccess, readV2RoleAccessPayload, V2RoleAccessError, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
 import type { ClaimPhase, V2AcceptanceHmacKey, V2InvitationClaim, V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore, V2InvitationWindowUnavailableError } from "./invitation-store.js";
 import { V2_HELPER_VERSION, V2_PUBLIC_ENDPOINT, readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
@@ -76,6 +76,13 @@ const MIN_REGISTRATION_BALANCE_WEI = 5_000_000_000_000_000n;
 // at the window edge would expire before the Responder could be reached, and the host rotates a fresh
 // current session as soon as the window lapses, so the claim could never be observed.
 const INVITATION_MIN_RUNWAY_MS = 30_000;
+// The host observes agent_v2_invitation_claimed only until the session's
+// invitationExpiresAtMs and then rotates. A minted claim window must end
+// strictly inside that bound, with a small landing margin so a claim accepted
+// at the edge still reaches the host before it exits — an accept that lands
+// after rotation succeeds on the coordinator but orphans the session (claims
+// post, nobody funds, the session stalls at awaiting_funding until deadline).
+const INVITATION_CLAIM_LANDING_MARGIN_MS = 5_000;
 const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 // agent_handshake_next bridges ordinary dependency waits server-side: one tool
 // call may hold up to a bounded waitMs so a public client gets the next
@@ -129,6 +136,13 @@ export class V2TermsMismatchError extends V2CoordinatorError {
 // session past its deadline cannot sign at all — both are terminal.
 export class V2SigningWindowExpiredError extends V2CoordinatorError {
   constructor() { super(); this.name = "V2SigningWindowExpiredError"; }
+}
+// The session deadline passed while the role was joined but still waiting on
+// the host's funding record — a distinct terminal state from an invalid or
+// forged role access so a caller can tell a stalled host funder from a bad
+// token.
+export class V2FundingTimeoutError extends V2CoordinatorError {
+  constructor() { super(); this.name = "V2FundingTimeoutError"; }
 }
 export class V2TransientCoordinatorError extends Error {
   readonly retryAfterMs?: number;
@@ -486,8 +500,48 @@ export function createV2Coordinator(options: {
     return `curl -fsS "${AGENT_HANDSHAKE_V2_MCP_ORIGIN}/handshake/local-action/${commandSha256}" -o "${file}" && node -e 'const c=require("node:crypto"),f=require("node:fs");process.exit(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex")==="${commandSha256}"?0:1)' "${file}" && bash "${file}"`;
   };
 
+  // A role access can fail verification either because it is malformed/forged
+  // or simply because its expiry — the session deadline — passed. When the
+  // signature and bindings verify under a synthetic in-window clock and the
+  // stored record shows the role joined but never reached party_ready on an
+  // erc8004-required session with no host funding record on the relay, the
+  // honest terminal reason is a stalled host funder, not a bad token.
+  async function classifyAccessFailure(access: string, tool: string, original: Error): Promise<Error> {
+    try {
+      const untrusted = readV2RoleAccessPayload(access);
+      const verified = verifyV2RoleAccess(access, {
+        keys: options.accessKeys,
+        nowMs: Number(untrusted.nbfMs),
+        expectedSessionId: untrusted.sessionId,
+        expectedRole: untrusted.role,
+        expectedStatementDigest: untrusted.statementDigest,
+        expectedExpMs: untrusted.expMs,
+        requiredTool: tool,
+      });
+      if (now() < Number(untrusted.expMs)) return original;
+      const record = await store.get(key(verified.principal, untrusted.sessionId, untrusted.role));
+      if (!record) return original;
+      const current = data(record);
+      const erc8004 = (current.terms as { identityPolicy?: { erc8004?: unknown } } | undefined)?.identityPolicy?.erc8004;
+      if (
+        typeof current.sessionKeyAddress !== "string" || current.party !== undefined ||
+        (erc8004 !== "required_fresh" && erc8004 !== "required_existing_or_fresh")
+      ) return original;
+      const entries = (await options.relay.getMessages({ sessionId: untrusted.sessionId })).messages;
+      return funded(entries, untrusted.role, current.sessionKeyAddress) ? original : new V2FundingTimeoutError();
+    } catch {
+      return original;
+    }
+  }
+
   async function authorize(access: string, tool: string) {
-    const verified = authorizeV2RoleAccess(access, { keys: options.accessKeys, nowMs: now(), requiredTool: tool });
+    let verified: ReturnType<typeof authorizeV2RoleAccess>;
+    try {
+      verified = authorizeV2RoleAccess(access, { keys: options.accessKeys, nowMs: now(), requiredTool: tool });
+    } catch (error) {
+      if (!(error instanceof V2RoleAccessError)) throw error;
+      throw await classifyAccessFailure(access, tool, error);
+    }
     const keyValue = key(verified.principal, verified.payload.sessionId, verified.payload.role);
     const record = await store.get(keyValue);
     if (!record) fail();
@@ -819,13 +873,19 @@ export function createV2Coordinator(options: {
       const sessionTaken = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
         .some((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
       if (sessionTaken) transient(rotationRetryMs);
-      // The minted invitation gets its own full-width claim window measured from
-      // mint, not the remainder of the session's invitation window — otherwise a
-      // terms_mismatch retry or any pre-mint delay silently shrinks the
-      // Responder's runway. Still bounded by the session deadline, and minting
-      // itself stays gated on the session's invitation window above.
-      const invitationWindowMs = Number(found.invitationExpiresAtMs) - Number(found.createdAtMs);
-      const invitationExpMs = String(Math.min(now() + invitationWindowMs, Number(found.sessionDeadlineMs)));
+      // The minted claim window is capped at the session's own invitation
+      // expiry minus the landing margin — never extended mint-relative past
+      // it. The host stops observing claims at invitationExpiresAtMs and
+      // rotates the session, so a claim window that outlives it lets the
+      // Responder accept into a session nobody is funding. The runway check
+      // above guarantees at least INVITATION_MIN_RUNWAY_MS minus the margin of
+      // usable claim window at mint; a Responder too slow to claim gets
+      // invitation_expired and the Initiator re-invites into the next session
+      // rather than both sides stalling in an orphaned one.
+      const invitationExpMs = String(Math.min(
+        Number(found.invitationExpiresAtMs) - INVITATION_CLAIM_LANDING_MARGIN_MS,
+        Number(found.sessionDeadlineMs),
+      ));
       const metadata = metadataFrom(found, activeTerms);
       let created;
       try {

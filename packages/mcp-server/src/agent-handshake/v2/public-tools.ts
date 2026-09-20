@@ -72,6 +72,7 @@ const PUBLIC_ERROR_REASONS: Readonly<Record<string, string>> = Object.freeze({
   V2TermsMismatchError: "terms_mismatch",
   V2SigningWindowExpiredError: "signing_window_expired",
   V2RoleAccessError: "role_access_invalid",
+  V2FundingTimeoutError: "funding_timeout",
   V2InvitationExpiredError: "invitation_expired",
   V2InvitationError: "invitation_invalid",
   V2CommitmentCheckpointError: "checkpoint_invalid",
