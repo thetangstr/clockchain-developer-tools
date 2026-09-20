@@ -13,7 +13,7 @@ test("the plain AWS hostname proxies unchanged to the production MCP service", a
   assert.doesNotMatch(match[1], /handle_path|uri\s+(?:strip_prefix|replace)|rewrite/);
 });
 
-test("the public hostname keeps production untouched and isolates the staging prefix", async () => {
+test("the public hostname keeps production untouched outside the staging and pinned ACM4 prefixes", async () => {
   const source = await readFile(caddyFile, "utf8");
   const match = source.match(/mcp\.clockchain\.network\s*\{([\s\S]*?)\n\}/);
   assert.ok(match, "mcp.clockchain.network site block exists");
@@ -24,9 +24,25 @@ test("the public hostname keeps production untouched and isolates the staging pr
   assert.ok(staging, "handle_path /staging/* block exists");
   assert.match(staging[1], /reverse_proxy\s+mcp-staging:8080/);
   assert.match(staging[1], /header_up\s+X-Forwarded-Prefix\s+\/staging/);
-  // Everything outside the staging block must proxy unchanged to production.
-  const rest = block.replace(staging[0], "");
+  // ACM4 pin (owner decision 2026-09-20): the frozen Clark/Clint pair pins the
+  // literal /handshake/mcp URL against helper 2.1.6, so that exact path and the
+  // /acm4/* prefix route to the pinned demo instance while the current build's
+  // handshake surface is exposed prefix-forwarded at /next/*. Swap back once the
+  // participants are released on the current helper line.
+  const acm4 = block.match(/handle_path\s+\/acm4\/\*\s*\{([\s\S]*?)\n\t\}/);
+  assert.ok(acm4, "handle_path /acm4/* block exists");
+  assert.match(acm4[1], /reverse_proxy\s+mcp-acm4:8080/);
+  assert.match(acm4[1], /header_up\s+X-Forwarded-Prefix\s+\/acm4/);
+  const pinned = block.match(/handle\s+\/handshake\/mcp\s*\{([\s\S]*?)\n\t\}/);
+  assert.ok(pinned, "handle /handshake/mcp block exists");
+  assert.match(pinned[1], /reverse_proxy\s+mcp-acm4:8080/);
+  const next = block.match(/handle_path\s+\/next\/\*\s*\{([\s\S]*?)\n\t\}/);
+  assert.ok(next, "handle_path /next/* block exists");
+  assert.match(next[1], /reverse_proxy\s+mcp:8080/);
+  assert.match(next[1], /header_up\s+X-Forwarded-Prefix\s+\/next/);
+  // Everything outside those blocks must proxy unchanged to production.
+  const rest = block.replace(staging[0], "").replace(acm4[0], "").replace(pinned[0], "").replace(next[0], "");
   assert.match(rest, /reverse_proxy\s+mcp:8080/);
-  assert.doesNotMatch(rest, /handle_path|uri\s+(?:strip_prefix|replace)|rewrite|mcp-staging/);
+  assert.doesNotMatch(rest, /handle_path|handle\s|uri\s+(?:strip_prefix|replace)|rewrite|mcp-staging|mcp-acm4/);
   assert.doesNotMatch(source, /role-access|responderAccess|initiatorAccess|capability/i);
 });
