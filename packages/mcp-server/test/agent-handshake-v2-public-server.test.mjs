@@ -73,7 +73,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.ok(instructions.includes(V2_VERIFIED_HELPER_BOOTSTRAP));
   assert.match(instructions, /compile only those verified bytes in memory/i);
   assert.match(instructions, /short opaque local handle/i);
-  assert.match(instructions, /do not send it to the other stakeholder or echo it into chat or logs/i);
+  assert.match(instructions, /never send it to the other stakeholder or to any endpoint other than this one/i);
+  assert.match(instructions, /showing it to your own operator is expected/i);
   assert.match(instructions, /adapter asset path.*mandatory.*approvalTool.*already preloaded.*do not download or overwrite.*inspect.*manifest.*helper source/is);
   assert.match(instructions, /portable fallback.*only when.*approvalTool.*not available.*files are absent.*download/is);
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.7/manifest.json'"));
@@ -86,7 +87,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /needed.*erc8004_registration.*pinned helper.*register.*same absolute state directory.*agent_handshake_next/is);
   assert.match(instructions, /session-scoped \$TMPDIR path.*every local helper operation.*do not assign.*shell variable.*replace.*\$HOME.*\$PWD/is);
   assert.match(instructions, /generate one fresh high-entropy acceptanceIdempotencyKey.*client-native secure randomness.*before.*first.*agent_handshake_accept_invitation/is);
-  assert.match(instructions, /retain.*acceptanceIdempotencyKey locally.*never share.*return.*log/is);
+  assert.match(instructions, /retain.*acceptanceIdempotencyKey locally.*never send it to the other stakeholder.*operator is expected/is);
   assert.match(instructions, /retry.*same invitation.*same acceptanceIdempotencyKey.*retryable.*transport uncertainty/is);
   assert.match(instructions, /after.*success.*retain.*roleAccess.*stop accepting/is);
   assert.match(instructions, /missing acceptanceIdempotencyKey.*transitional one-shot compatibility/is);
@@ -284,14 +285,16 @@ test("accept invitation validates optional acceptance idempotency key and passes
     assert.equal(accepted.body.result.isError, undefined);
     assert.equal(observed.at(-1).args.acceptanceIdempotencyKey, uuidKey);
 
+    // macOS uuidgen prints uppercase; the key must pass schema validation and
+    // reach the handler verbatim.
     const uppercaseUuidKey = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
     const beforeUppercase = observed.length;
-    const uppercaseUuid = await rpc(url, "tools/call", {
+    await rpc(url, "tools/call", {
       name: "agent_handshake_accept_invitation",
       arguments: { invitation: "v".repeat(80), acceptanceIdempotencyKey: uppercaseUuidKey },
     });
-    assert.equal(observed.length, beforeUppercase);
-    assert.ok(uppercaseUuid.body.error || uppercaseUuid.body.result?.isError);
+    assert.equal(observed.length, beforeUppercase + 1);
+    assert.equal(observed.at(-1).args.acceptanceIdempotencyKey, uppercaseUuidKey);
 
     const base64urlKey = Buffer.from("0123456789abcdef", "utf8").toString("base64url");
     const acceptedWithBase64url = await rpc(url, "tools/call", {
@@ -531,6 +534,34 @@ test("public tools distinguish retryable infrastructure failures from terminal p
   ]);
   assert.equal(warnings.join("\n").includes("secret invalid role state"), false);
   assert.equal(warnings.join("\n").includes("unexpected internal state"), false);
+});
+
+test("terms mismatch surfaces a public reason and the published terms for self-correction", async () => {
+  const publishedTerms = {
+    reference: "NS-1847",
+    statement: "Northstar Logistics and Harbor Supply authorize these two independently controlled agents to communicate about shipment reference NS-1847 for 90 seconds.",
+    validForSeconds: "90",
+    identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" },
+  };
+  const mismatch = Object.assign(new Error("Agent handshake coordination failed safely."), {
+    name: "V2TermsMismatchError",
+    publishedTerms,
+  });
+  const handler = createV2PublicHttpHandler({ pin, now: () => 1_000, invoke: async () => { throw mismatch; } });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const result = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: { reference: "custom", statement: "custom", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } } });
+    const body = JSON.parse(result.body.result.content[0].text);
+    assert.equal(result.body.result.isError, true);
+    assert.equal(body.error, "HANDSHAKE_UNAVAILABLE");
+    assert.equal(body.retryable, false);
+    assert.equal(body.reason, "terms_mismatch");
+    assert.deepEqual(body.publishedTerms, publishedTerms);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
 });
 
 test("public agent_handshake_next accepts bounded waitMs and rejects out-of-range waits", async () => {

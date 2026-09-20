@@ -110,6 +110,17 @@ function joinRequired(role: V2Role, sessionId: string): JsonObject {
 export class V2CoordinatorError extends Error {
   constructor() { super("Agent handshake coordination failed safely."); this.name = "V2CoordinatorError"; }
 }
+// The published session terms are not secret — the host publishes them in
+// discovery — so a mismatch error may carry them verbatim to let the caller
+// resubmit with the exact published terms inside the same session window.
+export class V2TermsMismatchError extends V2CoordinatorError {
+  readonly publishedTerms: JsonObject;
+  constructor(publishedTerms: JsonObject) {
+    super();
+    this.name = "V2TermsMismatchError";
+    this.publishedTerms = publishedTerms;
+  }
+}
 export class V2TransientCoordinatorError extends Error {
   constructor() { super("Agent handshake coordination is waiting for durable infrastructure state."); this.name = "V2TransientCoordinatorError"; }
 }
@@ -278,13 +289,27 @@ function localStateDir(sessionId: string, role: V2Role): string {
   return `$TMPDIR/.clockchain/handshakes/${sessionId}/${role}`;
 }
 
+// macOS exports $TMPDIR with a trailing slash, so verbatim shell expansion of
+// "$TMPDIR/.clockchain/..." yields ".../T//.clockchain/..." and the helper's
+// private-path guard (resolve(p) === p) rejects the redundant separator. The
+// shell rendering uses ${TMPDIR%/} to strip it; argvAfterVerifiedPrefix keeps
+// the literal "$TMPDIR/" prefix because the harness adapter contractually
+// recognizes that exact prefix and resolves it to a canonical path itself.
+function localStateDirShell(sessionId: string, role: V2Role): string {
+  if (!UUID.test(sessionId)) fail();
+  return "${TMPDIR%/}/.clockchain/handshakes/" + sessionId + "/" + role;
+}
+
 function helperStep(verifiedHelperPrefix: string, operation: string, sessionId: string, role: V2Role, payload?: JsonObject): JsonObject {
   const stateDir = localStateDir(sessionId, role);
   const argvAfterVerifiedPrefix = [operation, "--state-dir", stateDir];
+  const shellArgv = [operation, "--state-dir", localStateDirShell(sessionId, role)];
   if (payload !== undefined) {
-    argvAfterVerifiedPrefix.push("--payload-base64url", Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"));
+    const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    argvAfterVerifiedPrefix.push("--payload-base64url", encoded);
+    shellArgv.push("--payload-base64url", encoded);
   }
-  const shellCommandSuffix = argvAfterVerifiedPrefix
+  const shellCommandSuffix = shellArgv
     .map((value, index) => index === 2 ? `"${value}"` : value)
     .join(" ");
   return Object.freeze({
@@ -320,12 +345,11 @@ function signingSummary(signingRequest: JsonObject): JsonObject {
 }
 
 function setupLocalAction(verifiedHelperPrefix: string, policy: JsonObject, sessionId: string, role: V2Role): JsonObject {
-  const stateDir = localStateDir(sessionId, role);
   return Object.freeze({
     executor: "pinned_helper",
     operations: Object.freeze(["init", "policy", "inspect"]),
     payloadEncoding: "base64url_utf8_json",
-    stateDirectoryCommand: `mkdir -p -m 700 "${stateDir}"`,
+    stateDirectoryCommand: `mkdir -p -m 700 "${localStateDirShell(sessionId, role)}"`,
     helperSteps: Object.freeze([
       compactHelperStep(helperStep(verifiedHelperPrefix, "init", sessionId, role), role, sessionId),
       compactHelperStep(helperStep(verifiedHelperPrefix, "policy", sessionId, role, policy), role, sessionId),
@@ -695,7 +719,9 @@ export function createV2Coordinator(options: {
       const hostTerms = found.terms as JsonObject | undefined;
       if (hostTerms === undefined) {
         console.warn(JSON.stringify({ event: "agent_handshake_v2_invite_without_host_terms", sessionId: found.sessionId }));
-      } else if (v2CanonicalRecord(terms).digest !== v2CanonicalRecord(hostTerms).digest) fail();
+      } else if (v2CanonicalRecord(terms).digest !== v2CanonicalRecord(hostTerms).digest) {
+        throw new V2TermsMismatchError(hostTerms);
+      }
       const activeTerms = hostTerms ?? terms;
       // Reject before minting any state unless the window retains enough runway for the Responder's claim
       // to land; an already-expired or near-expiry "current" session rolls over underneath the invite, so the

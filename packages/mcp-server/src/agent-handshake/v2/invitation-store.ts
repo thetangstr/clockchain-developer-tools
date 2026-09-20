@@ -18,7 +18,9 @@ import { normalizeV2Terms, v2CanonicalRecord } from "./protocol.js";
 const STORE_SCHEMA_V1 = "clockchain.agent-handshake-v2-invitations/v1";
 const STORE_SCHEMA = "clockchain.agent-handshake-v2-invitations/v2";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// Acceptance idempotency keys arrive from caller tooling — uuidgen on macOS
+// prints uppercase — so the v4 check is deliberately case-insensitive.
+const UUID_V4_ANY_CASE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const KID = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -94,7 +96,7 @@ function sameDigest(left: string, right: string): boolean {
 }
 
 function validIdempotencyKey(value: string): boolean {
-  if (UUID_V4.test(value)) return true;
+  if (UUID_V4_ANY_CASE.test(value)) return true;
   if (!BASE64URL.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
   return decoded.length >= 16 && decoded.toString("base64url") === value;
