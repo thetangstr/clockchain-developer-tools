@@ -130,6 +130,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
   assert.equal(manifest.helper.filename, "clockchain-agent-handshake.cjs");
   assert.equal(manifest.helper.nodeRuntimeMajor, "24");
+  assert.equal(manifest.adapter.package, "@clockchain/local-adapter");
+  assert.equal(manifest.adapter.tool, "mcp__clockchain-local-adapter__authorize_local_action");
   assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(pin.manifestDigest));
   assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(V2_VERIFIED_HELPER_BOOTSTRAP));
   assert.ok(V2_VERIFIED_HELPER_BOOTSTRAP.includes('!/^24\\./.test(manifest.nodeRuntime)'));
