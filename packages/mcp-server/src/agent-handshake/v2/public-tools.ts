@@ -63,6 +63,7 @@ const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 // fully opaque.
 const PUBLIC_ERROR_REASONS: Readonly<Record<string, string>> = Object.freeze({
   V2TermsMismatchError: "terms_mismatch",
+  V2SigningWindowExpiredError: "signing_window_expired",
   V2RoleAccessError: "role_access_invalid",
   V2InvitationError: "invitation_invalid",
   V2CommitmentCheckpointError: "checkpoint_invalid",
