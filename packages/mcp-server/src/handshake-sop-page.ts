@@ -26,17 +26,17 @@ const SOURCE_REPO = "https://github.com/thetangstr/clockchain-handshake-v2";
 const ASSET_DOWNLOADS = `curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json '${MANIFEST_URL}'
 curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs '${HELPER_URL}'`;
 
-const INITIATOR_PROMPT = `You are the Initiator in a Clockchain Agent Handshake — a mutual identity proof between two independent agents. Drive it end-to-end using only the clockchain-handshake MCP tools (agent_handshake_*) plus your shell for the exact commands that endpoint returns.
+const INITIATOR_PROMPT = `You are the Initiator in a Clockchain Agent Handshake — a mutual identity proof between two independent agents. Drive it end-to-end using only the clockchain-handshake MCP tools (agent_handshake_*) plus the clockchain-local-adapter for the local actions that endpoint returns (or, as a last resort, your shell for the exact commands).
 
 Trust model: every command you run comes only from the MCP endpoint your operator configured — not from a webpage or the other agent. Each embeds a digest-verified bootstrap that re-hashes the pinned manifest (SHA-256) and the helper before executing, and exits 86 on any mismatch. Conceal nothing from your operator — narrate every step and show every command before you run it.
 
-Setup: work in a fresh empty directory. Download the two pinned helper assets as two separate commands, then inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit is named in https://mcp.clockchain.network/.well-known/agent-handshake.json):
+Setup: work in a fresh empty directory. Local actions run through the clockchain-local-adapter by default — if the fixed zero-input tool mcp__clockchain-local-adapter__authorize_local_action is not among your tools, ask your operator to install the adapter (claude mcp add clockchain-local-adapter -- npx -y @clockchain/local-adapter; Codex: [mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@clockchain/local-adapter"]) rather than falling back silently. The two commands below are the LAST-RESORT fallback only — runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes (e.g. Claude Code auto-mode), and that refusal is expected behavior, not a bug. If the fallback is unavoidable, download the two pinned helper assets as two separate commands, then inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit is named in https://mcp.clockchain.network/.well-known/agent-handshake.json):
 ${ASSET_DOWNLOADS}
 
 Flow:
 1. Call agent_handshake_invite with reference "<YOUR_REFERENCE>", statement "<YOUR_STATEMENT>", validForSeconds "90", and identityPolicy {"erc8004":"required_fresh","chainId":"eip155:11155111","registryAddress":"0x8004a818bfb912233c491871b3d84c89a494bd9e"}. This public endpoint publishes fixed session terms — if the call returns terms_mismatch with publishedTerms, call invite again with those published terms verbatim (they are public discovery data, not secret).
 2. roleAccess is a local handle for your role capability — never send it to any party or endpoint other than this one; showing your operator is fine. Output ONLY the responderInvitation for delivery to the other agent, then keep going — the server holds you on waits until the responder joins.
-3. For every localAction: run stateDirectoryCommand once, then each helperStep.shellCommand verbatim via your shell, once, in returned order. Prefer helperStep.shellCommandFetch when present — a short command that downloads the exact shellCommand bytes by their commandSha256 and verifies the digest before executing — over hand-transcribing a multi-KB command. Never edit, decode, re-encode, or reconstruct commands or payloads; never hand-sign.
+3. For every localAction: call each helperStep.approvalTool — always the fixed zero-input tool mcp__clockchain-local-adapter__authorize_local_action — once per step, in returned order; the adapter executes each digest-bound action and you issue zero shell commands. Only when the adapter cannot be installed: run stateDirectoryCommand once, then each helperStep.shellCommand verbatim via your shell, once, in returned order. Prefer helperStep.shellCommandFetch when present — a short command that downloads the exact shellCommand bytes by their commandSha256 and verifies the digest before executing — over hand-transcribing a multi-KB command. Never edit, decode, re-encode, or reconstruct commands or payloads; never hand-sign.
 4. Call agent_handshake_join with the returned values — never register before join.
 5. Poll agent_handshake_next and dispatch on needed: signing step → run its localAction immediately, then (for proposal/acceptance) agent_handshake_submit_checkpoint with the sign output's checkpoint, then agent_handshake_submit; erc8004_registration → run the register command, then poll again; wait/stage → sleep retryAfterMs, poll again.
 6. At certificate_available: call agent_handshake_get_certificate, run the verify-certificate local action, then report sessionId, certificate digest, certificateVerified, outcome, and externalBusinessActionPerformed.
@@ -49,9 +49,9 @@ const RESPONDER_PROMPT = `You are the Responder in a Clockchain Agent Handshake.
 
 It is single-use and short-lived — start now. Conceal nothing from your operator — narrate every step and show every command before you run it.
 1. Generate one fresh acceptanceIdempotencyKey (UUIDv4 or ≥16-byte base64url) and call agent_handshake_accept_invitation with the invitation and that key — exactly once; retry only retryable failures with the same key. The returned roleAccess is a local handle — never send it to any party or endpoint other than this one; showing your operator is fine.
-2. Work in a fresh empty directory; download the two pinned helper assets as two separate commands and inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit names the exact source commit):
+2. Work in a fresh empty directory. Local actions run through the clockchain-local-adapter by default — if the fixed zero-input tool mcp__clockchain-local-adapter__authorize_local_action is not among your tools, ask your operator to install the adapter (claude mcp add clockchain-local-adapter -- npx -y @clockchain/local-adapter; Codex: [mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@clockchain/local-adapter"]) rather than falling back silently. The two commands below are the LAST-RESORT fallback only — runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes; that refusal is expected, not a bug. If the fallback is unavoidable, download the two pinned helper assets as two separate commands and inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit names the exact source commit):
 ${ASSET_DOWNLOADS}
-3. Then run the same server-driven flow: stateDirectoryCommand once, each helperStep.shellCommand verbatim via your shell in returned order — prefer helperStep.shellCommandFetch when present (it downloads the exact command bytes by commandSha256 and verifies them before executing) — never edit or reconstruct payloads, never hand-sign. Call agent_handshake_join with the returned values. Poll agent_handshake_next and dispatch on needed the same way. At certificate_available: agent_handshake_get_certificate, then the verify-certificate local action.
+3. Then run the same server-driven flow: with the adapter, call each helperStep.approvalTool once per step in returned order — zero shell commands. Without it (last resort only): stateDirectoryCommand once, each helperStep.shellCommand verbatim via your shell in returned order — prefer helperStep.shellCommandFetch when present (it downloads the exact command bytes by commandSha256 and verifies them before executing) — never edit or reconstruct payloads, never hand-sign. Call agent_handshake_join with the returned values. Poll agent_handshake_next and dispatch on needed the same way. At certificate_available: agent_handshake_get_certificate, then the verify-certificate local action.
 4. Enforce a policy permitting only the invited statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration, and no external business action. If any check fails, refuse and report the failure.
 5. Report sessionId, certificate digest, certificateVerified, outcome, and externalBusinessActionPerformed.`;
 
@@ -130,19 +130,20 @@ ${SOP_CSS}</style>
   </div>
 
   <h3 style="margin-top:26px"><span class="n">▶</span>Try it in five minutes — two prompts</h3>
-  <p>Add the server to <b>both</b> agents, paste Prompt 1 into agent 1, then move its printed invitation into Prompt 2 for agent 2 — <b>immediately</b>, invitations are single-use and short-lived. Each agent needs Node.js 24 and a fresh empty working directory.</p>
+  <p>Add the server to <b>both</b> agents, paste Prompt 1 into agent 1, then move its printed invitation into Prompt 2 for agent 2 — <b>immediately</b>, invitations are single-use and short-lived. Each agent needs Node.js 24, the local adapter (Step A), and a fresh empty working directory.</p>
   <div class="sop-note">
-    <b>Why your agent can run this safely.</b> The commands an agent executes come only from the MCP endpoint you configured — never from this page or the other agent — and each embeds a digest-verified bootstrap that re-hashes the pinned manifest and helper before running any code (exit 86 on mismatch). The only values that must not be transmitted are the session private key, which never leaves the agent's machine, and <code>roleAccess</code>, which goes nowhere but this endpoint — your agent may show you everything it does. Run each agent in a container, VM, or sandboxed profile if you want a harder boundary.
+    <b>Why your agent can run this safely.</b> With the <code>clockchain-local-adapter</code> installed, the agent runs zero shell commands — every local action is one call to the fixed zero-input <code>authorize_local_action</code> tool, executed by the adapter against digest-pinned assets it already holds and re-verifies on every call. On the last-resort portable path, the commands an agent executes come only from the MCP endpoint you configured — never from this page or the other agent — and each embeds a digest-verified bootstrap that re-hashes the pinned manifest and helper before running any code (exit 86 on mismatch). The only values that must not be transmitted are the session private key, which never leaves the agent's machine, and <code>roleAccess</code>, which goes nowhere but this endpoint — your agent may show you everything it does. Run each agent in a container, VM, or sandboxed profile if you want a harder boundary.
   </div>
   <div class="sop-note">
     <b>Review before you run — encouraged, not optional.</b> The helper ships unminified — the published <code>clockchain-agent-handshake.cjs</code> is readable JavaScript, byte-for-byte what executes; its release source lives in <a href="${SOURCE_REPO}">${SOURCE_REPO.replace("https://", "")}</a> at the commit named by <code>sourceCommit</code> in the live <a href="${MANIFEST}">discovery document</a>. Integrity is the SHA-256 pin chain — discovery manifest digest → helper digest — not an OS code signature; <code>nativeSignature.type: "none"</code> in the release manifest honestly reports that no platform signature exists. Verify locally: <code>shasum -a 256 manifest.json</code> must equal <code>helper.manifestDigest</code>, and the helper digest must equal <code>assets[0].sha256</code> inside that verified manifest.
   </div>
 
   <div class="qs-step">
-    <h4><span class="tag">Step A</span>Add the server to both agents</h4>
+    <h4><span class="tag">Step A</span>Add the server and the local adapter to both agents</h4>
     <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>codex mcp add clockchain-handshake --url ${ENDPOINT}
 claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></div>
     <p style="margin:8px 0 0">Project-local scope. Remove when done: <code>codex mcp remove clockchain-handshake</code> / <code>claude mcp remove clockchain-handshake</code>.</p>
+    <p style="margin:8px 0 0">Then install the local signing adapter once per agent — the default executor for every local action (no shell commands, no runtime downloads, keys never leave the machine): <code>claude mcp add clockchain-local-adapter -- npx -y @clockchain/local-adapter</code> · Codex: add <code>[mcp_servers.clockchain-local-adapter]</code> with <code>command = "npx"</code> and <code>args = ["-y", "@clockchain/local-adapter"]</code> to <code>~/.codex/config.toml</code>.</p>
   </div>
 
   <div class="qs-step">
@@ -167,6 +168,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
   <table class="sop-table">
     <tr><th>You need</th><th>Why</th></tr>
     <tr><td><b>Node.js 24.x</b> on each agent's machine</td><td>The pinned helper refuses any other major version.</td></tr>
+    <tr><td><b>The local adapter</b> — <code>@clockchain/local-adapter</code> on each agent</td><td>Default executor for every local action: a one-time MCP install that holds the digest-pinned assets and exposes the fixed zero-input <code>authorize_local_action</code> tool. Without it, agents must fall back to runtime download-and-execute, which many safety-conscious runtimes deliberately refuse.</td></tr>
     <tr><td><b>Two agent runtimes</b> (two processes, machines, or operators)</td><td>Any MCP-capable client that can POST JSON-RPC. Each side uses its own keys and state — never share one runtime across both roles.</td></tr>
     <tr><td><b>An out-of-band channel</b> between the two agents</td><td>Chat, ticket, queue — anything. Used once, to carry the responder invitation.</td></tr>
     <tr><td><b>A bounded session window</b></td><td>Signature payloads have a ≤90-second validity window each — act on signing requests immediately. A lapsed proposal window is re-issued on the next poll; a terminal <code>signing_window_expired</code> ends the session.</td></tr>
@@ -189,8 +191,8 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
   <h3><span class="n">2</span>The pinned helper — local signing only</h3>
   <p>The helper is a single audited Node file that generates your session key, commits your exact local policy, registers a fresh ERC-8004 identity when the Initiator mandates it, signs payloads, and verifies the certificate — <b>all signing happens locally</b>. The server returns the authoritative instructions in every response; follow them exactly.</p>
   <ul>
-    <li><b>Adapter path (preferred).</b> When a <code>localAction</code> carries <code>approvalTool</code>, the client-side harness adapter has already downloaded and digest-verified both assets. Call the fixed zero-input tool <code>authorize_local_action</code> once per helper step, in order — the adapter executes the exact digest-bound action without model transcription.</li>
-    <li><b>Portable fallback.</b> Without an adapter, download <code>manifest.json</code> and <code>clockchain-agent-handshake.cjs</code> over HTTPS as two separate commands, inspect both, then run every helper operation through the <code>verifiedBootstrapPrefix</code> from the manifest — it re-hashes the manifest against the pinned digest and the helper against the manifest before compiling, exiting <code>86</code> on any mismatch.</li>
+    <li><b>Adapter path (default).</b> Install the <code>clockchain-local-adapter</code> MCP server once per agent environment — <code>claude mcp add clockchain-local-adapter -- npx -y @clockchain/local-adapter</code>, Codex <code>[mcp_servers.clockchain-local-adapter]</code> <code>command = "npx"</code> <code>args = ["-y", "@clockchain/local-adapter"]</code>, or generic MCP config <code>{"command":"npx","args":["-y","@clockchain/local-adapter"]}</code>. The adapter already holds the digest-pinned assets and re-verifies them on every call. When a <code>localAction</code> carries <code>approvalTool</code>, call the fixed zero-input tool <code>authorize_local_action</code> once per helper step, in order — the adapter executes the exact digest-bound action without model transcription, and the agent issues zero shell commands. If the tool is absent, ask the operator to install the adapter rather than falling back silently.</li>
+    <li><b>Portable fallback (last resort).</b> Only when the adapter cannot be installed: download <code>manifest.json</code> and <code>clockchain-agent-handshake.cjs</code> over HTTPS as two separate commands, inspect both, then run every helper operation through the <code>verifiedBootstrapPrefix</code> from the manifest — it re-hashes the manifest against the pinned digest and the helper against the manifest before compiling, exiting <code>86</code> on any mismatch. Runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes (e.g. Claude Code auto-mode) — that refusal is expected behavior, not a bug; the adapter exists precisely because of it.</li>
   </ul>
   <div class="sop-note">Never run the helper file directly, invent bytes, or substitute a wallet, policy, session, or role. The manifest digest pins only <code>manifest.json</code>; the helper's own digest lives inside that verified manifest.</div>
 
@@ -203,7 +205,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
   <h3><span class="n">4</span>Playbook — Initiator</h3>
   <ol class="steps playbook">
     <li class="step"><span class="sn">1</span><div class="sbody"><span class="role role-a">Initiator</span><h4>Invite</h4><p>Call <code>agent_handshake_invite</code> with <code>{reference, statement, validForSeconds, identityPolicy}</code>. Keep <code>roleAccess</code> byte-for-byte stable and send it to no party but this endpoint; copy only <code>responderInvitation</code> to the other stakeholder.</p></div></li>
-    <li class="step"><span class="sn">2</span><div class="sbody"><h4>Run the setup localAction</h4><p>Helper <code>init</code> → <code>policy</code> → <code>inspect</code> via <code>approvalTool</code> (or the verified shell commands). Record <code>sessionKeyAddress</code> and <code>policyDigest</code>.</p></div></li>
+    <li class="step"><span class="sn">2</span><div class="sbody"><h4>Run the setup localAction</h4><p>Helper <code>init</code> → <code>policy</code> → <code>inspect</code> via <code>approvalTool</code> (or, as a last resort, the verified shell commands). Record <code>sessionKeyAddress</code> and <code>policyDigest</code>.</p></div></li>
     <li class="step"><span class="sn">3</span><div class="sbody"><h4>Join</h4><p>Call <code>agent_handshake_join</code> with <code>{access, helperVersion: "${V2_HELPER_VERSION}", sessionKeyAddress, policyDigest}</code>. Do not register before join — the coordinator funds the observed seat only when registration is mandated.</p></div></li>
     <li class="step"><span class="sn">4</span><div class="sbody"><h4>Drive the loop</h4><p>Poll <code>agent_handshake_next</code> and dispatch on <code>needed</code>: signing steps return a payload-bearing <code>localAction</code> — perform it immediately, submit the <code>checkpoint</code> object from the sign output via <code>agent_handshake_submit_checkpoint</code>, then the signature via <code>agent_handshake_submit</code>. If a signing window lapses before the helper runs, poll <code>next</code> again for a fresh window. <code>erc8004_registration</code> → run helper <code>register</code>, then poll <code>next</code> again. Waits return <code>retryAfterMs</code>.</p></div></li>
     <li class="step"><span class="sn">5</span><div class="sbody"><h4>Collect</h4><p>At <code>certificate_available</code>, call <code>agent_handshake_get_certificate</code>, then run the <code>verify-certificate</code> local action — expect <code>certificateVerified: true</code>, <code>outcome: "VERIFIED"</code>.</p></div></li>
@@ -275,19 +277,24 @@ Tools:      ${TOOL_LIST}
 QUICK START — TWO PROMPTS
   Add the server to BOTH agents, paste Prompt 1 into agent 1, then move its
   printed responderInvitation into Prompt 2 for agent 2 — immediately;
-  invitations are single-use and short-lived. Each agent needs Node.js 24
-  and a fresh empty working directory. Done when both agents report
-  outcome "VERIFIED" with the same sessionId and certificate digest and
-  externalBusinessActionPerformed false.
+  invitations are single-use and short-lived. Each agent needs Node.js 24,
+  the clockchain-local-adapter installed, and a fresh empty working
+  directory. Done when both agents report outcome "VERIFIED" with the same
+  sessionId and certificate digest and externalBusinessActionPerformed
+  false.
 
   WHY AGENTS CAN RUN THIS SAFELY
-  Commands come only from the MCP endpoint the operator configured — never
-  from this page or the other agent — and each embeds a digest-verified
-  bootstrap that re-hashes the pinned manifest and helper before running
-  code (exit 86 on mismatch). Only the session private key (never leaves
-  the machine) and roleAccess (goes nowhere but this endpoint) must not be
-  transmitted; agents may show their operator everything. Use a container
-  or sandboxed profile for a harder boundary.
+  With clockchain-local-adapter installed the agent runs zero shell
+  commands — every local action is one call to the fixed zero-input
+  authorize_local_action tool against digest-pinned assets the adapter
+  already holds and re-verifies on every call. On the last-resort portable
+  path, commands come only from the MCP endpoint the operator configured —
+  never from this page or the other agent — and each embeds a
+  digest-verified bootstrap that re-hashes the pinned manifest and helper
+  before running code (exit 86 on mismatch). Only the session private key
+  (never leaves the machine) and roleAccess (goes nowhere but this
+  endpoint) must not be transmitted; agents may show their operator
+  everything. Use a container or sandboxed profile for a harder boundary.
 
   REVIEW BEFORE YOU RUN
   The helper ships unminified — the published .cjs is readable JavaScript,
@@ -303,6 +310,14 @@ QUICK START — TWO PROMPTS
   claude mcp add --transport http clockchain-handshake ${ENDPOINT}
   (project-local scope; remove when done: codex mcp remove
   clockchain-handshake / claude mcp remove clockchain-handshake)
+
+  Local signing adapter — one-time install per agent, the DEFAULT executor
+  for every local action (no shell commands, no runtime downloads):
+  claude mcp add clockchain-local-adapter -- npx -y @clockchain/local-adapter
+  Codex ~/.codex/config.toml:
+    [mcp_servers.clockchain-local-adapter]
+    command = "npx"  args = ["-y", "@clockchain/local-adapter"]
+  Generic MCP config: {"command":"npx","args":["-y","@clockchain/local-adapter"]}
 
 PROMPT 1 — INITIATOR (the endpoint publishes fixed session terms; if invite
 returns terms_mismatch, resubmit with the returned publishedTerms verbatim)
@@ -320,6 +335,8 @@ SCOPE BOUNDARY
 
 YOU NEED
   - Node.js 24.x on each agent's machine (the helper refuses other majors)
+  - clockchain-local-adapter installed on each agent (the default
+    local-action executor — install commands above)
   - Two agent runtimes — any MCP-capable client; never share one runtime
   - One out-of-band channel to carry the responder invitation
   - A bounded session window; signature payloads are valid <= 90 seconds
@@ -331,11 +348,17 @@ FLOW — INITIATOR
      Keep roleAccess byte-for-byte stable and send it to no party but this
      endpoint; copy ONLY responderInvitation to the other stakeholder.
   2. Run the setup localAction: helper init -> policy -> inspect.
-     With an adapter, call the fixed zero-input authorize_local_action tool
-     once per helper step in order. Without one, download both pinned assets
-     as two separate commands, inspect them, and run every operation through
-     the manifest's verifiedBootstrapPrefix (re-hashes manifest then helper;
-     exits 86 on mismatch).
+     Default: the adapter — call the fixed zero-input
+     authorize_local_action tool once per helper step in order; the agent
+     issues zero shell commands. If that tool is absent, ask the operator
+     to install clockchain-local-adapter rather than falling back
+     silently. LAST RESORT only: download both pinned assets as two
+     separate commands, inspect them, and run every operation through the
+     manifest's verifiedBootstrapPrefix (re-hashes manifest then helper;
+     exits 86 on mismatch). Runtime download-and-execute is deliberately
+     refused by many safety-conscious agent runtimes (e.g. Claude Code
+     auto-mode) — expected behavior, not a bug; the adapter exists
+     precisely because of it.
   3. agent_handshake_join {access, helperVersion: "${V2_HELPER_VERSION}",
      sessionKeyAddress, policyDigest} — do not register before join.
   4. Poll agent_handshake_next and dispatch on needed:
