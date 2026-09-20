@@ -16,5 +16,13 @@ mcp.clockchain.network {
 			header_up X-Forwarded-Prefix /staging
 		}
 	}
+	# ACM4 demo instance: a second MCP server pinned to the build the Clark/Clint pair
+	# (helper 2.1.6) is proven against, with its own state and invite limiter. Runs from
+	# /opt/clockchain-mcp/acm4-compose.yml on the box; production stays on the main build.
+	handle_path /acm4/* {
+		reverse_proxy mcp-acm4:8080 {
+			header_up X-Forwarded-Prefix /acm4
+		}
+	}
 	reverse_proxy mcp:8080
 }
