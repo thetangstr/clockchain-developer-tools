@@ -80,8 +80,8 @@ test("public initialization leads with the immutable local-authority boundary", 
   // them per call — never "already preloaded" files in the workspace.
   assert.ok(instructions.indexOf("ADAPTER ASSET PATH") < instructions.indexOf("PORTABLE FALLBACK"), "adapter path precedes the portable fallback");
   assert.match(instructions, /adapter asset path \(default\).*one-time install.*digest-pinned.*re-verif.*every call/is);
-  assert.ok(instructions.includes("claude mcp add clockchain-local-adapter -- npx -y @clockchain/local-adapter"));
-  assert.ok(instructions.includes('[mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@clockchain/local-adapter"]'));
+  assert.ok(instructions.includes("claude mcp add clockchain-local-adapter -- npx -y @d4d/local-adapter"));
+  assert.ok(instructions.includes('[mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@d4d/local-adapter"]'));
   assert.match(instructions, /localAction carries approvalTool.*helperStep\.approvalTool.*once per step.*zero-input.*mcp__clockchain-local-adapter__authorize_local_action.*never run helperStep\.shellCommand when approvalTool is available/is);
   assert.match(instructions, /zero Bash commands for local actions/is);
   assert.match(instructions, /ask the operator to install the adapter rather than falling back silently/is);
@@ -130,7 +130,7 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.equal(manifest.endpoint, "https://mcp.clockchain.network/handshake/mcp");
   assert.equal(manifest.helper.filename, "clockchain-agent-handshake.cjs");
   assert.equal(manifest.helper.nodeRuntimeMajor, "24");
-  assert.equal(manifest.adapter.package, "@clockchain/local-adapter");
+  assert.equal(manifest.adapter.package, "@d4d/local-adapter");
   assert.equal(manifest.adapter.tool, "mcp__clockchain-local-adapter__authorize_local_action");
   assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(pin.manifestDigest));
   assert.ok(manifest.helper.verifiedBootstrapPrefix.includes(V2_VERIFIED_HELPER_BOOTSTRAP));
