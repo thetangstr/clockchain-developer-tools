@@ -250,6 +250,27 @@ test("an invite whose clock crosses the invitation runway boundary during create
   assert.equal((await harness.stateStore.list()).length, 0);
 });
 
+test("a second invite on an already-minted session rejects retryably before minting new state", async (t) => {
+  // The first invite anchors agent_v2_invitation_created on the session's relay
+  // log; without the precheck a second invite would mint fresh state and then
+  // fail closed inside post() on the sender-key check, surfacing an opaque
+  // terminal coordination failure instead of a retryable wait-for-rotation.
+  const harness = await createDurableAcceptHarness(t);
+  const first = await harness.coordinator.invite(terms);
+  assert.ok(first.responderInvitation.length > 0);
+  assert.ok(harness.messages.some((m) => m.kind === "agent_v2_invitation_created" && m.role === "initiator"));
+
+  await assert.rejects(
+    () => harness.coordinator.invite(terms),
+    (error) => error?.name === "V2TransientCoordinatorError",
+  );
+  assert.equal(
+    harness.messages.filter((m) => m.kind === "agent_v2_invitation_created").length,
+    1,
+  );
+  assert.equal((await harness.stateStore.list()).length, 1);
+});
+
 test("an invite whose terms differ from the published host terms is rejected before minting or posting", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
