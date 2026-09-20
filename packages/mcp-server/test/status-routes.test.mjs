@@ -131,7 +131,7 @@ test("GET /status.json returns the sanitized report, unauthenticated", async () 
   }
   assert.equal(body.lastVerifiedHandshake.evidence, "fresh");
   assert.equal(body.lastVerifiedHandshake.outcome, "VERIFIED");
-  assert.equal(body.build.helperVersion, "2.1.7");
+  assert.equal(body.build.helperVersion, "2.1.8");
   // Public performance block: real aggregates, labeled since process start.
   assert.equal(body.performance.windowLabel, "since process start");
   assert.equal(typeof body.performance.http.totalRequests, "number");

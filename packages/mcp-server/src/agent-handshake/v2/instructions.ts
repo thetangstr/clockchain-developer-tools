@@ -4,12 +4,12 @@
 // drift apart, because the published release embeds the same value in every
 // surface. The SSM release pin itself stays runtime data; only its shape and
 // version gate live here.
-export const V2_HELPER_VERSION = "2.1.7";
+export const V2_HELPER_VERSION = "2.1.8";
 export const V2_HELPER_ASSET_PREFIX =
   `https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v${V2_HELPER_VERSION}/`;
 
 export type V2ReleasePin = Readonly<{
-  version: "2.1.7";
+  version: "2.1.8";
   sourceCommit: string;
   manifestDigest: string;
   allowedAssetPrefix: string;
@@ -88,7 +88,7 @@ export function buildV2Instructions(rawPin: unknown): string {
     "When agent_handshake_next returns needed: erc8004_registration, run the pinned helper operation register with the same absolute state directory used for init and policy. After it succeeds, call agent_handshake_next again with the unchanged local role access. Do not keep polling instead of performing that returned local action.",
     "Every needed or stage response is nonterminal. If it includes a localAction, perform it exactly; otherwise wait for retryAfterMs when returned, then call agent_handshake_next again with the unchanged local role access. A party_ready response includes the same explicit next action. Do not send a final response or exit until the final certificate is locally verified or Clockchain returns an explicit unrecoverable error. Never infer that the other stakeholder stopped from a waiting response.",
     "HANDSHAKE_TEMPORARILY_UNAVAILABLE with retryable: true is not a terminal protocol rejection. Wait for retryAfterMs and retry the same tool with unchanged inputs. Stop on a terminal protocol rejection with retryable: false.",
-    "The harness adapter, not the language model, creates and signs the private release checkpoint immediately before a proposal or acceptance is released. Submit that exact checkpoint with agent_handshake_submit_checkpoint before agent_handshake_submit. Never invent, edit, or ask the model to sign a checkpoint.",
+    "For proposal and acceptance steps the pinned helper's sign output carries two artifacts: signatureHex (the artifact signature) and checkpoint (the separately signed commitment checkpoint). Submit the checkpoint first: agent_handshake_submit_checkpoint with access, artifactSignatureHex set to the helper output's signatureHex, and checkpoint set to the helper output's exact checkpoint object. Then call agent_handshake_submit with the same signatureHex and unchanged policyDigest. Never invent, edit, or ask the model to sign a checkpoint.",
     "Proposal and acceptance signing windows are bounded: sign and submit promptly after a signing request arrives — do not pause between agent_handshake_next and the sign, submit_checkpoint, and submit steps. If a sign step fails after a delay, call agent_handshake_next again with the unchanged role access: a still-pending proposal is re-issued with a fresh window, while a terminal reason: signing_window_expired response means the session is over and the Initiator must start over with a new agent_handshake_invite.",
     "No browser, repository clone, plugin, general Clockchain credential, payment, or external business action is part of this workflow. Codex and Claude Code use the same eight tools.",
   ].join("\n\n");

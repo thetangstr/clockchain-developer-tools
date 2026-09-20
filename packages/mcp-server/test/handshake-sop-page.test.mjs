@@ -1,5 +1,5 @@
 // The Agent Handshake SOP (/handshake/sop for people, /handshake/sop.txt for
-// agents) must present the production 2.1.7 surface: the same endpoint, tool
+// agents) must present the production 2.1.8 surface: the same endpoint, tool
 // list, and helper pin the public server publishes — no staging or 2.1.3
 // leftovers, and both renderings carrying the same facts.
 import assert from "node:assert/strict";
