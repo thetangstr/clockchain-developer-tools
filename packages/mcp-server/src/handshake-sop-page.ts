@@ -222,7 +222,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
   <h3><span class="n">6</span>Timing, limits, and errors</h3>
   <table class="sop-table">
     <tr><th>Constraint</th><th>Value</th><th>What it means</th></tr>
-    <tr><td>Invitation lifetime</td><td>single-use · own <code>invitationExpiresAtMs</code></td><td>Read <code>invitationExpiresAtMs</code> from the invite response: the coordinator refuses to mint a new invitation when the window has under 30 seconds of runway remaining, and the responder must claim before <code>invitationExpiresAtMs</code>. <code>sessionDeadlineMs</code> bounds the session overall; a consumed or expired code is terminal.</td></tr>
+    <tr><td>Invitation lifetime</td><td>single-use · own <code>invitationExpiresAtMs</code></td><td>Read <code>invitationExpiresAtMs</code> from the invite response: each minted invitation carries a full claim window measured from mint (never shrunken by earlier retries), bounded by <code>sessionDeadlineMs</code>. Minting itself only happens while the session's invitation window retains at least 30 seconds of runway. The responder must claim before <code>invitationExpiresAtMs</code>; an expired claim fails with <code>reason: invitation_expired</code>, a consumed code is terminal.</td></tr>
     <tr><td>Signature validity</td><td>≤ 90 seconds</td><td>Perform each signing localAction the moment it is returned. A lapsed <i>proposal</i> window is re-issued on the next <code>agent_handshake_next</code> poll while the session lives; an acceptance window is bound to the submitted proposal's expiry and cannot extend — once it lapses the session is terminal (<code>reason: signing_window_expired</code>).</td></tr>
     <tr><td>Rate limits</td><td>5 invites/hr · 120 calls/min per IP</td><td>429 carries <code>rate_limited</code>; poll on <code>retryAfterMs</code>, don't burst.</td></tr>
     <tr><td><code>HANDSHAKE_TEMPORARILY_UNAVAILABLE</code></td><td><code>retryable: true</code></td><td>Transient — wait <code>retryAfterMs</code> and retry the same call with the same <code>access</code>.</td></tr>
@@ -368,9 +368,11 @@ PASS CRITERIA
 LIMITS AND ERRORS
   5 invites/hour, 120 calls/minute per IP. Signature payloads <= 90 s.
   The invitation is single-use with its own invitationExpiresAtMs — read it
-  from the invite response. Minting is refused when the window has under 30
-  seconds of runway remaining; the responder must claim before
-  invitationExpiresAtMs. sessionDeadlineMs bounds the overall session.
+  from the invite response. Each minted invitation carries a full claim window
+  measured from mint, bounded by sessionDeadlineMs; minting itself is refused
+  when the session's invitation window has under 30 seconds of runway
+  remaining. The responder must claim before invitationExpiresAtMs; an expired
+  claim fails with reason invitation_expired.
   HANDSHAKE_TEMPORARILY_UNAVAILABLE (retryable: true) -> wait retryAfterMs,
     retry the same call unchanged.
   HANDSHAKE_UNAVAILABLE (retryable: false) -> terminal; start a new session.

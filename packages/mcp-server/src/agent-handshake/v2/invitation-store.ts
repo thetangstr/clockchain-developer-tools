@@ -84,8 +84,16 @@ export class V2InvitationWindowUnavailableError extends Error {
   }
 }
 
+export class V2InvitationExpiredError extends V2InvitationError {
+  constructor() {
+    super();
+    this.name = "V2InvitationExpiredError";
+  }
+}
+
 function unavailable(): never { throw new V2InvitationError(); }
 function windowUnavailable(): never { throw new V2InvitationWindowUnavailableError(); }
+function expired(): never { throw new V2InvitationExpiredError(); }
 function digest(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 function hmacDigest(secret: Buffer, value: string): string { return createHmac("sha256", secret).update(value, "utf8").digest("hex"); }
 
@@ -478,6 +486,11 @@ export function createV2InvitationService(options: {
       if (input.statementDigest !== undefined && input.statementDigest !== stored.statementDigest) unavailable();
       if (input.expMs !== undefined && String(input.expMs) !== stored.expMs) unavailable();
       const now = nowMs();
+      // A fresh accept past the invitation's own expiry is a distinct,
+      // diagnosable failure — not a malformed or tampered token. Keyed claims
+      // already in flight still resume past expiry via the verificationNow
+      // grace below.
+      if (stored.claim === null && now >= Number(stored.expMs)) expired();
       const existingClaim = stored.claim?.phase === "legacy_terminal" ? stored.claim : stored.claim;
       const verificationNow = existingClaim && existingClaim.phase !== "legacy_terminal" && now >= Number(stored.expMs)
         ? Number(stored.expMs) - 1

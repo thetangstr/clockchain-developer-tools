@@ -45,6 +45,7 @@ const TERMINAL_ERROR_NAMES = new Set([
   "AgentHandshakeV2ValidationError",
   "V2CoordinatorError",
   "V2InvitationError",
+  "V2InvitationExpiredError",
   "V2RoleAccessError",
 ]);
 const RETRYABLE_ERROR_NAMES = new Set([
@@ -65,6 +66,7 @@ const PUBLIC_ERROR_REASONS: Readonly<Record<string, string>> = Object.freeze({
   V2TermsMismatchError: "terms_mismatch",
   V2SigningWindowExpiredError: "signing_window_expired",
   V2RoleAccessError: "role_access_invalid",
+  V2InvitationExpiredError: "invitation_expired",
   V2InvitationError: "invitation_invalid",
   V2CommitmentCheckpointError: "checkpoint_invalid",
   AgentHandshakeV2ValidationError: "request_invalid",
