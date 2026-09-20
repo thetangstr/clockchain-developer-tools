@@ -130,10 +130,15 @@ export class V2SigningWindowExpiredError extends V2CoordinatorError {
   constructor() { super(); this.name = "V2SigningWindowExpiredError"; }
 }
 export class V2TransientCoordinatorError extends Error {
-  constructor() { super("Agent handshake coordination is waiting for durable infrastructure state."); this.name = "V2TransientCoordinatorError"; }
+  readonly retryAfterMs?: number;
+  constructor(retryAfterMs?: number) {
+    super("Agent handshake coordination is waiting for durable infrastructure state.");
+    this.name = "V2TransientCoordinatorError";
+    this.retryAfterMs = retryAfterMs;
+  }
 }
 function fail(): never { throw new V2CoordinatorError(); }
-function transient(): never { throw new V2TransientCoordinatorError(); }
+function transient(retryAfterMs?: number): never { throw new V2TransientCoordinatorError(retryAfterMs); }
 function windowExpired(): never { throw new V2SigningWindowExpiredError(); }
 
 // The helper requires proposal windows to be exactly validForSeconds wide and
@@ -776,7 +781,12 @@ export function createV2Coordinator(options: {
       // Reject before minting any state unless the window retains enough runway for the Responder's claim
       // to land; an already-expired or near-expiry "current" session rolls over underneath the invite, so the
       // caller must retry into the fresh session rather than hold an invitation nobody will observe.
-      if (now() + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) transient();
+      // Both rotation-gated rejects below carry the current session's deadline
+      // as the retry hint (capped): retrying before rotation can only land on
+      // this same unusable session.
+      const inviteNow = now();
+      const rotationRetryMs = Math.min(Math.max(Number(found.sessionDeadlineMs) - inviteNow + 2_000, 5_000), 120_000);
+      if (inviteNow + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) transient(rotationRetryMs);
       // One invitation per session: the first invite anchors an
       // agent_v2_invitation_created message on the session's relay log, and a
       // second invite would fail closed inside post() on the sender-key check.
@@ -785,7 +795,7 @@ export function createV2Coordinator(options: {
       // check above — instead of a terminal coordination failure.
       const sessionTaken = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
         .some((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
-      if (sessionTaken) transient();
+      if (sessionTaken) transient(rotationRetryMs);
       // The minted invitation gets its own full-width claim window measured from
       // mint, not the remainder of the session's invitation window — otherwise a
       // terms_mismatch retry or any pre-mint delay silently shrinks the
@@ -809,7 +819,7 @@ export function createV2Coordinator(options: {
           commitGuard: () => now() + INVITATION_MIN_RUNWAY_MS < Number(found.invitationExpiresAtMs),
         });
       } catch (error) {
-        if (error instanceof V2InvitationWindowUnavailableError) transient();
+        if (error instanceof V2InvitationWindowUnavailableError) transient(rotationRetryMs);
         throw error;
       }
       const createdAtMs = now();

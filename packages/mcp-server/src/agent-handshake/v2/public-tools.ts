@@ -58,6 +58,12 @@ const RETRYABLE_ERROR_NAMES = new Set([
   // fatal abort that pins the session. Pairs with the per-host breaker in packages/core/resilience.ts.
   "CircuitOpenError",
 ]);
+export function isV2RetryableToolError(error: unknown): boolean {
+  const name = (error as Error)?.name;
+  return RETRYABLE_ERROR_NAMES.has(name) &&
+    !TERMINAL_ERROR_NAMES.has(name) &&
+    (error as Error)?.message !== "rate_limited";
+}
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 // Coarse public reason codes for terminal failures — enough for an honest
 // caller to self-diagnose without leaking internals. Unmapped errors stay
@@ -191,12 +197,20 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
           tool: definition.name,
           errorName,
         }));
-        const retryable = RETRYABLE_ERROR_NAMES.has((error as Error)?.name) &&
-          !TERMINAL_ERROR_NAMES.has((error as Error)?.name) &&
-          (error as Error)?.message !== "rate_limited";
+        if (errorName === "V2RateLimitedError") {
+          const reset = Number((error as { retryAfterMs?: unknown }).retryAfterMs);
+          const body = {
+            error: "rate_limited",
+            retryable: true,
+            retryAfterMs: Number.isSafeInteger(reset) && reset > 0 ? reset : 60_000,
+          };
+          return { isError: true, content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
+        }
+        const retryable = isV2RetryableToolError(error);
+        const hinted = Number((error as { retryAfterMs?: unknown })?.retryAfterMs);
         const reason = PUBLIC_ERROR_REASONS[errorName];
         const body: Record<string, unknown> = retryable
-          ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 }
+          ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: Number.isSafeInteger(hinted) && hinted > 0 ? hinted : 5000 }
           : { error: "HANDSHAKE_UNAVAILABLE", retryable: false, ...(reason ? { reason } : {}) };
         // terms_mismatch additionally returns the host-published terms — public
         // discovery data — so the caller can resubmit inside the same window.

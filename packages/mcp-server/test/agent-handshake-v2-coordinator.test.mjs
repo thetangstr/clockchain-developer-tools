@@ -262,7 +262,7 @@ test("a second invite on an already-minted session rejects retryably before mint
 
   await assert.rejects(
     () => harness.coordinator.invite(terms),
-    (error) => error?.name === "V2TransientCoordinatorError",
+    (error) => error?.name === "V2TransientCoordinatorError" && error.retryAfterMs === 120_000,
   );
   assert.equal(
     harness.messages.filter((m) => m.kind === "agent_v2_invitation_created").length,
