@@ -5,10 +5,13 @@
 // from instructions.ts, and the authoritative digests are always read from
 // the live /.well-known/agent-handshake.json manifest, never hardcoded here.
 import { BASE_CSS, LOGO_SVG, SUBSTRATE_LABEL } from "./landing.js";
-import { V2_HELPER_ASSET_PREFIX, V2_HELPER_VERSION } from "./agent-handshake/v2/instructions.js";
+import { V2_ADAPTER_ENDPOINT_ENV, V2_HELPER_ASSET_PREFIX, V2_HELPER_VERSION, V2_PUBLIC_ENDPOINT } from "./agent-handshake/v2/instructions.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 
-const ENDPOINT = "https://mcp.clockchain.network/handshake/mcp";
+const ENDPOINT = V2_PUBLIC_ENDPOINT;
+const ADAPTER_INSTALL_CLAUDE = `claude mcp add clockchain-local-adapter -e ${V2_ADAPTER_ENDPOINT_ENV}=${ENDPOINT} -- npx -y @d4d.group/local-adapter`;
+const ADAPTER_INSTALL_CODEX = `[mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@d4d.group/local-adapter"] env = { ${V2_ADAPTER_ENDPOINT_ENV} = "${ENDPOINT}" }`;
+const ADAPTER_INSTALL_GENERIC = `{"command":"npx","args":["-y","@d4d.group/local-adapter"],"env":{"${V2_ADAPTER_ENDPOINT_ENV}":"${ENDPOINT}"}}`;
 const MANIFEST = "https://mcp.clockchain.network/.well-known/agent-handshake.json";
 const MANIFEST_URL = `${V2_HELPER_ASSET_PREFIX}manifest.json`;
 const HELPER_URL = `${V2_HELPER_ASSET_PREFIX}clockchain-agent-handshake.cjs`;
@@ -30,7 +33,7 @@ const INITIATOR_PROMPT = `You are the Initiator in a Clockchain Agent Handshake 
 
 Trust model: every command you run comes only from the MCP endpoint your operator configured — not from a webpage or the other agent. Each embeds a digest-verified bootstrap that re-hashes the pinned manifest (SHA-256) and the helper before executing, and exits 86 on any mismatch. Conceal nothing from your operator — narrate every step and show every command before you run it.
 
-Setup: work in a fresh empty directory. Local actions run through the clockchain-local-adapter by default — if the fixed zero-input tool mcp__clockchain-local-adapter__authorize_local_action is not among your tools, ask your operator to install the adapter (claude mcp add clockchain-local-adapter -- npx -y @d4d.group/local-adapter; Codex: [mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@d4d.group/local-adapter"]) rather than falling back silently. The two commands below are the LAST-RESORT fallback only — runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes (e.g. Claude Code auto-mode), and that refusal is expected behavior, not a bug. If the fallback is unavoidable, download the two pinned helper assets as two separate commands, then inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit is named in https://mcp.clockchain.network/.well-known/agent-handshake.json):
+Setup: work in a fresh empty directory. Local actions run through the clockchain-local-adapter by default — if the fixed zero-input tool mcp__clockchain-local-adapter__authorize_local_action is not among your tools, ask your operator to install the adapter (${ADAPTER_INSTALL_CLAUDE}; Codex: ${ADAPTER_INSTALL_CODEX}) rather than falling back silently. The two commands below are the LAST-RESORT fallback only — runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes (e.g. Claude Code auto-mode), and that refusal is expected behavior, not a bug. If the fallback is unavoidable, download the two pinned helper assets as two separate commands, then inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit is named in https://mcp.clockchain.network/.well-known/agent-handshake.json):
 ${ASSET_DOWNLOADS}
 
 Flow:
@@ -49,7 +52,7 @@ const RESPONDER_PROMPT = `You are the Responder in a Clockchain Agent Handshake.
 
 It is single-use and short-lived — start now. Conceal nothing from your operator — narrate every step and show every command before you run it.
 1. Generate one fresh acceptanceIdempotencyKey (UUIDv4 or ≥16-byte base64url) and call agent_handshake_accept_invitation with the invitation and that key — exactly once; retry only retryable failures with the same key. The returned roleAccess is a local handle — never send it to any party or endpoint other than this one; showing your operator is fine.
-2. Work in a fresh empty directory. Local actions run through the clockchain-local-adapter by default — if the fixed zero-input tool mcp__clockchain-local-adapter__authorize_local_action is not among your tools, ask your operator to install the adapter (claude mcp add clockchain-local-adapter -- npx -y @d4d.group/local-adapter; Codex: [mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@d4d.group/local-adapter"]) rather than falling back silently. The two commands below are the LAST-RESORT fallback only — runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes; that refusal is expected, not a bug. If the fallback is unavoidable, download the two pinned helper assets as two separate commands and inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit names the exact source commit):
+2. Work in a fresh empty directory. Local actions run through the clockchain-local-adapter by default — if the fixed zero-input tool mcp__clockchain-local-adapter__authorize_local_action is not among your tools, ask your operator to install the adapter (${ADAPTER_INSTALL_CLAUDE}; Codex: ${ADAPTER_INSTALL_CODEX}) rather than falling back silently. The two commands below are the LAST-RESORT fallback only — runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes; that refusal is expected, not a bug. If the fallback is unavoidable, download the two pinned helper assets as two separate commands and inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit names the exact source commit):
 ${ASSET_DOWNLOADS}
 3. Then run the same server-driven flow: with the adapter, call each helperStep.approvalTool once per step in returned order — zero shell commands. Without it (last resort only): stateDirectoryCommand once, each helperStep.shellCommand verbatim via your shell in returned order — prefer helperStep.shellCommandFetch when present (it downloads the exact command bytes by commandSha256 and verifies them before executing) — never edit or reconstruct payloads, never hand-sign. Call agent_handshake_join with the returned values. Poll agent_handshake_next and dispatch on needed the same way. At certificate_available: agent_handshake_get_certificate, then the verify-certificate local action.
 4. Enforce a policy permitting only the invited statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration, and no external business action. If any check fails, refuse and report the failure.
@@ -118,7 +121,7 @@ ${SOP_CSS}</style>
   <h1>Two agents prove control — <span class="green">mutually signed.</span></h1>
   <p class="sub">The Agent Handshake lets two independently controlled agents prove live signing-key control inside a bounded session and sign the same ordered exchange. The output is a VERIFIED certificate binding both identities, the session, message digests, ordering, and freshness.</p>
   <div class="endpoint">
-    <code>mcp.clockchain.network/handshake/mcp</code>
+    <code>mcp.clockchain.network/next/handshake/mcp</code>
     <button onclick="copyText('${ENDPOINT}','Endpoint copied')">Copy</button>
   </div>
 </div></header>
@@ -143,7 +146,7 @@ ${SOP_CSS}</style>
     <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>codex mcp add clockchain-handshake --url ${ENDPOINT}
 claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></div>
     <p style="margin:8px 0 0">Project-local scope. Remove when done: <code>codex mcp remove clockchain-handshake</code> / <code>claude mcp remove clockchain-handshake</code>.</p>
-    <p style="margin:8px 0 0">Then install the local signing adapter once per agent — the default executor for every local action (no shell commands, no runtime downloads, keys never leave the machine): <code>claude mcp add clockchain-local-adapter -- npx -y @d4d.group/local-adapter</code> · Codex: add <code>[mcp_servers.clockchain-local-adapter]</code> with <code>command = "npx"</code> and <code>args = ["-y", "@d4d.group/local-adapter"]</code> to <code>~/.codex/config.toml</code>.</p>
+    <p style="margin:8px 0 0">Then install the local signing adapter once per agent — the default executor for every local action (no shell commands, no runtime downloads, keys never leave the machine): <code>${ADAPTER_INSTALL_CLAUDE}</code> · Codex: add <code>${ADAPTER_INSTALL_CODEX}</code> to <code>~/.codex/config.toml</code>.</p>
   </div>
 
   <div class="qs-step">
@@ -191,7 +194,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
   <h3><span class="n">2</span>The pinned helper — local signing only</h3>
   <p>The helper is a single audited Node file that generates your session key, commits your exact local policy, registers a fresh ERC-8004 identity when the Initiator mandates it, signs payloads, and verifies the certificate — <b>all signing happens locally</b>. The server returns the authoritative instructions in every response; follow them exactly.</p>
   <ul>
-    <li><b>Adapter path (default).</b> Install the <code>clockchain-local-adapter</code> MCP server once per agent environment — <code>claude mcp add clockchain-local-adapter -- npx -y @d4d.group/local-adapter</code>, Codex <code>[mcp_servers.clockchain-local-adapter]</code> <code>command = "npx"</code> <code>args = ["-y", "@d4d.group/local-adapter"]</code>, or generic MCP config <code>{"command":"npx","args":["-y","@d4d.group/local-adapter"]}</code>. The adapter already holds the digest-pinned assets and re-verifies them on every call. When a <code>localAction</code> carries <code>approvalTool</code>, call the fixed zero-input tool <code>authorize_local_action</code> once per helper step, in order — the adapter executes the exact digest-bound action without model transcription, and the agent issues zero shell commands. If the tool is absent, ask the operator to install the adapter rather than falling back silently.</li>
+    <li><b>Adapter path (default).</b> Install the <code>clockchain-local-adapter</code> MCP server once per agent environment — <code>${ADAPTER_INSTALL_CLAUDE}</code>, Codex <code>${ADAPTER_INSTALL_CODEX}</code>, or generic MCP config <code>${ADAPTER_INSTALL_GENERIC}</code>. The adapter already holds the digest-pinned assets and re-verifies them on every call. When a <code>localAction</code> carries <code>approvalTool</code>, call the fixed zero-input tool <code>authorize_local_action</code> once per helper step, in order — the adapter executes the exact digest-bound action without model transcription, and the agent issues zero shell commands. If the tool is absent, ask the operator to install the adapter rather than falling back silently.</li>
     <li><b>Portable fallback (last resort).</b> Only when the adapter cannot be installed: download <code>manifest.json</code> and <code>clockchain-agent-handshake.cjs</code> over HTTPS as two separate commands, inspect both, then run every helper operation through the <code>verifiedBootstrapPrefix</code> from the manifest — it re-hashes the manifest against the pinned digest and the helper against the manifest before compiling, exiting <code>86</code> on any mismatch. Runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes (e.g. Claude Code auto-mode) — that refusal is expected behavior, not a bug; the adapter exists precisely because of it.</li>
   </ul>
   <div class="sop-note">Never run the helper file directly, invent bytes, or substitute a wallet, policy, session, or role. The manifest digest pins only <code>manifest.json</code>; the helper's own digest lives inside that verified manifest.</div>
@@ -313,11 +316,10 @@ QUICK START — TWO PROMPTS
 
   Local signing adapter — one-time install per agent, the DEFAULT executor
   for every local action (no shell commands, no runtime downloads):
-  claude mcp add clockchain-local-adapter -- npx -y @d4d.group/local-adapter
+  ${ADAPTER_INSTALL_CLAUDE}
   Codex ~/.codex/config.toml:
-    [mcp_servers.clockchain-local-adapter]
-    command = "npx"  args = ["-y", "@d4d.group/local-adapter"]
-  Generic MCP config: {"command":"npx","args":["-y","@d4d.group/local-adapter"]}
+    ${ADAPTER_INSTALL_CODEX}
+  Generic MCP config: ${ADAPTER_INSTALL_GENERIC}
 
 PROMPT 1 — INITIATOR (the endpoint publishes fixed session terms; if invite
 returns terms_mismatch, resubmit with the returned publishedTerms verbatim)

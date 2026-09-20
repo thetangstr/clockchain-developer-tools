@@ -10,7 +10,7 @@ import { INSTALL_TXT, MCP_MANIFEST, LANDING_HTML } from "../dist/landing.js";
 import { V2_HELPER_VERSION, V2_HELPER_ASSET_PREFIX } from "../dist/agent-handshake/v2/instructions.js";
 import { V2_PUBLIC_TOOL_NAMES } from "../dist/agent-handshake/v2/public-tools.js";
 
-const ENDPOINT = "https://mcp.clockchain.network/handshake/mcp";
+const ENDPOINT = "https://mcp.clockchain.network/next/handshake/mcp";
 const MANIFEST = "https://mcp.clockchain.network/.well-known/agent-handshake.json";
 
 test("the SOP names the production endpoint, manifest, and helper release in both renderings", () => {

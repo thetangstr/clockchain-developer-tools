@@ -87,7 +87,10 @@ code() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"deploy-box","version":"0"}}}'
 H=$(code "$BASE_URL/health"); echo "health $H"; [[ "$H" == 200 ]]
 M=$(code "$BASE_URL/.well-known/agent-handshake.json"); echo "handshake manifest $M"; [[ "$M" == 200 ]]
-HS=$(code -X POST "$BASE_URL/handshake/mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$INIT"); echo "handshake initialize (no creds) $HS"; [[ "$HS" == 200 ]]
+# While the ACM4 demo pin is live, /handshake/mcp serves the frozen 2.1.6
+# instance and the deployed build's handshake surface is /next/handshake/mcp.
+HS=$(code -X POST "$BASE_URL/next/handshake/mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$INIT"); echo "handshake initialize /next (no creds) $HS"; [[ "$HS" == 200 ]]
+PIN=$(code -X POST "$BASE_URL/handshake/mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$INIT"); echo "handshake initialize pinned demo (no creds) $PIN (expect 200 while the ACM4 pin is live)"
 A=$(code -X POST "$BASE_URL/mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$INIT"); echo "mcp without creds $A (expect 401)"; [[ "$A" == 401 ]]
 
 if [[ -n "${CC_MCP_TOKEN:-}" ]]; then

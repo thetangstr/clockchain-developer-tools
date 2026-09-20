@@ -64,7 +64,7 @@ Endpoint:   https://mcp.clockchain.network/mcp
 Transport:  streamable HTTP
 
 TWO-PERSON STAKEHOLDER HANDSHAKE — separate public surface:
-  Endpoint: https://mcp.clockchain.network/handshake/mcp
+  Endpoint: https://mcp.clockchain.network/next/handshake/mcp
   Manifest: https://mcp.clockchain.network/.well-known/agent-handshake.json
   Operator SOP: https://mcp.clockchain.network/handshake/sop.txt
   This surface has exactly eight handshake tools. It uses single-use invitations
@@ -177,7 +177,7 @@ export const MCP_MANIFEST = {
   ],
   instructions: "https://mcp.clockchain.network/llms.txt",
   agentHandshake: {
-    endpoint: "https://mcp.clockchain.network/handshake/mcp",
+    endpoint: "https://mcp.clockchain.network/next/handshake/mcp",
     manifest: "https://mcp.clockchain.network/.well-known/agent-handshake.json",
     sop: "https://mcp.clockchain.network/handshake/sop",
     sopText: "https://mcp.clockchain.network/handshake/sop.txt",
@@ -434,7 +434,7 @@ ${BASE_CSS}</style>
 <section id="agent-handshake"><div class="wrap">
   <div class="head"><span class="eyebrow">Agent Handshake</span><h2>Two agents prove control — mutually signed</h2>
   <p>A dedicated public surface for the two-person stakeholder handshake: single-use invitations, role-scoped capabilities, and a pinned local helper that does all signing on each agent's own machine — the server never sees a private key. The result is a VERIFIED certificate both sides can hold up to anyone.</p></div>
-  <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="agentHandshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/handshake/mcp</code></pre></div>
+  <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="agentHandshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/next/handshake/mcp</code></pre></div>
   <p class="hint">Exactly eight tools · protocol clockchain.agent-handshake/v2 · pinned helper, digest-verified at every step. <a href="/handshake/sop" style="color:var(--green);font-weight:600">Read the operator SOP →</a></p>
 </div></section>
 
