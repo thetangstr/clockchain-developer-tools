@@ -205,7 +205,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
     <li class="step"><span class="sn">1</span><div class="sbody"><span class="role role-a">Initiator</span><h4>Invite</h4><p>Call <code>agent_handshake_invite</code> with <code>{reference, statement, validForSeconds, identityPolicy}</code>. Keep <code>roleAccess</code> byte-for-byte stable and send it to no party but this endpoint; copy only <code>responderInvitation</code> to the other stakeholder.</p></div></li>
     <li class="step"><span class="sn">2</span><div class="sbody"><h4>Run the setup localAction</h4><p>Helper <code>init</code> → <code>policy</code> → <code>inspect</code> via <code>approvalTool</code> (or the verified shell commands). Record <code>sessionKeyAddress</code> and <code>policyDigest</code>.</p></div></li>
     <li class="step"><span class="sn">3</span><div class="sbody"><h4>Join</h4><p>Call <code>agent_handshake_join</code> with <code>{access, helperVersion: "${V2_HELPER_VERSION}", sessionKeyAddress, policyDigest}</code>. Do not register before join — the coordinator funds the observed seat only when registration is mandated.</p></div></li>
-    <li class="step"><span class="sn">4</span><div class="sbody"><h4>Drive the loop</h4><p>Poll <code>agent_handshake_next</code> and dispatch on <code>needed</code>: signing steps return a payload-bearing <code>localAction</code> — perform it immediately, submit the private checkpoint via <code>agent_handshake_submit_checkpoint</code>, then the signature via <code>agent_handshake_submit</code>. If a signing window lapses before the helper runs, poll <code>next</code> again for a fresh window. <code>erc8004_registration</code> → run helper <code>register</code>, then poll <code>next</code> again. Waits return <code>retryAfterMs</code>.</p></div></li>
+    <li class="step"><span class="sn">4</span><div class="sbody"><h4>Drive the loop</h4><p>Poll <code>agent_handshake_next</code> and dispatch on <code>needed</code>: signing steps return a payload-bearing <code>localAction</code> — perform it immediately, submit the <code>checkpoint</code> object from the sign output via <code>agent_handshake_submit_checkpoint</code>, then the signature via <code>agent_handshake_submit</code>. If a signing window lapses before the helper runs, poll <code>next</code> again for a fresh window. <code>erc8004_registration</code> → run helper <code>register</code>, then poll <code>next</code> again. Waits return <code>retryAfterMs</code>.</p></div></li>
     <li class="step"><span class="sn">5</span><div class="sbody"><h4>Collect</h4><p>At <code>certificate_available</code>, call <code>agent_handshake_get_certificate</code>, then run the <code>verify-certificate</code> local action — expect <code>certificateVerified: true</code>, <code>outcome: "VERIFIED"</code>.</p></div></li>
   </ol>
 
@@ -339,8 +339,11 @@ FLOW — INITIATOR
   3. agent_handshake_join {access, helperVersion: "${V2_HELPER_VERSION}",
      sessionKeyAddress, policyDigest} — do not register before join.
   4. Poll agent_handshake_next and dispatch on needed:
-       signing step -> perform localAction immediately, then
-         agent_handshake_submit_checkpoint, then agent_handshake_submit
+       signing step -> perform localAction immediately; for proposal and
+         acceptance the sign output carries signatureHex and checkpoint —
+         call agent_handshake_submit_checkpoint {access,
+         artifactSignatureHex: signatureHex, checkpoint}, then
+         agent_handshake_submit {access, policyDigest, signatureHex}
          (window lapsed before signing? poll next again for a fresh one);
        erc8004_registration -> helper register, then poll next again;
        wait/stage -> sleep retryAfterMs, poll again.

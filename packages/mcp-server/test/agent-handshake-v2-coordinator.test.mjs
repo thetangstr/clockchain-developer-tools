@@ -9,6 +9,7 @@ import { readV2RoleAccessPayload } from "../dist/agent-handshake/v2/access.js";
 import { generateRelayKeyPair } from "../dist/handshake/protocol.js";
 import * as v2CoordinatorModule from "../dist/agent-handshake/v2/coordinator.js";
 import { v2CanonicalRecord } from "../dist/agent-handshake/v2/protocol.js";
+import { commitmentCheckpointDigest } from "../dist/agent-handshake/v2/commitment-checkpoint.js";
 
 const { createV2Coordinator } = v2CoordinatorModule;
 
@@ -783,7 +784,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     assert.deepEqual(await coordinator.status({ access: accesses[role] }), joinRequired);
     assert.deepEqual(await coordinator.next({ access: accesses[role] }), joinRequired);
     const localPolicy = policy(role);
-    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.7", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
+    const joined = await coordinator.join({ access: accesses[role], helperVersion: "2.1.8", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
     const identityRequest = compactPayloadFrom(joined, "identity_claim");
     assert.equal(identityRequest.descriptorEnvelope, null);
     assert.equal(identityRequest.policyDigest, v2CanonicalRecord(localPolicy).digest);
@@ -964,7 +965,7 @@ test("join rejects a stale helper version before access authorization and accept
       `helperVersion ${JSON.stringify(stale)} is rejected`,
     );
   }
-  const joined = await coordinator.join({ ...joinInput, helperVersion: "2.1.7" });
+  const joined = await coordinator.join({ ...joinInput, helperVersion: "2.1.8" });
   const identityRequest = compactPayloadFrom(joined, "identity_claim");
   assert.equal(identityRequest.policyDigest, joinInput.policyDigest);
 });
@@ -1004,7 +1005,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
   const digest = v2CanonicalRecord(localPolicy).digest;
   await coordinator.join({
     access: invited.initiatorAccess,
-    helperVersion: "2.1.7",
+    helperVersion: "2.1.8",
     sessionKeyAddress: presentedAddress,
     policyDigest: digest,
   });
@@ -1108,7 +1109,7 @@ async function createBoundedWaitHarness(overrides = {}) {
     fund: (role) => messages.push({ seq: String(messages.length + 1), kind: "agent_v2_funding_record", role: "host", body: { role, address: addresses[role] }, sessionId }),
     join: async (role) => {
       const localPolicy = policy(role);
-      await coordinator.join({ access: harness.accesses[role], helperVersion: "2.1.7", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
+      await coordinator.join({ access: harness.accesses[role], helperVersion: "2.1.8", sessionKeyAddress: addresses[role], policyDigest: v2CanonicalRecord(localPolicy).digest });
       await coordinator.submit({ access: harness.accesses[role], policyDigest: v2CanonicalRecord(localPolicy).digest, signatureHex: `0x${"1".repeat(128)}${role === "initiator" ? "1b" : "1c"}` });
     },
     messageCalls,
@@ -1146,6 +1147,7 @@ test("agent_handshake_next bridges counterpart and proposal arrival to sign_acce
   harness.fund("initiator");
   harness.fund("responder");
   assert.equal((await harness.coordinator.next({ access: harness.accesses.responder })).stage, "party_ready");
+  let expectedProposalCheckpoint = null;
   harness.onWaitPoll = async ({ poll }) => {
     if (poll === 1) {
       assert.equal((await harness.coordinator.next({ access: harness.accesses.initiator })).stage, "party_ready");
@@ -1159,11 +1161,31 @@ test("agent_handshake_next bridges counterpart and proposal arrival to sign_acce
       schema: "clockchain.agent-handshake-proposal-envelope/v2",
       signature: { address: harness.addresses.initiator, algorithm: "eip191", value: `0x${"2".repeat(128)}1b` },
     };
-    harness.messages.push({ seq: String(harness.messages.length + 1), kind: "agent_v2_proposal", role: "initiator", body: { proposalEnvelope }, sessionId });
+    // A proposal envelope can only exist once its commitment checkpoint was
+    // submitted, so the relay carries both — the acceptance signing request
+    // links to the checkpoint's digest.
+    const proposalCheckpoint = {
+      schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: "1",
+      protocol: "clockchain.agent-handshake/v2", sessionId, role: "initiator", artifactType: "proposal",
+      artifactDigest: v2CanonicalRecord(proposalEnvelope).digest, sequence: "1", previousCheckpointDigest: null,
+      issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: harness.addresses.initiator,
+      signature: { address: harness.addresses.initiator, algorithm: "eip191", value: `0x${"6".repeat(128)}1b` },
+    };
+    harness.messages.push(
+      { seq: String(harness.messages.length + 1), kind: "agent_v2_commitment_checkpoint", role: "initiator", body: { checkpoint: proposalCheckpoint }, sessionId },
+      { seq: String(harness.messages.length + 2), kind: "agent_v2_proposal", role: "initiator", body: { proposalEnvelope }, sessionId },
+    );
+    expectedProposalCheckpoint = proposalCheckpoint;
   };
   const acceptance = await harness.coordinator.next({ access: harness.accesses.responder, waitMs: 10_000 });
   assert.equal(acceptance.stage, "sign_acceptance");
   assert.equal(acceptance.localAction.operation, "sign");
+  const acceptanceRequest = compactPayloadFrom(acceptance, "acceptance");
+  assert.equal(acceptanceRequest.previousCheckpointDigest, commitmentCheckpointDigest(expectedProposalCheckpoint));
+  assert.equal(
+    acceptance.localAction.afterSuccess,
+    "call_agent_handshake_submit_checkpoint_with_helper_output_checkpoint_then_agent_handshake_submit_with_signatureHex_and_unchanged_policy_digest",
+  );
   assert.deepEqual(harness.waitPolls().map((poll) => poll.waitMs), [2000, 2000]);
 });
 

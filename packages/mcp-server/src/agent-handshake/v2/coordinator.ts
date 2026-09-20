@@ -273,6 +273,13 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
     ? current.descriptorEnvelope
     : null;
   if (operation === "evidence" && !descriptorEnvelope) fail();
+  // The helper's sign step emits the commitment checkpoint alongside the
+  // artifact signature so portable clients can satisfy submit_checkpoint
+  // without a local adapter. Acceptance checkpoints link to the proposal
+  // checkpoint, which must already exist by the time an acceptance is minted.
+  const previousCheckpointDigest = operation === "acceptance"
+    ? (current.proposalCheckpoint ? commitmentCheckpointDigest(current.proposalCheckpoint) : fail())
+    : null;
   return Object.freeze({
     schema: "clockchain.agent-handshake-signing-request/v1",
     helperVersion: V2_HELPER_VERSION,
@@ -284,6 +291,7 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
     hostSessionKeyCertificate: current.discovery.hostSessionKeyCertificate,
     terms: current.terms,
     policyDigest: current.policyDigest,
+    previousCheckpointDigest,
     descriptorEnvelope,
     bytesGzipBase64Url: gzipSync(bytes).toString("base64url"),
     bytesSha256: createHash("sha256").update(bytes).digest("hex"),
@@ -393,7 +401,9 @@ function signingLocalAction(verifiedHelperPrefix: string, signingRequest: JsonOb
     operation: "sign",
     helperStep: compactHelperStep(step, role, sessionId),
     stateDir: "reuse_exact_absolute_state_dir",
-    afterSuccess: "call_agent_handshake_submit_with_helper_output_and_unchanged_policy_digest",
+    afterSuccess: signingRequest.operation === "proposal" || signingRequest.operation === "acceptance"
+      ? "call_agent_handshake_submit_checkpoint_with_helper_output_checkpoint_then_agent_handshake_submit_with_signatureHex_and_unchanged_policy_digest"
+      : "call_agent_handshake_submit_with_helper_output_and_unchanged_policy_digest",
   });
 }
 
