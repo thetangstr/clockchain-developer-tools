@@ -295,21 +295,58 @@ test("every issued helperStep command is fetchable verbatim by its commandSha256
   assert.equal(harness.coordinator.localActionCommand(invited.localAction.helperSteps[0].commandSha256), null);
 });
 
-test("a late-minted invitation's claim window stays inside the session's invitation window", async (t) => {
-  // Mint at 89s into the session's 120s invitation window (just above the 30s
-  // runway guard): the host observes claims only until the session's
-  // invitationExpiresAtMs, so the claim deadline must be capped at that bound
-  // minus the landing margin — never mint-relative past it. A claim window
-  // that outlived the bound would let the Responder accept into a session the
-  // host has already rotated away from.
+test("an early-minted invitation gets the full mint-relative claim runway", async (t) => {
+  // Mint near session open: the claim window is mint-relative at 180s and the
+  // minted expiry is published on agent_v2_invitation_created as
+  // claimExpiresAtMs so the host can extend its observation bound to match.
+  const mintAt = nowMs + 1_000;
+  const harness = await createDurableAcceptHarness(t, { now: () => mintAt });
+  const invited = await harness.coordinator.invite(terms);
+  assert.equal(
+    readV2RoleAccessPayload(invited.responderInvitation).expMs,
+    String(mintAt + 180_000),
+  );
+  assert.equal(invited.invitationExpiresAtMs, String(mintAt + 180_000));
+  const created = harness.messages.find((m) => m.kind === "agent_v2_invitation_created");
+  assert.equal(created?.body?.claimExpiresAtMs, String(mintAt + 180_000));
+});
+
+test("a late-minted invitation still gets the full mint-relative claim runway", async (t) => {
+  // Mint at 89s into the session's 120s mint cutoff (just above the 30s
+  // runway guard): the claim window runs mint + 180s, well past the session's
+  // invitationExpiresAtMs — the host extends its claim-observation bound to
+  // the minted expiry carried on invitation_created, so the claim can never
+  // outlive host observation.
   const mintAt = nowMs + 89_000;
   const harness = await createDurableAcceptHarness(t, { now: () => mintAt });
   const invited = await harness.coordinator.invite(terms);
   assert.equal(
     readV2RoleAccessPayload(invited.responderInvitation).expMs,
-    String(nowMs + 120_000 - 5_000),
+    String(mintAt + 180_000),
   );
-  assert.equal(invited.invitationExpiresAtMs, String(nowMs + 120_000 - 5_000));
+  assert.equal(invited.invitationExpiresAtMs, String(mintAt + 180_000));
+  const created = harness.messages.find((m) => m.kind === "agent_v2_invitation_created");
+  assert.equal(created?.body?.claimExpiresAtMs, String(mintAt + 180_000));
+});
+
+test("a minted claim window is capped at the session deadline minus the landing margin", async (t) => {
+  // A session already near its deadline cannot promise runway past it: the
+  // minted expiry is clamped below sessionDeadlineMs so a claim accepted at
+  // the edge still lands while the host is alive.
+  const mintAt = nowMs + 89_000;
+  const harness = await createDurableAcceptHarness(t, {
+    discovery: {
+      ...discovery,
+      invitationExpiresAtMs: String(mintAt + 60_000),
+      sessionDeadlineMs: String(mintAt + 120_000),
+    },
+    now: () => mintAt,
+  });
+  const invited = await harness.coordinator.invite(terms);
+  assert.equal(
+    readV2RoleAccessPayload(invited.responderInvitation).expMs,
+    String(mintAt + 120_000 - 5_000),
+  );
 });
 
 test("a fresh accept past the invitation expiry fails with a distinct expired reason", async (t) => {
@@ -319,7 +356,7 @@ test("a fresh accept past the invitation expiry fails with a distinct expired re
     serviceNowMs: () => clock,
   });
   const invited = await harness.coordinator.invite(terms);
-  clock = nowMs + 121_000;
+  clock = nowMs + 181_000;
   await assert.rejects(
     () => harness.coordinator.acceptInvitation(invited.responderInvitation),
     (error) => error?.name === "V2InvitationExpiredError",
@@ -814,6 +851,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   );
   assert.equal(invitationCreated.role, "initiator");
   assert.deepEqual(invitationCreated.body, {
+    claimExpiresAtMs: String(nowMs + 1 + 180_000),
     createdAtMs: String(nowMs + 1),
     externalBusinessActionPerformed: false,
     statementDigest: v2CanonicalRecord(terms).digest,
@@ -837,7 +875,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
   assert.equal(readV2RoleAccessPayload(invited.initiatorAccess).expMs, discovery.sessionDeadlineMs);
-  assert.equal(readV2RoleAccessPayload(invited.responderInvitation).expMs, String(nowMs + 120000 - 5_000));
+  assert.equal(readV2RoleAccessPayload(invited.responderInvitation).expMs, String(nowMs + 1 + 180_000));
   assert.equal(readV2RoleAccessPayload(accepted.responderAccess).expMs, discovery.sessionDeadlineMs);
   assert.deepEqual(accepted.localPolicy, policy("responder"));
   assert.equal(Object.hasOwn(accepted.localAction, "policyPayload"), false);
