@@ -1213,6 +1213,94 @@ test("agent_handshake_next returns actionable and terminal outcomes without wait
   assert.equal(harness.waitPolls().length, 0);
 });
 
+test("agent_handshake_next re-issues an expired pending proposal window instead of stranding the session", async () => {
+  const harness = await createBoundedWaitHarness();
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.fund("responder");
+  await harness.coordinator.next({ access: harness.accesses.initiator });
+  await harness.coordinator.next({ access: harness.accesses.responder });
+  const proposal = await harness.coordinator.next({ access: harness.accesses.initiator });
+  const firstRequest = compactPayloadFrom(proposal, "proposal");
+  const first = JSON.parse(gunzipSync(Buffer.from(firstRequest.bytesGzipBase64Url, "base64url")).toString("utf8"));
+
+  // While the window is still open the same payload is re-served unchanged.
+  const same = await harness.coordinator.next({ access: harness.accesses.initiator });
+  assert.equal(compactPayloadFrom(same, "proposal").bytesSha256, firstRequest.bytesSha256);
+
+  // Past expiresAtMs the pending payload is re-issued with a fresh full-width
+  // window instead of re-serving bytes that can never be signed again.
+  harness.setClock(Number(first.expiresAtMs) + 1);
+  const renewed = await harness.coordinator.next({ access: harness.accesses.initiator });
+  assert.equal(renewed.stage, "sign_proposal");
+  const renewedRequest = compactPayloadFrom(renewed, "proposal");
+  const second = JSON.parse(gunzipSync(Buffer.from(renewedRequest.bytesGzipBase64Url, "base64url")).toString("utf8"));
+  assert.notEqual(renewedRequest.bytesSha256, firstRequest.bytesSha256);
+  assert.equal(second.issuedAtMs, String(Number(first.expiresAtMs) + 1));
+  assert.equal(BigInt(second.expiresAtMs) - BigInt(second.issuedAtMs), BigInt(terms.validForSeconds) * 1000n);
+  assert.deepEqual(
+    { ...second, issuedAtMs: "0", expiresAtMs: "0" },
+    { ...first, issuedAtMs: "0", expiresAtMs: "0" },
+  );
+
+  // Near the session deadline the window clamps to the deadline and slides
+  // issuedAtMs back so the exact-width invariant still holds.
+  const nearDeadline = Number(discovery.sessionDeadlineMs) - 10_000;
+  harness.setClock(nearDeadline);
+  const clamped = await harness.coordinator.next({ access: harness.accesses.initiator });
+  const third = JSON.parse(gunzipSync(Buffer.from(compactPayloadFrom(clamped, "proposal").bytesGzipBase64Url, "base64url")).toString("utf8"));
+  assert.equal(third.expiresAtMs, discovery.sessionDeadlineMs);
+  assert.equal(BigInt(third.expiresAtMs) - BigInt(third.issuedAtMs), BigInt(terms.validForSeconds) * 1000n);
+  assert.ok(BigInt(third.issuedAtMs) < BigInt(nearDeadline));
+
+  // Past the session deadline the role access itself is expired — terminal.
+  harness.setClock(Number(discovery.sessionDeadlineMs));
+  await assert.rejects(
+    () => harness.coordinator.next({ access: harness.accesses.initiator }),
+    (error) => error.name === "V2RoleAccessError",
+  );
+});
+
+test("agent_handshake_next reports an expired acceptance window as terminal", async () => {
+  const harness = await createBoundedWaitHarness();
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.fund("responder");
+  await harness.coordinator.next({ access: harness.accesses.initiator });
+  await harness.coordinator.next({ access: harness.accesses.responder });
+  const proposal = await harness.coordinator.next({ access: harness.accesses.initiator });
+  const proposalRequest = compactPayloadFrom(proposal, "proposal");
+  const proposalPayload = JSON.parse(gunzipSync(Buffer.from(proposalRequest.bytesGzipBase64Url, "base64url")).toString("utf8"));
+  const proposalSignatureHex = `0x${"2".repeat(128)}1b`;
+  const proposalEnvelope = {
+    payload: proposalPayload,
+    schema: "clockchain.agent-handshake-proposal-envelope/v2",
+    signature: { address: harness.addresses.initiator, algorithm: "eip191", value: proposalSignatureHex },
+  };
+  const proposalCheckpoint = {
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: "1",
+    protocol: "clockchain.agent-handshake/v2", sessionId, role: "initiator", artifactType: "proposal",
+    artifactDigest: v2CanonicalRecord(proposalEnvelope).digest, sequence: "1", previousCheckpointDigest: null,
+    issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: harness.addresses.initiator,
+    signature: { address: harness.addresses.initiator, algorithm: "eip191", value: `0x${"6".repeat(128)}1b` },
+  };
+  await harness.coordinator.submitCheckpoint({ access: harness.accesses.initiator, artifactSignatureHex: proposalSignatureHex, checkpoint: proposalCheckpoint });
+  await harness.coordinator.submit({ access: harness.accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: proposalSignatureHex });
+
+  const acceptance = await harness.coordinator.next({ access: harness.accesses.responder });
+  assert.equal(acceptance.stage, "sign_acceptance");
+
+  // The acceptance window is bound to the anchored proposal's expiresAtMs —
+  // once it lapses no renewal is possible and the session is terminal.
+  harness.setClock(Number(proposalPayload.expiresAtMs));
+  await assert.rejects(
+    () => harness.coordinator.next({ access: harness.accesses.responder }),
+    (error) => error.name === "V2SigningWindowExpiredError",
+  );
+});
+
 test("agent_handshake_next returns the registration local action and terminal errors without waiting", async () => {
   const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true, registrationAvailable: false });
   await harness.join("initiator");

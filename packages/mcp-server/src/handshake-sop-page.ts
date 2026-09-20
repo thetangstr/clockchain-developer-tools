@@ -41,7 +41,7 @@ Flow:
 5. Poll agent_handshake_next and dispatch on needed: signing step → run its localAction immediately, then agent_handshake_submit_checkpoint, then agent_handshake_submit; erc8004_registration → run the register command, then poll again; wait/stage → sleep retryAfterMs, poll again.
 6. At certificate_available: call agent_handshake_get_certificate, run the verify-certificate local action, then report sessionId, certificate digest, certificateVerified, outcome, and externalBusinessActionPerformed.
 
-Enforce a policy permitting only your chosen statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration for both roles, and no external business action. Signing payloads expire in ≤90 seconds — run each signing localAction the moment it appears.`;
+Enforce a policy permitting only your chosen statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration for both roles, and no external business action. Signing payloads expire in ≤90 seconds — run each signing localAction the moment it appears. If one lapses before you sign, poll agent_handshake_next again — a still-pending proposal is re-issued with a fresh window; a terminal reason signing_window_expired means the session is over and you must start a new invite.`;
 
 const RESPONDER_PROMPT = `You are the Responder in a Clockchain Agent Handshake. The invitation from the Initiator:
 
@@ -169,7 +169,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
     <tr><td><b>Node.js 24.x</b> on each agent's machine</td><td>The pinned helper refuses any other major version.</td></tr>
     <tr><td><b>Two agent runtimes</b> (two processes, machines, or operators)</td><td>Any MCP-capable client that can POST JSON-RPC. Each side uses its own keys and state — never share one runtime across both roles.</td></tr>
     <tr><td><b>An out-of-band channel</b> between the two agents</td><td>Chat, ticket, queue — anything. Used once, to carry the responder invitation.</td></tr>
-    <tr><td><b>A bounded session window</b></td><td>Signature payloads have a ≤90-second validity window each — act on signing requests immediately.</td></tr>
+    <tr><td><b>A bounded session window</b></td><td>Signature payloads have a ≤90-second validity window each — act on signing requests immediately. A lapsed proposal window is re-issued on the next poll; a terminal <code>signing_window_expired</code> ends the session.</td></tr>
   </table>
 
   <h3><span class="n">1</span>Discover the service</h3>
@@ -205,7 +205,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
     <li class="step"><span class="sn">1</span><div class="sbody"><span class="role role-a">Initiator</span><h4>Invite</h4><p>Call <code>agent_handshake_invite</code> with <code>{reference, statement, validForSeconds, identityPolicy}</code>. Keep <code>roleAccess</code> byte-for-byte stable and send it to no party but this endpoint; copy only <code>responderInvitation</code> to the other stakeholder.</p></div></li>
     <li class="step"><span class="sn">2</span><div class="sbody"><h4>Run the setup localAction</h4><p>Helper <code>init</code> → <code>policy</code> → <code>inspect</code> via <code>approvalTool</code> (or the verified shell commands). Record <code>sessionKeyAddress</code> and <code>policyDigest</code>.</p></div></li>
     <li class="step"><span class="sn">3</span><div class="sbody"><h4>Join</h4><p>Call <code>agent_handshake_join</code> with <code>{access, helperVersion: "${V2_HELPER_VERSION}", sessionKeyAddress, policyDigest}</code>. Do not register before join — the coordinator funds the observed seat only when registration is mandated.</p></div></li>
-    <li class="step"><span class="sn">4</span><div class="sbody"><h4>Drive the loop</h4><p>Poll <code>agent_handshake_next</code> and dispatch on <code>needed</code>: signing steps return a payload-bearing <code>localAction</code> — perform it immediately, submit the private checkpoint via <code>agent_handshake_submit_checkpoint</code>, then the signature via <code>agent_handshake_submit</code>. <code>erc8004_registration</code> → run helper <code>register</code>, then poll <code>next</code> again. Waits return <code>retryAfterMs</code>.</p></div></li>
+    <li class="step"><span class="sn">4</span><div class="sbody"><h4>Drive the loop</h4><p>Poll <code>agent_handshake_next</code> and dispatch on <code>needed</code>: signing steps return a payload-bearing <code>localAction</code> — perform it immediately, submit the private checkpoint via <code>agent_handshake_submit_checkpoint</code>, then the signature via <code>agent_handshake_submit</code>. If a signing window lapses before the helper runs, poll <code>next</code> again for a fresh window. <code>erc8004_registration</code> → run helper <code>register</code>, then poll <code>next</code> again. Waits return <code>retryAfterMs</code>.</p></div></li>
     <li class="step"><span class="sn">5</span><div class="sbody"><h4>Collect</h4><p>At <code>certificate_available</code>, call <code>agent_handshake_get_certificate</code>, then run the <code>verify-certificate</code> local action — expect <code>certificateVerified: true</code>, <code>outcome: "VERIFIED"</code>.</p></div></li>
   </ol>
 
@@ -223,7 +223,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
   <table class="sop-table">
     <tr><th>Constraint</th><th>Value</th><th>What it means</th></tr>
     <tr><td>Invitation lifetime</td><td>single-use · own <code>invitationExpiresAtMs</code></td><td>Read <code>invitationExpiresAtMs</code> from the invite response: the coordinator refuses to mint a new invitation when the window has under 30 seconds of runway remaining, and the responder must claim before <code>invitationExpiresAtMs</code>. <code>sessionDeadlineMs</code> bounds the session overall; a consumed or expired code is terminal.</td></tr>
-    <tr><td>Signature validity</td><td>≤ 90 seconds</td><td>Perform each signing localAction the moment it is returned.</td></tr>
+    <tr><td>Signature validity</td><td>≤ 90 seconds</td><td>Perform each signing localAction the moment it is returned. A lapsed <i>proposal</i> window is re-issued on the next <code>agent_handshake_next</code> poll while the session lives; an acceptance window is bound to the submitted proposal's expiry and cannot extend — once it lapses the session is terminal (<code>reason: signing_window_expired</code>).</td></tr>
     <tr><td>Rate limits</td><td>5 invites/hr · 120 calls/min per IP</td><td>429 carries <code>rate_limited</code>; poll on <code>retryAfterMs</code>, don't burst.</td></tr>
     <tr><td><code>HANDSHAKE_TEMPORARILY_UNAVAILABLE</code></td><td><code>retryable: true</code></td><td>Transient — wait <code>retryAfterMs</code> and retry the same call with the same <code>access</code>.</td></tr>
     <tr><td><code>HANDSHAKE_UNAVAILABLE</code></td><td><code>retryable: false</code></td><td>Terminal — expired invitation, replayed code, wrong role, bad digest. Diagnose, then start a new session.</td></tr>
@@ -323,6 +323,8 @@ YOU NEED
   - Two agent runtimes — any MCP-capable client; never share one runtime
   - One out-of-band channel to carry the responder invitation
   - A bounded session window; signature payloads are valid <= 90 seconds
+    (a lapsed proposal window is re-issued on the next poll;
+    reason signing_window_expired is terminal)
 
 FLOW — INITIATOR
   1. agent_handshake_invite {reference, statement, validForSeconds, identityPolicy}
@@ -338,7 +340,8 @@ FLOW — INITIATOR
      sessionKeyAddress, policyDigest} — do not register before join.
   4. Poll agent_handshake_next and dispatch on needed:
        signing step -> perform localAction immediately, then
-         agent_handshake_submit_checkpoint, then agent_handshake_submit;
+         agent_handshake_submit_checkpoint, then agent_handshake_submit
+         (window lapsed before signing? poll next again for a fresh one);
        erc8004_registration -> helper register, then poll next again;
        wait/stage -> sleep retryAfterMs, poll again.
   5. At certificate_available: agent_handshake_get_certificate, then the

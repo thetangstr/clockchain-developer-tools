@@ -564,6 +564,27 @@ test("terms mismatch surfaces a public reason and the published terms for self-c
   }
 });
 
+test("an expired signing window surfaces a terminal public reason", async () => {
+  const expired = Object.assign(new Error("Agent handshake coordination failed safely."), {
+    name: "V2SigningWindowExpiredError",
+  });
+  const handler = createV2PublicHttpHandler({ pin, now: () => 1_000, invoke: async () => { throw expired; } });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const result = await rpc(url, "tools/call", { name: "agent_handshake_next", arguments: { access: roleAccess({ jti: "88888888-7777-4777-8777-777777777777" }) } });
+    const body = JSON.parse(result.body.result.content[0].text);
+    assert.equal(result.body.result.isError, true);
+    assert.equal(body.error, "HANDSHAKE_UNAVAILABLE");
+    assert.equal(body.retryable, false);
+    assert.equal(body.reason, "signing_window_expired");
+    assert.equal(Object.hasOwn(body, "publishedTerms"), false);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
 test("public agent_handshake_next accepts bounded waitMs and rejects out-of-range waits", async () => {
   const capability = roleAccess({ jti: "99999999-9999-4999-8999-999999999999", role: "initiator" });
   const observed = [];

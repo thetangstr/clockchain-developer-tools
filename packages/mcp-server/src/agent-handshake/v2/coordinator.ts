@@ -121,11 +121,34 @@ export class V2TermsMismatchError extends V2CoordinatorError {
     this.publishedTerms = publishedTerms;
   }
 }
+// A pending proposal/acceptance carries a fixed issuedAtMs/expiresAtMs window.
+// Once it lapses the payload can never be signed again: proposal windows are
+// renewed on re-poll (the payload is not anchored until submit), but an
+// acceptance window is bound to the anchored proposal's expiresAtMs and a
+// session past its deadline cannot sign at all — both are terminal.
+export class V2SigningWindowExpiredError extends V2CoordinatorError {
+  constructor() { super(); this.name = "V2SigningWindowExpiredError"; }
+}
 export class V2TransientCoordinatorError extends Error {
   constructor() { super("Agent handshake coordination is waiting for durable infrastructure state."); this.name = "V2TransientCoordinatorError"; }
 }
 function fail(): never { throw new V2CoordinatorError(); }
 function transient(): never { throw new V2TransientCoordinatorError(); }
+function windowExpired(): never { throw new V2SigningWindowExpiredError(); }
+
+// The helper requires proposal windows to be exactly validForSeconds wide and
+// to end at or before the session deadline. Near the deadline issuedAtMs
+// slides back to keep the width exact; issuedAtMs only needs to be <= now.
+// Returns null when no valid window fits before the deadline.
+function agreementWindow(validForSeconds: string, sessionDeadlineMs: string, nowMs: number): { issuedAtMs: string; expiresAtMs: string } | null {
+  const width = BigInt(validForSeconds) * 1000n;
+  const deadline = BigInt(sessionDeadlineMs);
+  const nowBig = BigInt(nowMs);
+  const issued = nowBig + width <= deadline ? nowBig : deadline - width;
+  const expires = issued + width;
+  if (issued < 1n || nowBig >= expires) return null;
+  return { issuedAtMs: String(issued), expiresAtMs: String(expires) };
+}
 
 function exact(value: unknown, keys: readonly string[]): JsonObject {
   if (value === null || typeof value !== "object" || Array.isArray(value)) fail();
@@ -594,6 +617,21 @@ export function createV2Coordinator(options: {
       return joinRequired(role, auth.keyValue.session);
     }
     if (current.pending) {
+      if (BigInt(now()) >= BigInt(current.discovery.sessionDeadlineMs)) windowExpired();
+      const pending = current.pending;
+      const expiresAtMs = pending.payload.expiresAtMs;
+      if (typeof expiresAtMs === "string" && BigInt(expiresAtMs) <= BigInt(now())) {
+        // An expired acceptance window is anchored to the submitted proposal's
+        // expiresAtMs and cannot be extended; an expired proposal is not yet
+        // anchored, so re-issue its window and re-store the pending payload.
+        if (pending.operation !== "proposal") windowExpired();
+        const window = agreementWindow(current.terms.validForSeconds, current.discovery.sessionDeadlineMs, now());
+        if (!window) windowExpired();
+        const renewed = normalizeV2Proposal({ ...pending.payload, ...window }) as JsonObject;
+        const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: renewed } }));
+        current = data(updated);
+        if (!current.pending) fail();
+      }
       const signingRequest = signRequest(current, role, current.pending.operation, current.pending.payload);
       return Object.freeze({ stage: current.stage, signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
     }
@@ -657,13 +695,14 @@ export function createV2Coordinator(options: {
     if (!current.counterpart) return Object.freeze({ needed: "counterpart_identity", nextAction: NEXT_ACTION, retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_counterpart" });
     const parties = role === "initiator" ? { initiator: current.party, responder: current.counterpart } : { initiator: current.counterpart, responder: current.party };
     if (role === "initiator" && !current.proposalEnvelope) {
-      const issuedAtMs = String(now());
+      const window = agreementWindow(current.terms.validForSeconds, current.discovery.sessionDeadlineMs, now());
+      if (!window) windowExpired();
       const proposal = normalizeV2Proposal({
         schema: "clockchain.agent-handshake-proposal/v2", protocol: "clockchain.agent-handshake/v2",
         sessionId: auth.keyValue.session, repositorySha: current.discovery.repositorySha,
         reference: current.terms.reference, statementDigest: v2CanonicalRecord(current.terms).digest,
         identityPolicy: current.terms.identityPolicy, initiator: parties.initiator, responder: parties.responder,
-        issuedAtMs, expiresAtMs: String(BigInt(issuedAtMs) + BigInt(current.terms.validForSeconds) * 1000n),
+        issuedAtMs: window.issuedAtMs, expiresAtMs: window.expiresAtMs,
         externalBusinessActionPerformed: false,
       }) as JsonObject;
       const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
@@ -673,6 +712,7 @@ export function createV2Coordinator(options: {
     if (role === "responder" && !current.acceptanceEnvelope) {
       if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", nextAction: NEXT_ACTION, retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
       const proposal = normalizeV2Proposal(current.proposalEnvelope.payload) as JsonObject;
+      if (BigInt(proposal.expiresAtMs) <= BigInt(now())) windowExpired();
       const acceptance = normalizeV2Acceptance({
         schema: "clockchain.agent-handshake-acceptance/v2", protocol: "clockchain.agent-handshake/v2",
         sessionId: proposal.sessionId, repositorySha: proposal.repositorySha, reference: proposal.reference,
