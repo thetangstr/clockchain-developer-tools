@@ -284,7 +284,11 @@ test("an invite whose terms differ from the published host terms is rejected bef
 
   await assert.rejects(
     () => coordinator.invite({ ...terms, reference: "NS-2000" }),
-    (error) => error?.name === "V2CoordinatorError",
+    (error) => {
+      assert.equal(error?.name, "V2TermsMismatchError");
+      assert.deepEqual(error.publishedTerms, terms);
+      return true;
+    },
   );
   assert.deepEqual(calls, { create: 0, update: 0, post: 0 });
 });
@@ -738,13 +742,13 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
     statementDigest: v2CanonicalRecord(terms).digest,
     terms,
   });
-  const initiatorStateDir = `$TMPDIR/.clockchain/handshakes/${sessionId}/initiator`;
+  const initiatorStateDir = "${TMPDIR%/}/.clockchain/handshakes/" + sessionId + "/initiator";
   assert.deepEqual(invited.localPolicy, policy("initiator"));
   assert.deepEqual(invited.localAction, {
     executor: "pinned_helper",
     operations: ["init", "policy", "inspect"],
     payloadEncoding: "base64url_utf8_json",
-    stateDirectoryCommand: `mkdir -p -m 700 "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`,
+    stateDirectoryCommand: `mkdir -p -m 700 "\${TMPDIR%/}/.clockchain/handshakes/${sessionId}/initiator"`,
     helperSteps: [
       compactHelperStep("init", "initiator", `${verifiedHelperPrefix} init --state-dir "${initiatorStateDir}"`),
       compactHelperStep("policy", "initiator", `${verifiedHelperPrefix} policy --state-dir "${initiatorStateDir}" --payload-base64url ${Buffer.from(JSON.stringify(policy("initiator")), "utf8").toString("base64url")}`),
@@ -1033,7 +1037,7 @@ test("fresh identity registration is returned as an executable pinned-helper act
       executor: "pinned_helper",
       operation: "register",
       stateDir: "reuse_exact_absolute_state_dir",
-      helperStep: compactHelperStep("register", "initiator", `${verifiedHelperPrefix} register --state-dir "$TMPDIR/.clockchain/handshakes/${sessionId}/initiator"`),
+      helperStep: compactHelperStep("register", "initiator", `${verifiedHelperPrefix} register --state-dir "\${TMPDIR%/}/.clockchain/handshakes/${sessionId}/initiator"`),
       afterSuccess: "call_agent_handshake_next_with_unchanged_role_access",
     },
   });

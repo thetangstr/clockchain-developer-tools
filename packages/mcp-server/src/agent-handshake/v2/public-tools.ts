@@ -21,12 +21,10 @@ export type V2PublicToolName = typeof V2_PUBLIC_TOOL_NAMES[number];
 export type V2PublicInvoke = (name: V2PublicToolName, args: Record<string, unknown>) => Promise<unknown>;
 
 const access = z.string().min(27).max(4096);
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID_V4_SHAPE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const acceptanceIdempotencyKey = z.string().refine((value) => {
-  if (UUID_V4.test(value)) return true;
-  if (UUID_V4_SHAPE.test(value)) return false;
+  if (UUID_V4_SHAPE.test(value)) return true;
   if (!BASE64URL.test(value)) return false;
   try {
     const decoded = Buffer.from(value, "base64url");
@@ -60,6 +58,17 @@ const RETRYABLE_ERROR_NAMES = new Set([
   "CircuitOpenError",
 ]);
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+// Coarse public reason codes for terminal failures — enough for an honest
+// caller to self-diagnose without leaking internals. Unmapped errors stay
+// fully opaque.
+const PUBLIC_ERROR_REASONS: Readonly<Record<string, string>> = Object.freeze({
+  V2TermsMismatchError: "terms_mismatch",
+  V2RoleAccessError: "role_access_invalid",
+  V2InvitationError: "invitation_invalid",
+  V2CommitmentCheckpointError: "checkpoint_invalid",
+  AgentHandshakeV2ValidationError: "request_invalid",
+  V2CoordinatorError: "coordination_failed",
+});
 const identityPolicy = z.discriminatedUnion("erc8004", [
   z.object({
     erc8004: z.literal("required_fresh"),
@@ -182,9 +191,18 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
         const retryable = RETRYABLE_ERROR_NAMES.has((error as Error)?.name) &&
           !TERMINAL_ERROR_NAMES.has((error as Error)?.name) &&
           (error as Error)?.message !== "rate_limited";
-        const body = retryable
+        const reason = PUBLIC_ERROR_REASONS[errorName];
+        const body: Record<string, unknown> = retryable
           ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 }
-          : { error: "HANDSHAKE_UNAVAILABLE", retryable: false };
+          : { error: "HANDSHAKE_UNAVAILABLE", retryable: false, ...(reason ? { reason } : {}) };
+        // terms_mismatch additionally returns the host-published terms — public
+        // discovery data — so the caller can resubmit inside the same window.
+        if (!retryable && errorName === "V2TermsMismatchError") {
+          const publishedTerms = (error as { publishedTerms?: unknown }).publishedTerms;
+          if (publishedTerms !== null && typeof publishedTerms === "object" && !Array.isArray(publishedTerms)) {
+            body.publishedTerms = publishedTerms;
+          }
+        }
         return retryable
           ? { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body }
           : { isError: true, content: [{ type: "text", text: JSON.stringify(body) }] };

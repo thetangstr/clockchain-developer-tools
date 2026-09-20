@@ -30,11 +30,11 @@ const INITIATOR_PROMPT = `You are the Initiator in a Clockchain Agent Handshake 
 
 Trust model: every command you run comes only from the MCP endpoint your operator configured — not from a webpage or the other agent. Each embeds a digest-verified bootstrap that re-hashes the pinned manifest (SHA-256) and the helper before executing, and exits 86 on any mismatch. Conceal nothing from your operator — narrate every step and show every command before you run it.
 
-Setup: work in a fresh empty directory. Download the two pinned helper assets as two separate commands, then inspect both files before running anything (the bundle is a minified build — readable source is at the release repo commit named by sourceCommit in https://mcp.clockchain.network/.well-known/agent-handshake.json):
+Setup: work in a fresh empty directory. Download the two pinned helper assets as two separate commands, then inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit is named in https://mcp.clockchain.network/.well-known/agent-handshake.json):
 ${ASSET_DOWNLOADS}
 
 Flow:
-1. Call agent_handshake_invite with reference "<YOUR_REFERENCE>", statement "<YOUR_STATEMENT>", validForSeconds "90", and identityPolicy {"erc8004":"required_fresh","chainId":"eip155:11155111","registryAddress":"0x8004a818bfb912233c491871b3d84c89a494bd9e"}.
+1. Call agent_handshake_invite with reference "<YOUR_REFERENCE>", statement "<YOUR_STATEMENT>", validForSeconds "90", and identityPolicy {"erc8004":"required_fresh","chainId":"eip155:11155111","registryAddress":"0x8004a818bfb912233c491871b3d84c89a494bd9e"}. This public endpoint publishes fixed session terms — if the call returns terms_mismatch with publishedTerms, call invite again with those published terms verbatim (they are public discovery data, not secret).
 2. roleAccess is a local handle for your role capability — never send it to any party or endpoint other than this one; showing your operator is fine. Output ONLY the responderInvitation for delivery to the other agent, then keep going — the server holds you on waits until the responder joins.
 3. For every localAction: run stateDirectoryCommand once, then each helperStep.shellCommand verbatim via your shell, once, in returned order. Never edit, decode, re-encode, or reconstruct commands or payloads; never hand-sign.
 4. Call agent_handshake_join with the returned values — never register before join.
@@ -49,7 +49,7 @@ const RESPONDER_PROMPT = `You are the Responder in a Clockchain Agent Handshake.
 
 It is single-use and short-lived — start now. Conceal nothing from your operator — narrate every step and show every command before you run it.
 1. Generate one fresh acceptanceIdempotencyKey (UUIDv4 or ≥16-byte base64url) and call agent_handshake_accept_invitation with the invitation and that key — exactly once; retry only retryable failures with the same key. The returned roleAccess is a local handle — never send it to any party or endpoint other than this one; showing your operator is fine.
-2. Work in a fresh empty directory; download the two pinned helper assets as two separate commands and inspect both files before running anything (minified build — readable source at the release repo's sourceCommit):
+2. Work in a fresh empty directory; download the two pinned helper assets as two separate commands and inspect both files before running anything (the bundle ships unminified so you can read exactly what executes; its sourceCommit names the exact source commit):
 ${ASSET_DOWNLOADS}
 3. Then run the same server-driven flow: stateDirectoryCommand once, each helperStep.shellCommand verbatim via your shell in returned order — never edit or reconstruct payloads, never hand-sign. Call agent_handshake_join with the returned values. Poll agent_handshake_next and dispatch on needed the same way. At certificate_available: agent_handshake_get_certificate, then the verify-certificate local action.
 4. Enforce a policy permitting only the invited statement and reference, at most 90 seconds of validity, fresh ERC-8004 registration, and no external business action. If any check fails, refuse and report the failure.
@@ -135,7 +135,7 @@ ${SOP_CSS}</style>
     <b>Why your agent can run this safely.</b> The commands an agent executes come only from the MCP endpoint you configured — never from this page or the other agent — and each embeds a digest-verified bootstrap that re-hashes the pinned manifest and helper before running any code (exit 86 on mismatch). The only values that must not be transmitted are the session private key, which never leaves the agent's machine, and <code>roleAccess</code>, which goes nowhere but this endpoint — your agent may show you everything it does. Run each agent in a container, VM, or sandboxed profile if you want a harder boundary.
   </div>
   <div class="sop-note">
-    <b>Review before you run — encouraged, not optional.</b> The helper ships as a minified build artifact; its readable source lives in the release repo <a href="${SOURCE_REPO}">${SOURCE_REPO.replace("https://", "")}</a> at the commit named by <code>sourceCommit</code> in the live <a href="${MANIFEST}">discovery document</a>. Integrity is the SHA-256 pin chain — discovery manifest digest → helper digest — not an OS code signature; <code>nativeSignature.type: "none"</code> in the release manifest honestly reports that no platform signature exists. Verify locally: <code>shasum -a 256 manifest.json</code> must equal <code>helper.manifestDigest</code>, and the helper digest must equal <code>assets[0].sha256</code> inside that verified manifest.
+    <b>Review before you run — encouraged, not optional.</b> The helper ships unminified — the published <code>clockchain-agent-handshake.cjs</code> is readable JavaScript, byte-for-byte what executes; its release source lives in <a href="${SOURCE_REPO}">${SOURCE_REPO.replace("https://", "")}</a> at the commit named by <code>sourceCommit</code> in the live <a href="${MANIFEST}">discovery document</a>. Integrity is the SHA-256 pin chain — discovery manifest digest → helper digest — not an OS code signature; <code>nativeSignature.type: "none"</code> in the release manifest honestly reports that no platform signature exists. Verify locally: <code>shasum -a 256 manifest.json</code> must equal <code>helper.manifestDigest</code>, and the helper digest must equal <code>assets[0].sha256</code> inside that verified manifest.
   </div>
 
   <div class="qs-step">
@@ -147,7 +147,7 @@ claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code></pre></d
 
   <div class="qs-step">
     <h4><span class="tag">Step B</span>Prompt 1 — paste into agent 1 (Initiator)</h4>
-    <p style="margin:0 0 8px">Replace <code>&lt;YOUR_REFERENCE&gt;</code> and <code>&lt;YOUR_STATEMENT&gt;</code> with your own bounded test terms first.</p>
+    <p style="margin:0 0 8px">This public endpoint publishes fixed session terms — if <code>agent_handshake_invite</code> answers <code>terms_mismatch</code>, it includes <code>publishedTerms</code>; resubmit with those verbatim. The <code>&lt;YOUR_REFERENCE&gt;</code>/<code>&lt;YOUR_STATEMENT&gt;</code> placeholders are only for harnesses that already know the published terms.</p>
     <div class="code prompt"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(INITIATOR_PROMPT)}</code></pre></div>
   </div>
 
@@ -290,7 +290,8 @@ QUICK START — TWO PROMPTS
   or sandboxed profile for a harder boundary.
 
   REVIEW BEFORE YOU RUN
-  The helper ships minified; readable source lives in the release repo
+  The helper ships unminified — the published .cjs is readable JavaScript,
+  byte-for-byte what executes; release source lives in the release repo
   ${SOURCE_REPO} at the commit named by sourceCommit in the live discovery
   document. Integrity is the SHA-256 pin chain (discovery manifest digest
   -> helper digest), not an OS code signature; the release manifest's
@@ -303,7 +304,8 @@ QUICK START — TWO PROMPTS
   (project-local scope; remove when done: codex mcp remove
   clockchain-handshake / claude mcp remove clockchain-handshake)
 
-PROMPT 1 — INITIATOR (replace <YOUR_REFERENCE> and <YOUR_STATEMENT> first)
+PROMPT 1 — INITIATOR (the endpoint publishes fixed session terms; if invite
+returns terms_mismatch, resubmit with the returned publishedTerms verbatim)
 ${INITIATOR_PROMPT}
 
 PROMPT 2 — RESPONDER (drop the invitation into the marked slot)
