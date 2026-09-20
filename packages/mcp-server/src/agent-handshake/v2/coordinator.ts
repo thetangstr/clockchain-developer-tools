@@ -18,6 +18,7 @@ import {
   normalizeV2CommitmentCheckpoint,
 } from "./commitment-checkpoint.js";
 import {
+  AGENT_HANDSHAKE_V2_MCP_ORIGIN,
   normalizeV2Acceptance,
   normalizeV2Descriptor,
   normalizeV2EvidenceResult,
@@ -356,7 +357,18 @@ function helperStep(verifiedHelperPrefix: string, operation: string, sessionId: 
   });
 }
 
-function compactHelperStep(step: JsonObject, role: V2Role, sessionId: string): JsonObject {
+// Digest-addressed verbatim commands: a shellCommand is multi-KB and must be
+// transcribed byte-exact by adapter-less agents, which is slow and corruptible
+// through a chat/shell round-trip. Each step therefore also carries
+// shellCommandFetch — a short digest-bound command that downloads the exact
+// shellCommand bytes by commandSha256 and verifies them before executing.
+// Registered commands live only slightly longer than a session; the digest is
+// the capability (256-bit, unguessable) and the bytes served are the same
+// already-issued command the caller holds.
+const LOCAL_ACTION_COMMAND_TTL_MS = 20 * 60_000;
+type LocalActionCommandRegistrar = (commandSha256: string, shellCommand: string, sessionId: string, role: V2Role) => string;
+
+function compactHelperStep(step: JsonObject, role: V2Role, sessionId: string, registerCommand?: LocalActionCommandRegistrar): JsonObject {
   const shellCommand = step.shellCommand as string;
   const commandSha256 = createHash("sha256").update(shellCommand, "utf8").digest("hex");
   return Object.freeze({
@@ -366,6 +378,7 @@ function compactHelperStep(step: JsonObject, role: V2Role, sessionId: string): J
     approvalTool: "mcp__clockchain-local-adapter__authorize_local_action",
     commandLength: Buffer.byteLength(shellCommand),
     commandSha256,
+    ...(registerCommand ? { shellCommandFetch: registerCommand(commandSha256, shellCommand, sessionId, role) } : {}),
     shellCommand,
   });
 }
@@ -380,16 +393,16 @@ function signingSummary(signingRequest: JsonObject): JsonObject {
   });
 }
 
-function setupLocalAction(verifiedHelperPrefix: string, policy: JsonObject, sessionId: string, role: V2Role): JsonObject {
+function setupLocalAction(verifiedHelperPrefix: string, policy: JsonObject, sessionId: string, role: V2Role, registerCommand?: LocalActionCommandRegistrar): JsonObject {
   return Object.freeze({
     executor: "pinned_helper",
     operations: Object.freeze(["init", "policy", "inspect"]),
     payloadEncoding: "base64url_utf8_json",
     stateDirectoryCommand: `mkdir -p -m 700 "${localStateDirShell(sessionId, role)}"`,
     helperSteps: Object.freeze([
-      compactHelperStep(helperStep(verifiedHelperPrefix, "init", sessionId, role), role, sessionId),
-      compactHelperStep(helperStep(verifiedHelperPrefix, "policy", sessionId, role, policy), role, sessionId),
-      compactHelperStep(helperStep(verifiedHelperPrefix, "inspect", sessionId, role), role, sessionId),
+      compactHelperStep(helperStep(verifiedHelperPrefix, "init", sessionId, role), role, sessionId, registerCommand),
+      compactHelperStep(helperStep(verifiedHelperPrefix, "policy", sessionId, role, policy), role, sessionId, registerCommand),
+      compactHelperStep(helperStep(verifiedHelperPrefix, "inspect", sessionId, role), role, sessionId, registerCommand),
     ]),
     stateDir: "new_private_absolute_state_dir",
     registrationGate: "do_not_register_until_agent_handshake_next_returns_erc8004_registration_after_join_and_funding",
@@ -397,14 +410,14 @@ function setupLocalAction(verifiedHelperPrefix: string, policy: JsonObject, sess
   });
 }
 
-function signingLocalAction(verifiedHelperPrefix: string, signingRequest: JsonObject): JsonObject {
+function signingLocalAction(verifiedHelperPrefix: string, signingRequest: JsonObject, registerCommand?: LocalActionCommandRegistrar): JsonObject {
   const role = signingRequest.role as V2Role;
   const sessionId = signingRequest.sessionId as string;
   const step = helperStep(verifiedHelperPrefix, "sign", sessionId, role, signingRequest);
   return Object.freeze({
     executor: "pinned_helper",
     operation: "sign",
-    helperStep: compactHelperStep(step, role, sessionId),
+    helperStep: compactHelperStep(step, role, sessionId, registerCommand),
     stateDir: "reuse_exact_absolute_state_dir",
     afterSuccess: signingRequest.operation === "proposal" || signingRequest.operation === "acceptance"
       ? "call_agent_handshake_submit_checkpoint_with_helper_output_checkpoint_then_agent_handshake_submit_with_signatureHex_and_unchanged_policy_digest"
@@ -417,7 +430,7 @@ function certificateLocalAction(verifiedHelperPrefix: string, input: {
   discovery: JsonObject;
   role: V2Role;
   sessionId: string;
-}): JsonObject {
+}, registerCommand?: LocalActionCommandRegistrar): JsonObject {
   const payload = Object.freeze({
     schema: "clockchain.agent-handshake-certificate-verification/v1",
     helperVersion: V2_HELPER_VERSION,
@@ -432,7 +445,7 @@ function certificateLocalAction(verifiedHelperPrefix: string, input: {
   return Object.freeze({
     executor: "pinned_helper",
     operation: "verify-certificate",
-    helperStep: compactHelperStep(step, input.role, input.sessionId),
+    helperStep: compactHelperStep(step, input.role, input.sessionId, registerCommand),
     stateDir: "reuse_exact_absolute_state_dir",
     terminalProof: "use_verified_helper_output_only",
   });
@@ -463,6 +476,15 @@ export function createV2Coordinator(options: {
   const store = options.stateStore ?? createHandshakeStateStore();
   const now = options.now ?? Date.now;
   const acceptSerializers = new Map<string, Promise<void>>();
+  const localActionCommands = new Map<string, { command: string; expiresAtMs: number }>();
+  const registerLocalActionCommand: LocalActionCommandRegistrar = (commandSha256, shellCommand, sessionId, role) => {
+    for (const [digest, entry] of localActionCommands) if (entry.expiresAtMs <= now()) localActionCommands.delete(digest);
+    localActionCommands.set(commandSha256, { command: shellCommand, expiresAtMs: now() + LOCAL_ACTION_COMMAND_TTL_MS });
+    const file = `${localStateDirShell(sessionId, role)}/cmd-${commandSha256.slice(0, 16)}.sh`;
+    // Node is guaranteed present (the helper requires it), so the digest check
+    // uses node rather than shasum/sha256sum, which differ across platforms.
+    return `curl -fsS "${AGENT_HANDSHAKE_V2_MCP_ORIGIN}/handshake/local-action/${commandSha256}" -o "${file}" && node -e 'const c=require("node:crypto"),f=require("node:fs");process.exit(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex")==="${commandSha256}"?0:1)' "${file}" && bash "${file}"`;
+  };
 
   async function authorize(access: string, tool: string) {
     const verified = authorizeV2RoleAccess(access, { keys: options.accessKeys, nowMs: now(), requiredTool: tool });
@@ -622,7 +644,7 @@ export function createV2Coordinator(options: {
         discovery: current.discovery,
         role,
         sessionId: keyValue.session,
-      }),
+      }, registerLocalActionCommand),
     });
   }
 
@@ -648,7 +670,7 @@ export function createV2Coordinator(options: {
         if (!current.pending) fail();
       }
       const signingRequest = signRequest(current, role, current.pending.operation, current.pending.payload);
-      return Object.freeze({ stage: current.stage, signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
+      return Object.freeze({ stage: current.stage, signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
     }
     const entries = (await options.relay.getMessages({ sessionId: auth.keyValue.session })).messages;
     if (!current.party) {
@@ -694,6 +716,7 @@ export function createV2Coordinator(options: {
                 helperStep(options.verifiedHelperPrefix, "register", auth.keyValue.session, role),
                 role,
                 auth.keyValue.session,
+                registerLocalActionCommand,
               ),
               afterSuccess: NEXT_ACTION,
             }),
@@ -722,7 +745,7 @@ export function createV2Coordinator(options: {
       }) as JsonObject;
       const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
       const signingRequest = signRequest(data(updated), role, "proposal", proposal);
-      return Object.freeze({ stage: "sign_proposal", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
+      return Object.freeze({ stage: "sign_proposal", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
     }
     if (role === "responder" && !current.acceptanceEnvelope) {
       if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", nextAction: NEXT_ACTION, retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
@@ -741,7 +764,7 @@ export function createV2Coordinator(options: {
       return Object.freeze({
         stage: "sign_acceptance",
         signingSummary: signingSummary(signingRequest),
-        localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest),
+        localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand),
         previousCheckpoint: current.proposalCheckpoint,
       });
     }
@@ -764,7 +787,7 @@ export function createV2Coordinator(options: {
     }, current.terms.identityPolicy) as JsonObject;
     const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" }));
     const signingRequest = signRequest(data(updated), role, "evidence", evidence);
-    return Object.freeze({ stage: "sign_evidence", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest) });
+    return Object.freeze({ stage: "sign_evidence", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
   }
 
   return Object.freeze({
@@ -831,7 +854,7 @@ export function createV2Coordinator(options: {
         terms: activeTerms,
       });
       const policy = localPolicy(activeTerms, "initiator") as JsonObject;
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: invitationExpMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: invitationExpMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator", registerLocalActionCommand) });
     },
 
     async acceptInvitation(invitation: string, acceptanceIdempotencyKey?: string): Promise<JsonObject> {
@@ -847,7 +870,7 @@ export function createV2Coordinator(options: {
         if (accepted.claim) await options.invitationService.advanceClaim({ claim: accepted.claim, phase: "posted" });
         const policy = localPolicy(accepted.metadata!.terms as JsonObject, "responder") as JsonObject;
         const sessionId = (accepted.metadata!.hostSessionKeyCertificate as JsonObject).certificate?.sessionId as string;
-        const response = Object.freeze({ responderAccess: accepted.responderAccess, sessionId, terms: accepted.metadata!.terms, sessionDeadlineMs: accepted.metadata!.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, sessionId, "responder") });
+        const response = Object.freeze({ responderAccess: accepted.responderAccess, sessionId, terms: accepted.metadata!.terms, sessionDeadlineMs: accepted.metadata!.sessionDeadlineMs, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, sessionId, "responder", registerLocalActionCommand) });
         if (accepted.claim) await options.invitationService.advanceClaim({ claim: accepted.claim, phase: "completed", completedAtMs: String(now()) });
         return response;
       };
@@ -877,7 +900,7 @@ export function createV2Coordinator(options: {
         role: auth.verified.payload.role, sessionId: auth.keyValue.session,
         repositorySha: auth.current.discovery.repositorySha, sessionDeadlineMs: auth.current.discovery.sessionDeadlineMs,
         signingSummary: signingSummary(signingRequest),
-        localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest),
+        localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand),
       });
     },
 
@@ -1004,6 +1027,16 @@ export function createV2Coordinator(options: {
       const auth = await authorize(input.access, "agent_handshake_get_certificate");
       if (!auth.current.evidenceUploaded) fail();
       return certificateResponse(auth.keyValue, auth.current, auth.verified.payload.role);
+    },
+
+    localActionCommand(commandSha256: string): string | null {
+      if (!/^[0-9a-f]{64}$/.test(commandSha256)) return null;
+      const entry = localActionCommands.get(commandSha256);
+      if (!entry || entry.expiresAtMs <= now()) {
+        localActionCommands.delete(commandSha256);
+        return null;
+      }
+      return entry.command;
     },
 
     async invoke(name: string, args: JsonObject): Promise<unknown> {

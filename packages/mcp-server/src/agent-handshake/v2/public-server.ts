@@ -172,13 +172,31 @@ export function createV2PublicHttpHandler(options: {
   callsPerMinute?: number;
   now?: () => number;
   onRateLimited?: (surface: "handshake_call" | "handshake_invite") => void;
+  localActionCommand?: (commandSha256: string) => string | null;
 }) {
   const now = options.now ?? Date.now;
   const allowInvite = limiter(options.invitePerHour ?? 5, 60 * 60_000, now);
   const allowCall = limiter(options.callsPerMinute ?? 120, 60_000, now);
   const invoke = createRoleAccessBroker(options.invoke, now);
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    if ((req.url ?? "").split("?")[0] !== "/handshake/mcp") {
+    const path = (req.url ?? "").split("?")[0];
+    // Digest-addressed fetch for verbatim helperStep commands: the 256-bit
+    // commandSha256 is the capability, the body is the exact already-issued
+    // shellCommand bytes, and the response is uncacheable. Exempt from the
+    // per-minute call bucket — it is a static read, not a handshake call.
+    if (path === "/handshake/local-action" || path.startsWith("/handshake/local-action/")) {
+      const match = /^\/handshake\/local-action\/([0-9a-f]{64})$/.exec(path);
+      const command = req.method === "GET" && match ? options.localActionCommand?.(match[1]) : null;
+      if (!command) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+      res.end(command);
+      return;
+    }
+    if (path !== "/handshake/mcp") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "not_found" }));
       return;
