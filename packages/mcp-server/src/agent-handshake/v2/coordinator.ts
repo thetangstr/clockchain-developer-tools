@@ -72,16 +72,23 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const SIGNATURE = /^0x[0-9a-f]{130}$/;
 const RETRY_AFTER_MS = 3000;
 const MIN_REGISTRATION_BALANCE_WEI = 5_000_000_000_000_000n;
-// Minimum remaining invitation-window runway required to mint responder role state. An invitation minted
-// at the window edge would expire before the Responder could be reached, and the host rotates a fresh
-// current session as soon as the window lapses, so the claim could never be observed.
+// Minimum remaining invitation-window runway required to mint responder role state. The session's
+// invitationExpiresAtMs is the MINT cutoff — past it the host may rotate before the mint's
+// agent_v2_invitation_created lands on the relay log — so a mint must commit early enough for that
+// message to be observed. The claim runway itself is mint-relative (below), not bound to the cutoff.
 const INVITATION_MIN_RUNWAY_MS = 30_000;
-// The host observes agent_v2_invitation_claimed only until the session's
-// invitationExpiresAtMs and then rotates. A minted claim window must end
-// strictly inside that bound, with a small landing margin so a claim accepted
-// at the edge still reaches the host before it exits — an accept that lands
-// after rotation succeeds on the coordinator but orphans the session (claims
-// post, nobody funds, the session stalls at awaiting_funding until deadline).
+// The responder's claim window is mint-relative so an invitation minted late
+// in the session's invitation window still gets a full runway for real
+// LLM-agent turn latency (~10-90s to read the drop, build the token argument,
+// and issue accept). The host learns this expiry from the
+// agent_v2_invitation_created message and extends its claim-observation bound
+// to match, so a claim still can never outlive host observation.
+const INVITATION_CLAIM_RUNWAY_MS = 180_000;
+// The claim window must end strictly inside the session deadline, with a
+// small landing margin so a claim accepted at the edge still reaches the host
+// while it is observing — an accept that lands after rotation succeeds on the
+// coordinator but orphans the session (claims post, nobody funds, the session
+// stalls at awaiting_funding until deadline).
 const INVITATION_CLAIM_LANDING_MARGIN_MS = 5_000;
 const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 // agent_handshake_next bridges ordinary dependency waits server-side: one tool
@@ -873,18 +880,17 @@ export function createV2Coordinator(options: {
       const sessionTaken = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
         .some((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
       if (sessionTaken) transient(rotationRetryMs);
-      // The minted claim window is capped at the session's own invitation
-      // expiry minus the landing margin — never extended mint-relative past
-      // it. The host stops observing claims at invitationExpiresAtMs and
-      // rotates the session, so a claim window that outlives it lets the
-      // Responder accept into a session nobody is funding. The runway check
-      // above guarantees at least INVITATION_MIN_RUNWAY_MS minus the margin of
-      // usable claim window at mint; a Responder too slow to claim gets
-      // invitation_expired and the Initiator re-invites into the next session
-      // rather than both sides stalling in an orphaned one.
+      // The minted claim window is mint-relative at INVITATION_CLAIM_RUNWAY_MS,
+      // capped only by the session deadline minus the landing margin. The host
+      // observes agent_v2_invitation_created (posted below with the minted
+      // expiry as claimExpiresAtMs) and extends its claim-observation bound to
+      // match, so the window never outlives observation — the #141 orphan guard
+      // — while a late-window mint still gets the full runway. A Responder too
+      // slow to claim gets invitation_expired and the Initiator re-invites into
+      // the next session rather than both sides stalling in an orphaned one.
       const invitationExpMs = String(Math.min(
-        Number(found.invitationExpiresAtMs) - INVITATION_CLAIM_LANDING_MARGIN_MS,
-        Number(found.sessionDeadlineMs),
+        inviteNow + INVITATION_CLAIM_RUNWAY_MS,
+        Number(found.sessionDeadlineMs) - INVITATION_CLAIM_LANDING_MARGIN_MS,
       ));
       const metadata = metadataFrom(found, activeTerms);
       let created;
@@ -908,6 +914,7 @@ export function createV2Coordinator(options: {
       const createdAtMs = now();
       const keyValue = await storeInitial(created.initiatorAccess, metadata, "initiator");
       await post(keyValue, "agent_v2_invitation_created", {
+        claimExpiresAtMs: invitationExpMs,
         createdAtMs: String(createdAtMs),
         externalBusinessActionPerformed: false,
         statementDigest: v2CanonicalRecord(activeTerms).digest,
