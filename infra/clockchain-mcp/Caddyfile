@@ -16,5 +16,25 @@ mcp.clockchain.network {
 			header_up X-Forwarded-Prefix /staging
 		}
 	}
+	# ACM4 demo instance: a second MCP server pinned to the build the Clark/Clint pair
+	# (helper 2.1.6) is proven against, with its own state and invite limiter. Runs from
+	# /opt/clockchain-mcp/acm4-compose.yml on the box; production stays on the main build.
+	handle_path /acm4/* {
+		reverse_proxy mcp-acm4:8080 {
+			header_up X-Forwarded-Prefix /acm4
+		}
+	}
+	# Agent handshake endpoint pin (owner decision 2026-09-20): the frozen Clark/Clint pair
+	# pins this exact URL and helper 2.1.6, so /handshake/mcp serves the pinned instance while
+	# the current build's handshake surface is reachable at /next/handshake/mcp. Swap back once
+	# the participants are released on the current helper line.
+	handle /handshake/mcp {
+		reverse_proxy mcp-acm4:8080
+	}
+	handle_path /next/* {
+		reverse_proxy mcp:8080 {
+			header_up X-Forwarded-Prefix /next
+		}
+	}
 	reverse_proxy mcp:8080
 }
