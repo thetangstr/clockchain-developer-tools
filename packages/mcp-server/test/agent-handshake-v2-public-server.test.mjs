@@ -564,6 +564,26 @@ test("terms mismatch surfaces a public reason and the published terms for self-c
   }
 });
 
+test("an expired invitation surfaces a distinct terminal public reason", async () => {
+  const expired = Object.assign(new Error("Agent handshake invitation is unavailable."), {
+    name: "V2InvitationExpiredError",
+  });
+  const handler = createV2PublicHttpHandler({ pin, now: () => 1_000, invoke: async () => { throw expired; } });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  try {
+    const result = await rpc(url, "tools/call", { name: "agent_handshake_accept_invitation", arguments: { invitation: "x".repeat(80) } });
+    const body = JSON.parse(result.body.result.content[0].text);
+    assert.equal(result.body.result.isError, true);
+    assert.equal(body.error, "HANDSHAKE_UNAVAILABLE");
+    assert.equal(body.retryable, false);
+    assert.equal(body.reason, "invitation_expired");
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
 test("an expired signing window surfaces a terminal public reason", async () => {
   const expired = Object.assign(new Error("Agent handshake coordination failed safely."), {
     name: "V2SigningWindowExpiredError",
