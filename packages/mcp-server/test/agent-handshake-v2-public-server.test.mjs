@@ -75,8 +75,20 @@ test("public initialization leads with the immutable local-authority boundary", 
   assert.match(instructions, /short opaque local handle/i);
   assert.match(instructions, /never send it to the other stakeholder or to any endpoint other than this one/i);
   assert.match(instructions, /showing it to your own operator is expected/i);
-  assert.match(instructions, /adapter asset path.*mandatory.*approvalTool.*already preloaded.*do not download or overwrite.*inspect.*manifest.*helper source/is);
-  assert.match(instructions, /portable fallback.*only when.*approvalTool.*not available.*files are absent.*download/is);
+  // The adapter is the documented default: presented before the portable
+  // fallback, a one-time install that holds the pinned assets and re-verifies
+  // them per call — never "already preloaded" files in the workspace.
+  assert.ok(instructions.indexOf("ADAPTER ASSET PATH") < instructions.indexOf("PORTABLE FALLBACK"), "adapter path precedes the portable fallback");
+  assert.match(instructions, /adapter asset path \(default\).*one-time install.*digest-pinned.*re-verif.*every call/is);
+  assert.ok(instructions.includes("claude mcp add clockchain-local-adapter -- npx -y @clockchain/local-adapter"));
+  assert.ok(instructions.includes('[mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@clockchain/local-adapter"]'));
+  assert.match(instructions, /localAction carries approvalTool.*helperStep\.approvalTool.*once per step.*zero-input.*mcp__clockchain-local-adapter__authorize_local_action.*never run helperStep\.shellCommand when approvalTool is available/is);
+  assert.match(instructions, /zero Bash commands for local actions/is);
+  assert.match(instructions, /ask the operator to install the adapter rather than falling back silently/is);
+  // The portable download-and-run path is the explicit last resort and says why.
+  assert.match(instructions, /portable fallback.*last resort.*only when.*approvalTool.*not available.*files are absent.*download/is);
+  assert.match(instructions, /runtime download-and-execute is deliberately blocked.*safety-conscious.*expected behavior, not a bug.*adapter exists precisely because/is);
+  assert.match(instructions, /execution shape.*portable fallback only.*zero Bash commands for local actions/is);
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./manifest.json 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.8/manifest.json'"));
   assert.ok(instructions.includes("curl --fail --location --proto '=https' --proto-redir '=https' --output ./clockchain-agent-handshake.cjs 'https://github.com/thetangstr/clockchain-handshake-v2/releases/download/v2.1.8/clockchain-agent-handshake.cjs'"));
   assert.match(instructions, /portable fallback.*each file as its own separate Bash tool call.*never prefix, wrap, combine/is);
