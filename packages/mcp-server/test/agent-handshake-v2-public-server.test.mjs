@@ -357,6 +357,76 @@ test("public HTTP routing ignores full-surface credentials, trusts only configur
   }
 });
 
+test("an exhausted invite quota surfaces rate_limited with the real reset delay", async () => {
+  let now = 1000;
+  const handler = createV2PublicHttpHandler({
+    pin,
+    now: () => now,
+    invitePerHour: 1,
+    callsPerMinute: 120,
+    invoke: async () => ({ ok: true, initiatorAccess: roleAccess({ jti: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expMs: 60 * 60_000 + 10_000 }) }),
+  });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  const args = { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } };
+  try {
+    const first = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: args });
+    assert.equal(first.body.result.isError, undefined);
+    now += 1_000;
+    const limited = await rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: args });
+    const body = JSON.parse(limited.body.result.content[0].text);
+    assert.equal(limited.body.result.isError, true);
+    assert.equal(body.error, "rate_limited");
+    assert.equal(body.retryable, true);
+    assert.equal(body.retryAfterMs, 60 * 60_000 - 1_000);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
+test("transient invite rejections refund the hourly quota while terminal ones consume it", async () => {
+  let now = 1000;
+  let mode = "transient";
+  const transient = Object.assign(new Error("waiting"), { name: "V2TransientCoordinatorError" });
+  const terminal = Object.assign(new Error("failed"), { name: "V2CoordinatorError" });
+  const handler = createV2PublicHttpHandler({
+    pin,
+    now: () => now,
+    invitePerHour: 3,
+    callsPerMinute: 120,
+    invoke: async () => {
+      if (mode === "transient") throw transient;
+      if (mode === "terminal") throw terminal;
+      return { ok: true, initiatorAccess: roleAccess({ jti: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expMs: 60 * 60_000 + 10_000 }) };
+    },
+  });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${httpServer.address().port}/handshake/mcp`;
+  const args = { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } };
+  const invite = () => rpc(url, "tools/call", { name: "agent_handshake_invite", arguments: args });
+  try {
+    for (let index = 0; index < 8; index += 1) {
+      const retried = await invite();
+      const body = JSON.parse(retried.body.result.content[0].text);
+      assert.equal(body.error, "HANDSHAKE_TEMPORARILY_UNAVAILABLE");
+    }
+    mode = "ok";
+    const minted = await invite();
+    assert.equal(minted.body.result.isError, undefined);
+    mode = "terminal";
+    for (let index = 0; index < 2; index += 1) {
+      const rejected = await invite();
+      assert.equal(JSON.parse(rejected.body.result.content[0].text).error, "HANDSHAKE_UNAVAILABLE");
+    }
+    const limited = await invite();
+    assert.equal(JSON.parse(limited.body.result.content[0].text).error, "rate_limited");
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
 test("public HTTP keeps signed role capabilities behind short opaque handles", async () => {
   const initiatorCapability = roleAccess({ jti: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", role: "initiator" });
   const responderCapability = roleAccess({ jti: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", role: "responder" });

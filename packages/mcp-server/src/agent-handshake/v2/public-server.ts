@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { V2_HELPER_VERSION, buildV2Instructions, type V2ReleasePin } from "./instructions.js";
-import { registerV2PublicTools, V2_PUBLIC_TOOL_NAMES, type V2PublicInvoke } from "./public-tools.js";
+import { isV2RetryableToolError, registerV2PublicTools, V2_PUBLIC_TOOL_NAMES, type V2PublicInvoke } from "./public-tools.js";
 import { readV2RoleAccessPayload, V2RoleAccessError } from "./access.js";
 
 export { V2_PUBLIC_TOOL_NAMES } from "./public-tools.js";
@@ -35,17 +35,39 @@ export function v2PublicClientIp(headers: IncomingHttpHeaders, remoteAddress: st
 
 function limiter(limit: number, windowMs: number, now: () => number) {
   const hits = new Map<string, { count: number; resetAt: number }>();
-  return (key: string): boolean => {
-    const current = now();
-    const prior = hits.get(key);
-    if (!prior || current >= prior.resetAt) {
-      hits.set(key, { count: 1, resetAt: current + windowMs });
+  return {
+    acquire(key: string): boolean {
+      const current = now();
+      const prior = hits.get(key);
+      if (!prior || current >= prior.resetAt) {
+        hits.set(key, { count: 1, resetAt: current + windowMs });
+        return true;
+      }
+      if (prior.count >= limit) return false;
+      prior.count += 1;
       return true;
-    }
-    if (prior.count >= limit) return false;
-    prior.count += 1;
-    return true;
+    },
+    release(key: string): void {
+      const prior = hits.get(key);
+      if (prior && prior.count > 0) prior.count -= 1;
+    },
+    retryAfterMs(key: string): number {
+      const prior = hits.get(key);
+      return prior ? Math.max(prior.resetAt - now(), 1) : 1;
+    },
   };
+}
+
+// Rate limiting is a quota condition, not a handshake failure — it carries the
+// real bucket reset so a caller can back off for the actual duration instead of
+// hot-retrying into the wall.
+export class V2RateLimitedError extends Error {
+  readonly retryAfterMs: number;
+  constructor(retryAfterMs: number) {
+    super("rate_limited");
+    this.name = "V2RateLimitedError";
+    this.retryAfterMs = retryAfterMs;
+  }
 }
 
 const ROLE_ACCESS_HANDLE = /^ccra_[A-Za-z0-9_-]{22}$/;
@@ -162,7 +184,7 @@ export function createV2PublicHttpHandler(options: {
       return;
     }
     const ip = v2PublicClientIp(req.headers, req.socket.remoteAddress, options.trustedProxy);
-    if (!allowCall(`call:${ip}`)) {
+    if (!allowCall.acquire(`call:${ip}`)) {
       options.onRateLimited?.("handshake_call");
       res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify({ error: "rate_limited" }));
@@ -171,9 +193,21 @@ export function createV2PublicHttpHandler(options: {
     const server = buildV2PublicServer({
       pin: options.pin,
       invoke: async (name, args) => {
-        if (name === "agent_handshake_invite" && !allowInvite(`invite:${ip}`)) {
-          options.onRateLimited?.("handshake_invite");
-          throw new Error("rate_limited");
+        if (name === "agent_handshake_invite") {
+          const inviteKey = `invite:${ip}`;
+          if (!allowInvite.acquire(inviteKey)) {
+            options.onRateLimited?.("handshake_invite");
+            throw new V2RateLimitedError(allowInvite.retryAfterMs(inviteKey));
+          }
+          try {
+            return await invoke(name, args);
+          } catch (error) {
+            // Session-state transient rejections (consumed session, insufficient
+            // invitation runway, dependency breaker) mint nothing — refund the
+            // hourly budget so SOP-documented retry polling cannot self-lockout.
+            if (isV2RetryableToolError(error)) allowInvite.release(inviteKey);
+            throw error;
+          }
         }
         return invoke(name, args);
       },
