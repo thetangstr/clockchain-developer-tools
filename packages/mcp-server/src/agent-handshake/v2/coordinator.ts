@@ -11,7 +11,7 @@ import { readEvmBalance, recoverEip191Address, resolveOwnedAgentRegistration } f
 import { authorizeV2RoleAccess, verifyV2RoleAccess, type V2AccessKey, type V2Role } from "./access.js";
 import type { ClaimPhase, V2AcceptanceHmacKey, V2InvitationClaim, V2InvitationMetadata } from "./invitation-store.js";
 import { createV2InvitationService, createV2InvitationStore, V2InvitationWindowUnavailableError } from "./invitation-store.js";
-import { V2_HELPER_VERSION, readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
+import { V2_HELPER_VERSION, V2_PUBLIC_ENDPOINT, readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
   commitmentCheckpointDigest,
   commitmentCheckpointSigningBytes,
@@ -854,7 +854,7 @@ export function createV2Coordinator(options: {
         terms: activeTerms,
       });
       const policy = localPolicy(activeTerms, "initiator") as JsonObject;
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: invitationExpMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator", registerLocalActionCommand) });
+      return Object.freeze({ ...created, endpoint: V2_PUBLIC_ENDPOINT, sessionId: found.sessionId, invitationExpiresAtMs: invitationExpMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator", registerLocalActionCommand) });
     },
 
     async acceptInvitation(invitation: string, acceptanceIdempotencyKey?: string): Promise<JsonObject> {

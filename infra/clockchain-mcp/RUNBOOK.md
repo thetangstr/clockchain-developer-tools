@@ -3,6 +3,9 @@
 This deployment keeps the existing EC2, Docker Compose, and Caddy edge. Caddy is
 the only public ingress. The authenticated MCP remains at `/mcp`; the isolated
 eight-tool stakeholder handshake is at `/handshake/mcp`; `/health` stays public.
+While the ACM4 demo pin is live (Caddyfile), `/handshake/mcp` routes to the
+frozen 2.1.6 demo instance and this build's handshake surface is
+`/next/handshake/mcp`.
 
 ## Required SSM parameters
 
@@ -110,7 +113,7 @@ Run these before any stakeholder demonstration:
 GET https://mcp.clockchain.network/health                         -> 200
 GET https://mcp-aws.clockchain.network/health                     -> 200
 GET https://mcp.clockchain.network/.well-known/agent-handshake.json -> 200 and the approved release pin
-POST https://mcp.clockchain.network/handshake/mcp                 -> MCP initialize without an authenticated-MCP credential
+POST https://mcp.clockchain.network/next/handshake/mcp            -> MCP initialize on the current build (no creds); /handshake/mcp is the ACM4-pinned demo while the pin is live
 POST https://mcp.clockchain.network/mcp                           -> still requires authenticated MCP credentials
 ```
 
