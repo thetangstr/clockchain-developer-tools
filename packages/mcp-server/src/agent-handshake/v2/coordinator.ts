@@ -777,6 +777,15 @@ export function createV2Coordinator(options: {
       // to land; an already-expired or near-expiry "current" session rolls over underneath the invite, so the
       // caller must retry into the fresh session rather than hold an invitation nobody will observe.
       if (now() + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) transient();
+      // One invitation per session: the first invite anchors an
+      // agent_v2_invitation_created message on the session's relay log, and a
+      // second invite would fail closed inside post() on the sender-key check.
+      // The condition self-heals at session rotation, so surface it as
+      // transient — same "retry into the next session" semantics as the runway
+      // check above — instead of a terminal coordination failure.
+      const sessionTaken = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
+        .some((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
+      if (sessionTaken) transient();
       const metadata = metadataFrom(found, activeTerms);
       let created;
       try {
