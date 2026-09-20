@@ -271,6 +271,34 @@ test("a second invite on an already-minted session rejects retryably before mint
   assert.equal((await harness.stateStore.list()).length, 1);
 });
 
+test("a late-minted invitation keeps a full mint-relative claim window", async (t) => {
+  // Mint at 89s into the session's 120s invitation window (just above the 30s
+  // runway guard): the claim deadline must be mint+120s, not the 31s remnant
+  // of the session's window — a terms_mismatch retry must not shrink it.
+  const mintAt = nowMs + 89_000;
+  const harness = await createDurableAcceptHarness(t, { now: () => mintAt });
+  const invited = await harness.coordinator.invite(terms);
+  assert.equal(
+    readV2RoleAccessPayload(invited.responderInvitation).expMs,
+    String(mintAt + 120_000),
+  );
+  assert.equal(invited.invitationExpiresAtMs, String(mintAt + 120_000));
+});
+
+test("a fresh accept past the invitation expiry fails with a distinct expired reason", async (t) => {
+  let clock = nowMs + 1;
+  const harness = await createDurableAcceptHarness(t, {
+    now: () => clock,
+    serviceNowMs: () => clock,
+  });
+  const invited = await harness.coordinator.invite(terms);
+  clock = nowMs + 121_000;
+  await assert.rejects(
+    () => harness.coordinator.acceptInvitation(invited.responderInvitation),
+    (error) => error?.name === "V2InvitationExpiredError",
+  );
+});
+
 test("an invite whose terms differ from the published host terms is rejected before minting or posting", async () => {
   __resetHandshakeStateStore();
   const key = { kid: "role-2026-08", secret: randomBytes(32) };
@@ -442,7 +470,7 @@ async function createDurableAcceptHarness(t, options = {}) {
     verificationKeys: [key],
     acceptanceHmacKeys: [acceptanceKey],
     store: invitationStore,
-    nowMs: () => nowMs + 1,
+    nowMs: options.serviceNowMs ?? (() => nowMs + 1),
   });
   const invitationService = options.wrapInvitationService
     ? options.wrapInvitationService(baseInvitationService)
@@ -782,7 +810,7 @@ test("two distinct role capabilities drive the complete v2 local-signing state m
   });
   const accepted = await coordinator.acceptInvitation(invited.responderInvitation);
   assert.equal(readV2RoleAccessPayload(invited.initiatorAccess).expMs, discovery.sessionDeadlineMs);
-  assert.equal(readV2RoleAccessPayload(invited.responderInvitation).expMs, discovery.invitationExpiresAtMs);
+  assert.equal(readV2RoleAccessPayload(invited.responderInvitation).expMs, String(nowMs + 1 + 120000));
   assert.equal(readV2RoleAccessPayload(accepted.responderAccess).expMs, discovery.sessionDeadlineMs);
   assert.deepEqual(accepted.localPolicy, policy("responder"));
   assert.equal(Object.hasOwn(accepted.localAction, "policyPayload"), false);

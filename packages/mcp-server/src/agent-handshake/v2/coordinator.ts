@@ -786,6 +786,13 @@ export function createV2Coordinator(options: {
       const sessionTaken = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
         .some((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
       if (sessionTaken) transient();
+      // The minted invitation gets its own full-width claim window measured from
+      // mint, not the remainder of the session's invitation window — otherwise a
+      // terms_mismatch retry or any pre-mint delay silently shrinks the
+      // Responder's runway. Still bounded by the session deadline, and minting
+      // itself stays gated on the session's invitation window above.
+      const invitationWindowMs = Number(found.invitationExpiresAtMs) - Number(found.createdAtMs);
+      const invitationExpMs = String(Math.min(now() + invitationWindowMs, Number(found.sessionDeadlineMs)));
       const metadata = metadataFrom(found, activeTerms);
       let created;
       try {
@@ -794,7 +801,7 @@ export function createV2Coordinator(options: {
           statementDigest: v2CanonicalRecord(activeTerms).digest,
           nbfMs: found.createdAtMs,
           expMs: found.sessionDeadlineMs,
-          invitationExpMs: found.invitationExpiresAtMs,
+          invitationExpMs,
           metadata,
           // Evaluated inside the store's serialized write: if the remaining window drops below the minimum
           // runway during create, the commit is refused atomically so no unclaimed invitation record is
@@ -814,7 +821,7 @@ export function createV2Coordinator(options: {
         terms: activeTerms,
       });
       const policy = localPolicy(activeTerms, "initiator") as JsonObject;
-      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: found.invitationExpiresAtMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
+      return Object.freeze({ ...created, endpoint: "https://mcp.clockchain.network/handshake/mcp", sessionId: found.sessionId, invitationExpiresAtMs: invitationExpMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator") });
     },
 
     async acceptInvitation(invitation: string, acceptanceIdempotencyKey?: string): Promise<JsonObject> {
