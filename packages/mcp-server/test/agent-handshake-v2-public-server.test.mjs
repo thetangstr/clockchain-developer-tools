@@ -427,6 +427,34 @@ test("transient invite rejections refund the hourly quota while terminal ones co
   }
 });
 
+test("GET /handshake/local-action/<sha256> serves the exact issued command bytes", async () => {
+  const command = "node --version";
+  const sha = "a".repeat(64);
+  const handler = createV2PublicHttpHandler({
+    pin,
+    invoke: async () => ({}),
+    localActionCommand: (digest) => (digest === sha ? command : null),
+  });
+  const httpServer = createServer((req, res) => handler(req, res));
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${httpServer.address().port}`;
+  try {
+    const hit = await fetch(`${base}/handshake/local-action/${sha}`);
+    assert.equal(hit.status, 200);
+    assert.equal(hit.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(hit.headers.get("cache-control"), "no-store");
+    assert.equal(await hit.text(), command);
+    const miss = await fetch(`${base}/handshake/local-action/${"b".repeat(64)}`);
+    assert.equal(miss.status, 404);
+    const malformed = await fetch(`${base}/handshake/local-action/not-a-digest`);
+    assert.equal(malformed.status, 404);
+    const wrongMethod = await fetch(`${base}/handshake/local-action/${sha}`, { method: "POST" });
+    assert.equal(wrongMethod.status, 404);
+  } finally {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+});
+
 test("public HTTP keeps signed role capabilities behind short opaque handles", async () => {
   const initiatorCapability = roleAccess({ jti: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", role: "initiator" });
   const responderCapability = roleAccess({ jti: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", role: "responder" });

@@ -473,6 +473,7 @@ export async function runHttp(): Promise<void> {
       callsPerMinute: Number(process.env.AGENT_HANDSHAKE_CALLS_PER_MINUTE ?? "120"),
       invoke: (name, args) => instrumentedInvoke(name, args as Record<string, unknown>, (n, a) => publicHandshakeCoordinator!.invoke(n, a as Record<string, never>)),
       onRateLimited: (surface) => rlEvents.inc({ surface: bounded(surface, RL_SURFACES) }),
+      localActionCommand: (commandSha256) => publicHandshakeCoordinator!.localActionCommand(commandSha256),
     });
     return publicHandshakeHandler;
   };
@@ -507,7 +508,7 @@ export async function runHttp(): Promise<void> {
   const ROUTE_CLASSES = [
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
     "llms", "manifest", "handshake_manifest", "standalone_manifest", "connect_verify",
-    "connect_mcp", "handshake_mcp", "invitation_exchange", "token", "promote",
+    "connect_mcp", "handshake_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
     "landing", "mcp_rpc", "keeper", "other",
   ] as const;
   const STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
@@ -557,6 +558,7 @@ export async function runHttp(): Promise<void> {
     if (method === "GET" && p === "/connect/verify") return "connect_verify";
     if (p === "/connect/mcp") return "connect_mcp";
     if (p === "/handshake/mcp") return "handshake_mcp";
+    if (p.startsWith("/handshake/local-action")) return "handshake_local_action";
     if (p === "/handshake/invitations/exchange") return "invitation_exchange";
     if (method === "POST" && p === "/token") return "token";
     if (method === "POST" && p === "/promote") return "promote";
@@ -1014,6 +1016,20 @@ export async function runHttp(): Promise<void> {
         if (!res.headersSent) {
           res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify({ error: "standalone_handshake_unavailable" }));
+        }
+      }
+      return;
+    }
+
+    // Digest-addressed fetch of verbatim helperStep commands — same public
+    // handler, GET only, the 256-bit commandSha256 is the capability.
+    if (pathOf(req.url).startsWith("/handshake/local-action")) {
+      try {
+        await getPublicHandshakeHandler()(req, res);
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
         }
       }
       return;

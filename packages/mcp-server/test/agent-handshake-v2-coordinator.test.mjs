@@ -59,6 +59,8 @@ function policy(role) {
 
 function compactHelperStep(operation, role, command) {
   const commandSha256 = createHash("sha256").update(command).digest("hex");
+  const file = "${TMPDIR%/}/.clockchain/handshakes/" + sessionId + "/" + role + "/cmd-" + commandSha256.slice(0, 16) + ".sh";
+  const shellCommandFetch = `curl -fsS "https://mcp.clockchain.network/handshake/local-action/${commandSha256}" -o "${file}" && node -e 'const c=require("node:crypto"),f=require("node:fs");process.exit(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex")==="${commandSha256}"?0:1)' "${file}" && bash "${file}"`;
   return {
     operation,
     role,
@@ -66,6 +68,7 @@ function compactHelperStep(operation, role, command) {
     approvalTool: "mcp__clockchain-local-adapter__authorize_local_action",
     commandLength: Buffer.byteLength(command),
     commandSha256,
+    shellCommandFetch,
     shellCommand: command,
   };
 }
@@ -79,7 +82,7 @@ function compactPayloadFrom(response, operation) {
   assert.match(response.signingSummary.bytesSha256, /^[0-9a-f]{64}$/);
   assert.equal(response.localAction.operation, "sign");
   assert.deepEqual(Object.keys(response.localAction.helperStep), [
-    "operation", "role", "sessionId", "approvalTool", "commandLength", "commandSha256", "shellCommand",
+    "operation", "role", "sessionId", "approvalTool", "commandLength", "commandSha256", "shellCommandFetch", "shellCommand",
   ]);
   const command = response.localAction.helperStep.shellCommand;
   assert.equal(response.localAction.helperStep.commandLength, Buffer.byteLength(command));
@@ -111,7 +114,7 @@ function compactCertificatePayloadFrom(response, role) {
   assert.equal(response.certificateSummary.sessionId, sessionId);
   assert.match(response.certificateSummary.resultDigest, /^[0-9a-f]{64}$/);
   assert.deepEqual(Object.keys(response.localAction.helperStep), [
-    "operation", "role", "sessionId", "approvalTool", "commandLength", "commandSha256", "shellCommand",
+    "operation", "role", "sessionId", "approvalTool", "commandLength", "commandSha256", "shellCommandFetch", "shellCommand",
   ]);
   const command = response.localAction.helperStep.shellCommand;
   assert.equal(response.localAction.helperStep.operation, "verify-certificate");
@@ -269,6 +272,27 @@ test("a second invite on an already-minted session rejects retryably before mint
     1,
   );
   assert.equal((await harness.stateStore.list()).length, 1);
+});
+
+test("every issued helperStep command is fetchable verbatim by its commandSha256 until expiry", async (t) => {
+  // The registry is what backs GET /handshake/local-action/<commandSha256>:
+  // the digest is the capability and the served bytes are the exact already-
+  // issued shellCommand — so an adapter-less agent never hand-transcribes a
+  // multi-KB command through a chat/shell round-trip.
+  let clock = nowMs + 1;
+  const harness = await createDurableAcceptHarness(t, { now: () => clock });
+  const invited = await harness.coordinator.invite(terms);
+  assert.equal(invited.localAction.helperSteps.length, 3);
+  for (const step of invited.localAction.helperSteps) {
+    assert.match(step.shellCommandFetch, new RegExp(`^curl -fsS "https://mcp\\.clockchain\\.network/handshake/local-action/${step.commandSha256}" -o `));
+    assert.match(step.shellCommandFetch, /node -e '.*sha256.*' ".*" && bash ".*"$/);
+    assert.ok(step.shellCommandFetch.length < 1024);
+    assert.equal(harness.coordinator.localActionCommand(step.commandSha256), step.shellCommand);
+  }
+  assert.equal(harness.coordinator.localActionCommand("f".repeat(64)), null);
+  assert.equal(harness.coordinator.localActionCommand("not-a-digest"), null);
+  clock += 20 * 60_000 + 1;
+  assert.equal(harness.coordinator.localActionCommand(invited.localAction.helperSteps[0].commandSha256), null);
 });
 
 test("a late-minted invitation keeps a full mint-relative claim window", async (t) => {
