@@ -671,6 +671,12 @@ test("terms mismatch surfaces a public reason and the published terms for self-c
     assert.equal(body.retryable, false);
     assert.equal(body.reason, "terms_mismatch");
     assert.deepEqual(body.publishedTerms, publishedTerms);
+    // The note teaches verify-then-resubmit, not blind trust — it must name
+    // the identityPolicy identity check and the genuine red flag.
+    assert.equal(typeof body.note, "string");
+    assert.ok(body.note.includes("same fixed public session terms"));
+    assert.ok(body.note.includes("identityPolicy"));
+    assert.ok(body.note.includes("red flag"));
   } finally {
     await new Promise((resolve) => httpServer.close(resolve));
   }
