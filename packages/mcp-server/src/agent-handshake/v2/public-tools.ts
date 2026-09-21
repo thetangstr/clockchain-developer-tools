@@ -215,10 +215,13 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
           : { error: "HANDSHAKE_UNAVAILABLE", retryable: false, ...(reason ? { reason } : {}) };
         // terms_mismatch additionally returns the host-published terms — public
         // discovery data — so the caller can resubmit inside the same window.
+        // The note teaches verification, not blind trust: a careful agent
+        // should confirm the fixture is identical-fielded before re-signing.
         if (!retryable && errorName === "V2TermsMismatchError") {
           const publishedTerms = (error as { publishedTerms?: unknown }).publishedTerms;
           if (publishedTerms !== null && typeof publishedTerms === "object" && !Array.isArray(publishedTerms)) {
             body.publishedTerms = publishedTerms;
+            body.note = "publishedTerms are the same fixed public session terms this endpoint returns to every caller — fixture data, not a substitution targeted at your request. Verify before resubmitting: publishedTerms.identityPolicy (erc8004, chainId, registryAddress) must be identical to what you sent — a changed identityPolicy or chain is a genuine red flag; refuse and report it. If it is identical, call agent_handshake_invite again with publishedTerms verbatim.";
           }
         }
         return retryable
