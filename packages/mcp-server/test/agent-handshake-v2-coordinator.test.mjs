@@ -1202,7 +1202,7 @@ async function createBoundedWaitHarness(overrides = {}) {
     activeAccessKey: key,
     invitationService: createV2InvitationService({ activeKey: key, verificationKeys: [key], store: createV2InvitationStore(), nowMs: () => clock }),
     relay,
-    stateStore: createHandshakeStateStore({}),
+    stateStore: overrides.stateStore ?? createHandshakeStateStore({}),
     now: () => clock,
     recoverEip191Address: async ({ signatureHex }) => signatureHex.endsWith("1b") ? addresses.initiator : addresses.responder,
     registrationFundingReady: async () => (overrides.registrationFundingReady ? overrides.registrationFundingReady() : true),
@@ -1301,6 +1301,127 @@ test("agent_handshake_next bridges counterpart and proposal arrival to sign_acce
     "call_agent_handshake_submit_checkpoint_with_helper_output_checkpoint_then_agent_handshake_submit_with_signatureHex_and_unchanged_policy_digest",
   );
   assert.deepEqual(harness.waitPolls().map((poll) => poll.waitMs), [2000, 2000]);
+});
+
+function createMintRaceStore() {
+  const store = createHandshakeStateStore({});
+  let enteredMint;
+  let releaseMint;
+  let secondCommitted;
+  const enteredMintPromise = new Promise((resolve) => { enteredMint = resolve; });
+  const releaseMintPromise = new Promise((resolve) => { releaseMint = resolve; });
+  const secondCommittedPromise = new Promise((resolve) => { secondCommitted = resolve; });
+  let armGate = false;
+  let watchSecond = false;
+  const isMintUpdate = async (keyValue, mutate) => {
+    const current = await store.get(keyValue);
+    return !current?.data?.pending && Boolean(mutate(current)?.data?.pending);
+  };
+  const gated = {
+    store,
+    enteredMintPromise,
+    releaseMint: () => releaseMint(),
+    secondCommittedPromise,
+    arm: () => { armGate = true; },
+    watchSecond: () => { watchSecond = true; },
+    get: (keyValue) => store.get(keyValue),
+    put: (keyValue, record) => store.put(keyValue, record),
+    list: () => store.list(),
+    update: async (keyValue, mutate) => {
+      if (armGate && await isMintUpdate(keyValue, mutate)) {
+        armGate = false;
+        enteredMint();
+        await releaseMintPromise;
+        return store.update(keyValue, mutate);
+      }
+      if (watchSecond && await isMintUpdate(keyValue, mutate)) {
+        watchSecond = false;
+        const result = await store.update(keyValue, mutate);
+        secondCommitted();
+        return result;
+      }
+      return store.update(keyValue, mutate);
+    },
+  };
+  return gated;
+}
+
+test("agent_handshake_next converges concurrent proposal mints on the stored payload", async () => {
+  const gated = createMintRaceStore();
+  const harness = await createBoundedWaitHarness({ stateStore: gated });
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.fund("responder");
+  assert.equal((await harness.coordinator.next({ access: harness.accesses.initiator })).stage, "party_ready");
+  assert.equal((await harness.coordinator.next({ access: harness.accesses.responder })).stage, "party_ready");
+
+  // First poll mints a proposal and suspends inside its update; a concurrent
+  // poll then mints a *different* payload (fresh issuedAtMs) and commits first.
+  gated.arm();
+  const first = harness.coordinator.next({ access: harness.accesses.initiator });
+  await gated.enteredMintPromise;
+  harness.setClock(nowMs + 10_000);
+  gated.watchSecond();
+  const second = harness.coordinator.next({ access: harness.accesses.initiator });
+  await gated.secondCommittedPromise;
+  gated.releaseMint();
+
+  const [firstResponse, secondResponse] = await Promise.all([first, second]);
+  assert.equal(firstResponse.stage, "sign_proposal");
+  assert.equal(secondResponse.stage, "sign_proposal");
+  // The loser must serve the stored payload's request — never its discarded
+  // mint — or a signature made over its response cannot recover at submit.
+  const firstRequest = compactPayloadFrom(firstResponse, "proposal");
+  const secondRequest = compactPayloadFrom(secondResponse, "proposal");
+  assert.equal(firstRequest.bytesSha256, secondRequest.bytesSha256);
+  const again = await harness.coordinator.next({ access: harness.accesses.initiator });
+  assert.equal(compactPayloadFrom(again, "proposal").bytesSha256, firstRequest.bytesSha256);
+});
+
+test("agent_handshake_next converges concurrent acceptance mints on the stored payload", async () => {
+  const gated = createMintRaceStore();
+  const harness = await createBoundedWaitHarness({ stateStore: gated });
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.fund("initiator");
+  harness.fund("responder");
+  await harness.coordinator.next({ access: harness.accesses.initiator });
+  await harness.coordinator.next({ access: harness.accesses.responder });
+  const proposal = await harness.coordinator.next({ access: harness.accesses.initiator });
+  const proposalRequest = compactPayloadFrom(proposal, "proposal");
+  const proposalPayload = JSON.parse(gunzipSync(Buffer.from(proposalRequest.bytesGzipBase64Url, "base64url")).toString("utf8"));
+  const proposalSignatureHex = `0x${"2".repeat(128)}1b`;
+  const proposalEnvelope = {
+    payload: proposalPayload,
+    schema: "clockchain.agent-handshake-proposal-envelope/v2",
+    signature: { address: harness.addresses.initiator, algorithm: "eip191", value: proposalSignatureHex },
+  };
+  const proposalCheckpoint = {
+    schema: "clockchain.agent-handshake-commitment-checkpoint/v1", version: "1",
+    protocol: "clockchain.agent-handshake/v2", sessionId, role: "initiator", artifactType: "proposal",
+    artifactDigest: v2CanonicalRecord(proposalEnvelope).digest, sequence: "1", previousCheckpointDigest: null,
+    issuedAtMs: String(nowMs + 1), expiresAtMs: String(nowMs + 90_000), signerAddress: harness.addresses.initiator,
+    signature: { address: harness.addresses.initiator, algorithm: "eip191", value: `0x${"6".repeat(128)}1b` },
+  };
+  await harness.coordinator.submitCheckpoint({ access: harness.accesses.initiator, artifactSignatureHex: proposalSignatureHex, checkpoint: proposalCheckpoint });
+  await harness.coordinator.submit({ access: harness.accesses.initiator, policyDigest: v2CanonicalRecord(policy("initiator")).digest, signatureHex: proposalSignatureHex });
+
+  gated.arm();
+  const first = harness.coordinator.next({ access: harness.accesses.responder });
+  await gated.enteredMintPromise;
+  harness.setClock(nowMs + 10_000);
+  gated.watchSecond();
+  const second = harness.coordinator.next({ access: harness.accesses.responder });
+  await gated.secondCommittedPromise;
+  gated.releaseMint();
+
+  const [firstResponse, secondResponse] = await Promise.all([first, second]);
+  assert.equal(firstResponse.stage, "sign_acceptance");
+  assert.equal(secondResponse.stage, "sign_acceptance");
+  assert.equal(compactPayloadFrom(firstResponse, "acceptance").bytesSha256, compactPayloadFrom(secondResponse, "acceptance").bytesSha256);
+  const again = await harness.coordinator.next({ access: harness.accesses.responder });
+  assert.equal(compactPayloadFrom(again, "acceptance").bytesSha256, compactPayloadFrom(firstResponse, "acceptance").bytesSha256);
 });
 
 test("agent_handshake_next returns dependency waits with retryAfterMs and nextAction once the wait budget expires", async () => {
