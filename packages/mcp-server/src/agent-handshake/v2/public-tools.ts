@@ -65,6 +65,9 @@ export function isV2RetryableToolError(error: unknown): boolean {
     (error as Error)?.message !== "rate_limited";
 }
 const SAFE_ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+// Internal guard tags carried on coordinator errors — short lowercase
+// identifiers only, logged server-side to pinpoint which guard fired.
+const SAFE_ERROR_DETAIL = /^[a-z][a-zA-Z0-9_.-]{0,63}$/;
 // Coarse public reason codes for terminal failures — enough for an honest
 // caller to self-diagnose without leaking internals. Unmapped errors stay
 // fully opaque.
@@ -193,10 +196,15 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
         const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName)
           ? observedName
           : "Error";
+        const observedDetail = (error as { detail?: unknown })?.detail;
+        const detail = typeof observedDetail === "string" && SAFE_ERROR_DETAIL.test(observedDetail)
+          ? observedDetail
+          : undefined;
         console.warn(JSON.stringify({
           event: "agent_handshake_tool_failure",
           tool: definition.name,
           errorName,
+          ...(detail ? { detail } : {}),
         }));
         if (errorName === "V2RateLimitedError") {
           const reset = Number((error as { retryAfterMs?: unknown }).retryAfterMs);

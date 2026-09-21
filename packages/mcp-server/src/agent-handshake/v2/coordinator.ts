@@ -123,7 +123,15 @@ function joinRequired(role: V2Role, sessionId: string): JsonObject {
 }
 
 export class V2CoordinatorError extends Error {
-  constructor() { super("Agent handshake coordination failed safely."); this.name = "V2CoordinatorError"; }
+  // A short machine-stable tag naming which coordination guard fired. It is
+  // emitted only in the server-side agent_handshake_tool_failure log — the
+  // public response stays "coordination_failed".
+  readonly detail?: string;
+  constructor(detail?: string) {
+    super("Agent handshake coordination failed safely.");
+    this.name = "V2CoordinatorError";
+    this.detail = detail;
+  }
 }
 // The published session terms are not secret — the host publishes them in
 // discovery — so a mismatch error may carry them verbatim to let the caller
@@ -159,9 +167,16 @@ export class V2TransientCoordinatorError extends Error {
     this.retryAfterMs = retryAfterMs;
   }
 }
-function fail(): never { throw new V2CoordinatorError(); }
+function fail(detail?: string): never { throw new V2CoordinatorError(detail); }
 function transient(retryAfterMs?: number): never { throw new V2TransientCoordinatorError(retryAfterMs); }
 function windowExpired(): never { throw new V2SigningWindowExpiredError(); }
+
+// Agents mint checkpoint issuedAtMs on their own machines, so it is checked
+// against the host clock. NTP skew between independent hosts routinely exceeds
+// one second, and a tight bound rejected every checkpoint from a slightly
+// fast agent clock — deterministic coordination_failed at sign_proposal. Two
+// minutes tolerates real-world skew; expiresAtMs remains the strict bound.
+const CHECKPOINT_ISSUED_FUTURE_SKEW_MS = 120_000;
 
 // The helper requires proposal windows to be exactly validForSeconds wide and
 // to end at or before the session deadline. Near the deadline issuedAtMs
@@ -1011,43 +1026,46 @@ export function createV2Coordinator(options: {
     },
 
     async submitCheckpoint(input: { access: string; artifactSignatureHex: string; checkpoint: unknown }): Promise<JsonObject> {
-      if (!SIGNATURE.test(input.artifactSignatureHex)) fail();
+      if (!SIGNATURE.test(input.artifactSignatureHex)) fail("signature_hex");
       const auth = await authorize(input.access, "agent_handshake_submit_checkpoint");
       const current = await refresh(auth.keyValue);
       const operation = current.pending?.operation;
-      if (!current.sessionKeyAddress || (operation !== "proposal" && operation !== "acceptance")) fail();
+      if (!current.sessionKeyAddress || (operation !== "proposal" && operation !== "acceptance")) fail("no_pending_signing_op");
       const pending = current.pending;
-      if (!pending) fail();
+      if (!pending) fail("no_pending");
       const checkpoint = normalizeV2CommitmentCheckpoint(input.checkpoint) as JsonObject;
       const expectedRole = auth.verified.payload.role;
       const expectedSequence = operation === "proposal" ? "1" : "2";
       const expectedPrevious = operation === "proposal"
         ? null
-        : current.proposalCheckpoint ? commitmentCheckpointDigest(current.proposalCheckpoint) : fail();
+        : current.proposalCheckpoint ? commitmentCheckpointDigest(current.proposalCheckpoint) : fail("missing_prior_proposal_checkpoint");
       const signature = checkpoint.signature as JsonObject;
-      if (
-        checkpoint.sessionId !== auth.keyValue.session || checkpoint.role !== expectedRole ||
-        checkpoint.artifactType !== operation || checkpoint.sequence !== expectedSequence ||
-        checkpoint.previousCheckpointDigest !== expectedPrevious ||
-        checkpoint.signerAddress !== current.sessionKeyAddress ||
-        Number(checkpoint.issuedAtMs) > now() + 1_000 || Number(checkpoint.expiresAtMs) <= now()
-      ) fail();
+      const mismatch =
+        checkpoint.sessionId !== auth.keyValue.session ? "sessionId" :
+        checkpoint.role !== expectedRole ? "role" :
+        checkpoint.artifactType !== operation ? "artifactType" :
+        checkpoint.sequence !== expectedSequence ? "sequence" :
+        checkpoint.previousCheckpointDigest !== expectedPrevious ? "previousCheckpointDigest" :
+        checkpoint.signerAddress !== current.sessionKeyAddress ? "signerAddress" :
+        Number(checkpoint.issuedAtMs) > now() + CHECKPOINT_ISSUED_FUTURE_SKEW_MS ? "issuedAtMs_future" :
+        Number(checkpoint.expiresAtMs) <= now() ? "expiresAtMs" : null;
+      if (mismatch) fail(`checkpoint.${mismatch}`);
       const artifactBytes = canonicalBytes(pending.payload);
       const artifactSigner = (await options.recoverEip191Address({
         bytes: artifactBytes,
         signatureHex: input.artifactSignatureHex,
       })).toLowerCase();
-      if (artifactSigner !== current.sessionKeyAddress) fail();
+      if (artifactSigner !== current.sessionKeyAddress) fail("artifact_signer");
       const envelope = signatureEnvelope(operation, pending.payload, artifactSigner, input.artifactSignatureHex);
-      if (checkpoint.artifactDigest !== v2CanonicalRecord(envelope).digest) fail();
+      if (checkpoint.artifactDigest !== v2CanonicalRecord(envelope).digest) fail("artifact_digest");
       const recovered = (await options.recoverEip191Address({
         bytes: commitmentCheckpointSigningBytes(checkpoint),
         signatureHex: signature.value,
       })).toLowerCase();
-      if (recovered !== current.sessionKeyAddress) fail();
+      if (recovered !== current.sessionKeyAddress) fail("checkpoint_signer");
       const field = operation === "proposal" ? "proposalCheckpoint" : "acceptanceCheckpoint";
       const prior = operation === "proposal" ? current.proposalCheckpoint : current.acceptanceCheckpoint;
-      if (prior && commitmentCheckpointDigest(prior) !== commitmentCheckpointDigest(checkpoint)) fail();
+      if (prior && commitmentCheckpointDigest(prior) !== commitmentCheckpointDigest(checkpoint)) fail("prior_checkpoint_mismatch");
       await post(auth.keyValue, "agent_v2_commitment_checkpoint", { checkpoint });
       await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { [field]: checkpoint }));
       return Object.freeze({
