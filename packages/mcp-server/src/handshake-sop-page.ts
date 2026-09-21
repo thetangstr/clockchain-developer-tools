@@ -151,11 +151,9 @@ ${SOP_CSS}</style>
   <p style="margin-top:-6px"><b>Prereqs:</b> Node.js 24 on each agent · two agent runtimes · one out-of-band channel · invites capped at 5/hour.</p>
 
   <div class="qs-step">
-    <h4><span class="tag">Step 1</span>Register two MCP servers on each agent — any MCP-capable client works</h4>
-    <p style="margin:0 0 8px"><b>1.</b> <code>clockchain-handshake</code> — a remote streamable-http MCP server at <code>${ENDPOINT}</code> (no auth; authorization is per-call via the <code>access</code> capability). <b>2.</b> <code>clockchain-local-adapter</code> — a local stdio MCP server run as <code>npx -y @d4d.group/local-adapter</code> (Node.js 24): the default executor for every local action — zero shell commands, keys never leave the machine.</p>
-    <p style="margin:0 0 8px">Canonical <code>mcpServers</code> config (npx form, accepted by most clients):</p>
+    <h4><span class="tag">Step 1</span>Add the MCP servers — copy this into each agent's MCP client config</h4>
     <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${MCP_SERVERS_JSON}</code></pre></div>
-    <p style="margin:8px 0 0">Prefer a pinned install, or using Cursor/Cline/Windsurf/Codex/an SDK? See "Install options" below.</p>
+    <p style="margin:8px 0 0">That registers two servers in any MCP-capable client: the remote streamable-http coordinator (<code>${ENDPOINT}</code>, no auth — per-call capability) and the local stdio adapter (<code>npx -y @d4d.group/local-adapter</code>, Node.js 24 — the default local-action executor: zero shell commands, keys never leave the machine). Using a CLI like Claude Code or Codex, or want a pinned install? See "Install options" below.</p>
   </div>
 
   <div class="qs-step">
@@ -282,19 +280,15 @@ START HERE — YOUR FIRST HANDSHAKE IN 3 STEPS
   and peer binding — it authorizes nothing downstream;
   externalBusinessActionPerformed is always false (full boundary below).
 
-  STEP 1 — REGISTER TWO MCP SERVERS (run on BOTH agents — any
-  MCP-capable client works)
-    1. clockchain-handshake — a remote streamable-http MCP server at
-       ${ENDPOINT} (no auth; per-call capability).
-    2. clockchain-local-adapter — a local stdio MCP server run as
-       npx -y @d4d.group/local-adapter (Node.js 24): the default executor
-       for every local action — zero shell commands, keys never leave
-       the machine.
-
-    Canonical MCP config (npx form, accepted by most clients):
+  STEP 1 — ADD THE MCP SERVERS (copy this into each agent's MCP
+  client config — any MCP-capable client works)
 ${MCP_SERVERS_JSON.split("\n").map((l) => `    ${l}`).join("\n")}
-    Prefer a pinned install, or using Cursor/Cline/Windsurf/Codex/an SDK?
-    See INSTALL OPTIONS below.
+    That registers two servers: the remote streamable-http coordinator
+    (${ENDPOINT}, no auth — per-call capability) and the
+    local stdio adapter (npx -y @d4d.group/local-adapter, Node.js 24 —
+    the default local-action executor: zero shell commands, keys never
+    leave the machine). Using a CLI like Claude Code or Codex, or want a
+    pinned install? See INSTALL OPTIONS below.
 
   STEP 2 — INITIATOR: paste PROMPT 1 below into agent 1. It prints a
   responderInvitation — the only value that leaves agent 1.
