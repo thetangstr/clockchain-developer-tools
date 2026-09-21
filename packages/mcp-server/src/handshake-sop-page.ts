@@ -152,18 +152,10 @@ ${SOP_CSS}</style>
 
   <div class="qs-step">
     <h4><span class="tag">Step 1</span>Register two MCP servers on each agent — any MCP-capable client works</h4>
-    <p style="margin:0 0 8px"><b>1.</b> <code>clockchain-handshake</code> — a remote streamable-http MCP server at <code>${ENDPOINT}</code> (no auth: authorization is per-call via the <code>access</code> capability the server issues). <b>2.</b> <code>clockchain-local-adapter</code> — a local stdio MCP server, the <code>@d4d.group/local-adapter</code> npm package (requires Node.js 24). Two ways to run it — pick one: <b>(a) quick start, default:</b> command <code>npx -y @d4d.group/local-adapter</code> — npx ships with Node/npm and downloads + caches the package from the npm registry on first launch; one line, nothing to install first. <b>(b) for production / reliability:</b> install once — <code>${ADAPTER_INSTALL_NPM}</code> — then use the installed binary <code>clockchain-local-adapter</code> as the MCP command: deterministic pinned version, no network dependency at launch (works offline after install), faster cold start. Both run the same npm package; the only difference is npx-fetch-on-launch versus a one-time global install. For reproducibility without a global install, the npx form can be version-pinned — <code>${ADAPTER_INSTALL_NPX_PINNED}</code>. The adapter is the default executor for every local action — the agent issues zero shell commands and keys never leave the machine.</p>
+    <p style="margin:0 0 8px"><b>1.</b> <code>clockchain-handshake</code> — a remote streamable-http MCP server at <code>${ENDPOINT}</code> (no auth; authorization is per-call via the <code>access</code> capability). <b>2.</b> <code>clockchain-local-adapter</code> — a local stdio MCP server run as <code>npx -y @d4d.group/local-adapter</code> (Node.js 24): the default executor for every local action — zero shell commands, keys never leave the machine.</p>
+    <p style="margin:0 0 8px">Canonical <code>mcpServers</code> config (npx form, accepted by most clients):</p>
     <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${MCP_SERVERS_JSON}</code></pre></div>
-    <p style="margin:8px 0 0">The common <code>mcpServers</code> JSON shape most clients accept — shown for the quick-start npx path. For the production install (b), the adapter entry is just the installed binary:</p>
-    <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${ADAPTER_CONFIG_BIN}</code></pre></div>
-    <p style="margin:8px 0 0">Some clients spell the remote transport differently — <code>"transport": "http"</code>, <code>"streamable-http"</code>, or a nested transport object; the invariant is the URL plus streamable-http, so map those two facts to your client's own config schema.</p>
-    <details class="ref"><summary>Client-specific examples (optional)</summary><div class="ref-body">
-      <ul style="margin-top:0">
-        <li><b>Claude Code:</b> <code>claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code> and <code>${ADAPTER_INSTALL_CLAUDE}</code> — remove when done with <code>claude mcp remove</code>.</li>
-        <li><b>Codex:</b> <code>codex mcp add clockchain-handshake --url ${ENDPOINT}</code> and <code>${ADAPTER_INSTALL_CODEX}</code> in <code>~/.codex/config.toml</code> — remove when done with <code>codex mcp remove</code>.</li>
-        <li><b>Any other MCP client</b> (Cursor, Cline, Windsurf, an SDK, a custom client): point its MCP server config at the same URL + command above.</li>
-      </ul>
-    </div></details>
+    <p style="margin:8px 0 0">Prefer a pinned install, or using Cursor/Cline/Windsurf/Codex/an SDK? See "Install options" below.</p>
   </div>
 
   <div class="qs-step">
@@ -184,10 +176,23 @@ ${SOP_CSS}</style>
 
   <p style="margin-top:26px">Reference — expand as needed.</p>
 
+  <details class="ref"><summary>Install options — pinned install &amp; other clients</summary><div class="ref-body">
+    <p><b>Production / reliability — pinned install.</b> Install once — <code>${ADAPTER_INSTALL_NPM}</code> (requires Node.js 24) — then use the installed binary <code>clockchain-local-adapter</code> as the MCP command: deterministic pinned version, no network dependency at launch (works offline after install), faster cold start. The adapter entry becomes just the installed binary:</p>
+    <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${ADAPTER_CONFIG_BIN}</code></pre></div>
+    <ul>
+      <li><b>Reproducibility without a global install:</b> version-pin the npx form — <code>${ADAPTER_INSTALL_NPX_PINNED}</code>.</li>
+      <li><b>Transport spelling:</b> some clients spell the remote transport differently — <code>"transport": "http"</code>, <code>"streamable-http"</code>, or a nested transport object; the invariant is the URL plus streamable-http, so map those two facts to your client's own config schema.</li>
+      <li><b>Claude Code:</b> <code>claude mcp add --transport http clockchain-handshake ${ENDPOINT}</code> and <code>${ADAPTER_INSTALL_CLAUDE}</code>.</li>
+      <li><b>Codex:</b> <code>codex mcp add clockchain-handshake --url ${ENDPOINT}</code> and <code>${ADAPTER_INSTALL_CODEX}</code> in <code>~/.codex/config.toml</code>.</li>
+      <li><b>Any other MCP client</b> (Cursor, Cline, Windsurf, an SDK, a custom client): point its MCP server config at the same URL + command above.</li>
+      <li>Remove when done: <code>&lt;client&gt; mcp remove clockchain-handshake</code> (e.g. <code>claude mcp remove</code> / <code>codex mcp remove</code>).</li>
+    </ul>
+  </div></details>
+
   <details class="ref"><summary>How it works — and how to verify it yourself</summary><div class="ref-body">
     <p>The coordinator is a stateless streamable-http MCP server that <b>never signs</b> — it sequences the exchange and anchors receipts; all signing happens locally on each agent through the pinned helper (a single audited Node.js 24 file, unminified — byte-for-byte what executes; its release source lives in <a href="${SOURCE_REPO}">${SOURCE_REPO.replace("https://", "")}</a> at the <code>sourceCommit</code> named in the live <a href="${MANIFEST}">discovery document</a>). The helper generates the session key, commits your exact local policy, registers a fresh ERC-8004 identity when mandated, signs payloads, and verifies the certificate.</p>
     <ul>
-      <li><b>Adapter path (default).</b> The <code>clockchain-local-adapter</code> MCP server (Step 1 — <code>npx</code> or the pinned global install) already holds the digest-pinned assets and re-verifies them on every call. Every <code>localAction</code> is one call per step to the fixed zero-input <code>authorize_local_action</code> tool — the agent issues zero shell commands, and embedded <code>shellCommand</code>/<code>shellCommandFetch</code> text is inert reference data, never to be run.</li>
+      <li><b>Adapter path (default).</b> The <code>clockchain-local-adapter</code> MCP server (Step 1's <code>npx</code> form, or the pinned global install in "Install options") already holds the digest-pinned assets and re-verifies them on every call. Every <code>localAction</code> is one call per step to the fixed zero-input <code>authorize_local_action</code> tool — the agent issues zero shell commands, and embedded <code>shellCommand</code>/<code>shellCommandFetch</code> text is inert reference data, never to be run.</li>
       <li><b>Portable fallback (last resort — only when the adapter cannot be installed).</b> Download the two pinned assets as two separate commands, inspect both, then run <code>stateDirectoryCommand</code> once and each <code>helperStep.shellCommand</code> verbatim via your shell in returned order — prefer <code>helperStep.shellCommandFetch</code> when present (it downloads the exact command bytes by <code>commandSha256</code> and verifies them before executing). Never edit, decode, re-encode, or reconstruct commands or payloads; never hand-sign.
         <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(ASSET_DOWNLOADS)}</code></pre></div>
         Runtime download-and-execute is deliberately refused by many safety-conscious agent runtimes (e.g. Claude Code auto-mode) — that refusal is expected behavior, not a bug; the adapter exists precisely because of it. If this client refuses, stop and ask the operator to install the adapter.</li>
@@ -280,46 +285,16 @@ START HERE — YOUR FIRST HANDSHAKE IN 3 STEPS
   STEP 1 — REGISTER TWO MCP SERVERS (run on BOTH agents — any
   MCP-capable client works)
     1. clockchain-handshake — a remote streamable-http MCP server at
-       ${ENDPOINT} (no auth: authorization is per-call via
-       the access capability the server issues).
-    2. clockchain-local-adapter — a local stdio MCP server, the
-       @d4d.group/local-adapter npm package (requires Node.js 24). Two
-       ways to run it — pick one:
-       (a) quick start (default): command npx -y @d4d.group/local-adapter
-           — npx ships with Node/npm and downloads + caches the package
-           from the npm registry on first launch; one line, nothing to
-           install first.
-       (b) for production / reliability: install once —
-           npm install -g @d4d.group/local-adapter — then use the
-           installed binary clockchain-local-adapter as the MCP command:
-           deterministic pinned version, no network dependency at launch
-           (works offline after install), faster cold start.
-       Both run the same npm package; the only difference is
-       npx-fetch-on-launch versus a one-time global install. For
-       reproducibility without a global install, version-pin the npx
-       form: ${ADAPTER_INSTALL_NPX_PINNED}. The adapter
-       is the default executor for every local action — the agent issues
-       zero shell commands and keys never leave the machine.
+       ${ENDPOINT} (no auth; per-call capability).
+    2. clockchain-local-adapter — a local stdio MCP server run as
+       npx -y @d4d.group/local-adapter (Node.js 24): the default executor
+       for every local action — zero shell commands, keys never leave
+       the machine.
 
-    Canonical MCP config (the common mcpServers JSON shape most clients
-    accept — shown for the quick-start npx path):
+    Canonical MCP config (npx form, accepted by most clients):
 ${MCP_SERVERS_JSON.split("\n").map((l) => `    ${l}`).join("\n")}
-    Production-install (b) variant — the adapter entry is the installed binary:
-    ${ADAPTER_CONFIG_BIN}
-    Some clients spell the remote transport differently ("transport":
-    "http" or "streamable-http", or a nested transport object) — the
-    invariant is the URL plus streamable-http; map those two facts to
-    your client's own config schema.
-
-    Client-specific examples (optional):
-      Claude Code: claude mcp add --transport http clockchain-handshake ${ENDPOINT}
-                   ${ADAPTER_INSTALL_CLAUDE}
-      Codex:       codex mcp add clockchain-handshake --url ${ENDPOINT}
-                   ${ADAPTER_INSTALL_CODEX}
-                   in ~/.codex/config.toml
-      Any other MCP client (Cursor, Cline, Windsurf, an SDK, a custom
-      client): point its MCP server config at the same URL + command.
-      Remove when done: <client> mcp remove clockchain-handshake.
+    Prefer a pinned install, or using Cursor/Cline/Windsurf/Codex/an SDK?
+    See INSTALL OPTIONS below.
 
   STEP 2 — INITIATOR: paste PROMPT 1 below into agent 1. It prints a
   responderInvitation — the only value that leaves agent 1.
@@ -342,8 +317,31 @@ PROMPT 2 — RESPONDER (drop the invitation into the marked slot)
 ${RESPONDER_PROMPT}
 
 ======================================================================
-REFERENCE — how it works, scope, limits, hygiene
+REFERENCE — install options, how it works, scope, limits, hygiene
 ======================================================================
+
+INSTALL OPTIONS — PINNED INSTALL & OTHER CLIENTS
+  Production / reliability — pinned install: install once —
+  npm install -g @d4d.group/local-adapter (requires Node.js 24) — then use
+  the installed binary clockchain-local-adapter as the MCP command:
+  deterministic pinned version, no network dependency at launch (works
+  offline after install), faster cold start. Adapter entry becomes:
+    ${ADAPTER_CONFIG_BIN}
+  Reproducibility without a global install: version-pin the npx form —
+  ${ADAPTER_INSTALL_NPX_PINNED}.
+  Transport spelling: some clients spell the remote transport differently
+  ("transport": "http" / "streamable-http" / a nested transport object) —
+  the invariant is the URL plus streamable-http; map those two facts to
+  your client's own config schema.
+  Client-specific examples:
+    Claude Code: claude mcp add --transport http clockchain-handshake ${ENDPOINT}
+                 ${ADAPTER_INSTALL_CLAUDE}
+    Codex:       codex mcp add clockchain-handshake --url ${ENDPOINT}
+                 ${ADAPTER_INSTALL_CODEX}
+                 in ~/.codex/config.toml
+    Any other MCP client (Cursor, Cline, Windsurf, an SDK, a custom
+    client): point its MCP server config at the same URL + command.
+    Remove when done: <client> mcp remove clockchain-handshake.
 
 HOW IT WORKS — AND HOW TO VERIFY IT YOURSELF
   The coordinator is a stateless streamable-http MCP server that never
@@ -355,9 +353,10 @@ HOW IT WORKS — AND HOW TO VERIFY IT YOURSELF
   local policy, registers a fresh ERC-8004 identity when mandated, signs
   payloads, and verifies the certificate.
 
-  Adapter path (default): clockchain-local-adapter (Step 1 — npx or the
-  pinned global install) already holds the digest-pinned assets and
-  re-verifies them on every call. Every localAction is one call per step
+  Adapter path (default): clockchain-local-adapter (Step 1's npx form, or
+  the pinned global install in INSTALL OPTIONS) already holds the
+  digest-pinned assets and re-verifies them on every call. Every
+  localAction is one call per step
   to the fixed zero-input authorize_local_action tool — zero shell
   commands; embedded shellCommand/shellCommandFetch text is inert
   reference data, never to be run.
