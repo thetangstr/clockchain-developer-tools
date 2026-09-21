@@ -68,34 +68,39 @@ test("the SOP states the operator hygiene rule without claiming server-log guara
   }
 });
 
-test("the SOP ships drop-in initiator and responder prompts with placeholders", () => {
+test("the SOP ships one shared drop-in prompt with a responderInvitation slot", () => {
   for (const body of [HANDSHAKE_SOP_HTML, HANDSHAKE_SOP_TXT]) {
     const flat = body.replace(/<[a-zA-Z/][^>]*>/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\s+/g, " ");
-    // Entity-decoded form keeps the literal angle-bracket placeholders the
-    // tag-stripper would otherwise remove.
-    const decoded = body.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/\s+/g, " ");
-    // Both roles get a paste-ready prompt, marked as such.
-    assert.ok(flat.includes("You are the Initiator"), "initiator prompt present");
-    assert.ok(flat.includes("You are the Responder"), "responder prompt present");
-    // Placeholders stay literal so a local harness or operator substitutes them.
-    assert.ok(decoded.includes("<YOUR_REFERENCE>"), "reference placeholder");
-    assert.ok(decoded.includes("<YOUR_STATEMENT>"), "statement placeholder");
-    assert.ok(decoded.includes("<PASTE_THE_RESPONDER_INVITATION_HERE>"), "invitation slot");
-    // The prompts carry the no-adapter contract: verbatim shellCommands, no hand-signing.
+    // Exactly one shared prompt — the slot decides the role.
+    assert.equal(flat.split("Do a Clockchain agent handshake with another agent").length - 1, 1, "exactly one shared prompt");
+    assert.ok(flat.includes("Copy this prompt to BOTH agents".toUpperCase()) || flat.includes("Copy this prompt to BOTH agents"), "step 2 directs the prompt to both agents");
+    assert.ok(flat.includes("you are the Responder"), "responder branch present");
+    assert.ok(flat.includes("you are the Initiator"), "initiator branch present");
+    assert.ok(flat.includes("agent_handshake_accept_invitation"), "accept tool named");
+    assert.ok(flat.includes("agent_handshake_invite"), "invite tool named");
+    // The slot stays literal so the operator fills it for agent 2.
+    assert.ok(flat.includes("responderInvitation: (paste here for the second agent"), "invitation slot");
+    // The prompt binds the adapter path and the authorization-only scope.
+    assert.ok(flat.includes("authorize_local_action"), "adapter tool named");
+    assert.ok(flat.includes("externalBusinessActionPerformed must stay false"), "scope clause in prompt");
+    // The report contract names the shared evidence fields.
+    assert.ok(flat.includes("certificateVerified"), "certificateVerified report field");
+    assert.ok(flat.includes("same sessionId"), "same-session check");
+    // The portable-fallback contract survives in the reference, not the prompt.
     assert.ok(flat.includes("helperStep.shellCommand verbatim"), "verbatim shellCommand rule");
     assert.ok(flat.includes("never hand-sign"), "no hand-signing rule");
-    // The responder prompt demands a fresh idempotency key and single acceptance.
-    assert.ok(flat.includes("acceptanceIdempotencyKey"), "idempotency key instruction");
-    // The operator-facing pass check names the shared evidence fields.
-    assert.ok(flat.includes("same sessionId"), "same-session check");
-    // The prompts drive the real invite shape: string validity, fresh ERC-8004.
-    assert.ok(flat.includes('validForSeconds "90"'), "string validForSeconds in prompt");
-    assert.ok(flat.includes('"required_fresh"'), "fresh ERC-8004 policy in prompt");
-    // The prompts must not read as concealment instructions: secrecy is
-    // scoped to transmission and the operator may observe everything.
-    assert.ok(flat.includes("Conceal nothing from your operator"), "operator transparency clause");
-    assert.ok(!flat.includes("never print it"), "no hide-from-operator phrasing");
+    // No two-prompt leftovers.
+    assert.ok(!flat.includes("PROMPT 1"), "no PROMPT 1 leftover");
+    assert.ok(!flat.includes("PROMPT 2"), "no PROMPT 2 leftover");
+    assert.ok(!flat.includes("<PASTE_THE_RESPONDER_INVITATION_HERE>"), "no old invitation placeholder");
   }
+});
+
+test("the SOP quick-start counts two steps", () => {
+  assert.ok(HANDSHAKE_SOP_HTML.includes("first handshake in 2 steps"));
+  assert.ok(HANDSHAKE_SOP_TXT.includes("FIRST HANDSHAKE IN 2 STEPS"));
+  assert.ok(!HANDSHAKE_SOP_HTML.includes("in 3 steps"));
+  assert.ok(!HANDSHAKE_SOP_TXT.includes("IN 3 STEPS"));
 });
 
 test("the SOP contains no staging or superseded-helper language", () => {
