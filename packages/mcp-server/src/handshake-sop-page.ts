@@ -5,13 +5,13 @@
 // from instructions.ts, and the authoritative digests are always read from
 // the live /.well-known/agent-handshake.json manifest, never hardcoded here.
 import { BASE_CSS, LOGO_SVG, SUBSTRATE_LABEL } from "./landing.js";
-import { V2_ADAPTER_ENDPOINT_ENV, V2_HELPER_ASSET_PREFIX, V2_HELPER_VERSION, V2_PUBLIC_ENDPOINT } from "./agent-handshake/v2/instructions.js";
+import { V2_HELPER_ASSET_PREFIX, V2_HELPER_VERSION, V2_PUBLIC_ENDPOINT } from "./agent-handshake/v2/instructions.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 
 const ENDPOINT = V2_PUBLIC_ENDPOINT;
-const ADAPTER_INSTALL_CLAUDE = `claude mcp add clockchain-local-adapter -e ${V2_ADAPTER_ENDPOINT_ENV}=${ENDPOINT} -- npx -y @d4d.group/local-adapter`;
-const ADAPTER_INSTALL_CODEX = `[mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@d4d.group/local-adapter"] env = { ${V2_ADAPTER_ENDPOINT_ENV} = "${ENDPOINT}" }`;
-const ADAPTER_INSTALL_GENERIC = `{"command":"npx","args":["-y","@d4d.group/local-adapter"],"env":{"${V2_ADAPTER_ENDPOINT_ENV}":"${ENDPOINT}"}}`;
+const ADAPTER_INSTALL_CLAUDE = `claude mcp add clockchain-local-adapter -- npx -y @d4d.group/local-adapter`;
+const ADAPTER_INSTALL_CODEX = `[mcp_servers.clockchain-local-adapter] command = "npx" args = ["-y", "@d4d.group/local-adapter"]`;
+const ADAPTER_INSTALL_GENERIC = `{"command":"npx","args":["-y","@d4d.group/local-adapter"]}`;
 const MANIFEST = "https://mcp.clockchain.network/.well-known/agent-handshake.json";
 const MANIFEST_URL = `${V2_HELPER_ASSET_PREFIX}manifest.json`;
 const HELPER_URL = `${V2_HELPER_ASSET_PREFIX}clockchain-agent-handshake.cjs`;
