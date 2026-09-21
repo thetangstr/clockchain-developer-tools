@@ -741,7 +741,16 @@ export function createV2Coordinator(options: {
         const window = agreementWindow(current.terms.validForSeconds, current.discovery.sessionDeadlineMs, now());
         if (!window) windowExpired();
         const renewed = normalizeV2Proposal({ ...pending.payload, ...window }) as JsonObject;
-        const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: renewed } }));
+        // A concurrent next() may have renewed the window first — keep the
+        // winner so the served request always matches the stored payload.
+        const updated = await store.update(auth.keyValue, (value) => {
+          const stored = data(value).pending;
+          if (
+            stored?.operation === "proposal" && typeof stored.payload.expiresAtMs === "string" &&
+            BigInt(stored.payload.expiresAtMs) > BigInt(now())
+          ) return value;
+          return merge(value, auth.keyValue, { pending: { operation: "proposal", payload: renewed } });
+        });
         current = data(updated);
         if (!current.pending) fail();
       }
@@ -819,8 +828,15 @@ export function createV2Coordinator(options: {
         issuedAtMs: window.issuedAtMs, expiresAtMs: window.expiresAtMs,
         externalBusinessActionPerformed: false,
       }) as JsonObject;
-      const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
-      const signingRequest = signRequest(data(updated), role, "proposal", proposal);
+      // Two concurrent next() calls can both observe no pending and mint; the
+      // serialized update keeps the first payload and the response is built
+      // from whatever landed, so a lost race can never strand a signature made
+      // over bytes the coordinator no longer holds.
+      const updated = await store.update(auth.keyValue, (value) =>
+        data(value).pending ? value : merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
+      const storedProposal = data(updated).pending;
+      if (storedProposal?.operation !== "proposal") fail("proposal_pending");
+      const signingRequest = signRequest(data(updated), role, "proposal", storedProposal.payload);
       return Object.freeze({ stage: "sign_proposal", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
     }
     if (role === "responder" && !current.acceptanceEnvelope) {
@@ -835,8 +851,13 @@ export function createV2Coordinator(options: {
         decision: "ACCEPTED", issuedAtMs: String(now()), expiresAtMs: proposal.expiresAtMs,
         externalBusinessActionPerformed: false,
       }) as JsonObject;
-      const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance }, stage: "sign_acceptance" }));
-      const signingRequest = signRequest(data(updated), role, "acceptance", acceptance);
+      // Same concurrent-mint guard as the proposal branch: keep the first
+      // stored pending and serve its request, never a discarded mint's.
+      const updated = await store.update(auth.keyValue, (value) =>
+        data(value).pending ? value : merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance }, stage: "sign_acceptance" }));
+      const storedAcceptance = data(updated).pending;
+      if (storedAcceptance?.operation !== "acceptance") fail("acceptance_pending");
+      const signingRequest = signRequest(data(updated), role, "acceptance", storedAcceptance.payload);
       return Object.freeze({
         stage: "sign_acceptance",
         signingSummary: signingSummary(signingRequest),
@@ -861,8 +882,15 @@ export function createV2Coordinator(options: {
       statementDigest: v2CanonicalRecord(current.terms).digest,
       transitionDigests: transitions.map((entry) => entry.digest),
     }, current.terms.identityPolicy) as JsonObject;
-    const updated = await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" }));
-    const signingRequest = signRequest(data(updated), role, "evidence", evidence);
+    // Concurrent-mint guard: keep the first stored pending (transitions are
+    // recomputed on every poll, so refreshing them here stays safe).
+    const updated = await store.update(auth.keyValue, (value) =>
+      data(value).pending
+        ? merge(value, auth.keyValue, { transitions })
+        : merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" }));
+    const storedEvidence = data(updated).pending;
+    if (storedEvidence?.operation !== "evidence") fail("evidence_pending");
+    const signingRequest = signRequest(data(updated), role, "evidence", storedEvidence.payload);
     return Object.freeze({ stage: "sign_evidence", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
   }
 
@@ -1055,14 +1083,21 @@ export function createV2Coordinator(options: {
         bytes: artifactBytes,
         signatureHex: input.artifactSignatureHex,
       })).toLowerCase();
-      if (artifactSigner !== current.sessionKeyAddress) fail("artifact_signer");
+      // The recovered signer and the stored payload's bytes hash are
+      // session-scoped public data (the key is already published in
+      // party_ready); carrying them in the log tag separates "signed by a
+      // different key" from "signed over different bytes" in one line.
+      if (artifactSigner !== current.sessionKeyAddress) {
+        fail(`artifact_signer.${artifactSigner.slice(0, 12)}.${createHash("sha256").update(artifactBytes).digest("hex").slice(0, 8)}`);
+      }
       const envelope = signatureEnvelope(operation, pending.payload, artifactSigner, input.artifactSignatureHex);
-      if (checkpoint.artifactDigest !== v2CanonicalRecord(envelope).digest) fail("artifact_digest");
+      const expectedArtifactDigest = v2CanonicalRecord(envelope).digest;
+      if (checkpoint.artifactDigest !== expectedArtifactDigest) fail(`artifact_digest.${expectedArtifactDigest.slice(0, 8)}`);
       const recovered = (await options.recoverEip191Address({
         bytes: commitmentCheckpointSigningBytes(checkpoint),
         signatureHex: signature.value,
       })).toLowerCase();
-      if (recovered !== current.sessionKeyAddress) fail("checkpoint_signer");
+      if (recovered !== current.sessionKeyAddress) fail(`checkpoint_signer.${recovered.slice(0, 12)}`);
       const field = operation === "proposal" ? "proposalCheckpoint" : "acceptanceCheckpoint";
       const prior = operation === "proposal" ? current.proposalCheckpoint : current.acceptanceCheckpoint;
       if (prior && commitmentCheckpointDigest(prior) !== commitmentCheckpointDigest(checkpoint)) fail("prior_checkpoint_mismatch");
