@@ -29,7 +29,7 @@ mcp.clockchain.network {
 	# the current build's handshake surface is reachable at /next/handshake/mcp. Swap back once
 	# the participants are released on the current helper line.
 	handle /handshake/mcp {
-		reverse_proxy mcp-acm4:8080
+		reverse_proxy mcp:8080
 	}
 	handle_path /next/* {
 		reverse_proxy mcp:8080 {
