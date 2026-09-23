@@ -215,7 +215,12 @@ test("a near-expiry current invitation window is retryable before any state is m
 
   await assert.rejects(
     () => harness.coordinator.invite(terms),
-    (error) => error?.name === "V2TransientCoordinatorError",
+    (error) =>
+      error?.name === "V2TransientCoordinatorError" &&
+      // The hint is the moment the next usable window opens (window end + rotation
+      // margin), never a cycle-length value that phase-locks an obedient retryer
+      // into this same dead phase.
+      error.retryAfterMs === 7_500,
   );
   assert.equal(createCalls, 0);
   assert.equal((await harness.stateStore.list()).length, 0);
@@ -245,7 +250,7 @@ test("an invite whose clock crosses the invitation runway boundary during create
 
   await assert.rejects(
     () => harness.coordinator.invite(terms),
-    (error) => error?.name === "V2TransientCoordinatorError",
+    (error) => error?.name === "V2TransientCoordinatorError" && error.retryAfterMs === 33_500,
   );
   assert.equal(createCalls, 1);
   assert.equal(attempted.length, 1);
@@ -272,6 +277,24 @@ test("a second invite on an already-minted session rejects retryably before mint
     1,
   );
   assert.equal((await harness.stateStore.list()).length, 1);
+});
+
+test("a second invite late in the first mint's claim window is hinted at the claim lapse, not a flat cycle guess", async (t) => {
+  // The minted invitation's claimExpiresAtMs is the rotation horizon: an unclaimed mint lapses there and
+  // the host opens a fresh session ~1-2s later. The hint must name that horizon (claim end + margin) —
+  // the old deadline-capped hint happened to equal the ~120s rotation cycle and phase-locked callers.
+  let tick = nowMs;
+  const harness = await createDurableAcceptHarness(t, { now: () => tick });
+  const first = await harness.coordinator.invite(terms);
+  assert.ok(first.responderInvitation.length > 0);
+  // First mint at nowMs carries claimExpiresAtMs = nowMs + 180_000; retrying 80s
+  // later leaves 100s of claim window, so the hint is 100s + 2.5s margin.
+  tick = nowMs + 80_000;
+
+  await assert.rejects(
+    () => harness.coordinator.invite(terms),
+    (error) => error?.name === "V2TransientCoordinatorError" && error.retryAfterMs === 102_500,
+  );
 });
 
 test("every issued helperStep command is fetchable verbatim by its commandSha256 until expiry", async (t) => {
