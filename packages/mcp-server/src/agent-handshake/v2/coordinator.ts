@@ -908,21 +908,34 @@ export function createV2Coordinator(options: {
       // Reject before minting any state unless the window retains enough runway for the Responder's claim
       // to land; an already-expired or near-expiry "current" session rolls over underneath the invite, so the
       // caller must retry into the fresh session rather than hold an invitation nobody will observe.
-      // Both rotation-gated rejects below carry the current session's deadline
-      // as the retry hint (capped): retrying before rotation can only land on
-      // this same unusable session.
+      // The retry hints below name the moment the NEXT usable session is live —
+      // window end (or claim-window end) plus a rotation margin — never a
+      // cycle-length value: a ~120s hint against a ~121s rotation phase-locks an
+      // obedient caller into this same dead phase on every retry.
       const inviteNow = now();
       const rotationRetryMs = Math.min(Math.max(Number(found.sessionDeadlineMs) - inviteNow + 2_000, 5_000), 120_000);
-      if (inviteNow + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) transient(rotationRetryMs);
+      const windowRetryMs = Number.isSafeInteger(Number(found.invitationExpiresAtMs))
+        ? Math.min(Math.max(Number(found.invitationExpiresAtMs) - inviteNow + 2_500, 5_000), 120_000)
+        : rotationRetryMs;
+      if (inviteNow + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) transient(windowRetryMs);
       // One invitation per session: the first invite anchors an
       // agent_v2_invitation_created message on the session's relay log, and a
       // second invite would fail closed inside post() on the sender-key check.
       // The condition self-heals at session rotation, so surface it as
       // transient — same "retry into the next session" semantics as the runway
       // check above — instead of a terminal coordination failure.
-      const sessionTaken = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
-        .some((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
-      if (sessionTaken) transient(rotationRetryMs);
+      const takenInvitation = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
+        .find((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
+      if (takenInvitation) {
+        // An unclaimed mint lapses at its claimExpiresAtMs and the host rotates
+        // ~1-2s later; a claimed one holds the session to its deadline. Hint the
+        // earlier horizon, floored so a legitimately-busy session is not
+        // hot-polled.
+        const claimExpMs = Number((takenInvitation.body as JsonObject | undefined)?.claimExpiresAtMs);
+        transient(Number.isSafeInteger(claimExpMs)
+          ? Math.min(Math.max(claimExpMs - inviteNow + 2_500, 15_000), 120_000)
+          : rotationRetryMs);
+      }
       // The minted claim window is mint-relative at INVITATION_CLAIM_RUNWAY_MS,
       // capped only by the session deadline minus the landing margin. The host
       // observes agent_v2_invitation_created (posted below with the minted
@@ -951,7 +964,7 @@ export function createV2Coordinator(options: {
           commitGuard: () => now() + INVITATION_MIN_RUNWAY_MS < Number(found.invitationExpiresAtMs),
         });
       } catch (error) {
-        if (error instanceof V2InvitationWindowUnavailableError) transient(rotationRetryMs);
+        if (error instanceof V2InvitationWindowUnavailableError) transient(windowRetryMs);
         throw error;
       }
       const createdAtMs = now();
