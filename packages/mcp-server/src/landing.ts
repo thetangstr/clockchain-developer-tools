@@ -344,7 +344,7 @@ export const BASE_CSS = `  :root {
   .toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(16px); background: var(--ink); color: #fff; font-size: 13px; font-weight: 500; padding: 11px 20px; border-radius: 99px; opacity: 0; transition: .25s; z-index: 80; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  .demo-frame { max-width: 980px; margin: 0 auto; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); background: var(--bg) url('https://clockchain-research.vercel.app/mcp-demo-poster.png') center/cover no-repeat; }
+  .demo-frame { max-width: 980px; margin: 0 auto; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); background: var(--bg) url('/assets/mcp-demo-poster.png') center/cover no-repeat; }
   .demo-frame video { width: 100%; display: block; aspect-ratio: 16 / 9; opacity: 0; transition: opacity .45s ease; }
   .demo-frame video.playing { opacity: 1; }
   @media (max-width: 760px) { .grid, .tenets, .pair { grid-template-columns: 1fr; } .svc-grid { grid-template-columns: 1fr; } .svc-grid .card, .svc-grid .card:nth-child(n+4) { grid-column: auto; } .nav-links a:not(.pill) { display: none; } }
@@ -409,7 +409,7 @@ ${BASE_CSS}</style>
     <p>An agent acts, the action is anchored on a real testnet block, the receipt verifies — and a one-byte change is rejected.</p>
   </div>
   <div class="demo-frame">
-    <video id="demoVideo" src="https://clockchain-research.vercel.app/mcp-demo.mp4" poster="https://clockchain-research.vercel.app/mcp-demo-poster.png" loop muted playsinline preload="metadata"></video>
+    <video id="demoVideo" src="/assets/mcp-demo.mp4" poster="/assets/mcp-demo-poster.png" loop muted playsinline preload="metadata"></video>
   </div>
 </div></section>
 

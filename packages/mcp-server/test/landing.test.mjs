@@ -58,6 +58,12 @@ test("landing page points agents at the real endpoint + key headers, not a fake"
   assert.match(LANDING_HTML, /href="\/status"/);
 });
 
+test("landing demo media is same-origin (a hot-linked host went 403 and blanked the demo)", () => {
+  assert.match(LANDING_HTML, /src="\/assets\/mcp-demo\.mp4"/);
+  assert.match(LANDING_HTML, /poster="\/assets\/mcp-demo-poster\.png"/);
+  assert.doesNotMatch(LANDING_HTML, /vercel\.app/);
+});
+
 test("landing page clearly calls out testnet", () => {
   assert.match(LANDING_HTML, /Testnet/);
 });

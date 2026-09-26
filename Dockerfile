@@ -44,5 +44,6 @@ COPY --from=build /app/packages/keeper/package.json ./packages/keeper/package.js
 COPY --from=build /app/packages/keeper/dist ./packages/keeper/dist
 COPY --from=build /app/packages/mcp-server/package.json ./packages/mcp-server/package.json
 COPY --from=build /app/packages/mcp-server/dist ./packages/mcp-server/dist
+COPY --from=build /app/packages/mcp-server/assets ./packages/mcp-server/assets
 EXPOSE 8080
 CMD ["node", "packages/mcp-server/dist/index.js"]

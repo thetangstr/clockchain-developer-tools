@@ -210,3 +210,33 @@ test("load smoke: 50 concurrent /status.json requests all succeed fast", async (
   for (const r of results) assert.equal(r.status, 200);
   assert.ok(elapsed < 10_000, `50 concurrent status requests took ${elapsed}ms`);
 });
+
+test("landing demo media is served same-origin, public, and Range-aware", async () => {
+  const poster = await fetch(`${BASE}/assets/mcp-demo-poster.png`);
+  assert.equal(poster.status, 200);
+  assert.equal(poster.headers.get("content-type"), "image/png");
+  assert.ok((await poster.arrayBuffer()).byteLength > 1000);
+
+  const full = await fetch(`${BASE}/assets/mcp-demo.mp4`, { method: "HEAD" });
+  assert.equal(full.status, 200);
+  assert.equal(full.headers.get("content-type"), "video/mp4");
+  assert.equal(full.headers.get("accept-ranges"), "bytes");
+  const size = Number(full.headers.get("content-length"));
+  assert.ok(size > 1000);
+
+  const part = await fetch(`${BASE}/assets/mcp-demo.mp4`, { headers: { range: "bytes=0-99" } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get("content-range"), `bytes 0-99/${size}`);
+  assert.equal((await part.arrayBuffer()).byteLength, 100);
+
+  const bad = await fetch(`${BASE}/assets/mcp-demo.mp4`, { headers: { range: `bytes=${size + 10}-` } });
+  assert.equal(bad.status, 416);
+  await bad.arrayBuffer();
+
+  const missing = await fetch(`${BASE}/assets/../../package.json`);
+  assert.notEqual(missing.status, 200);
+  await missing.arrayBuffer();
+  const unknown = await fetch(`${BASE}/assets/nope.png`);
+  assert.equal(unknown.status, 404);
+  await unknown.arrayBuffer();
+});
