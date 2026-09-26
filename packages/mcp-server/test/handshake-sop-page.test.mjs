@@ -124,5 +124,5 @@ test("llms.txt, the manifest, and the landing page all link the SOP", () => {
   assert.ok(INSTALL_TXT.includes("https://mcp.clockchain.network/handshake/sop.txt"));
   assert.equal(MCP_MANIFEST.agentHandshake.sop, "https://mcp.clockchain.network/handshake/sop");
   assert.equal(MCP_MANIFEST.agentHandshake.sopText, "https://mcp.clockchain.network/handshake/sop.txt");
-  assert.ok((LANDING_HTML.match(/href="\/handshake\/sop"/g) || []).length >= 3, "linked from nav, section, and footer");
+  assert.ok((LANDING_HTML.match(/href="\/handshake\/sop"/g) || []).length >= 2, "linked from the handshake section and footer");
 });
