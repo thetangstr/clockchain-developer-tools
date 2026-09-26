@@ -7,8 +7,10 @@ import { buildStandaloneDiscovery } from "../dist/standalone-handshake/public-se
 test("the landing page announces Standalone Handshake and stays consistent", () => {
   assert.match(LANDING_HTML, /Standalone Handshake/);
   assert.match(LANDING_HTML, /\/connect\/mcp/);
-  // The module badge renders zero-padded ("08"); a bare "8" could match anywhere.
-  assert.match(LANDING_HTML, /08/);
+  // Handshake is one of the five services, and the card links to the section.
+  assert.match(LANDING_HTML, /<h3>Handshake<\/h3>/);
+  assert.match(LANDING_HTML, /href="#handshake"/);
+  assert.match(LANDING_HTML, /Consent covers communication only/);
 });
 
 test("llms.txt carries the agent-readable handshake facts", () => {

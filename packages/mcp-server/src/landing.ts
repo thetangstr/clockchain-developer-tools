@@ -12,7 +12,7 @@ const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
 // Single source of truth for the numbers on the page. Every registered tool is
 // asserted into CLASSIFIED_TOOLS at boot (entitlement.ts), so its size IS the
-// full-surface tool count; the module count is the MODULES list below. The
+// full-surface tool count; the service count is the SERVICES list below. The
 // page used to hard-code these in seven places and drifted (31/42, six/seven).
 export const TOOL_COUNT = CLASSIFIED_TOOLS.size;
 // Where anchors live on THIS deployment, stated honestly on the page (D7). Same rule as
@@ -130,8 +130,8 @@ export const MCP_MANIFEST = {
   name: "clockchain",
   displayName: "Clockchain MCP",
   description:
-    "Hosted MCP server: consensus time, notarization, agent-attested receipts, " +
-    `audit trails, agent identity, and commitments. ${TOOL_COUNT} tools, one endpoint.`,
+    "Hosted MCP server: trusted time, proof (anchoring + self-verifying receipts), " +
+    `agent identity, handshakes, and commitments & audit. ${TOOL_COUNT} tools, one endpoint.`,
   type: "http",
   transport: "streamable-http",
   endpoint: "https://mcp.clockchain.network/mcp",
@@ -189,18 +189,18 @@ export const MCP_MANIFEST = {
   },
 } as const;
 
-const MODULES = [
-  { i: "01", name: "Time", body: "Consensus block time and height — the network's consented clock, not a single server's. Provable after the fact." },
-  { i: "02", name: "Notarization", body: "Anchor any hash to an append-only ledger, then verify it against the immutable on-chain block." },
-  { i: "03", name: "Scheduler", body: "Time-triggered smart contracts. Non-custodial — the caller's wallet signs; the server holds no key." },
-  { i: "04", name: "Audit", body: "Audit trails, compliance reports (EU AI Act Art. 12, SEC 17a-4, ISO 27001), and portable evidence packages." },
-  { i: "05", name: "Agent identity", body: "Attest agent actions into self-verifying receipts; resolve and verify identity valid at a point in time." },
-  { i: "06", name: "Commitments", body: "Issue, checkpoint, attest, settle — every commitment's outcome, kept or broken, on the record." },
-  { i: "07", name: "Verified time tools", wide: true, href: "/clock-tools", cta: "How to use the stopwatch, timer and alarm →", body: `Stopwatch, timer, alarm on consensus time — hosted. stopwatch_start / stop / verify: elapsed time between two anchored markers, re-verifiable from the blocks. timer_set / alarm_set: fire on verified time while your client is offline, never early; poll timer_status for the receipt, or receive a signed webhook. Every fire is a keyless-verifiable anchor on the ${SUBSTRATE_LABEL}.` },
-  { i: "08", name: "Standalone Handshake", wide: true, href: "/.well-known/standalone-handshake.json", cta: "Discovery manifest →", body: `The pre-negotiation gateway for two previously unconnected agents: mutually authenticated identity, a deterministic readiness checklist, signed consent to a stated purpose and scope — then a witnessed, bounded channel. Opening decisions and closures are anchored on the ${SUBSTRATE_LABEL}; consent authorizes communication only, never a transaction. Credential-light at /connect/mcp.` },
+// The page presents the surface as five services, each a job an agent needs done —
+// the same framing as the launch video. Tool names live in /llms.txt, /clock-tools
+// and the SOP; the page stays high-level. `includes` is plain words, not tool names.
+const SERVICES = [
+  { i: "01", name: "Trusted time", pitch: "One clock every agent agrees on.", body: "The network's consensus block time, provable after the fact — plus a hosted stopwatch, timer and alarm that fire on verified time, never early.", includes: ["Consensus time", "Stopwatch, timer, alarm"], href: "/clock-tools", cta: "How the clock tools work →" },
+  { i: "02", name: "Proof", pitch: "Anchor anything. Verify it forever.", body: "Anchor any hash to an append-only ledger and get a receipt anyone can re-check against the on-chain block — no key, no trust in us.", includes: ["Anchoring", "Self-verifying receipts", "Search"] },
+  { i: "03", name: "Agent identity", pitch: "Know who acted — and whether they could.", body: "Register agent identities, delegate and revoke authority, and check that an agent was authorized at the exact moment it acted.", includes: ["Identity", "Delegation", "Attested actions"] },
+  { i: "04", name: "Handshake", pitch: "Two agents, verified before they talk.", body: "Previously unconnected agents establish who is present, sign consent to a stated scope on their own machines, and open a witnessed, bounded channel.", includes: ["Mutual verification", "Local signing", "Witnessed channel"], href: "#handshake", cta: "How the handshake works →" },
+  { i: "05", name: "Commitments & audit", pitch: "Promises with a timestamp — and the trail to prove them.", body: "Issue, checkpoint and settle commitments with every outcome, kept or broken, on the record. Then export audit trails, compliance reports and portable evidence packages.", includes: ["Commitments", "Scheduled contracts", "Audit & evidence"] },
 ];
-export const MODULE_COUNT = MODULES.length;
-const MODULE_WORD = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][MODULE_COUNT] ?? String(MODULE_COUNT);
+export const SERVICE_COUNT = SERVICES.length;
+const SERVICE_WORD = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"][SERVICE_COUNT] ?? String(SERVICE_COUNT);
 
 // Green clock mark, echoing the Clockchain site logo.
 export const LOGO_SVG = `<svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true" style="flex:none">
@@ -282,6 +282,16 @@ export const BASE_CSS = `  :root {
 
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
   .card.wide { grid-column: 1 / -1; }
+  .svc-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 20px; }
+  .svc-grid .card { grid-column: span 2; display: flex; flex-direction: column; }
+  .svc-grid .card:nth-child(n+4) { grid-column: span 3; }
+  .card .pitch { font-family: var(--display); font-size: 17px; font-weight: 500; color: var(--ink); line-height: 1.35; margin-bottom: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 16px; }
+  .chip { font-family: var(--mono); font-size: 11px; color: var(--fg-2); background: var(--alt); border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .pair .card { display: flex; flex-direction: column; min-width: 0; }
+  .pair .card .code { margin-top: auto; }
+  .pair .hint { margin-top: 12px; }
   .card { background: var(--bg); border: 1px solid var(--line); border-radius: 16px; padding: 26px; transition: box-shadow .25s, transform .25s; }
   .card:hover { box-shadow: var(--shadow); transform: translateY(-3px); }
   .card .i { font-family: var(--mono); font-size: 12px; color: var(--green); letter-spacing: .1em; }
@@ -337,7 +347,7 @@ export const BASE_CSS = `  :root {
   .demo-frame { max-width: 980px; margin: 0 auto; border: 1px solid var(--line); border-radius: 18px; overflow: hidden; box-shadow: var(--shadow); background: var(--bg) url('https://clockchain-research.vercel.app/mcp-demo-poster.png') center/cover no-repeat; }
   .demo-frame video { width: 100%; display: block; aspect-ratio: 16 / 9; opacity: 0; transition: opacity .45s ease; }
   .demo-frame video.playing { opacity: 1; }
-  @media (max-width: 760px) { .grid, .tenets { grid-template-columns: 1fr; } .nav-links a:not(.pill) { display: none; } }
+  @media (max-width: 760px) { .grid, .tenets, .pair { grid-template-columns: 1fr; } .svc-grid { grid-template-columns: 1fr; } .svc-grid .card, .svc-grid .card:nth-child(n+4) { grid-column: auto; } .nav-links a:not(.pill) { display: none; } }
 `;
 
 export const LANDING_HTML = `<!doctype html>
@@ -346,7 +356,7 @@ export const LANDING_HTML = `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Clockchain MCP — time your agents can prove</title>
-<meta name="description" content="Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification. ${TOOL_COUNT} tools across ${MODULE_WORD} modules, one endpoint." />
+<meta name="description" content="Clockchain MCP gives any AI agent trusted time, proof, identity, handshakes and commitments — ${SERVICE_WORD} services, ${TOOL_COUNT} tools, one endpoint." />
 <meta property="og:title" content="Clockchain MCP" />
 <meta property="og:description" content="Time your agents can prove. ${TOOL_COUNT} tools, one endpoint." />
 <meta property="og:type" content="website" />
@@ -361,9 +371,9 @@ ${BASE_CSS}</style>
   <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">Testnet</span></div>
   <div class="nav-links">
     <a href="#demo">Demo</a>
-    <a href="#modules">Modules</a>
+    <a href="#services">Services</a>
+    <a href="#handshake">Handshake</a>
     <a href="/clock-tools">Clock tools</a>
-    <a href="/handshake/sop">Handshake SOP</a>
     <a href="#install">Install</a>
     <a href="/status"><span class="ndot"></span>Status</a>
     <a href="https://github.com/thetangstr/clockchain-developer-tools">Docs</a>
@@ -374,7 +384,7 @@ ${BASE_CSS}</style>
 <header class="hero"><div class="wrap">
   <span class="eyebrow">Model Context Protocol · Testnet</span>
   <h1>Time your agents can <span class="green">prove.</span></h1>
-  <p class="sub">Clockchain MCP gives any AI agent consensus-anchored time, tamper-evident receipts, and on-chain verification — ${TOOL_COUNT} tools across ${MODULE_WORD} modules, one endpoint.</p>
+  <p class="sub">Trusted time, proof, identity, handshakes and commitments for any AI agent — ${SERVICE_WORD} services behind one MCP endpoint.</p>
   <div class="cta">
     <a class="btn btn-green" href="#install">Add to your agent</a>
     <a class="btn btn-ghost" href="/status">View live status</a>
@@ -386,8 +396,8 @@ ${BASE_CSS}</style>
 </div></header>
 
 <div class="strip"><div class="wrap strip-in">
+  <div class="stat"><div class="k">Services</div><div class="v">${SERVICE_COUNT}</div></div>
   <div class="stat"><div class="k">Tools</div><div class="v">${TOOL_COUNT}</div></div>
-  <div class="stat"><div class="k">Modules</div><div class="v">${MODULE_COUNT}</div></div>
   <div class="stat"><div class="k">Transport</div><div class="v">StreamableHTTP</div></div>
   <div class="stat"><div class="k">Network</div><div class="v">Testnet</div></div>
 </div></div>
@@ -403,19 +413,20 @@ ${BASE_CSS}</style>
   </div>
 </div></section>
 
-<section id="modules"><div class="wrap">
+<section class="tint" id="services"><div class="wrap">
+  <span id="modules"></span>
   <div class="head">
-    <span class="eyebrow">The surface</span>
-    <h2>${MODULE_WORD[0].toUpperCase()}${MODULE_WORD.slice(1)} modules</h2>
-    <p>Every tool is typed, idempotent where it writes, and degrades with grace.</p>
+    <span class="eyebrow">What your agent gets</span>
+    <h2>${SERVICE_WORD[0].toUpperCase()}${SERVICE_WORD.slice(1)} services, one endpoint</h2>
+    <p>Everything an agent needs to prove when, what, and who — and to trust the agent on the other side.</p>
   </div>
-  <div class="grid">
-    ${MODULES.map((m) => `
-    <div class="card${"wide" in m && m.wide ? " wide" : ""}"><div class="i">${m.i}</div><h3>${m.name}</h3><p>${m.body}</p>${"href" in m ? `<p class="more"><a href="${m.href}">${m.cta}</a></p>` : ""}</div>`).join("")}
+  <div class="svc-grid">
+    ${SERVICES.map((m) => `
+    <div class="card"><div class="i">${m.i}</div><h3>${m.name}</h3><p class="pitch">${m.pitch}</p><p>${m.body}</p>${"href" in m ? `<p class="more"><a href="${m.href}">${m.cta}</a></p>` : ""}<div class="chips">${m.includes.map((c) => `<span class="chip">${c}</span>`).join("")}</div></div>`).join("")}
   </div>
 </div></section>
 
-<section class="tint"><div class="wrap">
+<section><div class="wrap">
   <div class="head"><span class="eyebrow">Why it holds up</span><h2>Proof, not assurance</h2></div>
   <div class="tenets">
     <div class="tenet"><h3><span class="n">01</span>Consensus time</h3><p>Every timestamp is the network's consented block time — anyone can re-check it. No single clock to trust.</p></div>
@@ -425,17 +436,23 @@ ${BASE_CSS}</style>
 </div></section>
 
 <section class="tint" id="handshake"><div class="wrap">
-  <div class="head"><span class="eyebrow">Standalone Handshake</span><h2>Two strangers, one bounded conversation</h2>
-  <p>Before agents talk business, they establish who is present, whether entry conditions are met, and what each side consented to discuss. Identity, authority, and capability checks run deterministically on both sides; consent is signed locally over the exact terms; the opening decision is anchored where anyone can re-verify it.</p></div>
-  <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="handshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/connect/mcp</code></pre></div>
-  <p class="hint">No API key. Consent covers communication only — it is not an agreement, and it never authorizes a transaction.</p>
-</div></section>
-
-<section id="agent-handshake"><div class="wrap">
-  <div class="head"><span class="eyebrow">Agent Handshake</span><h2>Two agents prove control — mutually signed</h2>
-  <p>A dedicated public surface for the two-person stakeholder handshake: single-use invitations, role-scoped capabilities, and a pinned local helper that does all signing on each agent's own machine — the server never sees a private key. The result is a VERIFIED certificate both sides can hold up to anyone.</p></div>
-  <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="agentHandshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/next/handshake/mcp</code></pre></div>
-  <p class="hint">Exactly eight tools · protocol clockchain.agent-handshake/v2 · pinned helper, digest-verified at every step. <a href="/handshake/sop" style="color:var(--green);font-weight:600">Read the operator SOP →</a></p>
+  <span id="agent-handshake"></span>
+  <div class="head"><span class="eyebrow">Handshake</span><h2>Trust the agent on the other side</h2>
+  <p>Before agents talk business, they prove who is present and what each side agreed to. Signing happens on each agent's own machine — the server never sees a private key — and the outcome is anchored where anyone can re-verify it.</p></div>
+  <div class="pair">
+    <div class="card">
+      <div class="i">Standalone Handshake</div><h3>Open a bounded conversation</h3>
+      <p>Two strangers run identity, authority and capability checks, sign consent to a stated purpose and scope, then talk in a witnessed channel whose opening and closing are anchored.</p>
+      <p class="hint">No API key. Consent covers communication only — it is not an agreement, and it never authorizes a transaction.</p>
+      <div class="code" style="margin-top:16px"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="handshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/connect/mcp</code></pre></div>
+    </div>
+    <div class="card">
+      <div class="i">Agent Handshake</div><h3>Prove control, mutually signed</h3>
+      <p>The two-person stakeholder handshake: single-use invitations, role-scoped capabilities, and a pinned local helper. The result is a VERIFIED certificate both sides can hold up to anyone.</p>
+      <p class="hint">Exactly eight tools · protocol clockchain.agent-handshake/v2 · <a href="/handshake/sop" style="color:var(--green);font-weight:600">Read the operator SOP →</a></p>
+      <div class="code" style="margin-top:16px"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="agentHandshakeCmd">claude mcp add clockchain-handshake --transport http https://mcp.clockchain.network/next/handshake/mcp</code></pre></div>
+    </div>
+  </div>
 </div></section>
 
 <section id="install"><div class="wrap install">
