@@ -2,7 +2,7 @@
 // MCP host. Keep a light guard on its key content + the install/endpoint facts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST, TOOL_COUNT, MODULE_COUNT } from "../dist/landing.js";
+import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST, TOOL_COUNT, SERVICE_COUNT } from "../dist/landing.js";
 import { registerTools } from "../dist/tools.js";
 
 // The number of tools actually registered on the full surface — what an agent
@@ -21,28 +21,31 @@ test("landing page is well-formed HTML with the core message", () => {
   assert.match(LANDING_HTML, /^<!doctype html>/i);
   assert.match(LANDING_HTML, /<\/html>\s*$/i);
   assert.match(LANDING_HTML, /Clockchain/);
-  assert.match(LANDING_HTML, /modules/i);
+  assert.match(LANDING_HTML, /services/i);
 });
 
-test("every tool/module count on the page is derived from the registered surface (no drift)", () => {
+test("every tool/service count on the page is derived from the registered surface (no drift)", () => {
   const registered = registeredToolCount();
   assert.equal(TOOL_COUNT, registered, "TOOL_COUNT must equal the registered full-surface tool count");
   // Hero, stat strip, install step, meta tags all carry the same number...
   const hits = LANDING_HTML.match(new RegExp(`\\b${registered} tools\\b`, "g")) ?? [];
   assert.ok(hits.length >= 3, `expected the tool count in hero/meta/install, found ${hits.length}`);
   assert.match(LANDING_HTML, new RegExp(`<div class="k">Tools</div><div class="v">${registered}</div>`));
-  assert.match(LANDING_HTML, new RegExp(`<div class="k">Modules</div><div class="v">${MODULE_COUNT}</div>`));
+  assert.match(LANDING_HTML, new RegExp(`<div class="k">Services</div><div class="v">${SERVICE_COUNT}</div>`));
   // ...and the stale literals never come back.
   assert.doesNotMatch(LANDING_HTML, /\b31 tools\b|>31<|>6</);
-  assert.doesNotMatch(LANDING_HTML, /Six modules|six modules/);
+  assert.doesNotMatch(LANDING_HTML, /Six modules|six modules|Eight modules|eight modules/);
   assert.match(INSTALL_TXT, new RegExp(`\\(${registered} tools\\)`));
 });
 
-test("landing page lists the verified time tools module (stopwatch / timer / alarm)", () => {
-  assert.match(LANDING_HTML, /Verified time tools/);
+test("landing page presents the five services, with the clock tools under Trusted time", () => {
+  assert.equal(SERVICE_COUNT, 5);
+  for (const name of ["Trusted time", "Proof", "Agent identity", "Handshake", "Commitments &amp; audit|Commitments & audit"]) {
+    assert.match(LANDING_HTML, new RegExp(`<h3>(${name})</h3>`), name);
+  }
   assert.match(LANDING_HTML, /Stopwatch, timer, alarm/);
-  // The hosted tools are named, and the claim stays honest about the substrate.
-  assert.match(LANDING_HTML, /timer_set \/ alarm_set/);
+  // High-level page: tool names stay in /llms.txt, /clock-tools and the SOP.
+  assert.doesNotMatch(LANDING_HTML, /timer_set|stopwatch_start|tsa_issue|log_action/);
   // D7: the page names the real substrate (network or owned gateway), never implies more.
   assert.match(LANDING_HTML, /anchoring gateway \(testnet, single operator\)|single-validator Clockchain testnet/);
   assert.match(LANDING_HTML, /not yet attested by an independent validator set/);
