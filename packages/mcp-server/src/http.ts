@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -9,6 +10,18 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
+
+// The landing page's demo video + poster, served same-origin from the image
+// (packages/mcp-server/assets, copied by the Dockerfile). They used to hot-link a
+// Vercel deploy that later went 403, which left the demo frame blank. Read once
+// at boot; a missing file is a 404, never a crash.
+const PUBLIC_ASSETS: Record<string, { type: string; body: Buffer | null }> = Object.fromEntries(
+  ([["mcp-demo.mp4", "video/mp4"], ["mcp-demo-poster.png", "image/png"]] as const).map(([name, type]) => {
+    let body: Buffer | null = null;
+    try { body = readFileSync(new URL(`../assets/${name}`, import.meta.url)); } catch { body = null; }
+    return [`/assets/${name}`, { type, body }];
+  }),
+);
 import { CLOCK_TOOLS_HTML, CLOCK_TOOLS_TXT } from "./clock-tools-page.js";
 import { HANDSHAKE_SOP_HTML, HANDSHAKE_SOP_TXT } from "./handshake-sop-page.js";
 import {
@@ -509,7 +522,7 @@ export async function runHttp(): Promise<void> {
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
     "llms", "manifest", "handshake_manifest", "standalone_manifest", "connect_verify",
     "connect_mcp", "handshake_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
-    "landing", "mcp_rpc", "keeper", "other",
+    "landing", "asset", "mcp_rpc", "keeper", "other",
   ] as const;
   const STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
   const RESULT_KINDS = ["ok", "fail_closed", "error", "rate_limited"] as const;
@@ -550,6 +563,7 @@ export async function runHttp(): Promise<void> {
     if (method === "GET" && p === "/readyz") return "readyz";
     if (method === "GET" && p === "/metrics") return "metrics";
     if (method === "GET" && (p === "/clock-tools" || p === "/clock-tools.txt")) return "clock_tools";
+    if ((method === "GET" || method === "HEAD") && p.startsWith("/assets/")) return "asset";
     if (method === "GET" && (p === "/handshake/sop" || p === "/handshake/sop.txt")) return "sop";
     if (method === "GET" && (p === "/llms.txt" || p === "/install.txt")) return "llms";
     if (method === "GET" && p === "/.well-known/mcp.json") return "manifest";
@@ -827,6 +841,34 @@ export async function runHttp(): Promise<void> {
     // The clock-tools guide: HTML for a browser, plain text for everything else (an
     // agent fetching the bare URL gets the guide, not markup). /clock-tools.txt is
     // always text. Public, like the landing page.
+    // Landing-page media. Public, cacheable, and Range-aware (Safari will not play
+    // an MP4 that ignores Range).
+    if ((req.method === "GET" || req.method === "HEAD") && pathOf(req.url).startsWith("/assets/")) {
+      const asset = PUBLIC_ASSETS[pathOf(req.url)];
+      if (!asset?.body) {
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        res.end("not found");
+        return;
+      }
+      const body = asset.body;
+      const headers = { "content-type": asset.type, "accept-ranges": "bytes", "cache-control": "public, max-age=86400" };
+      const m = /^bytes=(\d*)-(\d*)$/.exec(firstHeader(req.headers.range));
+      if (m && (m[1] || m[2])) {
+        const start = m[1] ? Number(m[1]) : Math.max(0, body.length - Number(m[2]));
+        const end = m[1] && m[2] ? Math.min(Number(m[2]), body.length - 1) : body.length - 1;
+        if (start > end || start >= body.length) {
+          res.writeHead(416, { ...headers, "content-range": `bytes */${body.length}` });
+          res.end();
+          return;
+        }
+        res.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${body.length}`, "content-length": end - start + 1 });
+        res.end(req.method === "HEAD" ? undefined : body.subarray(start, end + 1));
+        return;
+      }
+      res.writeHead(200, { ...headers, "content-length": body.length });
+      res.end(req.method === "HEAD" ? undefined : body);
+      return;
+    }
     if (req.method === "GET" && (pathOf(req.url) === "/clock-tools" || pathOf(req.url) === "/clock-tools.txt")) {
       const wantsHtml = pathOf(req.url) === "/clock-tools" && firstHeader(req.headers.accept).includes("text/html");
       res.writeHead(200, {
