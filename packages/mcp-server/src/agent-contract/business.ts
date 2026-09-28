@@ -190,13 +190,28 @@ export function createBusinessOps(options: {
   const READ_ONLY_TOOLS = new Set([
     "catalog_quote", "booking_lookup", "agreement_get", "settlement_status",
   ]);
+  /**
+   * N4b-4: the cancel pair stays reachable after terminalState — a booked
+   * order may still be cancelled after a claimed mismatch ends the run
+   * (verification_failed), and a replayed submit must land on the recorded
+   * cancellation for a deterministic result. The cases below still refuse
+   * ALREADY_TERMINAL once a settlement has authorized (settled runs can
+   * never be cancelled).
+   */
+  const TERMINAL_REPLAY_TOOLS = new Set(["booking_cancel_prepare", "booking_cancel_submit"]);
 
   /** Both seats must be occupied before any business step runs. */
   function requireRun(run: ContractRun | undefined, tool: string): BusinessOutcome | null {
     if (run === undefined || run.bound.buyer === undefined || run.bound.provider === undefined) {
       return refuse("STATE_REFUSED");
     }
-    if (run.terminalState !== null && !READ_ONLY_TOOLS.has(tool)) return refuse("ALREADY_TERMINAL");
+    if (
+      run.terminalState !== null &&
+      !READ_ONLY_TOOLS.has(tool) &&
+      !TERMINAL_REPLAY_TOOLS.has(tool)
+    ) {
+      return refuse("ALREADY_TERMINAL");
+    }
     return null;
   }
 
@@ -349,6 +364,23 @@ export function createBusinessOps(options: {
       currency: agreement.currency,
       amountMinor: agreement.totalMinor,
       simulated: true,
+    };
+  }
+
+  /**
+   * v2 cancel payload (N4b-4) — server-derived from the live booking; the
+   * agent supplies only the free-text reason, which the signed envelope
+   * then binds.
+   */
+  function cancelPayload(run: ContractRun, reason: string): Record<string, unknown> {
+    const agreement = run.agreement!;
+    const booking = run.booking!;
+    return {
+      kind: "cancel",
+      agreementId: agreement.agreementId,
+      agreementDigest: agreement.agreementDigest,
+      bookingRef: booking.pnr,
+      reason,
     };
   }
 
@@ -853,6 +885,87 @@ export function createBusinessOps(options: {
       case "booking_lookup": {
         const observation = liveRun.simRun!.lookupOrder({ orderRef: args.orderRef });
         return ok({ observation, simulated: true, serverNonce });
+      }
+
+      case "booking_cancel_prepare": {
+        // A settled run can never be cancelled — the money already moved.
+        if (liveRun.settlement !== undefined || liveRun.terminalState === "settled") {
+          return refuse("ALREADY_TERMINAL");
+        }
+        if (
+          liveRun.booking === undefined || liveRun.agreement === undefined ||
+          liveRun.cancellation !== undefined
+        ) {
+          return refuse("STATE_REFUSED");
+        }
+        const envelope = prepare(liveRun, "provider", "booking_cancel_prepare",
+          cancelPayload(liveRun, args.reason as string));
+        return ok({ envelope, serverNonce });
+      }
+
+      case "booking_cancel_submit": {
+        // Idempotent replay: the recorded cancellation is returned verbatim —
+        // never a nonce error — even though the envelope's nonce is claimed.
+        if (liveRun.cancellation !== undefined) {
+          return ok({
+            orderRef: liveRun.cancellation.orderRef,
+            status: "CANCELLED",
+            cancelledAt: liveRun.cancellation.cancelledAt,
+            terminalState: "cancelled",
+            simulated: true,
+            serverNonce,
+          });
+        }
+        if (liveRun.settlement !== undefined || liveRun.terminalState === "settled") {
+          return refuse("ALREADY_TERMINAL");
+        }
+        if (liveRun.booking === undefined || liveRun.agreement === undefined) {
+          return refuse("STATE_REFUSED");
+        }
+        const submitted = verifySubmission(liveRun, "provider", "booking_cancel_prepare",
+          args.envelope, args.signatureHex as string);
+        if (!submitted.ok) return submitted;
+        // Server-derived fields must match the live run exactly; only the
+        // reason is the caller's own (bound by its signature either way).
+        if (
+          !samePayload(
+            submitted.envelope.payload,
+            cancelPayload(liveRun, submitted.envelope.payload.reason as string),
+          )
+        ) {
+          return refuse("ENVELOPE_INVALID");
+        }
+        if (
+          !verifyApprovalRecord({
+            approval: args.approval as ApprovalRecord,
+            runId: liveRun.runId,
+            role: "provider",
+            tool: "booking_cancel_submit",
+            action: "booking",
+            nonce: submitted.envelope.nonce,
+            envelopeDigest: canonicalDigest(submitted.envelope),
+            expiresAt: submitted.envelope.expiresAt,
+            approvalKey: liveRun.bound.provider!.approvalKey,
+            expectedPolicyDigest: options.policyDigests.provider,
+            nowMs: now(),
+          })
+        ) {
+          return refuse("APPROVAL_INVALID");
+        }
+        // The order ref comes from the server's own booking record — nothing
+        // consequential is agent-selected.
+        const cancelled = liveRun.simRun!.cancelOrder({ orderRef: liveRun.booking.orderRef });
+        if (!cancelled.ok) return refuse("STATE_REFUSED");
+        liveRun.cancellation = { orderRef: cancelled.orderRef, cancelledAt: cancelled.cancelledAt };
+        options.endRun(liveRun, "cancelled");
+        return ok({
+          orderRef: cancelled.orderRef,
+          status: "CANCELLED",
+          cancelledAt: cancelled.cancelledAt,
+          terminalState: "cancelled",
+          simulated: true,
+          serverNonce,
+        });
       }
 
       case "verification_prepare": {

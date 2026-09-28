@@ -124,6 +124,8 @@ export interface ContractRun {
   offerSeq: number;
   agreement?: AgreementRecord;
   booking?: { orderRef: string; pnr: string; tickets: SimTicket[]; bookedAt: string };
+  /** N4b-4: the provider-side simulated cancel result (terminal "cancelled"). */
+  cancellation?: { orderRef: string; cancelledAt: string };
   verification?: {
     result: "match" | "mismatch";
     verificationDigest: string;

@@ -77,6 +77,7 @@ export const CONTRACT_TERMINAL_STATES = Object.freeze([
   "blocked_by_policy",
   "budget_exhausted",
   "harness_error",
+  "cancelled",
 ] as const);
 
 const terminalState = z.enum(CONTRACT_TERMINAL_STATES);
@@ -392,6 +393,37 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       serverNonce,
     }).strict(),
     readOnly: true,
+    simulated: true,
+  },
+  {
+    // N4b-4: provider-side cancel before settlement — prepare → local sign →
+    // submit (v2 payload kind "cancel"), gated by a booking-class approval.
+    name: "booking_cancel_prepare",
+    role: "provider",
+    schema: {
+      reason: z.string().min(1).max(512),
+    },
+    outputSchema: z.object({ ...envelopeOut }).strict(),
+    readOnly: false,
+    simulated: false,
+  },
+  {
+    name: "booking_cancel_submit",
+    role: "provider",
+    schema: {
+      envelope: prepareEnvelopeSchema,
+      signatureHex,
+      approval: approvalRecordSchema,
+    },
+    outputSchema: z.object({
+      orderRef,
+      status: z.literal("CANCELLED"),
+      cancelledAt: isoDateTime,
+      terminalState: z.literal("cancelled"),
+      simulated: z.literal(true),
+      serverNonce,
+    }).strict(),
+    readOnly: false,
     simulated: true,
   },
   {

@@ -37,6 +37,8 @@ const PROVIDER_ONLY = [
   "catalog_quote",
   "booking_prepare",
   "booking_execute",
+  "booking_cancel_prepare",
+  "booking_cancel_submit",
 ];
 const SHARED = [
   "rendezvous_inbox",
@@ -53,8 +55,8 @@ const SHARED = [
 ];
 
 test("every LLD §3 tool exists exactly once, role-scoped", () => {
-  assert.equal(CONTRACT_TOOL_DEFS.length, 24);
-  assert.equal(new Set(CONTRACT_TOOL_NAMES).size, 24);
+  assert.equal(CONTRACT_TOOL_DEFS.length, 26);
+  assert.equal(new Set(CONTRACT_TOOL_NAMES).size, 26);
   for (const name of BUYER_ONLY) assert.equal(contractToolDef(name).role, "buyer", name);
   for (const name of PROVIDER_ONLY) assert.equal(contractToolDef(name).role, "provider", name);
   for (const name of SHARED) assert.equal(contractToolDef(name).role, "both", name);
@@ -64,7 +66,7 @@ test("role-scoped tools/list hides the other role's tools", () => {
   const buyerTools = toolsListForRole("buyer").tools.map((t) => t.name);
   const providerTools = toolsListForRole("provider").tools.map((t) => t.name);
   assert.equal(buyerTools.length, 20);
-  assert.equal(providerTools.length, 15);
+  assert.equal(providerTools.length, 17);
   for (const name of PROVIDER_ONLY) assert.ok(!buyerTools.includes(name), name);
   for (const name of BUYER_ONLY) assert.ok(!providerTools.includes(name), name);
   for (const name of SHARED) {
@@ -175,7 +177,7 @@ test("MANDATE_REFUSED and refusals cannot carry the cap or extras", () => {
 });
 
 test("sim-backed outputs require simulated:true; every output carries serverNonce", () => {
-  const simBacked = ["catalog_quote", "booking_execute", "booking_lookup", "settlement_authorize", "settlement_status"];
+  const simBacked = ["catalog_quote", "booking_execute", "booking_lookup", "booking_cancel_submit", "settlement_authorize", "settlement_status"];
   for (const def of CONTRACT_TOOL_DEFS) {
     assert.equal(def.simulated, simBacked.includes(def.name), def.name);
     const shape = def.outputSchema._def.shape();
