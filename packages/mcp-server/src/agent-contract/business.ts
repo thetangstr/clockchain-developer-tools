@@ -391,6 +391,26 @@ export function createBusinessOps(options: {
     };
   }
 
+  /**
+   * The cancel reason must match the run's actual state (rev 6.7):
+   * `mutual_withdrawal` only before any verification, `verification_mismatch`
+   * only with a recorded claimed mismatch, `verification_failed` only once
+   * the run has ended that way. Checked at BOTH prepare and submit — a
+   * prepared envelope may go stale if verification lands in between.
+   */
+  function cancelReasonAllowed(run: ContractRun, reason: unknown): boolean {
+    switch (reason) {
+      case "mutual_withdrawal":
+        return run.verification === undefined;
+      case "verification_mismatch":
+        return run.verification?.result === "mismatch";
+      case "verification_failed":
+        return run.terminalState === "verification_failed";
+      default:
+        return false;
+    }
+  }
+
   function samePayload(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
     return canonicalDigest(a) === canonicalDigest(b);
   }
@@ -904,7 +924,8 @@ export function createBusinessOps(options: {
         }
         if (
           liveRun.booking === undefined || liveRun.agreement === undefined ||
-          liveRun.cancellation !== undefined
+          liveRun.cancellation !== undefined ||
+          !cancelReasonAllowed(liveRun, args.reason)
         ) {
           return refuse("STATE_REFUSED");
         }
@@ -936,7 +957,13 @@ export function createBusinessOps(options: {
           args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
         // Server-derived fields must match the live run exactly; only the
-        // reason is the caller's own (bound by its signature either way).
+        // reason is the caller's own (bound by its signature either way) —
+        // and the enum reason must still match the CURRENT run state.
+        if (
+          !cancelReasonAllowed(liveRun, submitted.envelope.payload.reason)
+        ) {
+          return refuse("STATE_REFUSED");
+        }
         if (
           !samePayload(
             submitted.envelope.payload,

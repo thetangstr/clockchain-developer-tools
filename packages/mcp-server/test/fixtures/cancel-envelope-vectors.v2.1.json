@@ -1,0 +1,45 @@
+{
+  "schema": "agent-contract.cancel-envelope-vectors/v2.1",
+  "generator": "orchestrator independent generator (not N5/N4b code), 2026-09-28",
+  "contract": "docs/travel-mvp/design/CONTRACT-PAYLOADS-v2.md",
+  "supersedes": "nothing — ADDITIVE to the frozen v2 files (cancel kind, rev 6.7)",
+  "testOnlyServerKey": {
+    "keyId": "test-server-ed25519-v1",
+    "alg": "ed25519",
+    "publicKeyHex": "0x3f7de43bef96b9fca5efad242bf133584be9b5e2614aee0e36530323a36d340a",
+    "note": "TEST-ONLY deterministic key; never deploy"
+  },
+  "ledgerFacts": {
+    "runId": "run-test-0002",
+    "offerDigest": "0x0f54a5e28325492485d609d169466ab82ed73488d9a692903d6f03fc3947a7f2",
+    "agreementDigest": "0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864",
+    "verificationDigest": "0x0987893b9654b7c715398efb2f427a8aeb36dab2cdb678f811636633bf43a7c3"
+  },
+  "vectors": [
+    {
+      "envelope": {
+        "schema": "agent-contract.prepare-envelope/v1",
+        "runId": "run-test-0002",
+        "tool": "booking_cancel_prepare",
+        "role": "provider",
+        "payload": {
+          "kind": "cancel",
+          "agreementId": "agr-0002",
+          "agreementDigest": "0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864",
+          "bookingRef": "PNR-56VQOC",
+          "reason": "verification_mismatch"
+        },
+        "payloadDigest": "0xd9bee5e75549d9fe5b9d3022945dc9d7d7de35fd35ae02eab90b16cbc9440420",
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "nonce": "0x16c3b8cd585e83e140bc7498cd5b7432",
+        "serverKeyId": "test-server-ed25519-v1",
+        "serverSig": {
+          "alg": "ed25519",
+          "keyId": "test-server-ed25519-v1",
+          "sig": "0x3754a571c6be781ba6419bc36fe8c6bf52c4637fd2b2dc718a25fabaaaeca895677aa1b25025a82a1e1afa203cd90f647d6de30a54d81ecdcd4f36e30e06430c"
+        }
+      },
+      "signedMessage": "{\"expiresAt\":\"2030-01-01T00:00:00.000Z\",\"nonce\":\"0x16c3b8cd585e83e140bc7498cd5b7432\",\"payload\":{\"agreementDigest\":\"0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864\",\"agreementId\":\"agr-0002\",\"bookingRef\":\"PNR-56VQOC\",\"kind\":\"cancel\",\"reason\":\"verification_mismatch\"},\"payloadDigest\":\"0xd9bee5e75549d9fe5b9d3022945dc9d7d7de35fd35ae02eab90b16cbc9440420\",\"role\":\"provider\",\"runId\":\"run-test-0002\",\"schema\":\"agent-contract.prepare-envelope/v1\",\"serverKeyId\":\"test-server-ed25519-v1\",\"tool\":\"booking_cancel_prepare\"}"
+    }
+  ]
+}

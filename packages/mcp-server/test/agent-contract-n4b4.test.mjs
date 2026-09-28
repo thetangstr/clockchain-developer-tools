@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { generateKeyPairSync, createHash, sign as edSign } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { generateKeyPairSync, createHash, createPublicKey, sign as edSign } from "node:crypto";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,8 +10,11 @@ import { canonicalJson, canonicalDigest } from "../dist/agent-contract/canonical
 import { parseContractTokens, tokenAuthenticator, createContractHttpHandler } from "../dist/agent-contract/http-handler.js";
 import { createContractService } from "../dist/agent-contract/service.js";
 import { loadContractConfig } from "../dist/agent-contract/config.js";
-import { eip191SignDigest32, eip191RecoverPublicKey, publicKeyToAddress } from "../dist/agent-contract/eip191.js";
+import { verifyEnvelope } from "../dist/agent-contract/envelope.js";
+import { eip191SignDigest32, eip191RecoverPublicKey, publicKeyToAddress, verifyRoleSignature } from "../dist/agent-contract/eip191.js";
 import { computeApprovalDigest, computeApprovalSigDigest } from "../dist/agent-contract/approval.js";
+import { createSimWorld } from "../dist/agent-contract/sim/index.js";
+import { createBusinessOps } from "../dist/agent-contract/business.js";
 
 const ACCEPT = "application/json, text/event-stream";
 
@@ -225,7 +228,7 @@ async function boot(handlerOptions = {}) {
     const text = await res.text();
     const data = text.split("\n").find((l) => l.startsWith("data:"));
     const body = JSON.parse(data ? data.slice(5) : text);
-    return body.result?.structuredContent ?? {};
+    return { ...(body.result?.structuredContent ?? {}), ...(body.error ? { rpcError: body.error.code } : {}) };
   };
   const freshSession = async (token) => {
     sessions.delete(token);
@@ -295,15 +298,15 @@ test("booking_cancel: a provider cancels a booked run — CANCELLED on the sim, 
   try {
     const { runId, agreementId, orderRef, pnr } = await bookedPair(app.rpc, 301, "tb1", "tp1");
 
-    const prep = await app.rpc("tp1", "booking_cancel_prepare", { reason: "schedule change" });
+    const prep = await app.rpc("tp1", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
     assert.ok(prep.envelope, JSON.stringify(prep));
-    // The v2 cancel payload — {kind, agreementId, agreementDigest, bookingRef, reason}.
+    // The v2.1 cancel payload — {kind, agreementId, agreementDigest, bookingRef, reason}.
     assert.deepEqual(prep.envelope.payload, {
       kind: "cancel",
       agreementId,
       agreementDigest: prep.envelope.payload.agreementDigest,
       bookingRef: pnr,
-      reason: "schedule change",
+      reason: "mutual_withdrawal",
     });
     assert.match(prep.envelope.payload.agreementDigest, /^0x[0-9a-f]{64}$/);
 
@@ -343,7 +346,7 @@ test("booking_cancel runs after a claimed mismatch (terminal verification_failed
     assert.equal(verified.terminalState, "verification_failed", JSON.stringify(verified));
 
     // The run is terminal — cancel is the one provider action still allowed.
-    const prep = await app.rpc("tp2", "booking_cancel_prepare", { reason: "buyer disputed the order" });
+    const prep = await app.rpc("tp2", "booking_cancel_prepare", { reason: "verification_failed" });
     assert.ok(prep.envelope, JSON.stringify(prep));
     const approval = makeApproval({
       envelope: prep.envelope, role: "provider", action: "booking",
@@ -379,13 +382,13 @@ test("booking_cancel is refused after settlement; a replayed submit is idempoten
       submitTool: "settlement_authorize", extraArgs: { approval: settleApproval },
     });
     assert.equal(settledRes.status, "released", JSON.stringify(settledRes));
-    const late = await app.rpc("tp3", "booking_cancel_prepare", { reason: "too late" });
+    const late = await app.rpc("tp3", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
     assert.equal(late.error, "ALREADY_TERMINAL", JSON.stringify(late));
 
     // Idempotent replay on a fresh run: cancel once, then resubmit the SAME
     // envelope — the recorded cancel is returned, not a nonce error.
     const again = await bookedPair(app.rpc, 304, "tb4", "tp4");
-    const prep = await app.rpc("tp4", "booking_cancel_prepare", { reason: "ops" });
+    const prep = await app.rpc("tp4", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
     const approval = makeApproval({
       envelope: prep.envelope, role: "provider", action: "booking",
       tool: "booking_cancel_submit", key: keys.providerApproval,
@@ -415,11 +418,11 @@ test("booking_cancel is provider-only and needs a booking-class approval", async
     const { orderRef } = await bookedPair(app.rpc, 305, "tb5", "tp5");
 
     // Wrong role: the buyer can't see or call either cancel tool.
-    const buyerPrep = await app.rpc("tb5", "booking_cancel_prepare", { reason: "buyer attempt" });
+    const buyerPrep = await app.rpc("tb5", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
     assert.equal(buyerPrep.error, "ROLE_REFUSED", JSON.stringify(buyerPrep));
 
     // Right role, no approval → APPROVAL_INVALID.
-    const prep = await app.rpc("tp5", "booking_cancel_prepare", { reason: "ops" });
+    const prep = await app.rpc("tp5", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
     assert.ok(prep.envelope);
     const noApproval = await signedSubmit(app.rpc, {
       token: "tp5", role: "provider", prepared: prep, submitTool: "booking_cancel_submit",
@@ -492,4 +495,144 @@ test("a service past its key's validUntil refuses to sign — every call is refu
     // Nothing was receipted either — the chain stays empty.
     assert.equal(service.preBindFeed("kb8"), undefined);
   } finally { await app.close(); }
+});
+
+// === 4. cancel freeze (N4B4-CHANGES-1) ========================================
+// reason is a frozen enum validated against run state; the v2.1 cancel
+// vectors are copied unchanged from the travel repo's design/vectors.
+
+test("cancel reason is an enum, and must match the run state", async () => {
+  const app = await boot();
+  try {
+    await bookedPair(app.rpc, 401, "tb9", "tp9");
+
+    // Free text fails the input schema — refused as JSON-RPC -32602.
+    const free = await app.rpc("tp9", "booking_cancel_prepare", { reason: "flight got expensive" });
+    assert.equal(free.rpcError, -32602, JSON.stringify(free));
+
+    // Enum-valid but wrong state: the run is booked with NO verification —
+    // only mutual_withdrawal matches.
+    const wrong1 = await app.rpc("tp9", "booking_cancel_prepare", { reason: "verification_mismatch" });
+    assert.equal(wrong1.error, "STATE_REFUSED", JSON.stringify(wrong1));
+    const wrong2 = await app.rpc("tp9", "booking_cancel_prepare", { reason: "verification_failed" });
+    assert.equal(wrong2.error, "STATE_REFUSED", JSON.stringify(wrong2));
+
+    const ok = await app.rpc("tp9", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
+    assert.ok(ok.envelope, JSON.stringify(ok));
+    assert.equal(ok.envelope.payload.reason, "mutual_withdrawal");
+  } finally { await app.close(); }
+});
+
+test("the cancel reason is re-checked against run state at submit", async () => {
+  const app = await boot();
+  try {
+    const { orderRef } = await bookedPair(app.rpc, 402, "tb10", "tp10");
+    // Prepare while the run is unverified — mutual_withdrawal is valid here.
+    const prep = await app.rpc("tp10", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
+    assert.ok(prep.envelope, JSON.stringify(prep));
+    // A verification lands between prepare and submit — the reason no longer
+    // matches the run's actual state.
+    const prepV = await app.rpc("tb10", "verification_prepare", {
+      orderRef, result: "mismatch", findingsDigest: `0x${"dd".repeat(32)}`,
+    });
+    await signedSubmit(app.rpc, { token: "tb10", role: "buyer", prepared: prepV, submitTool: "verification_submit" });
+    const approval = makeApproval({
+      envelope: prep.envelope, role: "provider", action: "booking",
+      tool: "booking_cancel_submit", key: keys.providerApproval,
+    });
+    const late = await signedSubmit(app.rpc, {
+      token: "tp10", role: "provider", prepared: prep,
+      submitTool: "booking_cancel_submit", extraArgs: { approval },
+    });
+    assert.equal(late.error, "STATE_REFUSED", JSON.stringify(late));
+  } finally { await app.close(); }
+});
+
+test("the frozen v2.1 cancel envelope verifies; the builder emits it field-for-field", async () => {
+  const vectors = JSON.parse(readFileSync(
+    new URL("./fixtures/cancel-envelope-vectors.v2.1.json", import.meta.url), "utf8",
+  ));
+  assert.equal(vectors.schema, "agent-contract.cancel-envelope-vectors/v2.1");
+  const serverPub = createPublicKey({
+    key: Buffer.concat([
+      Buffer.from("302a300506032b6570032100", "hex"), // ed25519 SPKI prefix
+      Buffer.from(vectors.testOnlyServerKey.publicKeyHex.slice(2), "hex"),
+    ]),
+    format: "der", type: "spki",
+  });
+  for (const v of vectors.vectors) {
+    const { envelope, signedMessage } = v;
+    assert.equal(canonicalDigest(envelope.payload), envelope.payloadDigest);
+    const { serverSig: _s, ...message } = envelope;
+    assert.equal(canonicalJson(message), signedMessage);
+    const verdict = verifyEnvelope(envelope, { [vectors.testOnlyServerKey.keyId]: serverPub }, { nowMs: 0 });
+    assert.equal(verdict.ok, true, `${envelope.tool}/${envelope.role}`);
+  }
+
+  // The builder emits the vector's payload byte-for-byte on a matching run
+  // (verification_mismatch requires a recorded mismatch verification).
+  const vec = vectors.vectors[0].envelope.payload;
+  const sim = createSimWorld({ now: Date.now });
+  const run = {
+    runId: "run-test-0002",
+    resultDigest: `0x${"0".repeat(64)}`,
+    sessionPublicKey: "x",
+    createdAtMs: Date.now(),
+    bound: {
+      buyer: { principalKeyId: "kb1", agentId: "9452", side: "initiator", signerKey: keys.buyerSigner, approvalKey: keys.buyerApproval, boundAt: "t" },
+      provider: { principalKeyId: "kp1", agentId: "9453", side: "responder", signerKey: keys.providerSigner, approvalKey: keys.providerApproval, boundAt: "t" },
+    },
+    receipts: [],
+    receiptsByPrincipal: new Map(),
+    simRun: sim.forRun("run-test-0002"),
+    claimedNonces: new Set(),
+    offers: new Map(), offerSeq: 0,
+    agreement: {
+      agreementId: "agr-0002", offerId: "off-0002",
+      offerDigest: vectors.ledgerFacts.offerDigest, agreementDigest: vectors.ledgerFacts.agreementDigest,
+      offerPayload: {}, acceptPayload: {},
+      itineraryId: "IT-QW-ONESTOP", currency: "USD",
+      fareMinor: 429_000, feeMinor: 8_000, totalMinor: 437_000, formedAt: "t",
+    },
+    booking: { orderRef: "ORD-X", pnr: "PNR-56VQOC", tickets: [], bookedAt: "t" },
+    verification: {
+      result: "mismatch", verificationDigest: vectors.ledgerFacts.verificationDigest,
+      findingsDigest: `0x${ "ee".repeat(32) }`, agreementId: "agr-0002",
+      agreementDigest: vectors.ledgerFacts.agreementDigest,
+      orderRef: "ORD-X", bookingRef: "PNR-56VQOC", flagged: false, submittedAt: "t",
+    },
+    terminalState: "verification_failed", stage: "terminal",
+  };
+  const business = createBusinessOps({
+    signer: SIGNER, sim, policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
+    endRun: () => {},
+  });
+  const provider = { keyId: "kp1", role: "provider", agentId: "9453", side: "responder" };
+  const out = business.dispatch(provider, run, "booking_cancel_prepare", { reason: "verification_mismatch" }, "0xnonce");
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(out.result.envelope.payload, vec);
+  assert.equal(canonicalDigest(out.result.envelope.payload), vectors.vectors[0].envelope.payloadDigest);
+});
+
+test("the frozen v2.1 cancel role signature digests and recovers to its signer", () => {
+  const vectors = JSON.parse(readFileSync(
+    new URL("./fixtures/cancel-role-sig-vectors.v2.1.json", import.meta.url), "utf8",
+  ));
+  assert.equal(vectors.schema, "agent-contract.cancel-role-sig-vectors/v2.1");
+  for (const v of vectors.vectors) {
+    const digest = canonicalDigest(v.tuple);
+    assert.equal(digest, v.roleSigDigest, `${v.tool}/${v.role} digest`);
+    const pub = eip191RecoverPublicKey(Buffer.from(v.roleSigDigest.slice(2), "hex"), v.signature);
+    assert.ok(pub !== null, `${v.tool}/${v.role} recovers`);
+    assert.equal(publicKeyToAddress(pub).toLowerCase(), v.signerAddress.toLowerCase(), `${v.tool}/${v.role} address`);
+    assert.equal(
+      verifyRoleSignature({
+        runId: v.tuple.runId, role: v.tuple.role, tool: v.tuple.tool,
+        nonce: v.tuple.nonce, payloadDigest: v.tuple.payloadDigest,
+        signatureHex: v.signature, expectedPublicKeyHex: "0x" + Buffer.from(pub).toString("hex"),
+      }),
+      true,
+      `${v.tool}/${v.role} verifyRoleSignature`,
+    );
+  }
 });

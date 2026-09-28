@@ -401,7 +401,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     name: "booking_cancel_prepare",
     role: "provider",
     schema: {
-      reason: z.string().min(1).max(512),
+      // Frozen enum (CONTRACT-PAYLOADS-v2 §Cancel, rev 6.7) — never free text;
+      // the run-state match is enforced in business.dispatch.
+      reason: z.enum(["verification_mismatch", "verification_failed", "mutual_withdrawal"]),
     },
     outputSchema: z.object({ ...envelopeOut }).strict(),
     readOnly: false,

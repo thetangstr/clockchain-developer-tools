@@ -1,0 +1,29 @@
+{
+  "schema": "agent-contract.cancel-role-sig-vectors/v2.1",
+  "generator": "orchestrator independent generator (not N5/N4b code), 2026-09-28",
+  "contract": "docs/travel-mvp/design/CONTRACT-PAYLOADS-v2.md",
+  "supersedes": "nothing — ADDITIVE to the frozen v2 files (cancel kind, rev 6.7)",
+  "scheme": "EIP-191 signMessage({message:{raw: roleSigDigest}}), roleSigDigest = canonicalDigest({domain:'agent-contract.role-sig/v1', runId, role, tool, nonce, payloadDigest})",
+  "testOnlySigners": {
+    "buyer": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+    "provider": "0x5C5111597c31145047F45840d1ABAa1ED4Ad14A8",
+    "note": "TEST-ONLY deterministic keys (seed strings in generator); never deploy"
+  },
+  "vectors": [
+    {
+      "tool": "booking_cancel_prepare",
+      "role": "provider",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "provider",
+        "tool": "booking_cancel_prepare",
+        "nonce": "0x16c3b8cd585e83e140bc7498cd5b7432",
+        "payloadDigest": "0xd9bee5e75549d9fe5b9d3022945dc9d7d7de35fd35ae02eab90b16cbc9440420"
+      },
+      "roleSigDigest": "0xf61825bd1871d0f9028521ce8ba9055f7356dd83da11c01883791da4ada7b4a2",
+      "signerAddress": "0x5C5111597c31145047F45840d1ABAa1ED4Ad14A8",
+      "signature": "0x2d36440ee5f95e50baade96e4c7aefedec95bd0c3319a53ed8cf6e905c39f80b7edd2b351f77e7aa8f05e575aab18ef71c4637bebb55c290046d198c10c087671c"
+    }
+  ]
+}
