@@ -56,7 +56,15 @@ interface Listing {
   terms?: Record<string, unknown>;
   publishedAtMs: number;
   expiresAtMs: number;
-  invitationDelivered: boolean;
+  /**
+   * The listing is consumed ONLY when the provider acts — binds the
+   * handshake that came from one of its pending deliveries. A delivered
+   * invitation (even junk) never burns the listing for other senders.
+   */
+  consumed: boolean;
+  /** Pending sealed deliveries — at most one per sender keyId (a resend
+   *  replaces the sender's old one), at most 16 per listing. */
+  pending: Map<string, InboxMessage>;
 }
 
 interface InboxMessage {
@@ -76,6 +84,11 @@ export interface BusinessOps {
     args: Record<string, unknown>,
     serverNonce: string,
   ): BusinessOutcome;
+  /**
+   * The provider has acted on a handshake — every listing it owns is
+   * consumed and its pending deliveries are cleared from the inbox.
+   */
+  consumeProviderListings(providerKeyId: string): void;
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -97,7 +110,12 @@ const mandateSchema = z.object({
 type Mandate = z.infer<typeof mandateSchema>;
 
 const LISTING_TTL_MS = 60 * 60_000;
+/** Global safety cap — the real quota is per-provider. */
 const MAX_LISTINGS = 512;
+/** One provider can hold at most this many live listings. */
+const MAX_LISTINGS_PER_PROVIDER = 32;
+/** Pending sealed deliveries a single listing holds at once. */
+const MAX_PENDING_PER_LISTING = 16;
 const MAX_INBOX_MESSAGES = 256;
 const MAX_DELIVERIES_PER_MINUTE = 12;
 
@@ -113,11 +131,25 @@ export function createBusinessOps(options: {
   policyDigests: Readonly<Record<ContractRole, string>>;
   /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
   principals?: ReadonlyMap<string, string>;
+  /**
+   * Single-use mandate ledger (N4B2B-CHANGES-2 §3): claims
+   * `mandateId` for a family principal — durable when the service has a
+   * state dir. The claim persists BEFORE the run's mandate record commits.
+   * Absent this hook an in-memory ledger still enforces single-use.
+   */
+  claimMandate?(principalAddress: string, mandateId: string, runId: string): "ok" | "used" | "unavailable";
   endRun: (run: ContractRun, terminalState: string) => void;
 }): BusinessOps {
   const now = options.now ?? Date.now;
   const sim = options.sim;
   const principals = options.principals ?? new Map<string, string>();
+  const localMandates = new Set<string>();
+  const claimMandate = options.claimMandate ?? ((principalAddress: string, mandateId: string): "ok" | "used" => {
+    const key = `${principalAddress.toLowerCase()}:${mandateId}`;
+    if (localMandates.has(key)) return "used";
+    localMandates.add(key);
+    return "ok";
+  });
   const serverPublicKeys = { [options.signer.keyId]: publicKeyOf(options.signer.privateKey) };
   const listings = new Map<string, Listing>();
   const inbox = new Map<string, InboxMessage[]>();
@@ -313,6 +345,29 @@ export function createBusinessOps(options: {
     }
   }
 
+  function removeFromInbox(providerKeyId: string, messageId: string): void {
+    const list = inbox.get(providerKeyId);
+    if (list === undefined) return;
+    const i = list.findIndex((m) => m.messageId === messageId);
+    if (i >= 0) list.splice(i, 1);
+  }
+
+  /**
+   * The provider acted — every listing it owns is consumed (closed to new
+   * deliveries) and its pending deliveries are cleared from the inbox
+   * (N4B2B-CHANGES-2 §1: consumption happens only on a provider action).
+   */
+  function consumeProviderListings(providerKeyId: string): void {
+    for (const listing of listings.values()) {
+      if (listing.providerKeyId !== providerKeyId || listing.consumed) continue;
+      listing.consumed = true;
+      for (const message of listing.pending.values()) {
+        removeFromInbox(providerKeyId, message.messageId);
+      }
+      listing.pending.clear();
+    }
+  }
+
   /** A listing matches a filter only if its terms don't contradict it. */
   function listingMatches(l: Listing, args: Record<string, unknown>): boolean {
     const terms = l.terms ?? {};
@@ -348,8 +403,16 @@ export function createBusinessOps(options: {
           // Only the listing's owner may republish/reset it.
           return refuse("LISTING_UNAVAILABLE");
         }
-        if (existing === undefined && listings.size >= MAX_LISTINGS) {
-          return refuse("RATE_LIMITED");
+        if (existing === undefined) {
+          // Per-provider quota first, then the global safety cap — one
+          // provider can never lock the others out.
+          let mine = 0;
+          for (const l of listings.values()) {
+            if (l.providerKeyId === principal.keyId) mine += 1;
+          }
+          if (mine >= MAX_LISTINGS_PER_PROVIDER || listings.size >= MAX_LISTINGS) {
+            return refuse("RATE_LIMITED");
+          }
         }
         const t = now();
         listings.set(listingId, {
@@ -365,8 +428,10 @@ export function createBusinessOps(options: {
             : {}),
           publishedAtMs: existing?.publishedAtMs ?? t,
           expiresAtMs: t + LISTING_TTL_MS,
-          // Republishing a spent listing does NOT resurrect it.
-          invitationDelivered: existing?.invitationDelivered ?? false,
+          // Republishing never clears pendings and never resurrects a
+          // consumed listing.
+          consumed: existing?.consumed ?? false,
+          pending: existing?.pending ?? new Map(),
         });
         return ok({ listingId, publishedAt: iso(existing?.publishedAtMs ?? t), serverNonce });
       }
@@ -396,18 +461,28 @@ export function createBusinessOps(options: {
         if (sent.length >= MAX_DELIVERIES_PER_MINUTE) return refuse("RATE_LIMITED");
         const listing = listings.get(args.listingId as string);
         if (listing === undefined) return refuse("NOT_FOUND");
-        if (listing.invitationDelivered) return refuse("LISTING_UNAVAILABLE");
-        listing.invitationDelivered = true;
+        if (listing.consumed) return refuse("LISTING_UNAVAILABLE");
+        // One pending delivery per sender: a resend REPLACES the sender's old
+        // one (and its inbox entry) rather than stacking.
+        const replaced = listing.pending.get(principal.keyId);
+        if (replaced !== undefined) {
+          removeFromInbox(listing.providerKeyId, replaced.messageId);
+          listing.pending.delete(principal.keyId);
+        }
+        if (listing.pending.size >= MAX_PENDING_PER_LISTING) {
+          return refuse("LISTING_UNAVAILABLE");
+        }
         sent.push(t);
         deliveries.set(principal.keyId, sent);
         const receivedAt = iso(t);
         const message: InboxMessage = {
-          messageId: `msg-${canonicalDigest({ kind: "inbox", listingId: listing.listingId, receivedAt }).slice(2, 14)}`,
+          messageId: `msg-${canonicalDigest({ kind: "inbox", listingId: listing.listingId, receivedAt, seal: canonicalDigest(seal.data) }).slice(2, 14)}`,
           kind: "handshake_invitation",
           listingId: listing.listingId,
           sealedPayload: seal.data,
           receivedAt,
         };
+        listing.pending.set(principal.keyId, message);
         const list = inbox.get(listing.providerKeyId) ?? [];
         list.push(message);
         if (list.length > MAX_INBOX_MESSAGES) list.splice(0, list.length - MAX_INBOX_MESSAGES);
@@ -473,6 +548,14 @@ export function createBusinessOps(options: {
         }
         const mandateDigest = canonicalDigest({ domain: MANDATE_DOMAIN, ...mandate });
         if (payload.mandateDigest !== mandateDigest) return refuse("ENVELOPE_INVALID");
+        // Single-use per family principal (N4B2B-CHANGES-2 §3): the ledger
+        // claim persists BEFORE the run's mandate record commits. A reused
+        // id reports the same generic MANDATE_INVALID — no policy leak.
+        const claim = claimMandate(
+          principals.get(principal.keyId)!, mandate.mandateId, liveRun.runId,
+        );
+        if (claim === "used") return refuse("MANDATE_INVALID");
+        if (claim === "unavailable") return refuse("CONTRACT_UNAVAILABLE");
         liveRun.mandate = {
           digest: mandateDigest,
           mandateId: mandate.mandateId,
@@ -798,12 +881,22 @@ export function createBusinessOps(options: {
           flagged: claimed !== observed,
           submittedAt: iso(now()),
         };
-        if (observed === "mismatch") {
+        // A claimed mismatch is TERMINAL (N4B2B-CHANGES-2 §2): the run ends
+        // verification_failed whether or not the server's observation agrees
+        // (the disagreement is the `flagged` bit). No settlement can follow.
+        const failed = claimed === "mismatch" || observed === "mismatch";
+        if (failed) {
           options.endRun(liveRun, "verification_failed");
-        } else if (claimed === "match" && observed === "match") {
+        } else {
           liveRun.stage = "verified";
         }
-        return ok({ outcome: claimed, verificationDigest, flagged: claimed !== observed, serverNonce });
+        return ok({
+          outcome: claimed,
+          verificationDigest,
+          flagged: claimed !== observed,
+          ...(failed ? { terminalState: "verification_failed" } : {}),
+          serverNonce,
+        });
       }
 
       case "settlement_prepare": {
@@ -880,6 +973,8 @@ export function createBusinessOps(options: {
           transferId: transfer.receipt.transferId,
           status: "released",
           simulated: true,
+          // The rail is a simulation: no commercial transfer ever occurred.
+          commercialTransfer: false,
           serverNonce,
         });
       }
@@ -903,5 +998,5 @@ export function createBusinessOps(options: {
     }
   }
 
-  return { dispatch };
+  return { dispatch, consumeProviderListings };
 }

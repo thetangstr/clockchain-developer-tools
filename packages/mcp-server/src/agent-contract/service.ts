@@ -201,6 +201,7 @@ const DEFAULT_MAX_RECEIPTS_PER_RUN = 4096;
 const DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL = 512;
 const RUN_TTL_MS = 24 * 3600_000; // LLD §3: run-scoped state TTL is 24h
 const USED_SESSIONS_FILE = "used-sessions.json";
+const USED_MANDATES_FILE = "used-mandates.json";
 const LOCK_FILE = "used-sessions.lock";
 
 /**
@@ -229,6 +230,45 @@ function persistUsedSessions(stateDir: string, used: ReadonlyMap<string, string>
   const fd = openSync(tmp, "w");
   try {
     writeFileSync(fd, JSON.stringify({ sessions: Object.fromEntries(used) }));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, file);
+  const dirFd = openSync(stateDir, "r");
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
+}
+
+/**
+ * Used mandateIds per family principal — same durability contract as
+ * used-sessions (N4B2B-CHANGES-2 §3): absent file = fresh dir; a corrupt or
+ * unreadable record is a hard startup error, never silently "empty".
+ */
+function loadUsedMandates(stateDir: string): Map<string, string> {
+  const file = path.join(stateDir, USED_MANDATES_FILE);
+  if (!existsSync(file)) return new Map();
+  const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
+  if (!isPlainRecord(raw) || !isPlainRecord(raw.mandates)) {
+    throw new Error(`corrupt ${USED_MANDATES_FILE}`);
+  }
+  for (const v of Object.values(raw.mandates)) {
+    if (typeof v !== "string") throw new Error(`corrupt ${USED_MANDATES_FILE}`);
+  }
+  return new Map(Object.entries(raw.mandates) as [string, string][]);
+}
+
+/** Durable write — identical fsync/rename discipline to used-sessions. */
+function persistUsedMandates(stateDir: string, used: ReadonlyMap<string, string>): void {
+  mkdirSync(stateDir, { recursive: true });
+  const file = path.join(stateDir, USED_MANDATES_FILE);
+  const tmp = `${file}.${process.pid}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeFileSync(fd, JSON.stringify({ mandates: Object.fromEntries(used) }));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -376,16 +416,44 @@ export function createContractService(options: {
   const principalRuns = new Map<string, string>();
   let releaseLock: (() => void) | undefined;
   let usedSessions: Map<string, string> = new Map();
+  let usedMandates: Map<string, string> = new Map();
   if (options.stateDir !== undefined) {
     // N1/N2: lock the dir first (a second process is refused outright), then
     // load — a corrupt/unreadable record is a startup failure, not "empty".
     releaseLock = acquireStateLock(options.stateDir);
     try {
       usedSessions = loadUsedSessions(options.stateDir);
+      usedMandates = loadUsedMandates(options.stateDir);
     } catch (err) {
       releaseLock();
       throw err;
     }
+  }
+
+  /**
+   * Single-use mandate ledger (N4B2B-CHANGES-2 §3): `mandateId` is claimed
+   * ONCE per family principal (the mandate's signer — principalAddress, not
+   * the buyer keyId). The durable record is written before the claim is
+   * considered made; a write failure means the mandate never commits.
+   */
+  function claimMandate(
+    principalAddress: string,
+    mandateId: string,
+    runId: string,
+  ): "ok" | "used" | "unavailable" {
+    const key = `${principalAddress.toLowerCase()}:${mandateId}`;
+    if (usedMandates.has(key)) return "used";
+    const next = new Map(usedMandates);
+    next.set(key, runId);
+    if (options.stateDir !== undefined) {
+      try {
+        persistUsedMandates(options.stateDir, next);
+      } catch {
+        return "unavailable";
+      }
+    }
+    usedMandates = next;
+    return "ok";
   }
 
   function runEnded(run: ContractRun): boolean {
@@ -594,6 +662,9 @@ export function createContractService(options: {
     if (run.bound.buyer !== undefined && run.bound.provider !== undefined) run.stage = "bound";
     if (existing === undefined) runs.set(runId, run);
     principalRuns.set(principal.keyId, runId);
+    // The provider just acted on a handshake — every listing it owns is
+    // consumed and its pending deliveries cleared (N4B2B-CHANGES-2 §1).
+    if (principal.role === "provider") business.consumeProviderListings(principal.keyId);
     return { ok: true, runId, role: principal.role, boundAt, result: resultBody, receipt, run };
   }
 
@@ -637,6 +708,7 @@ export function createContractService(options: {
     sim,
     policyDigests: options.policyDigests,
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
+    claimMandate,
     endRun,
   });
 

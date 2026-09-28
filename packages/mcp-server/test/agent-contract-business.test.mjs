@@ -499,8 +499,9 @@ test("a claimed-mismatch verification flags and blocks settlement", async () => 
   });
   assert.equal(booked.simulated, true, JSON.stringify(booked));
 
-  // buyer claims mismatch while the sim observation says match → flagged,
-  // and settlement stays locked (the claim is not the truth source).
+  // buyer claims mismatch while the sim observation says match → flagged
+  // AND terminal (N4B2B-CHANGES-2 §2): a claimed mismatch ends the run
+  // verification_failed whether or not the observation agrees.
   const prepV = await callTool("tb5", "verification_prepare", {
     orderRef: booked.orderRef, result: "mismatch", findingsDigest: `0x${"bb".repeat(32)}`,
   });
@@ -509,9 +510,10 @@ test("a claimed-mismatch verification flags and blocks settlement", async () => 
   assert.equal(verified.flagged, true);
 
   const settle = await callTool("tb5", "settlement_prepare", {});
-  assert.equal(settle.error, "STATE_REFUSED");
+  assert.equal(settle.error, "ALREADY_TERMINAL");
   const stage = await callTool("tb5", "contract_status", {});
-  assert.notEqual(stage.stage, "settled");
+  assert.equal(stage.stage, "terminal");
+  assert.equal(stage.terminalState, "verification_failed");
 });
 
 test("withdraw ends the run and the receipt chain carries the terminal call", async () => {

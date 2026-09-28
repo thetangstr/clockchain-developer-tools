@@ -411,6 +411,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       outcome: z.enum(["match", "mismatch"]),
       verificationDigest: digestHex,
       flagged: z.boolean(),
+      // Present when the verification ended the run (any mismatch is terminal).
+      terminalState: z.literal("verification_failed").optional(),
       serverNonce,
     }).strict(),
     readOnly: false,
@@ -436,6 +438,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       transferId: z.string().min(4).max(64),
       status: z.enum(["authorized", "released", "failed"]),
       simulated: z.literal(true),
+      commercialTransfer: z.literal(false),
       serverNonce,
     }).strict(),
     readOnly: false,

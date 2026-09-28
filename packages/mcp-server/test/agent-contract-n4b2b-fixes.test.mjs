@@ -652,16 +652,18 @@ test("PROBE E replay: a junk seal can't burn a listing; only the owner resets; c
   const legit = await callTool("tb5", "rendezvous_send_invitation", { listingId: l.listingId, sealedInvitation: V2_SEAL });
   assert.equal(legit.delivered, true, JSON.stringify(legit));
 
-  // a second (valid) delivery is refused — the listing is spent
+  // a second (valid) delivery from a DIFFERENT sender also lands — the
+  // listing holds multiple pending deliveries until the provider acts
+  // (N4B2B-CHANGES-2 §1: no more first-delivery burn).
   const second = await callTool("tb6", "rendezvous_send_invitation", { listingId: l.listingId, sealedInvitation: V2_SEAL });
-  assert.equal(second.error, "LISTING_UNAVAILABLE");
+  assert.equal(second.delivered, true, JSON.stringify(second));
 
-  // republish does NOT resurrect a delivered listing
+  // owner republish still doesn't clear or consume the pending deliveries
   await callTool("tp6", "rendezvous_publish_listing", {
     title: "Victim listing", summary: "x", sealedBoxPublicKeyHex: `0x${"11".repeat(32)}`,
   });
-  const afterRepublish = await callTool("tb6", "rendezvous_send_invitation", { listingId: l.listingId, sealedInvitation: V2_SEAL });
-  assert.equal(afterRepublish.error, "LISTING_UNAVAILABLE");
+  const afterRepublish = await callTool("tb5", "rendezvous_send_invitation", { listingId: l.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(afterRepublish.delivered, true, JSON.stringify(afterRepublish));
 
   // malformed-but-schema-shaped seals are refused without burning a fresh listing
   const l2 = await callTool("tp6", "rendezvous_publish_listing", {
@@ -693,9 +695,11 @@ test("contract_withdraw is refused after booking; a submitted verification is wr
   const vp = await callTool("tb7", "verification_prepare", { orderRef: b.orderRef, result: "mismatch", findingsDigest: `0x${"2".repeat(64)}` });
   const v = await signedSubmit({ token: "tb7", role: "buyer", prepared: vp, submitTool: "verification_submit" });
   assert.equal(v.flagged, true, JSON.stringify(v)); // observed=match, claimed mismatch
+  // N4B2B-CHANGES-2 §2: a buyer-declared mismatch is terminal either way.
+  assert.equal(v.terminalState, "verification_failed", JSON.stringify(v));
 
-  // a second verification — trying to overwrite the flagged record with "match"
+  // a second verification can never overwrite the record — the run ended.
   const vp2 = await callTool("tb7", "verification_prepare", { orderRef: b.orderRef, result: "match", findingsDigest: `0x${"3".repeat(64)}` });
   const outcome2 = vp2.envelope === undefined ? vp2 : await signedSubmit({ token: "tb7", role: "buyer", prepared: vp2, submitTool: "verification_submit" });
-  assert.equal(outcome2.error, "STATE_REFUSED", JSON.stringify(outcome2));
+  assert.equal(outcome2.error, "ALREADY_TERMINAL", JSON.stringify(outcome2));
 });
