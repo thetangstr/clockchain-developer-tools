@@ -163,6 +163,39 @@ This is what an agent sees on `initialize`, at most 25 lines:
 - **Keep your session key for the whole handshake** (in memory or sandbox storage). Never
   send it anywhere.
 
+## Coexistence with other surfaces (checked with the travel MVP, 2026-09-28)
+
+The travel MVP doesn't use `/connect/mcp` and doesn't plan to. It pins `/next/handshake/mcp`
+(v2), `/handshake/mcp` (M4 direct-agent) and `/mcp` (tsa_* anchoring). Muse and Gemini
+reach travel only through travel's own MCP front door. It shares this package and the
+`mcp` container, so these are binding:
+
+- **Frozen surfaces:** don't change `/next/handshake/mcp` (Agent Handshake v2) or
+  `/acm4/*` (the frozen 2.1.6 build). The canonical-lowercase change applies to
+  standalone records only. v2 certificate and contract-payload bytes must stay
+  byte-identical, because travel's contract_bind digest check depends on them.
+- **Shared code:** the Agent Contract business MCP (`/contract/mcp`,
+  `packages/mcp-server/src/agent-contract/`, branch `feat/contract-mcp-n4a`) adds routing
+  in `http.ts` next to ours. Coordinate rebases on `http.ts`, keep standalone routing
+  changes inside `standalone-handshake/public-server.ts` where possible, and land the
+  `http.ts` changes as small, separate commits.
+- **State:** the durable store lives under its own subpath, `/app/state/standalone-handshake/`
+  on the `mcp_state` volume, with its own TTL sweep. It never touches contract or v2 state
+  files.
+- **Deploys:** every production `mcp` deploy restarts the container, and in-flight v2 runs
+  fail closed; travel's self-serve cart can start one at any time. Before every production
+  deploy, post a notice in the travel_mvp orchestrator session, and don't deploy while
+  travel's N6 or N8 live pairings are announced as running.
+
+**Follow-ups travel asked for, as separate specs (not in this change):**
+1. **v2 durability across restarts:** their highest-value ask. A deploy mid-handshake
+   currently kills their runs.
+2. **v2 `next` returning exact bytes plus a structured record to verify:** this matches
+   their prepare → sign locally → submit pattern.
+3. **v2 signing of an arbitrary bind statement with the handshake session key via the
+   helper:** proof of possession for `contract_bind`, which blocks their P level.
+Travel doesn't need mailbox invitations on v2, because their harness launches both roles.
+
 ## Out of scope
 
 - Push notifications (webhooks). The timer tools' Standard-Webhooks signer
