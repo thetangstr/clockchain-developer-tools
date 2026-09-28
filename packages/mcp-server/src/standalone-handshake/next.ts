@@ -1,4 +1,5 @@
 import { buildStandaloneConsentRecord, standaloneSigningPayload } from "./protocol.js";
+import { STALL_AFTER_MS, nextDeadline, pendingTurn } from "./turns.js";
 
 // handshake_next: the server tells a role what to do next so an agent can finish a
 // handshake by looping on one call. It never acts for a party: it only reads state
@@ -10,7 +11,7 @@ import { buildStandaloneConsentRecord, standaloneSigningPayload } from "./protoc
 // sentence, so both parties hear the same facts from the server and neither agent ever
 // needs its human to relay anything to the other.
 
-export const NEXT_ACTIONS = ["wait", "sign", "open", "respond", "fix_readiness", "closed", "expired", "revoked", "ready_failed", "abandoned"] as const;
+export const NEXT_ACTIONS = ["wait", "sign", "open", "respond", "fix_readiness", "closed", "expired", "revoked", "ready_failed", "abandoned", "stalled"] as const;
 export type StandaloneNextAction = (typeof NEXT_ACTIONS)[number];
 
 // Long-poll bounds, the same as Agent Handshake v2's agent_handshake_next
@@ -41,6 +42,16 @@ const TERMINAL_STAGES: Readonly<Record<string, StandaloneNextAction>> = {
   revoked: "revoked",
   expired: "expired",
   abandoned: "abandoned",
+  stalled: "stalled",
+};
+
+const ACTION_WORDS: Readonly<Record<string, string>> = {
+  ACCEPT: "accept the invitation",
+  FIX_READINESS: "correct its readiness",
+  CONSENT: "sign consent",
+  OPEN: "open the channel",
+  SEND: "send the first message",
+  REPLY: "reply",
 };
 
 type JsonRecord = Record<string, any>;
@@ -70,8 +81,12 @@ export function evaluateStandaloneNext(input: {
   cursor: number;
   now: () => number;
   maxAttempts: number;
+  /** F1: housekeeping time and the silence after which a pending counterparty is reported. */
+  nowMs?: number;
+  stallAfterMs?: number;
 }): JsonRecord {
   const { store, session, role, cursor, now, maxAttempts } = input;
+  const stallAfterMs = input.stallAfterMs ?? STALL_AFTER_MS;
   const stage: string = session.stage;
   const base = { sessionId: session.sessionId, role, stage };
   const attempts: number = session.attempts?.length ?? 0;
@@ -208,7 +223,38 @@ export function evaluateStandaloneNext(input: {
   return wait("WAITING", "Waiting for the handshake to progress.", "The handshake is in progress.");
 
   function wait(reason: string, status: string, tellYourUser: string): JsonRecord {
-    return { action: "wait", ...base, reason, guidance: `${status} ${CALL_AGAIN}`, nextStep: CALL_AGAIN, tellYourUser, retryAfterMs: WAIT_RETRY_AFTER_MS };
+    const result: JsonRecord = { action: "wait", ...base, reason, guidance: `${status} ${CALL_AGAIN}`, nextStep: CALL_AGAIN, tellYourUser, retryAfterMs: WAIT_RETRY_AFTER_MS };
+    const stalled = counterpartyStalled();
+    if (stalled !== undefined) {
+      result.counterpartyStalled = stalled;
+      result.tellYourUser = `${tellYourUser} The other agent has been silent for ${Math.floor(stalled.sinceMs / 60_000)} minute(s) on its turn to ${ACTION_WORDS[stalled.pendingAction] ?? "act"}.`;
+    }
+    return result;
+  }
+
+  // F1: the waiting party learns when the party it is waiting on has gone quiet on its turn.
+  function counterpartyStalled(): JsonRecord | undefined {
+    const turn = pendingTurn(session);
+    const counterparty = role === "initiator" ? "responder" : "initiator";
+    if (turn === undefined || turn.pendingOn !== counterparty || input.nowMs === undefined) return undefined;
+    const seenAt: number | undefined = session.lastSeenAtMs?.[counterparty];
+    const silentSince = Math.max(seenAt ?? turn.sinceMs, turn.sinceMs);
+    const sinceMs = input.nowMs - silentSince;
+    if (sinceMs < stallAfterMs) return undefined;
+    const deadline = nextDeadline(session);
+    const endsAt = deadline?.outcome === "stalled" ? new Date(deadline.atMs).toISOString() : undefined;
+    const options: JsonRecord[] = [
+      { option: "wait", call: "handshake_next", detail: endsAt ? `Keep waiting; if nothing happens the session ends as stalled at ${endsAt}.` : "Keep waiting." },
+      { option: "nudge", call: "handshake_nudge", detail: "Ask the server to nudge the counterparty (pushed if it registered a webhook; otherwise shown on its next call). Once per turn." },
+    ];
+    if (stage === "open") options.push({ option: "close", call: "channel_close", detail: "End the channel now." }, { option: "revoke", call: "channel_revoke", detail: "Withdraw consent and end the channel now." });
+    return {
+      sinceMs,
+      lastSeenAt: seenAt === undefined ? null : new Date(seenAt).toISOString(),
+      pendingAction: turn.action,
+      turnDeadlineAt: endsAt ?? null,
+      options,
+    };
   }
 
   function terminal(action: StandaloneNextAction): JsonRecord {
@@ -218,7 +264,7 @@ export function evaluateStandaloneNext(input: {
       blockHeight: anchor.blockHeight,
       ledgerId: anchor.ledgerId,
     }));
-    const unread = action === "ready_failed" || action === "abandoned" ? [] : store.readMessages(session.sessionId, role, cursor);
+    const unread = action === "ready_failed" || action === "abandoned" || (action === "stalled" && session.stalled?.fromStage !== "open") ? [] : store.readMessages(session.sessionId, role, cursor);
     const reason = terminalReason(action, session);
     const said = terminalStatement(action, session, role, reason, attempts);
     const result: JsonRecord = {
@@ -234,7 +280,7 @@ export function evaluateStandaloneNext(input: {
       result.terminal.checks = session.checklist?.checks ?? [];
       result.terminal.failures = session.checklist?.failures ?? [];
       result.terminal.attempts = attempts;
-    } else if (action !== "abandoned") {
+    } else if (action !== "abandoned" && !(action === "stalled" && session.stalled?.fromStage !== "open")) {
       result.cursor = nextCursor(unread, cursor);
       if (unread.length > 0) {
         result.messages = unread.map(publicMessage);
@@ -259,6 +305,7 @@ function terminalReason(action: StandaloneNextAction, session: JsonRecord): stri
     return codes.length > 0 ? codes.join(",") : "CHECKLIST_FAILED";
   }
   if (action === "expired") return "DURATION_ELAPSED";
+  if (action === "stalled") return String(session.stalled?.reason ?? "STALLED");
   if (action === "abandoned") {
     if (session.abandonedFrom === "invited") return "INVITATION_NOT_ACCEPTED";
     if (session.abandonedFrom === "readiness_retry") return "READINESS_NOT_CORRECTED";
@@ -283,6 +330,17 @@ function terminalStatement(action: StandaloneNextAction, session: JsonRecord, ro
       : reason === "READINESS_NOT_CORRECTED" ? "the Responder's readiness was not corrected before the invitation expired"
       : "the channel was not opened within the deadline after acceptance";
     return { guidance: `The session was abandoned: ${why}.`, nextStep: NEW_INVITATION_STEP, tellYourUser: `The handshake ended without opening a channel: ${why}.` };
+  }
+  if (action === "stalled") {
+    const stalled = session.stalled ?? {};
+    const what = ACTION_WORDS[String(reason).replace(/^STALLED_/, "").replace(/_BY_.*$/, "")] ?? "act";
+    const who = stalled.role === "both" ? "neither agent" : stalled.role === role ? "I" : "the other agent";
+    const verbPhrase = stalled.role === "both" ? `managed to ${what}` : `did not ${what}`;
+    return {
+      guidance: `A turn deadline passed: ${reason}.${stalled.fromStage === "open" ? " The closure is anchored (see terminal.anchors)." : ""}`,
+      nextStep: "None for this session. Either party may start a new handshake with handshake_invite.",
+      tellYourUser: `The handshake ended because ${who} ${verbPhrase} in time.`,
+    };
   }
   if (action === "expired") {
     return {

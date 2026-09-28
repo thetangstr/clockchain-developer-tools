@@ -276,7 +276,8 @@ test("next revoked and expired are terminal with their own reasons", async () =>
   assert.equal(r.terminal.reason, "REVOKED_BY_RESPONDER");
   assert.deepEqual(r.terminal.anchors.map((anchor) => anchor.kind), ["terms-readiness", "consent", "open", "revocation"]);
 
-  const expiredHarness = harness();
+  // A reply window as long as the channel, so expiry (not an F3 turn stall) ends it.
+  const expiredHarness = harness({ terms: { channelLimits: { ...validTerms().channelLimits, replyDeadlineSeconds: "3600" } } });
   const expired = await openedSession(expiredHarness);
   expiredHarness.setNow(FAKE_BLOCK_MS + 3_600_000);
   const e = await expiredHarness.next(expired.a);

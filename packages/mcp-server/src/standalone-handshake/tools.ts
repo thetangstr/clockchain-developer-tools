@@ -15,6 +15,7 @@ export const STANDALONE_TOOL_NAMES = Object.freeze([
   "handshake_accept_invitation",
   "handshake_retry_readiness",
   "handshake_next",
+  "handshake_nudge",
   "handshake_timeline",
   "handshake_status",
   "consent_sign",
@@ -53,6 +54,9 @@ export const channelLimits = z.object({
   durationSeconds: decimalInRange(60, 86400),
   messageKinds: z.array(z.enum(["question", "proposal", "evidence", "note"])).min(1).max(4),
   maxMessageBytes: decimalInRange(1, 16384),
+  // Optional per-session turn windows (F3); the server also caps them at durationSeconds.
+  turnDeadlineSeconds: decimalInRange(60, 86400).optional(),
+  replyDeadlineSeconds: decimalInRange(60, 86400).optional(),
 }).strict();
 
 const readiness = z.object({
@@ -61,6 +65,8 @@ const readiness = z.object({
   authorityStatement: z.object({ accountableParty: z.string().min(1).max(128), statement: z.string().min(1).max(512) }).strict(),
   authoritySignatureHex: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
   capabilityManifest: z.object({ dataHandlingClass: z.enum(["public", "confidential", "restricted"]), purpose: z.string().min(1).max(256) }).strict(),
+  // Optional F4 push channel: an https webhook told "your turn, call handshake_next". Shown to nobody else.
+  notify: z.object({ webhookUrl: z.string().min(1).max(2048) }).strict().optional(),
 }).strict();
 
 const access = z.string().min(20).max(200);
@@ -105,9 +111,16 @@ export const STANDALONE_TOOL_DEFINITIONS = Object.freeze([
   {
     name: "handshake_next",
     title: "Get your next action",
-    description: "Long-polls (waitMs, default 12000, max 15000) until there is something for your role to do, then returns action: wait, fix_readiness, sign, open, respond, or a terminal outcome (closed, expired, revoked, ready_failed, abandoned). Blocking and terminal answers carry reason, nextStep and tellYourUser. Pass back the cursor it returns. Never acts for you.",
-    schema: { access, waitMs: z.number().int().min(0).optional(), cursor: z.number().int().min(0).optional(), playbookVersion },
+    description: "Long-polls (waitMs, default 12000, max 15000) and returns your next action: wait, fix_readiness, sign, open, respond, or a terminal outcome. Blocking and terminal answers carry reason, nextStep and tellYourUser. Pass back the returned cursor. Lost your place? Call with resume: true. Never acts for you.",
+    schema: { access, waitMs: z.number().int().min(0).optional(), cursor: z.number().int().min(0).optional(), resume: z.boolean().optional(), playbookVersion },
     readOnly: true,
+  },
+  {
+    name: "handshake_nudge",
+    title: "Nudge a silent counterparty",
+    description: "When handshake_next reports counterpartyStalled: ask the server to nudge the counterparty. Pushed to its webhook if it registered one, otherwise shown on its next handshake_next. Once per turn.",
+    schema: { access },
+    readOnly: false,
   },
   { name: "handshake_timeline", title: "Read the session timeline", description: "Your own session's append-only event timeline (invited, previewed, attempts, consent, open, message digests, close...). Never contains message bodies.", schema: { access }, readOnly: true },
   { name: "handshake_status", title: "Read handshake status", description: "Read progress, checklist results, channel state, remaining time, and scope for this role.", schema: { access }, readOnly: true },

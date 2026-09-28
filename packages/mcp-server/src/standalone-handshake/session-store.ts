@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
-const STAGES = ["invited", "readiness_pending", "readiness_retry", "ready", "ready_failed", "consent_pending", "consented", "open", "closed", "revoked", "expired", "abandoned"] as const;
+import { nextDeadline, pendingTurn } from "./turns.js";
+
+const STAGES = ["invited", "readiness_pending", "readiness_retry", "ready", "ready_failed", "consent_pending", "consented", "open", "closed", "revoked", "expired", "abandoned", "stalled"] as const;
 const LEGAL: Record<string, readonly string[]> = {
   invited: ["readiness_pending"],
   readiness_pending: ["ready", "ready_failed", "readiness_retry"],
@@ -11,11 +13,11 @@ const LEGAL: Record<string, readonly string[]> = {
   open: ["closed", "revoked", "expired"],
 };
 const ROLES = ["initiator", "responder"];
-const TERMINAL_STAGES = new Set(["ready_failed", "closed", "revoked", "expired", "abandoned"]);
+const TERMINAL_STAGES = new Set(["ready_failed", "closed", "revoked", "expired", "abandoned", "stalled"]);
 // Stages that end as "abandoned" when the session misses its open deadline. readiness_pending
 // is excluded: it only lasts while a checklist evaluation is in flight.
 const ABANDONABLE_STAGES = new Set(["invited", "readiness_retry", "ready", "consent_pending", "consented"]);
-const TERMINAL_EVENTS = new Set(["ready_failed", "close", "revoke", "expire", "abandon"]);
+const TERMINAL_EVENTS = new Set(["ready_failed", "close", "revoke", "expire", "abandon", "turn_timeout"]);
 
 // Terminal sessions are retained for post-hoc inspection up to this cap; the oldest
 // are evicted (Map insertion order) so a long-lived process cannot grow unbounded.
@@ -157,17 +159,45 @@ export function createStandaloneSessionStore(options: {
     pendingClosures.delete(sessionId);
   }
 
-  // Applies the session's clocks: an open channel expires at expiresAtMs, and a session
-  // that never opened is abandoned at its open deadline.
+  // Applies the session's clocks through the single nextDeadline() rule (turns.ts): an open
+  // channel expires, a session that never opened is abandoned, or a turn deadline passes
+  // and the session ends as stalled. Only one of them can ever fire.
   function expireIfDue(session: any): void {
-    if (session.stage === "open" && now() >= session.expiresAtMs) {
+    const deadline = nextDeadline(session);
+    if (deadline === undefined) return;
+    // Channel time is protocol time; pre-open deadlines are housekeeping time.
+    const current = session.stage === "open" ? now() : housekeepingNow();
+    if (current < deadline.atMs) return;
+    const fromStage = session.stage;
+    if (deadline.outcome === "expired") {
       session.stage = "expired";
       pushEvent(session, { type: "expire" });
-    } else if (ABANDONABLE_STAGES.has(session.stage) && housekeepingNow() >= session.openDeadlineMs) {
-      session.abandonedFrom = session.stage;
+    } else if (deadline.outcome === "abandoned") {
+      if (!ABANDONABLE_STAGES.has(fromStage)) return;
+      session.abandonedFrom = fromStage;
       session.stage = "abandoned";
-      pushEvent(session, { type: "abandon", fromStage: session.abandonedFrom });
+      pushEvent(session, { type: "abandon", fromStage });
+    } else {
+      session.stalled = Object.freeze({ reason: deadline.reason, role: deadline.stalledRole, atMs: deadline.atMs, fromStage });
+      session.stage = "stalled";
+      pushEvent(session, { type: "turn_timeout", reason: deadline.reason, stalledRole: deadline.stalledRole, fromStage });
     }
+  }
+
+  // A new turn: whose move it is (or what the move is) changed. Turns on an open channel
+  // run on the channel's clock (protocol time), like its expiry; earlier turns on
+  // housekeeping time, like abandonment.
+  function startTurn(session: any): void {
+    let current = housekeepingNow();
+    if (session.stage === "open") {
+      try {
+        current = now();
+      } catch {
+        // Protocol clock unavailable: fall back to housekeeping time.
+      }
+    }
+    session.turnStartedAtMs = current;
+    session.turnSeq += 1;
   }
 
   function other(role: string): string {
@@ -201,6 +231,17 @@ export function createStandaloneSessionStore(options: {
         invitationExpiresAtMs: createdAtMs + invitationTtlMs,
         openDeadlineMs: createdAtMs + invitationTtlMs,
         touchedAtMs: createdAtMs,
+        // Active facilitation (F1-F4).
+        turnStartedAtMs: createdAtMs,
+        turnSeq: 0,
+        lastSeenAtMs: { initiator: createdAtMs } as Record<string, number>,
+        seenEventCount: { initiator: 1 } as Record<string, number>,
+        stallFlag: undefined as undefined | { role: string; turn: number },
+        stalled: undefined,
+        notify: {} as Record<string, { webhookUrl: string; secret: string }>,
+        noticeKeys: new Set<string>(),
+        lastNoticeAtMs: {} as Record<string, number>,
+        pendingNudge: {} as Record<string, string>,
       };
       sessions.set(input.sessionId, session);
       pushEvent(session, { type: "invited", termsDigest: input.termsDigest });
@@ -274,6 +315,7 @@ export function createStandaloneSessionStore(options: {
       const session = requireSession(sessionId);
       if (!(STAGES as readonly string[]).includes(stage) || !LEGAL[session.stage]?.includes(stage)) throw new StandaloneIllegalTransitionError();
       session.stage = stage;
+      startTurn(session);
       // Accepted: consent and channel_open now have their own window.
       if (stage === "ready") session.openDeadlineMs = housekeepingNow() + preOpenTtlMs;
     },
@@ -309,6 +351,11 @@ export function createStandaloneSessionStore(options: {
 
     appendEvent(sessionId: string, event: Record<string, unknown>): void {
       pushEvent(requireSession(sessionId), event);
+    },
+
+    // Timeline events from index `from` on (F2 catch-up).
+    eventsSince(sessionId: string, from: number): readonly any[] {
+      return requireSession(sessionId).timeline.slice(from);
     },
 
     timeline(sessionId: string): { events: readonly any[]; dropped: number } | undefined {
@@ -347,6 +394,7 @@ export function createStandaloneSessionStore(options: {
     setConsent(sessionId: string, role: string, consentDigest: string): void {
       const session = requireSession(sessionId);
       session.consents[role] = consentDigest;
+      startTurn(session);
     },
 
     bothConsented(sessionId: string): boolean {
@@ -358,6 +406,8 @@ export function createStandaloneSessionStore(options: {
       const session = requireSession(sessionId);
       session.openedAtMs = times.openedAtMs;
       session.expiresAtMs = times.expiresAtMs;
+      // The first open-channel turn starts when the channel's clock does.
+      session.turnStartedAtMs = times.openedAtMs;
     },
 
     admitMessage(sessionId: string, role: string, kind: string, body: string): any {
@@ -385,6 +435,7 @@ export function createStandaloneSessionStore(options: {
         body,
       };
       session.messages.push(message);
+      startTurn(session);
       pushEvent(session, { type: "message", seq: message.seq, kind, fromRole: role, bodyDigest: message.bodyDigest });
       return message;
     },
@@ -399,6 +450,76 @@ export function createStandaloneSessionStore(options: {
       return session.messages
         .filter((message: any) => message.toRole === role && message.seq > afterSeq)
         .map((message: any) => Object.freeze({ ...message }));
+    },
+
+    // F1: any authenticated call by `role`. Returns when it was last seen before this call and
+    // how long the timeline was then (F2 counts what happened after that point).
+    // A role reported as stalled that comes back gets a "resumed" event.
+    markSeen(sessionId: string, role: string): { atMs: number | undefined; eventCount: number } {
+      const session = requireSession(sessionId);
+      const previous = session.lastSeenAtMs[role];
+      const eventCount = session.seenEventCount[role] ?? 0;
+      session.lastSeenAtMs[role] = housekeepingNow();
+      session.seenEventCount[role] = session.timeline.length;
+      if (session.stallFlag?.role === role) {
+        pushEvent(session, { type: "resumed", role, silentMs: session.lastSeenAtMs[role] - (previous ?? session.lastSeenAtMs[role]) });
+        session.stallFlag = undefined;
+      }
+      return { atMs: previous, eventCount };
+    },
+
+    // Records (once per turn) that `role` was reported stalled to its counterparty.
+    flagStall(sessionId: string, role: string, turn: number, pendingAction: string): void {
+      const session = requireSession(sessionId);
+      if (session.stallFlag?.role === role && session.stallFlag.turn === turn) return;
+      session.stallFlag = { role, turn };
+      pushEvent(session, { type: "stalled", role, pendingAction });
+    },
+
+    pendingTurn(sessionId: string) {
+      return pendingTurn(requireSession(sessionId));
+    },
+
+    // F4: a role's own webhook. Never part of readiness, status, preview or the timeline.
+    setNotify(sessionId: string, role: string, notify: { webhookUrl: string; secret: string }): void {
+      requireSession(sessionId).notify[role] = Object.freeze({ ...notify });
+    },
+
+    getNotify(sessionId: string, role: string): { webhookUrl: string; secret: string } | undefined {
+      return requireSession(sessionId).notify[role];
+    },
+
+    // Claims the right to send one notice of `kind` to `role` for the current turn. At most
+    // once per (turn, kind), and never twice to one role within minIntervalMs.
+    claimNotice(sessionId: string, role: string, kind: string, minIntervalMs: number): boolean {
+      const session = requireSession(sessionId);
+      const key = `${role}:${kind}:${session.turnSeq}`;
+      const current = housekeepingNow();
+      if (session.noticeKeys.has(key)) return false;
+      if (session.lastNoticeAtMs[role] !== undefined && current - session.lastNoticeAtMs[role] < minIntervalMs) return false;
+      session.noticeKeys.add(key);
+      session.lastNoticeAtMs[role] = current;
+      return true;
+    },
+
+    // handshake_nudge: at most once per turn per nudging role.
+    claimNudge(sessionId: string, byRole: string): boolean {
+      const session = requireSession(sessionId);
+      const key = `nudge:${byRole}:${session.turnSeq}`;
+      if (session.noticeKeys.has(key)) return false;
+      session.noticeKeys.add(key);
+      return true;
+    },
+
+    setPendingNudge(sessionId: string, toRole: string, fromRole: string): void {
+      requireSession(sessionId).pendingNudge[toRole] = fromRole;
+    },
+
+    takePendingNudge(sessionId: string, role: string): string | undefined {
+      const session = requireSession(sessionId);
+      const from = session.pendingNudge[role];
+      delete session.pendingNudge[role];
+      return from;
     },
 
     // An actionable prompt (e.g. the Initiator's "send first", or a fix_readiness for one

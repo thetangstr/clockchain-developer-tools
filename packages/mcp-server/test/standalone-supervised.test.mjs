@@ -269,14 +269,14 @@ test("S4: the timeline records the whole session in order, with anchors and dige
   assert.equal(getStandaloneTimeline(h.instance, "00000000-0000-4000-8000-000000000000"), undefined);
 });
 
-test("S4: the timeline is bounded, always keeps the terminal event, and records expiry", async () => {
+test("S4: the timeline is bounded and always keeps the terminal event", async () => {
   const h = harness({ nowMs: T0 });
   const { a, b } = await openedSession(h);
   for (let i = 0; i < MAX_TIMELINE_EVENTS; i += 1) await h.instance.invoke("channel_send", { access: i % 2 ? a : b, kind: "question", body: `m${i}` });
-  h.setNow(Date.parse("2026-09-14T00:00:00.000Z") + 3_600_000);
+  h.setNow(T0 + 11 * 60_000); // past the default 10-minute reply window
   const timeline = await h.instance.invoke("handshake_timeline", { access: a });
-  assert.equal(timeline.stage, "expired");
+  assert.equal(timeline.stage, "stalled");
   assert.equal(timeline.events.length, MAX_TIMELINE_EVENTS + 1);
   assert.ok(timeline.droppedEvents > 0);
-  assert.equal(timeline.events.at(-1).type, "expire");
+  assert.equal(timeline.events.at(-1).type, "turn_timeout");
 });

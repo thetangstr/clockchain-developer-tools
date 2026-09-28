@@ -43,8 +43,8 @@ export function harness(options = {}) {
     next,
     readiness,
     setNow(value) { nowMs = value; },
-    async invite() {
-      return instance.invoke("handshake_invite", { ...validTerms(), readiness: await readiness("initiator") });
+    async invite(termsOverrides = options.terms ?? {}) {
+      return instance.invoke("handshake_invite", { ...validTerms(termsOverrides), readiness: await readiness("initiator") });
     },
     async accept(invitation, overrides) {
       return instance.invoke("handshake_accept_invitation", { invitation, readiness: await readiness("responder", overrides) });

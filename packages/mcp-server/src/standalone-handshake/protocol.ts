@@ -8,7 +8,8 @@ export const DATA_HANDLING_CLASSES = ["public", "confidential", "restricted"] as
 // Bumped whenever the rules an agent must follow change (tools, playbook, flows). Every tool
 // response carries it, so an agent running from an old script learns to re-read the rules.
 // 1: handshake_next/readiness_prepare. 2: supervised sessions. 3: self-describing invitations.
-export const STANDALONE_PLAYBOOK_VERSION = 3;
+// 4: active facilitation (stall reports, nudges, resume, turn deadlines, webhooks).
+export const STANDALONE_PLAYBOOK_VERSION = 4;
 export const STANDALONE_DEFAULT_ENDPOINT = "https://mcp.clockchain.network/connect/mcp";
 // v2 invitations are readable at a glance: "chs2." + base64url(JSON).
 export const INVITATION_V2_PREFIX = "chs2.";
@@ -83,11 +84,16 @@ function identityPolicy(value: unknown): Readonly<JsonRecord> {
   return Object.freeze({ erc8004: item.erc8004, chainId: item.chainId, registryAddress });
 }
 
+const DEADLINE_OVERRIDES = ["turnDeadlineSeconds", "replyDeadlineSeconds"] as const;
+
 export function normalizeStandaloneTerms(value: unknown): Readonly<JsonRecord> {
   const item = exact(value, ["reference", "purpose", "channelLimits", "identityPolicy"]);
   if (!printable(item.reference, 128) || !printable(item.purpose, 256)) invalid();
-  const limits = exact(item.channelLimits, ["durationSeconds", "messageKinds", "maxMessageBytes"]);
+  // Optional F3 overrides: per-turn windows, from 60 s up to the channel duration.
+  const optional = DEADLINE_OVERRIDES.filter((key) => item.channelLimits !== null && typeof item.channelLimits === "object" && Object.hasOwn(item.channelLimits, key));
+  const limits = exact(item.channelLimits, ["durationSeconds", "messageKinds", "maxMessageBytes", ...optional]);
   if (!decimalWithin(limits.durationSeconds, 60n, 86400n)) invalid();
+  for (const key of optional) if (!decimalWithin(limits[key], 60n, BigInt(limits.durationSeconds))) invalid();
   if (!decimalWithin(limits.maxMessageBytes, 1n, 16384n)) invalid();
   if (!Array.isArray(limits.messageKinds) || limits.messageKinds.length === 0) invalid();
   const kinds = [...limits.messageKinds];
@@ -95,7 +101,12 @@ export function normalizeStandaloneTerms(value: unknown): Readonly<JsonRecord> {
   return Object.freeze({
     reference: item.reference,
     purpose: item.purpose,
-    channelLimits: Object.freeze({ durationSeconds: limits.durationSeconds, messageKinds: Object.freeze(kinds), maxMessageBytes: limits.maxMessageBytes }),
+    channelLimits: Object.freeze({
+      durationSeconds: limits.durationSeconds,
+      messageKinds: Object.freeze(kinds),
+      maxMessageBytes: limits.maxMessageBytes,
+      ...Object.fromEntries(optional.map((key) => [key, limits[key]])),
+    }),
     identityPolicy: identityPolicy(item.identityPolicy),
   });
 }
@@ -184,7 +195,8 @@ export function buildStandaloneConsentRecord(input: { sessionId: string; role: s
 export function normalizeStandaloneClosure(value: unknown): Readonly<JsonRecord> {
   const item = exact(value, ["schema", "protocol", "sessionId", "outcome", "byRole", "closedAtMs", "externalBusinessActionPerformed"]);
   if (item.schema !== "clockchain.standalone-handshake-closure/v1" || item.protocol !== STANDALONE_HANDSHAKE_PROTOCOL) invalid();
-  if (!UUID.test(item.sessionId) || !["closed", "revoked"].includes(item.outcome)) invalid();
+  // "stalled": a turn deadline passed on an open channel (F3); byRole is the party that did not act.
+  if (!UUID.test(item.sessionId) || !["closed", "revoked", "stalled"].includes(item.outcome)) invalid();
   if (!ROLES.includes(item.byRole)) invalid();
   if (!decimalWithin(item.closedAtMs, 0n, 99999999999999n)) invalid();
   if (item.externalBusinessActionPerformed !== false) invalid();

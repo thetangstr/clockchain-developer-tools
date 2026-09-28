@@ -14,7 +14,7 @@ import { StandaloneAdmissionError } from "../dist/standalone-handshake/session-s
 
 const ACCEPT = "application/json, text/event-stream";
 
-test("the tool surface is exactly the fifteen designed tools", () => {
+test("the tool surface is exactly the sixteen designed tools", () => {
   assert.deepEqual([...STANDALONE_TOOL_NAMES], [
     "readiness_prepare",
     "handshake_preview_invitation",
@@ -22,6 +22,7 @@ test("the tool surface is exactly the fifteen designed tools", () => {
     "handshake_accept_invitation",
     "handshake_retry_readiness",
     "handshake_next",
+    "handshake_nudge",
     "handshake_timeline",
     "handshake_status",
     "consent_sign",
@@ -51,7 +52,9 @@ test("instructions are a playbook of at most 25 lines built on readiness_prepare
   assert.match(text, /handshake_preview_invitation/);
   assert.match(text, /handshake_retry_readiness/);
   assert.match(text, /tellYourUser/);
-  for (const action of ["wait", "fix_readiness", "sign", "open", "respond", "closed", "expired", "revoked", "ready_failed", "abandoned"]) assert.match(text, new RegExp(`\\b${action}\\b`));
+  assert.match(text, /resume: true/);
+  assert.match(text, /handshake_nudge/);
+  for (const action of ["wait", "fix_readiness", "sign", "open", "respond", "closed", "expired", "revoked", "ready_failed", "abandoned", "stalled"]) assert.match(text, new RegExp(`\\b${action}\\b`));
   // The old text claimed handshake_status returns the consent bytes; it never did.
   assert.doesNotMatch(text, /bytes returned in handshake_status/);
 });
@@ -194,7 +197,7 @@ test("the HTTP handler serves /connect/mcp and rate-limits invites per IP", asyn
     assert.equal(second.status, 200);
     assert.equal(second.body.result.isError, true);
     const secondText = JSON.parse(second.body.result.content[0].text);
-    assert.deepEqual(secondText, { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 3 });
+    assert.deepEqual(secondText, { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 4 });
     assert.deepEqual(calls, ["handshake_invite"]);
 
     const wrong = await fetch(`http://127.0.0.1:${server.address().port}/other/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: ACCEPT }, body: "{}" });
@@ -274,7 +277,7 @@ test("role-access handles slide their TTL on use and role-scoped results never c
     t += 61 * 60_000;
     const stale = await statusViaHandle();
     assert.equal(stale.result.isError, true);
-    assert.deepEqual(JSON.parse(stale.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 3 });
+    assert.deepEqual(JSON.parse(stale.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 4 });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -313,16 +316,16 @@ test("tool failures surface reason codes and constants only, and log structured 
 
     const admission = await rpc("tools/call", { name: "handshake_status", arguments: access });
     assert.equal(admission.result.isError, true);
-    assert.deepEqual(JSON.parse(admission.result.content[0].text), { error: "SCOPE_VIOLATION", retryable: false, playbookVersion: 3 });
+    assert.deepEqual(JSON.parse(admission.result.content[0].text), { error: "SCOPE_VIOLATION", retryable: false, playbookVersion: 4 });
 
     const generic = await rpc("tools/call", { name: "consent_sign", arguments: { ...access, signatureHex: `0x${"1".repeat(130)}` } });
     assert.equal(generic.result.isError, true);
-    assert.deepEqual(JSON.parse(generic.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 3 });
+    assert.deepEqual(JSON.parse(generic.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 4 });
     assert.equal(JSON.stringify(generic.result).includes("secret internal detail"), false);
 
     const retryable = await rpc("tools/call", { name: "channel_send", arguments: { ...access, kind: "note", body: "x" } });
     assert.equal(retryable.result.isError, undefined);
-    assert.deepEqual(retryable.result.structuredContent, { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000, playbookVersion: 3 });
+    assert.deepEqual(retryable.result.structuredContent, { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000, playbookVersion: 4 });
 
     assert.equal(warnings.length, 3);
     assert.deepEqual(
