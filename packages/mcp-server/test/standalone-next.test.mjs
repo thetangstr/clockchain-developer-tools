@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { getAddress } from "viem";
 
 import { evaluateStandaloneReadiness } from "../dist/standalone-handshake/checklist.js";
-import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordinator.js";
+import { createStandaloneCoordinator, resolveStandaloneHoldLimits } from "../dist/standalone-handshake/coordinator.js";
 import { createServer } from "node:http";
 
 import { standaloneRequestContext } from "../dist/standalone-handshake/long-poll.js";
@@ -520,4 +520,93 @@ test("schema: durationSeconds accepts exactly 60..86400 and maxMessageBytes exac
   for (const bad of ["59", "86401", "0", "0900", "-60", "60.0", " 60", "1e3", ""]) assert.equal(limits(bad), false, JSON.stringify(bad));
   for (const ok of ["1", "9", "999", "9999", "16000", "16383", "16384"]) assert.equal(limits("600", ok), true, ok);
   for (const bad of ["0", "16385", "01", "99999"]) assert.equal(limits("600", bad), false, bad);
+});
+
+// ---------------------------------------------------------------------------
+// Re-review follow-ups (PR #161)
+// ---------------------------------------------------------------------------
+
+test("busy: a repeated send-first prompt with no hold slot carries the busy retryAfterMs", async () => {
+  const h = harness({ coordinator: { nextPollMs: 20, maxHoldsPerClient: 1 } });
+  const { a } = await openedSession(h);
+  const other = await h.invite();
+  const first = await h.next(a, { waitMs: 5_000 });
+  assert.equal(first.action, "respond");
+  assert.equal(first.retryAfterMs, undefined);
+  const occupying = standaloneRequestContext.run({ clientKey: "203.0.113.7" }, () => h.next(other.initiatorAccess, { waitMs: 300 }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const started = Date.now();
+  const repeat = await standaloneRequestContext.run({ clientKey: "203.0.113.7" }, () => h.next(a, { waitMs: 5_000 }));
+  assert.equal(repeat.action, "respond");
+  assert.deepEqual(repeat.messages, []);
+  assert.equal(repeat.retryAfterMs, BUSY_RETRY_AFTER_MS);
+  assert.ok(Date.now() - started < 200, "answered at once rather than held");
+  await occupying;
+});
+
+test("env hold limits: only positive integers are used; anything else falls back to the defaults with one warning", (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  assert.deepEqual(resolveStandaloneHoldLimits({}), {});
+  assert.deepEqual(resolveStandaloneHoldLimits({ STANDALONE_NEXT_MAX_HOLDS: "64", STANDALONE_NEXT_MAX_HOLDS_PER_CLIENT: " 4 " }), { maxHolds: 64, maxHoldsPerClient: 4 });
+  for (const bad of ["0", "-1", "abc", "1.5", "NaN", "1e3", "007"]) {
+    assert.deepEqual(resolveStandaloneHoldLimits({ STANDALONE_NEXT_MAX_HOLDS: bad, STANDALONE_NEXT_MAX_HOLDS_PER_CLIENT: bad }), {}, bad);
+  }
+  const events = warn.mock.calls.map((call) => JSON.parse(call.arguments[0]));
+  assert.deepEqual(events.map((event) => event.variable).sort(), ["STANDALONE_NEXT_MAX_HOLDS", "STANDALONE_NEXT_MAX_HOLDS_PER_CLIENT"]);
+  for (const event of events) assert.equal(event.event, "standalone_handshake_invalid_hold_limit");
+});
+
+test("abandonment race: a deadline passing during consent recovery refuses cleanly with ABANDONED", async () => {
+  const t0 = 1_750_000_000_000;
+  let tripDeadline = false;
+  let h;
+  h = harness({
+    nowMs: t0,
+    coordinator: {
+      preOpenTtlMs: 60_000,
+      recoverEip191Address: async (input) => {
+        if (tripDeadline) h.setNow(t0 + 120_000);
+        return recoverLocally(input);
+      },
+    },
+  });
+  const invite = await h.invite();
+  const accept = await h.accept(invite.invitation);
+  const step = await h.next(invite.initiatorAccess);
+  const signatureHex = await verifyAndSign(h.keys.initiator, step.sign);
+  tripDeadline = true;
+  await assert.rejects(
+    () => h.instance.invoke("consent_sign", { access: invite.initiatorAccess, signatureHex }),
+    (error) => error.reason === "ABANDONED",
+  );
+  assert.equal((await h.next(accept.responderAccess)).action, "abandoned");
+  await assert.rejects(() => h.instance.invoke("consent_sign", { access: accept.responderAccess, signatureHex: "0x" + "11".repeat(65) }), (error) => error.reason === "ABANDONED");
+});
+
+test("abandonment race: a deadline passing while opening anchors refuses cleanly with ABANDONED and never opens", async () => {
+  const t0 = 1_750_000_000_000;
+  const ledger = fakeLedger();
+  let tripDeadline = false;
+  let h;
+  const tripping = {
+    ...ledger,
+    async log(input) {
+      if (tripDeadline) h.setNow(t0 + 120_000);
+      return ledger.log(input);
+    },
+  };
+  h = harness({ nowMs: t0, coordinator: { preOpenTtlMs: 60_000, client: tripping } });
+  const invite = await h.invite();
+  const accept = await h.accept(invite.invitation);
+  await h.consent("initiator", invite.initiatorAccess);
+  await h.consent("responder", accept.responderAccess);
+  tripDeadline = true;
+  await assert.rejects(() => h.instance.invoke("channel_open", { access: invite.initiatorAccess }), (error) => error.reason === "ABANDONED");
+  const after = await h.next(accept.responderAccess);
+  assert.equal(after.action, "abandoned");
+  assert.equal(after.terminal.reason, "NOT_OPENED_BEFORE_DEADLINE");
+  // Past the deadline before the call: refused before anything is anchored.
+  const anchored = ledger.entries.size;
+  await assert.rejects(() => h.instance.invoke("channel_open", { access: accept.responderAccess }), (error) => error.reason === "ABANDONED");
+  assert.equal(ledger.entries.size, anchored);
 });

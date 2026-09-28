@@ -230,6 +230,7 @@ export function createStandaloneCoordinator(options: {
       const { session, role } = authedSession(args);
       const signatureHex = args.signatureHex;
       if (typeof signatureHex !== "string" || !SIGNATURE.test(signatureHex)) throw new StandaloneCoordinatorError();
+      refuseIfAbandoned(session.sessionId);
       if (session.stage !== "ready" && session.stage !== "consent_pending") throw new StandaloneCoordinatorError();
       const readiness = role === "initiator" ? session.initiatorReadiness : session.responderReadiness;
       const checklist = session.checklist;
@@ -243,6 +244,10 @@ export function createStandaloneCoordinator(options: {
         recovered = "";
       }
       if (recovered !== String(readiness.sessionKeyAddress).toLowerCase()) throw new StandaloneCoordinatorError();
+      // The open deadline may have passed while recovery was awaited. Settle it now, with no
+      // await before the stage writes below, so the refusal is a clean ABANDONED rather than
+      // an illegal-transition error from setStage.
+      refuseIfAbandoned(session.sessionId);
       if (session.stage === "ready") store.setStage(session.sessionId, "consent_pending");
       store.setConsent(session.sessionId, role, standaloneCanonicalRecord(consentRecord).digest);
       const stage = store.bothConsented(session.sessionId) ? (store.setStage(session.sessionId, "consented"), "consented") : "consent_pending";
@@ -256,6 +261,7 @@ export function createStandaloneCoordinator(options: {
       // The counterparty already opened it: a distinct reason code, so a looping agent
       // knows to carry on with handshake_next rather than treat this as a failure.
       if (session.stage === "open") throw new StandaloneAdmissionError("ALREADY_OPEN");
+      refuseIfAbandoned(session.sessionId);
       if (session.stage !== "consented" || !store.bothConsented(session.sessionId)) throw new StandaloneCoordinatorError();
       const opening = openChannel(session);
       openings.set(session.sessionId, opening);
@@ -339,7 +345,9 @@ export function createStandaloneCoordinator(options: {
     if (waitMs === 0 || !holdable(result, current)) return deliver(result);
     const context = standaloneRequestContext.getStore();
     const hold = holds.acquire({ roleKey: `${session.sessionId}:${role}`, sessionId: session.sessionId, clientKey: context?.clientKey ?? "local", signal: context?.signal });
-    if (hold === undefined) return deliver(result.action === "wait" ? { ...result, retryAfterMs: BUSY_RETRY_AFTER_MS } : result);
+    // No hold slot: answer now (a wait, or a repeated send-first prompt) with a longer
+    // retryAfterMs so a busy server does not invite a spin.
+    if (hold === undefined) return deliver({ ...result, retryAfterMs: BUSY_RETRY_AFTER_MS });
     try {
       for (let polls = 0; polls < MAX_NEXT_WAIT_POLLS; polls += 1) {
         const budgetMs = waitMs - (waitClock() - startedAt);
@@ -375,6 +383,8 @@ export function createStandaloneCoordinator(options: {
     ];
     transitions[1].predecessor = standaloneCanonicalRecord(transitions[0]).digest;
     transitions[2].predecessor = standaloneCanonicalRecord(transitions[1]).digest;
+    // Re-check the open deadline before anything is written to the ledger.
+    refuseIfAbandoned(session.sessionId);
     const anchors: any[] = [];
     // Transition ownership is initiator/responder/initiator, but this standalone coordinator is the single
     // mediator (both parties' tokens live in one store, and consent_sign anchors nothing), so it writes all
@@ -393,6 +403,12 @@ export function createStandaloneCoordinator(options: {
     const anchorOpenMs = Date.parse(anchors[anchors.length - 1].blockTimeRaw);
     if (Number.isNaN(anchorOpenMs)) throw new StandaloneTransientCoordinatorError();
     const openedAtMs = anchorOpenMs;
+    // Anchoring awaits the ledger, so the open deadline can pass mid-flight. The session is
+    // then abandoned and stays abandoned: the opening anchors already on the ledger witness
+    // a consented opening that never took effect, and the caller gets a clean ABANDONED
+    // instead of an illegal-transition error from setStage. No await separates this check
+    // from the stage write below, so the outcome is deterministic.
+    refuseIfAbandoned(session.sessionId);
     const expiresAtMs = openedAtMs + Number(session.terms.channelLimits.durationSeconds) * 1000;
     store.setStage(session.sessionId, "open");
     store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
@@ -411,6 +427,10 @@ export function createStandaloneCoordinator(options: {
     };
   }
 
+  function refuseIfAbandoned(sessionId: string): void {
+    if (store.getSession(sessionId)?.stage === "abandoned") throw new StandaloneAdmissionError("ABANDONED");
+  }
+
   function requiredIdentity(session: any): boolean {
     return session.terms.identityPolicy.erc8004 !== "not_required";
   }
@@ -425,6 +445,30 @@ export function createStandaloneCoordinator(options: {
 // signature recovery threw and the checklist reported AUTHORITY_INVALID for everyone.
 export function resolveStandaloneRpcUrl(env: Record<string, string | undefined>): string {
   return env.SEPOLIA_RPC_URL || env.EVM_RPC_URL || "";
+}
+
+const warnedHoldLimitVars = new Set<string>();
+
+// Hold caps from env. Only a positive integer is accepted: NaN would silently remove a cap
+// and 0 would make every call busy, so anything else falls back to the default, with one
+// warning per variable.
+export function resolveStandaloneHoldLimits(env: Record<string, string | undefined>): { maxHolds?: number; maxHoldsPerClient?: number } {
+  const limits: { maxHolds?: number; maxHoldsPerClient?: number } = {};
+  const read = (name: string): number | undefined => {
+    const raw = env[name];
+    if (raw === undefined || raw.trim() === "") return undefined;
+    if (/^[1-9][0-9]{0,8}$/.test(raw.trim())) return Number(raw.trim());
+    if (!warnedHoldLimitVars.has(name)) {
+      warnedHoldLimitVars.add(name);
+      console.warn(JSON.stringify({ event: "standalone_handshake_invalid_hold_limit", variable: name }));
+    }
+    return undefined;
+  };
+  const maxHolds = read("STANDALONE_NEXT_MAX_HOLDS");
+  const maxHoldsPerClient = read("STANDALONE_NEXT_MAX_HOLDS_PER_CLIENT");
+  if (maxHolds !== undefined) limits.maxHolds = maxHolds;
+  if (maxHoldsPerClient !== undefined) limits.maxHoldsPerClient = maxHoldsPerClient;
+  return limits;
 }
 
 export function createRuntimeStandaloneCoordinator(env: Record<string, string | undefined> = process.env) {
@@ -452,8 +496,7 @@ export function createRuntimeStandaloneCoordinator(env: Record<string, string | 
       }
     },
     recoverEip191Address: ({ bytes, signatureHex }) => recoverEip191Address({ bytes, signatureHex, rpcUrl }),
-    ...(env.STANDALONE_NEXT_MAX_HOLDS ? { maxHolds: Number(env.STANDALONE_NEXT_MAX_HOLDS) } : {}),
-    ...(env.STANDALONE_NEXT_MAX_HOLDS_PER_CLIENT ? { maxHoldsPerClient: Number(env.STANDALONE_NEXT_MAX_HOLDS_PER_CLIENT) } : {}),
+    ...resolveStandaloneHoldLimits(env),
     resolveIdentity: async (identity, sessionKeyAddress) => {
       if (!identity) return false;
       const registration = await resolveOwnedAgentRegistration({
