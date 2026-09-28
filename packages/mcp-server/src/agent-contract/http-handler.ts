@@ -56,6 +56,11 @@ export function parseContractTokens(raw: string | undefined): ContractTokenEntry
     if (side !== "initiator" && side !== "responder") {
       throw new Error(`CONTRACT_AUTH_TOKENS: unknown side "${side}"`);
     }
+    // N4: role≡side is pinned at parse time — buyer≡initiator,
+    // provider≡responder; a mismatch is a startup (config) error.
+    if ((role === "buyer") !== (side === "initiator")) {
+      throw new Error(`CONTRACT_AUTH_TOKENS: role "${role}" cannot be pinned to side "${side}"`);
+    }
     if (!DECIMAL.test(agentId)) {
       throw new Error(`CONTRACT_AUTH_TOKENS: agentId "${agentId}" is not a decimal ERC-8004 id`);
     }

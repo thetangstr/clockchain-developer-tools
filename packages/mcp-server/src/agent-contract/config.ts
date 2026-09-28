@@ -38,6 +38,7 @@ export type ContractRouteConfig =
       readonly stateDir: string;
       readonly maxRuns: number;
       readonly maxReceiptsPerRun: number;
+      readonly maxReceiptsPerPrincipal: number;
       readonly runTtlMs: number;
       readonly certGraceMs: number;
       readonly service: ContractService;
@@ -111,10 +112,38 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
 
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
-  const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "1024");
+  const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "4096");
+  const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL ?? "512");
   const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS ?? String(24 * 3600_000));
   const certGraceMs = Number(env.CONTRACT_CERT_GRACE_MS ?? "600000");
   const stateDir = env.CONTRACT_STATE_DIR ?? path.join(process.cwd(), "state", "contract");
+
+  // Optional ERC-8004 chain/registry pins (LOW): when set, certificates must
+  // attest exactly this deployment, not just the agent id.
+  const expectedErc8004 =
+    env.CONTRACT_ERC8004_CHAIN_ID !== undefined || env.CONTRACT_ERC8004_REGISTRY_ADDRESS !== undefined
+      ? { chainId: env.CONTRACT_ERC8004_CHAIN_ID ?? "", registryAddress: env.CONTRACT_ERC8004_REGISTRY_ADDRESS ?? "" }
+      : undefined;
+
+  // N1/N2: construction can fail closed — corrupt/unreadable used-sessions or
+  // a state dir already locked by a live process are misconfiguration, not a
+  // mid-request exception.
+  let service: ContractService;
+  try {
+    service = createContractService({
+      hostRoots,
+      signer,
+      stateDir,
+      maxRuns: Number.isFinite(maxRuns) ? maxRuns : 1024,
+      maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
+      maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
+      runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
+      graceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
+      expectedErc8004,
+    });
+  } catch (err) {
+    return misconfigured(`contract state: ${(err as Error).message}`);
+  }
 
   return {
     kind: "ready",
@@ -126,17 +155,10 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     trustProxy: env.CONTRACT_TRUST_PROXY === "1",
     stateDir,
     maxRuns: Number.isFinite(maxRuns) ? maxRuns : 1024,
-    maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 1024,
+    maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
+    maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
     runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
     certGraceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
-    service: createContractService({
-      hostRoots,
-      signer,
-      stateDir,
-      maxRuns: Number.isFinite(maxRuns) ? maxRuns : 1024,
-      maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 1024,
-      runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
-      graceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
-    }),
+    service,
   };
 }

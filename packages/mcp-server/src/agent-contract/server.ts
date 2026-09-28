@@ -91,7 +91,7 @@ export function buildContractServer(options: {
         outcome = refusal(bound.code);
         // A refused bind never creates or alters run state — the refusal is
         // receipted only on an ALREADY-EXISTING run (evidence, not state).
-        if (run !== undefined) recordCall(run, name, argsDigest, outcome, serverNonce);
+        if (run !== undefined) outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
       } else {
         outcome = ok(bound.result);
       }
@@ -105,18 +105,21 @@ export function buildContractServer(options: {
         return asResult(ok({ stage: "rendezvous", terminalState: null, serverNonce }));
       }
       outcome = ok({ stage: run.stage, terminalState: null, serverNonce });
-      recordCall(run, name, argsDigest, outcome, serverNonce);
+      outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
       return asResult(outcome);
     }
 
     // Catalogue tool not implemented in this slice.
     outcome = refusal("CONTRACT_UNAVAILABLE");
-    if (run !== undefined) recordCall(run, name, argsDigest, outcome, serverNonce);
+    if (run !== undefined) outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
     return asResult(outcome);
   });
 
-  function recordCall(run: ContractRun, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): ServerReceipt {
-    return service.recordReceipt(run, {
+  // N3: receipt recording can REFUSE at the per-principal budget — the call's
+  // outcome then becomes the RATE_LIMITED refusal (nothing is appended), so
+  // one principal can never fill the chain to brick the other.
+  function recordCall(run: ContractRun, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
+    const recorded = service.recordReceipt(run, {
       tool,
       argsDigest,
       principal: { role: principal.role, keyId: principal.keyId },
@@ -125,6 +128,7 @@ export function buildContractServer(options: {
       serverNonce,
       sourceIp: options.sourceIp,
     });
+    return recorded.ok ? outcome : refusal(recorded.code);
   }
 
   return server;

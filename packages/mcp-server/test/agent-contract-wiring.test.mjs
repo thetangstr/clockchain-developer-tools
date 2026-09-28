@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -138,5 +138,41 @@ test("H3: enabled + seeded + tokens → route serves; disabled env → not mount
     const ok = await post(app.url, "tools/list", {}, "tb1");
     assert.equal(ok.status, 200);
     assert.ok(ok.body.result.tools.length > 0);
+  } finally { await app.close(); }
+});
+
+test("N1: a corrupt used-sessions record closes the route (503, no binds)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-wiring-corrupt-"));
+  writeFileSync(path.join(dir, "used-sessions.json"), "{corrupt");
+  const app = await boot({
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_STATE_DIR: dir,
+  });
+  try {
+    const res = await post(app.url, "tools/call", { name: "contract_bind", arguments: {} }, "tb1");
+    assert.equal(res.status, 503);
+    assert.deepEqual(res.body, { error: "contract_unavailable" });
+  } finally { await app.close(); }
+});
+
+test("N2: a second process on the same state dir is refused (exclusive lock)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-wiring-lock-"));
+  const env = {
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_STATE_DIR: dir,
+  };
+  const app = await boot(env);
+  try {
+    // The live route holds the lock; a second config on the same dir refuses.
+    const second = loadContractConfig(env);
+    assert.equal(second.kind, "misconfigured");
+    assert.match(second.reason, /lock/i);
+    // …but the live route keeps serving.
+    const ok = await post(app.url, "tools/list", {}, "tb1");
+    assert.equal(ok.status, 200);
   } finally { await app.close(); }
 });

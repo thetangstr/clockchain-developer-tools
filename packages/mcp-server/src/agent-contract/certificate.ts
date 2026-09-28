@@ -149,9 +149,11 @@ export function verifyCertificateEnvelope(
     if (sessionKey === null) return INVALID;
 
     // Freshness: the certified session key is only useful near its window —
-    // now ≤ validUntil + grace (grace configurable, capped at 10 min).
+    // validFromMs ≤ now ≤ validUntil + grace (grace configurable, capped at
+    // 10 min) — a not-yet-valid certificate is refused too (H1).
     const now = options.now ?? Date.now;
     const graceMs = Math.min(Math.max(options.graceMs ?? MAX_CERT_GRACE_MS, 0), MAX_CERT_GRACE_MS);
+    if (now() < Number(BigInt(certificate.validFromMs as string))) return INVALID;
     if (now() > Number(BigInt(certificate.validUntilMs as string)) + graceMs) return INVALID;
 
     const rootSignature = exactKeys(hskc.rootSignature, ["algorithm", "keyId", "publicKey", "signature"]);

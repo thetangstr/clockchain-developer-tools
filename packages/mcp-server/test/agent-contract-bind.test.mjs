@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { generateKeyPairSync, createHash, sign as edSign, createPublicKey } from "node:crypto";
-import { readFileSync, mkdtempSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -130,8 +130,9 @@ const TOKENS_RAW = [
   "tp1:provider:kp1:9453:responder",
   "tp2:provider:kp2:9453:responder",
   "tp3:provider:kp3:9453:responder",
-  "tpwrong:provider:kpw:9453:initiator", // right agentId, wrong side
-  "tpsame:provider:kps:9452:initiator",  // provider claiming the initiator side
+  // N4: provider:initiator / buyer:responder tokens are unprovisionable —
+  // a startup parse error, so they cannot exist here. The wrong-side and
+  // same-side refusals are covered at the bind layer (service tests below).
   "tev:buyer:kev:7777:initiator",       // not a party to any minted session
 ].join(",");
 
@@ -252,18 +253,26 @@ test("a certificate from a session the principal is not a party to is refused", 
   assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
 });
 
-test("the wrong side is refused", async () => {
-  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB) }, "tpwrong");
-  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+test("a provider token pinned to the initiator is a startup parse error", () => {
+  assert.throws(
+    () => parseContractTokens("tpwrong:provider:kpw:9453:initiator"),
+    /side/i,
+  );
+  assert.throws(
+    () => parseContractTokens("tbwrong:buyer:kbw:9452:responder"),
+    /side/i,
+  );
 });
 
-test("two roles on the same side are refused", async () => {
+test("the two roles sit on opposite sides of a shared session", async () => {
+  // buyer (initiator-pinned) and provider (responder-pinned) bind certB.
   const b = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB, "b2") }, "tb2");
   assert.equal(b.body.result.structuredContent.bound, true);
-  const p = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB) }, "tpsame");
-  assert.equal(p.body.result.structuredContent.error, "ROLE_REFUSED");
   const tp = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB, "p2") }, "tp2");
   assert.equal(tp.body.result.structuredContent.bound, true);
+  const run = service.runFor(SESSION_B);
+  assert.equal(run.bound.buyer.side, "initiator");
+  assert.equal(run.bound.provider.side, "responder");
 });
 
 test("a second principal replaying a taken seat is SEAT_TAKEN", async () => {
@@ -347,8 +356,8 @@ test("used sessionIds are durable: a restart cannot start a second genesis", asy
     { argsDigest: canonicalDigest(args), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
   );
   assert.equal(first.ok, true);
-  // Simulated restart: fresh service, same stateDir. Same sessionId must never
-  // mint a second genesis — refuse (no live run to be idempotent against).
+  // Simulated restart: release the dir lock, fresh service, same stateDir.
+  s1.close();
   const s2 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
   const replay = s2.bind(
     { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
@@ -358,6 +367,160 @@ test("used sessionIds are durable: a restart cannot start a second genesis", asy
   assert.equal(replay.ok, false);
   assert.equal(replay.code, "STATE_REFUSED");
   assert.equal(s2.runFor("88888888-9999-4444-8888-888888888888"), undefined);
+  s2.close();
+});
+
+test("the state directory is exclusively locked — a second service is refused", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-lock-"));
+  const s1 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  assert.throws(() => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir }), /lock/i);
+  s1.close();
+  // After release the directory is usable again.
+  const s2 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  s2.close();
+});
+
+test("a corrupt used-sessions record fails closed: construction throws", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-corrupt-"));
+  writeFileSync(path.join(dir, "used-sessions.json"), "{not json");
+  assert.throws(() => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir }));
+});
+
+test("a used-sessions write failure refuses the bind with NO state change", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-eacces-"));
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const sid = "dddddddd-1111-4444-8888-dddddddddddd";
+  const certE = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid });
+  const args = bindArgs(certE, "eacces");
+  chmodSync(dir, 0o555); // persist must fail
+  try {
+    const res = svc.bind(
+      { keyId: "kb9", role: "buyer", agentId: "9452", side: "initiator" },
+      args,
+      { argsDigest: canonicalDigest(args), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
+    );
+    assert.equal(res.ok, false);
+    assert.equal(svc.runFor(sid), undefined); // nothing committed, no receipt
+  } finally {
+    chmodSync(dir, 0o755);
+    svc.close();
+  }
+});
+
+test("a principal pinned to the wrong role/side pair is refused at bind", () => {
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
+  const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "eeeeeeee-2222-4444-8888-eeeeeeeeeeee" });
+  const res = svc.bind(
+    { keyId: "kx", role: "provider", agentId: "9453", side: "initiator" }, // provider must be responder
+    bindArgs(certX),
+    { argsDigest: "0x" + "0".repeat(64), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "ROLE_REFUSED");
+  svc.close();
+});
+
+test("a not-yet-valid certificate is refused", async () => {
+  const early = mintCertificate({
+    root: rootA,
+    session: generateKeyPairSync("ed25519"),
+    sessionId: "ffffffff-3333-4444-8888-ffffffffffff",
+    issuedAtMs: String(Date.now() + 60_000),
+    validFromMs: String(Date.now() + 120_000), // validity starts in the future
+    validUntilMs: String(Date.now() + 600_000),
+  });
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(early) }, "tb4");
+  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+});
+
+test("a per-principal receipt budget: provider spam cannot brick the buyer", async () => {
+  const svc = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER,
+    stateDir: mkdtempSync(path.join(tmpdir(), "c-")),
+    maxReceiptsPerPrincipal: 2,
+  });
+  const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: svc });
+  const srv = createServer(handler);
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${srv.address().port}/contract/mcp`;
+    const sid = "12121212-4444-4444-8888-121212121212";
+    const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid });
+    await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certX, "bx") }, "tb4", url);
+    await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certX, "px") }, "tp3", url);
+    // provider's budget is 2: bind consumed 1, one status receipted, then refused
+    const s1 = await rpc("tools/call", { name: "contract_status", arguments: {} }, "tp3", url);
+    assert.equal(s1.body.result.structuredContent.stage, "bound");
+    const s2 = await rpc("tools/call", { name: "contract_status", arguments: {} }, "tp3", url);
+    assert.equal(s2.body.result.structuredContent.error, "RATE_LIMITED");
+    // the buyer's own budget is untouched
+    const sb = await rpc("tools/call", { name: "contract_status", arguments: {} }, "tb4", url);
+    assert.equal(sb.body.result.structuredContent.stage, "bound");
+    const run = svc.runFor(sid);
+    const buyerReceipts = run.receipts.filter((r) => r.principal.keyId === "kb4");
+    assert.ok(buyerReceipts.length >= 2); // bind + status
+  } finally {
+    await new Promise((r) => srv.close(r));
+    svc.close();
+  }
+});
+
+test("ended runs are evicted, freeing the runs cap slot", () => {
+  let t = Date.now();
+  const now = () => t;
+  const svc = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER, now,
+    stateDir: mkdtempSync(path.join(tmpdir(), "c-")), maxRuns: 1,
+  });
+  const sid1 = "13131313-5555-4444-8888-131313131313";
+  const cert1 = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid1 });
+  const a1 = bindArgs(cert1, "v1");
+  assert.equal(svc.bind(
+    { keyId: "kv1", role: "buyer", agentId: "9452", side: "initiator" }, a1,
+    { argsDigest: canonicalDigest(a1), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
+  ).ok, true);
+  t += 25 * 3600_000; // past TTL → run evicted, cap slot freed
+  const sid2 = "13131313-5555-4444-8888-131313131314";
+  const cert2 = mintCertificate({
+    root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid2,
+    issuedAtMs: String(t - 60_000), validFromMs: String(t - 120_000), validUntilMs: String(t + 600_000),
+  });
+  const a2 = bindArgs(cert2, "v2");
+  const res = svc.bind(
+    { keyId: "kv2", role: "buyer", agentId: "9452", side: "initiator" }, a2,
+    { argsDigest: canonicalDigest(a2), serverNonce: `0x${"cd".repeat(16)}`, tool: "contract_bind" },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(svc.runFor(sid1), undefined);
+  svc.close();
+});
+
+test("publicKeyHex must be lower-case even-length hex", async () => {
+  const sid = "14141414-6666-4444-8888-141414141414";
+  const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid });
+  const upper = bindArgs(certX);
+  upper.signerKey = { keyId: "s", publicKeyHex: `0x${"AB".repeat(32)}` };
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: upper }, "tb4");
+  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+  assert.equal(service.runFor(sid), undefined);
+});
+
+test("the party check pins agentId AND the erc8004 chain+registry", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "c-"));
+  // Pin a DIFFERENT registry than the certificate's identityPolicy carries.
+  const svc = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir,
+    expectedErc8004: { chainId: "eip155:1", registryAddress: "0x0000000000000000000000000000000000000001" },
+  });
+  const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "15151515-7777-4444-8888-151515151515" });
+  const res = svc.bind(
+    { keyId: "kb9", role: "buyer", agentId: "9452", side: "initiator" },
+    bindArgs(certX),
+    { argsDigest: "0x" + "0".repeat(64), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "CERTIFICATE_INVALID");
+  svc.close();
 });
 
 test("an 80-char XFF cannot leave a bound run with zero receipts", async () => {
