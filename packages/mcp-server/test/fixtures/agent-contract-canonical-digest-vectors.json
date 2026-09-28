@@ -1,0 +1,117 @@
+{
+  "schema": "agent-contract.canonical-digest-vectors/v1",
+  "source": "ac_travel_mvp feat/agent-pairing-slice1 fad991e src/lib/agent-pairing/contracts.ts canonicalDigest",
+  "note": "input 'skip: undefined' is dropped by canonicalization; JSON cannot carry undefined, so this vector's input is serialized without it",
+  "vectors": [
+    {
+      "input": {},
+      "canonical": "{}",
+      "digest": "0x44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "input": [],
+      "canonical": "[]",
+      "digest": "0x4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "input": null,
+      "canonical": "null",
+      "digest": "0x74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    },
+    {
+      "input": true,
+      "canonical": "true",
+      "digest": "0xb5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+    },
+    {
+      "input": 0,
+      "canonical": "0",
+      "digest": "0x5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "input": -1.5,
+      "canonical": "-1.5",
+      "digest": "0x37c2b212b94e5372b33df924ea2a91182d90c237d0bf942c1768e794ebef2376"
+    },
+    {
+      "input": 1e+21,
+      "canonical": "1e+21",
+      "digest": "0x241c4643fa70b1dcde1205b71be4e3bebb17e9f880c8e1a33d0ead6c27271d3c"
+    },
+    {
+      "input": "",
+      "canonical": "\"\"",
+      "digest": "0x12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126"
+    },
+    {
+      "input": "é日本🙂",
+      "canonical": "\"é日本🙂\"",
+      "digest": "0xcdade32c5ee3826ad12250c91d0cb522575f41af514c89a51f597e6e3259d3fb"
+    },
+    {
+      "input": "quote\"back\\slash\nnl",
+      "canonical": "\"quote\\\"back\\\\slash\\nnl\"",
+      "digest": "0xceabf790b25eb608192eefcefee9f38222ae41c68df677f0c7ea023ff28bb4ba"
+    },
+    {
+      "input": {
+        "b": 1,
+        "a": 2
+      },
+      "canonical": "{\"a\":2,\"b\":1}",
+      "digest": "0xd3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772"
+    },
+    {
+      "input": {
+        "a": [
+          3,
+          {
+            "z": null,
+            "y": "x"
+          }
+        ],
+        "B": false
+      },
+      "canonical": "{\"B\":false,\"a\":[3,{\"y\":\"x\",\"z\":null}]}",
+      "digest": "0x8dcb75f4842097669a0dac51a9aaf156ab542eebb681d8d6a7d0896512c04e0b"
+    },
+    {
+      "input": {
+        "itineraryId": "IT-QW-ONESTOP",
+        "fareMinor": 429000,
+        "feeMinor": 10000,
+        "note": "window seat"
+      },
+      "canonical": "{\"fareMinor\":429000,\"feeMinor\":10000,\"itineraryId\":\"IT-QW-ONESTOP\",\"note\":\"window seat\"}",
+      "digest": "0x7de0fcf8acb22ea8ceac33ae3dc0a299b85dbde12bf4789ae6d8d3d71623f305"
+    },
+    {
+      "input": {
+        "nested": {
+          "deeper": {
+            "k": [
+              1,
+              2,
+              {
+                "b": "2",
+                "a": "1"
+              }
+            ]
+          }
+        }
+      },
+      "canonical": "{\"nested\":{\"deeper\":{\"k\":[1,2,{\"a\":\"1\",\"b\":\"2\"}]}}}",
+      "digest": "0xb5e847f8b8d71a47152bc004f04b1b87f818a4835de6372df15002bb8f51b406"
+    },
+    {
+      "input": {
+        "aa": 1,
+        "a": 2,
+        "Z": 3,
+        "_": 4
+      },
+      "canonical": "{\"Z\":3,\"_\":4,\"a\":2,\"aa\":1}",
+      "digest": "0x7c2570c62b077d734583a3e9ef1c706647f8f26478fe472ba7f82f3f4446e2a0"
+    }
+  ]
+}
