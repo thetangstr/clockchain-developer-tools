@@ -189,6 +189,9 @@ export function createContractHttpHandler(options: {
   const maxSessionsPerPrincipal = options.maxSessionsPerPrincipal ?? 4;
   const maxSessions = options.maxSessions ?? 512;
   const allowCall = keyedWindowLimiter(options.callsPerMinute ?? 120, 60_000, now);
+  // N4b-4: ONE poll limiter for the whole handler — keyed by principal, so a
+  // fresh session can never reset a principal's polling budget.
+  const pollGate = keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, now);
   const sessions = new Map<string, ContractSession>();
 
   /**
@@ -308,7 +311,7 @@ export function createContractHttpHandler(options: {
       principal,
       service,
       session: ctx,
-      pollsPerMinute: options.pollsPerMinute,
+      pollGate,
       now,
     });
     ctx.sourceIp = clientIp(req.headers, req.socket.remoteAddress, options.trustProxy === true);

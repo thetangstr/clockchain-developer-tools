@@ -56,6 +56,13 @@ export function buildContractServer(options: {
    * poll is refused (default 60/min; injectable for tests).
    */
   pollsPerMinute?: number;
+  /**
+   * N4b-4: the poll limiter must be per PRINCIPAL, not per session — a fresh
+   * `initialize` must not reset it. The transport injects one shared gate
+   * (`(keyId) => allowed`); absent it, a per-server limiter is used (direct
+   * in-process construction ≈ one session anyway).
+   */
+  pollGate?: (principalKeyId: string) => boolean;
   now?: () => number;
   /**
    * Live MCP session evidence (M2): `id` is filled on
@@ -71,7 +78,8 @@ export function buildContractServer(options: {
 }): Server {
   const { principal, service } = options;
   const POLL_TOOLS = new Set(["rendezvous_inbox", "contract_status"]);
-  const allowPoll = keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
+  const allowPoll = options.pollGate
+    ?? keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
   const sessionFields = () => ({
     mcpSessionId: options.session?.id,
     clientInfo: options.session?.clientInfo,
