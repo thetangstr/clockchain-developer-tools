@@ -34,6 +34,12 @@ export const serverReceiptSchema = z.object({
     keyId: z.string().min(1).max(64),
   }).strict(),
   outcome: z.string().min(1).max(64),
+  /**
+   * On a `contract_bind` receipt: the digest of THAT principal's pre-bind
+   * receipt-chain head — the run chain's cross-link into the evidence the
+   * principal produced before any run existed (M1). Absent elsewhere.
+   */
+  preBindHead: digestHex.optional(),
   mcpSessionId: z.string().min(1).max(128).optional(),
   clientInfo: z.object({
     name: z.string().min(1).max(128),
@@ -74,6 +80,8 @@ export function makeReceipt(
     principal: { role: "buyer" | "provider"; keyId: string };
     outcome: string;
     responseDigest: string;
+    /** Run genesis link to the principal's pre-bind chain head (M1). */
+    preBindHead?: string;
     surface?: "handshake" | "business" | "anchoring";
     mcpSessionId?: string;
     clientInfo?: { name: string; version: string };
@@ -96,6 +104,7 @@ export function makeReceipt(
     argsDigest: fields.argsDigest,
     principal: fields.principal,
     outcome: fields.outcome,
+    preBindHead: fields.preBindHead,
     mcpSessionId: fields.mcpSessionId,
     clientInfo: fields.clientInfo,
     sourceIp: fields.sourceIp,

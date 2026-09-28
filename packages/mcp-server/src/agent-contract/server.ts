@@ -92,6 +92,15 @@ export function buildContractServer(options: {
           serverNonce,
           sourceIp: options.sourceIp,
         });
+      } else if (run === undefined) {
+        service.recordPreBind(principal, {
+          tool: name,
+          argsDigest,
+          outcome: "INVALID_PARAMS",
+          responseDigest: canonicalDigest({ error: "invalid_params" }),
+          serverNonce,
+          sourceIp: options.sourceIp,
+        });
       }
       throw new McpError(ErrorCode.InvalidParams, "invalid tool arguments");
     }
@@ -111,9 +120,9 @@ export function buildContractServer(options: {
       );
       if (!bound.ok) {
         outcome = refusal(bound.code, serverNonce);
-        // A refused bind never creates or alters run state — the refusal is
-        // receipted only on an ALREADY-EXISTING run (evidence, not state).
-        if (run !== undefined) outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
+        // A refused bind never creates or alters run state — with no run
+        // the refusal lands on the principal's pre-bind chain (M1).
+        outcome = recordAny(run, name, argsDigest, outcome, serverNonce);
       } else {
         outcome = ok(bound.result);
       }
@@ -128,9 +137,10 @@ export function buildContractServer(options: {
 
     if (name === "contract_status") {
       if (run === undefined) {
-        // No run yet — the caller is still in discovery/handshake. No chain
-        // exists to receipt against; the nonce is still echoed for the trace.
-        return asResult(ok({ stage: "rendezvous", terminalState: null, serverNonce }));
+        // No run yet — the caller is still in discovery/handshake. The call
+        // lands on the principal's pre-bind chain (M1).
+        outcome = ok({ stage: "rendezvous", terminalState: null, serverNonce });
+        return asResult(recordAny(run, name, argsDigest, outcome, serverNonce));
       }
       outcome = ok({ stage: run.stage, terminalState: run.terminalState, serverNonce });
       outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
@@ -143,12 +153,36 @@ export function buildContractServer(options: {
       principal, run, name, parsed.data, serverNonce,
     );
     outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
-    if (run !== undefined) outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
-    return asResult(outcome);
+    return asResult(recordAny(run, name, argsDigest, outcome, serverNonce));
   });
 
   function withReceipt(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
-    return run === undefined ? outcome : recordCall(run, tool, argsDigest, outcome, serverNonce);
+    return recordAny(run, tool, argsDigest, outcome, serverNonce);
+  }
+
+  /**
+   * Receipt the call on the run chain when a run exists for this principal,
+   * else on the principal's PRE-BIND chain (M1 — rendezvous, pre-bind status
+   * and refused binds are still evidence).
+   */
+  function recordAny(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
+    return run === undefined
+      ? recordPreBindCall(tool, argsDigest, outcome, serverNonce)
+      : recordCall(run, tool, argsDigest, outcome, serverNonce);
+  }
+
+  // M1: pre-bind receipt — capped per principal; at the cap the outcome
+  // becomes RATE_LIMITED (nothing appended), never a throw.
+  function recordPreBindCall(tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
+    const recorded = service.recordPreBind(principal, {
+      tool,
+      argsDigest,
+      outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
+      responseDigest: canonicalDigest(outcome.body),
+      serverNonce,
+      sourceIp: options.sourceIp,
+    });
+    return recorded.ok ? outcome : refusal(recorded.code, serverNonce);
   }
 
   // N3: receipt recording can REFUSE at the per-principal budget — the call's

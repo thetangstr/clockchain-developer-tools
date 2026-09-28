@@ -181,8 +181,25 @@ export interface ContractService {
    * (post-terminal retention lives in the world itself).
    */
   endRun(run: ContractRun, terminalState: string): void;
+  /**
+   * M1: append to a principal's PRE-BIND chain — a signed, hash-chained
+   * receipt log for calls made before any run exists (rendezvous, status,
+   * refused binds). Never throws; at the per-principal cap it refuses.
+   */
+  recordPreBind(
+    principal: ContractPrincipal,
+    fields: Omit<Parameters<typeof makeReceipt>[1], "runId" | "principal">,
+  ): { ok: true; receipt: ServerReceipt } | { ok: false; code: "RATE_LIMITED" };
+  /** A principal's pre-bind chain for the observer feed (undefined if none). */
+  preBindFeed(keyId: string): { principalKeyId: string; head: string; receipts: ServerReceipt[] } | undefined;
   /** Read-only receipt feed for the observer endpoint (N4b-2b): head + chain. */
-  receiptFeed(runId: string): { runId: string; head: string; receipts: ServerReceipt[] } | undefined;
+  receiptFeed(runId: string): {
+    runId: string;
+    head: string;
+    receipts: ServerReceipt[];
+    /** M1: each bound principal's pre-bind chain, served beside the run's. */
+    preBind: { principalKeyId: string; role: ContractRole; head: string; receipts: ServerReceipt[] }[];
+  } | undefined;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
@@ -199,6 +216,10 @@ const boundKeySchema = z.object({
 const DEFAULT_MAX_RUNS = 1024;
 const DEFAULT_MAX_RECEIPTS_PER_RUN = 4096;
 const DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL = 512;
+/** M1: cap on a principal's pre-bind receipt chain (evidence, not state). */
+const MAX_PREBIND_RECEIPTS = 256;
+/** The runId sentinel pre-bind receipts are scoped under (no run exists yet). */
+const PRE_BIND_SCOPE = "pre-bind";
 const RUN_TTL_MS = 24 * 3600_000; // LLD §3: run-scoped state TTL is 24h
 const USED_SESSIONS_FILE = "used-sessions.json";
 const USED_MANDATES_FILE = "used-mandates.json";
@@ -414,6 +435,10 @@ export function createContractService(options: {
   }
   const runs = new Map<string, ContractRun>();
   const principalRuns = new Map<string, string>();
+  /** M1: per-principal signed receipt chains for calls made before a run
+   *  exists — rendezvous, pre-bind status, refused binds. The run genesis
+   *  links each side's head (`preBindHead`). */
+  const preBindChains = new Map<string, ServerReceipt[]>();
   let releaseLock: (() => void) | undefined;
   let usedSessions: Map<string, string> = new Map();
   let usedMandates: Map<string, string> = new Map();
@@ -458,6 +483,13 @@ export function createContractService(options: {
 
   function runEnded(run: ContractRun): boolean {
     return run.terminalState !== null || now() >= run.createdAtMs + runTtlMs;
+  }
+
+  /** The head of a principal's pre-bind chain, or undefined if it has none. */
+  function preBindHeadFor(keyId: string): string | undefined {
+    const chain = preBindChains.get(keyId);
+    if (chain === undefined || chain.length === 0) return undefined;
+    return canonicalDigest(chain[chain.length - 1]!);
   }
 
   function dropRun(runId: string): void {
@@ -630,6 +662,9 @@ export function createContractService(options: {
       serverNonce: evidence.serverNonce,
       sourceIp: evidence.sourceIp,
       bindAssurance: "agentId-pinned-token",
+      // M1: the bind receipt carries THIS principal's pre-bind chain head —
+      // the run chain's link back to the evidence that preceded it.
+      preBindHead: preBindHeadFor(principal.keyId),
       ts: now(),
     }, options.signer);
 
@@ -739,6 +774,28 @@ export function createContractService(options: {
       evictEnded();
       return runs.get(runId);
     },
+    recordPreBind(principal, fields) {
+      const chain = preBindChains.get(principal.keyId) ?? [];
+      if (chain.length >= MAX_PREBIND_RECEIPTS) return { ok: false, code: "RATE_LIMITED" };
+      const receipt = makeReceipt(chain.at(-1) ?? null, {
+        ...fields,
+        runId: PRE_BIND_SCOPE,
+        principal: { role: principal.role, keyId: principal.keyId },
+        ts: now(),
+      }, options.signer);
+      if (chain.length === 0) preBindChains.set(principal.keyId, chain);
+      chain.push(receipt);
+      return { ok: true, receipt };
+    },
+    preBindFeed(keyId) {
+      const chain = preBindChains.get(keyId);
+      if (chain === undefined || chain.length === 0) return undefined;
+      return {
+        principalKeyId: keyId,
+        head: canonicalDigest(chain[chain.length - 1]!),
+        receipts: chain.map((r) => structuredClone(r)),
+      };
+    },
     receiptFeed(runId) {
       evictEnded();
       const run = runs.get(runId);
@@ -746,7 +803,16 @@ export function createContractService(options: {
       const head = run.receipts.length === 0
         ? RECEIPT_CHAIN_GENESIS
         : canonicalDigest(run.receipts[run.receipts.length - 1]!);
-      return { runId, head, receipts: run.receipts.map((r) => structuredClone(r)) };
+      // M1: the bound principals' pre-bind chains ride the feed so the
+      // observer can audit the evidence that preceded the run.
+      const preBind: { principalKeyId: string; role: ContractRole; head: string; receipts: ServerReceipt[] }[] = [];
+      for (const role of ["buyer", "provider"] as const) {
+        const bound = run.bound[role];
+        if (bound === undefined) continue;
+        const feed = this.preBindFeed(bound.principalKeyId);
+        if (feed !== undefined) preBind.push({ ...feed, role });
+      }
+      return { runId, head, receipts: run.receipts.map((r) => structuredClone(r)), preBind };
     },
     endRun,
     runIdForPrincipal(keyId) {

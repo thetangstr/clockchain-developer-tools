@@ -1177,8 +1177,15 @@ export async function runHttp(): Promise<Server> {
         res.end(JSON.stringify({ error: "rate_limited" }));
         return;
       }
-      const runId = new URL(req.url ?? "/", "http://localhost").searchParams.get("runId") ?? "";
-      const feed = contractConfig.service.receiptFeed(runId);
+      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
+      // M1: `?keyId=` serves a principal's PRE-BIND chain (refused binds and
+      // rendezvous evidence have no runId to key on); `?runId=` serves the
+      // run chain plus both bound principals' pre-bind chains.
+      const keyId = params.get("keyId");
+      const runId = params.get("runId") ?? "";
+      const feed = keyId !== null
+        ? contractConfig.service.preBindFeed(keyId)
+        : contractConfig.service.receiptFeed(runId);
       if (feed === undefined) {
         res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ error: "not_found" }));
