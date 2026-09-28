@@ -9,10 +9,12 @@ import { z } from "zod";
 
 import { canonicalDigest } from "./canonical.js";
 import { verifyCertificateEnvelope, type HostRootPin } from "./certificate.js";
-import { makeReceipt, type ServerReceipt } from "./receipts.js";
+import { makeReceipt, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
 import type { ContractSigner } from "./envelope.js";
 import type { ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
+import { createBusinessOps, type BusinessOps } from "./business.js";
+import { createSimWorld, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
 
 /**
  * Run-scoped contract state and the `contract_bind` decision logic
@@ -66,6 +68,30 @@ export type ContractStage =
   | "rendezvous" | "handshake" | "bound" | "mandated" | "negotiating"
   | "agreed" | "booked" | "verified" | "settled" | "terminal";
 
+export interface OfferRecord {
+  offerId: string;
+  payload: Record<string, unknown>;
+  role: ContractRole;
+  principalKeyId: string;
+  state: "live" | "accepted" | "rejected";
+  submittedAt: string;
+}
+
+export interface AgreementRecord {
+  agreementId: string;
+  offerId: string;
+  offerDigest: string;
+  agreementDigest: string;
+  offerPayload: Record<string, unknown>;
+  acceptPayload: Record<string, unknown>;
+  itineraryId: string;
+  currency: string;
+  fareMinor: number;
+  feeMinor: number;
+  totalMinor: number;
+  formedAt: string;
+}
+
 export interface ContractRun {
   readonly runId: string;
   /** canonicalDigest of the signed certificate `result` — the run's digest half. */
@@ -76,6 +102,31 @@ export interface ContractRun {
   readonly receipts: ServerReceipt[];
   /** N3: each principal has its OWN receipt budget within a run. */
   readonly receiptsByPrincipal: Map<string, number>;
+  /** This run's closed sim world (ticketing + payment rail). */
+  simRun?: SimRun;
+  /** Signed-envelope nonces already consumed, per run (§13 rev 6.1). */
+  readonly claimedNonces: Set<string>;
+  mandate?: {
+    digest: string;
+    capMinor?: number;
+    currency?: string;
+    itineraryIds?: string[];
+    submittedAt: string;
+  };
+  readonly offers: Map<string, OfferRecord>;
+  offerSeq: number;
+  agreement?: AgreementRecord;
+  booking?: { orderRef: string; pnr: string; tickets: SimTicket[]; bookedAt: string };
+  verification?: {
+    result: "match" | "mismatch";
+    verificationDigest: string;
+    findingsDigest: string;
+    flagged: boolean;
+    submittedAt: string;
+  };
+  settlement?: { transferId: string; status: "authorized" | "released" };
+  settlementPrepared?: boolean;
+  terminalState: string | null;
   stage: ContractStage;
 }
 
@@ -108,6 +159,15 @@ export interface ContractService {
   ): { ok: true; receipt: ServerReceipt } | { ok: false; code: "RATE_LIMITED" };
   runFor(runId: string): ContractRun | undefined;
   runIdForPrincipal(keyId: string): string | undefined;
+  /**
+   * Move a run to its terminal state and retire the sim world entry
+   * (post-terminal retention lives in the world itself).
+   */
+  endRun(run: ContractRun, terminalState: string): void;
+  /** Read-only receipt feed for the observer endpoint (N4b-2b): head + chain. */
+  receiptFeed(runId: string): { runId: string; head: string; receipts: ServerReceipt[] } | undefined;
+  /** The business-tool semantics layer (everything except bind/status). */
+  business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
   close(): void;
 }
@@ -269,8 +329,13 @@ export function createContractService(options: {
   runTtlMs?: number;
   /** Optional pin: certificates must attest this exact ERC-8004 chain+registry. */
   expectedErc8004?: { chainId: string; registryAddress: string };
+  /** Closed sim world (ticketing + payment rail); one is created if absent. */
+  sim?: SimWorld;
+  /** §13: when pinned, approval records must carry exactly this policyDigest. */
+  expectedPolicyDigest?: string;
 }): ContractService {
   const now = options.now ?? Date.now;
+  const sim = options.sim ?? createSimWorld({ now, ttlMs: options.runTtlMs ?? RUN_TTL_MS });
   const maxRuns = options.maxRuns ?? DEFAULT_MAX_RUNS;
   const maxReceiptsPerRun = options.maxReceiptsPerRun ?? DEFAULT_MAX_RECEIPTS_PER_RUN;
   const maxReceiptsPerPrincipal = options.maxReceiptsPerPrincipal ?? DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL;
@@ -292,17 +357,30 @@ export function createContractService(options: {
   }
 
   function runEnded(run: ContractRun): boolean {
-    return run.stage === "terminal" || now() >= run.createdAtMs + runTtlMs;
+    return run.terminalState !== null || now() >= run.createdAtMs + runTtlMs;
   }
 
-  /** M4/M5: ended runs are REMOVED — they no longer hold a cap slot. */
+  function dropRun(runId: string): void {
+    runs.delete(runId);
+    for (const [keyId, rid] of principalRuns) {
+      if (rid === runId) principalRuns.delete(keyId);
+    }
+  }
+
+  /**
+   * M4/M5: TTL-expired runs are always removed. Terminal-but-fresh runs stay
+   * observable (contract_status, receipt feed) and are only dropped under
+   * capacity pressure — evidence survives the terminal transition.
+   */
   function evictEnded(): void {
     for (const [runId, run] of runs) {
-      if (!runEnded(run)) continue;
-      runs.delete(runId);
-      for (const [keyId, rid] of principalRuns) {
-        if (rid === runId) principalRuns.delete(keyId);
-      }
+      if (now() >= run.createdAtMs + runTtlMs) dropRun(runId);
+    }
+  }
+  function evictForCapacity(): void {
+    for (const [runId, run] of runs) {
+      if (runs.size < maxRuns) return;
+      if (runEnded(run)) dropRun(runId);
     }
   }
 
@@ -394,6 +472,7 @@ export function createContractService(options: {
       // No live run for this sessionId: a restart must never open a second
       // genesis for an already-bound handshake.
       if (usedSessions.has(verdict.sessionId)) return { ok: false, code: "STATE_REFUSED" };
+      if (runs.size >= maxRuns) evictForCapacity();
       if (runs.size >= maxRuns) return { ok: false, code: "RATE_LIMITED" };
     }
 
@@ -420,6 +499,11 @@ export function createContractService(options: {
       bound: {},
       receipts: [],
       receiptsByPrincipal: new Map(),
+      claimedNonces: new Set(),
+      offers: new Map(),
+      offerSeq: 0,
+      terminalState: null,
+      simRun: sim.forRun(runId),
       stage: "handshake",
     };
     // N3: refuse (never throw) at the run cap or this principal's own budget.
@@ -500,8 +584,26 @@ export function createContractService(options: {
     };
   }
 
+  const endRun = (run: ContractRun, terminalState: string): void => {
+    // "settled" is itself a named terminal stage; every other terminal reason
+    // reads stage:"terminal" with terminalState carrying the why.
+    run.stage = terminalState === "settled" ? "settled" : "terminal";
+    run.terminalState = terminalState;
+    sim.markTerminal(run.runId);
+  };
+  const business = createBusinessOps({
+    signer: options.signer,
+    now,
+    sim,
+    ...(options.expectedPolicyDigest !== undefined
+      ? { expectedPolicyDigest: options.expectedPolicyDigest }
+      : {}),
+    endRun,
+  });
+
   return {
     bind,
+    business,
     recordReceipt(run, fields) {
       evictEnded();
       const count = run.receiptsByPrincipal.get(fields.principal.keyId) ?? 0;
@@ -521,12 +623,24 @@ export function createContractService(options: {
       evictEnded();
       return runs.get(runId);
     },
+    receiptFeed(runId) {
+      evictEnded();
+      const run = runs.get(runId);
+      if (run === undefined) return undefined;
+      const head = run.receipts.length === 0
+        ? RECEIPT_CHAIN_GENESIS
+        : canonicalDigest(run.receipts[run.receipts.length - 1]!);
+      return { runId, head, receipts: run.receipts.map((r) => structuredClone(r)) };
+    },
+    endRun,
     runIdForPrincipal(keyId) {
       evictEnded();
       const runId = principalRuns.get(keyId);
       if (runId === undefined) return undefined;
       const run = runs.get(runId);
-      return run !== undefined && !runEnded(run) ? runId : undefined;
+      // Terminal-but-unexpired runs still resolve: contract_status and the
+      // receipt feed remain observable until the run's TTL evicts it.
+      return run !== undefined ? runId : undefined;
     },
     close() {
       releaseLock?.();

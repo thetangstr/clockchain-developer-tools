@@ -41,6 +41,8 @@ export type ContractRouteConfig =
       readonly maxReceiptsPerPrincipal: number;
       readonly runTtlMs: number;
       readonly certGraceMs: number;
+      /** Bearer token for the read-only observer receipt feed, if configured. */
+      readonly observerToken?: string;
       readonly service: ContractService;
     };
 
@@ -159,6 +161,9 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
     runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
     certGraceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
+    ...(env.CONTRACT_OBSERVER_TOKEN !== undefined && env.CONTRACT_OBSERVER_TOKEN !== ""
+      ? { observerToken: env.CONTRACT_OBSERVER_TOKEN }
+      : {}),
     service,
   };
 }

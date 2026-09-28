@@ -104,13 +104,17 @@ export function buildContractServer(options: {
         // exists to receipt against; the nonce is still echoed for the trace.
         return asResult(ok({ stage: "rendezvous", terminalState: null, serverNonce }));
       }
-      outcome = ok({ stage: run.stage, terminalState: null, serverNonce });
+      outcome = ok({ stage: run.stage, terminalState: run.terminalState, serverNonce });
       outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
       return asResult(outcome);
     }
 
-    // Catalogue tool not implemented in this slice.
-    outcome = refusal("CONTRACT_UNAVAILABLE");
+    // Every other catalogued tool is business semantics — mandate,
+    // negotiation, booking, verification, settlement (business.ts).
+    const dispatched = service.business.dispatch(
+      principal, run, name, parsed.data, serverNonce,
+    );
+    outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code);
     if (run !== undefined) outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
     return asResult(outcome);
   });

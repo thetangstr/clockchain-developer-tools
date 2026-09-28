@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync, createHash, sign as edSign } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import test from "node:test";
 
 import { runHttp } from "../dist/http.js";
 import { loadContractConfig } from "../dist/agent-contract/config.js";
+import { canonicalJson, canonicalDigest } from "../dist/agent-contract/canonical.js";
 
 // H3/C1: these tests boot the REAL runHttp wiring — env → loadContractConfig →
 // dispatch — so the enable gate, fail-closed config and prototype-key probes
@@ -16,7 +18,7 @@ const ENV_KEYS = [
   "PORT", "MCP_PORT", "CONTRACT_MCP_ENABLED", "CONTRACT_AUTH_TOKENS",
   "CONTRACT_SERVER_ED25519_SEED", "CONTRACT_ALLOW_EPHEMERAL_KEY",
   "CONTRACT_SERVER_KEY_ID", "CONTRACT_TRUST_PROXY", "CONTRACT_STATE_DIR",
-  "CONTRACT_HOST_ROOTS", "CONTRACT_CALLS_PER_MINUTE",
+  "CONTRACT_HOST_ROOTS", "CONTRACT_CALLS_PER_MINUTE", "CONTRACT_OBSERVER_TOKEN",
 ];
 
 const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
@@ -174,5 +176,134 @@ test("N2: a second process on the same state dir is refused (exclusive lock)", a
     // …but the live route keeps serving.
     const ok = await post(app.url, "tools/list", {}, "tb1");
     assert.equal(ok.status, 200);
+  } finally { await app.close(); }
+});
+
+// --- observer receipt feed (N4b-2b) -------------------------------------------
+
+function rawPublicKeyBase64(publicKey) {
+  return Buffer.from(publicKey.export({ format: "der", type: "spki" }).subarray(12)).toString("base64");
+}
+
+function mintCertificate({ root, session, sessionId }) {
+  const t = Date.now();
+  const sessionKeyAddress = `0x${createHash("sha256").update(session.publicKey.export({ format: "der", type: "spki" })).digest("hex").slice(0, 40)}`;
+  const certificate = {
+    schema: "clockchain.host-session-key/v1",
+    rootKid: "root-test", sessionId, repositorySha: "d".repeat(40),
+    sessionPublicKey: rawPublicKeyBase64(session.publicKey),
+    validFromMs: String(t - 60_000), validUntilMs: String(t + 10 * 60_000),
+  };
+  const hostSessionKeyCertificate = {
+    certificate,
+    rootSignature: {
+      algorithm: "ed25519", keyId: "root-test",
+      publicKey: rawPublicKeyBase64(root.publicKey),
+      signature: edSign(null, Buffer.from(canonicalJson(certificate), "utf8"), root.privateKey).toString("base64"),
+    },
+  };
+  const party = (addr, agentId, n) => ({
+    sessionKeyAddress: addr, policyDigest: `${"ab".repeat(31)}${String(n)}0`,
+    erc8004: {
+      agentId, chainId: "eip155:11155111",
+      registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+      reference: `eip155:11155111:0x8004a818bfb912233c491871b3d84c89a494bd9e:${agentId}`,
+      registrationTx: `0x${"a".repeat(64)}`, registrationBlock: `700${n}`,
+    },
+  });
+  const initiator = party(sessionKeyAddress, "9452", 0);
+  const responder = party(`0x${"9".repeat(40)}`, "9453", 1);
+  const anchor = (kind, n) => ({
+    blockHeight: String(7010 + n), blockTimeRaw: `2026-08-09T17:0${n}:00.000Z`,
+    digest: `${n}${"0".repeat(63)}`, kind,
+    ledgerId: `33333333-4444-4555-8666-77777777777${n}`,
+  });
+  const result = {
+    anchors: [anchor("proposal", 0), anchor("acceptance", 1), anchor("acknowledgment", 2)],
+    externalBusinessActionPerformed: false,
+    hostSessionKeyCertificateDigest: canonicalDigest(hostSessionKeyCertificate).slice(2),
+    identityPolicy: {
+      chainId: "eip155:11155111", erc8004: "required_fresh",
+      registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+    },
+    issuedAtMs: String(t), outcome: "VERIFIED",
+    parties: { initiator, responder },
+    policyDigests: { initiator: initiator.policyDigest, responder: responder.policyDigest },
+    reference: "NS-1847", schema: "clockchain.agent-handshake-result/v2",
+    sessionDigest: "e".repeat(64), sessionId,
+    statementDigest: "f".repeat(64), subjectRun: "stakeholder",
+  };
+  return {
+    hostSessionKeyCertificate, result,
+    signer: {
+      algorithm: "ed25519", keyId: "session-host",
+      publicKey: rawPublicKeyBase64(session.publicKey),
+      signature: edSign(null, Buffer.from(canonicalJson(result), "utf8"), session.privateKey).toString("base64"),
+    },
+  };
+}
+
+test("observer feed: /contract/receipts is token-gated and serves a bound run's chain", async () => {
+  const root = generateKeyPairSync("ed25519");
+  const fingerprint = createHash("sha256")
+    .update(Buffer.from(rawPublicKeyBase64(root.publicKey), "base64")).digest("hex");
+  const env = {
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_HOST_ROOTS: `root-test:${fingerprint}`,
+    CONTRACT_OBSERVER_TOKEN: "observer-secret",
+  };
+
+  // Off without the observer token even when the route is ready.
+  const { CONTRACT_OBSERVER_TOKEN: _drop, ...noTokenEnv } = env;
+  const unconfigured = await boot(noTokenEnv);
+  try {
+    const res = await fetch(`${unconfigured.url}/contract/receipts?runId=x`);
+    assert.equal(res.status, 404);
+  } finally { await unconfigured.close(); }
+
+  const app = await boot(env);
+  try {
+    // non-GET → 403; missing/wrong token → 401; unknown run → 404
+    const nonGet = await fetch(`${app.url}/contract/receipts?runId=x`, {
+      method: "POST", headers: { authorization: "Bearer observer-secret" },
+    });
+    assert.equal(nonGet.status, 403);
+    for (const auth of [undefined, "Bearer wrong"]) {
+      const res = await fetch(`${app.url}/contract/receipts?runId=x`, {
+        headers: auth === undefined ? {} : { authorization: auth },
+      });
+      assert.equal(res.status, 401, String(auth));
+    }
+    const noRun = await fetch(`${app.url}/contract/receipts?runId=unknown`, {
+      headers: { authorization: "Bearer observer-secret" },
+    });
+    assert.equal(noRun.status, 404);
+
+    // bind both parties through the real route, then read the feed
+    const cert = mintCertificate({
+      root, session: generateKeyPairSync("ed25519"),
+      sessionId: "feedfeed-0001-4444-8888-000000000001",
+    });
+    const bindArgs = {
+      certificate: cert,
+      signerKey: { keyId: "k", publicKeyHex: `0x${"11".repeat(32)}` },
+      approvalKey: { keyId: "a", publicKeyHex: `0x${"22".repeat(32)}` },
+    };
+    const bindB = await post(app.url, "tools/call", { name: "contract_bind", arguments: bindArgs }, "tb1");
+    assert.equal(bindB.body.result.structuredContent.bound, true, JSON.stringify(bindB.body));
+    const runId = bindB.body.result.structuredContent.runId;
+    const bindP = await post(app.url, "tools/call", { name: "contract_bind", arguments: bindArgs }, "tp1");
+    assert.equal(bindP.body.result.structuredContent.bound, true, JSON.stringify(bindP.body));
+
+    const feed = await fetch(`${app.url}/contract/receipts?runId=${runId}`, {
+      headers: { authorization: "Bearer observer-secret" },
+    });
+    assert.equal(feed.status, 200);
+    const body = await feed.json();
+    assert.equal(body.runId, runId);
+    assert.ok(Array.isArray(body.receipts) && body.receipts.length >= 2);
+    assert.match(body.head, /^0x[0-9a-f]{64}$/);
   } finally { await app.close(); }
 });

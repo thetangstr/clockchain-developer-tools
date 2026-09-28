@@ -1145,6 +1145,38 @@ export async function runHttp(): Promise<Server> {
       return;
     }
 
+    // Read-only observer receipt feed (N4b-2b): `GET /contract/receipts?runId=`
+    // behind its own bearer token — off unless CONTRACT_OBSERVER_TOKEN is set.
+    if (pathOf(req.url) === "/contract/receipts") {
+      const token = contractConfig.kind === "ready" ? contractConfig.observerToken : undefined;
+      if (contractConfig.kind === "disabled" || token === undefined) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      if (req.method !== "GET") {
+        res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "forbidden" }));
+        return;
+      }
+      const auth = req.headers.authorization;
+      if (auth !== `Bearer ${token}`) {
+        res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      const runId = new URL(req.url ?? "/", "http://localhost").searchParams.get("runId") ?? "";
+      const feed = contractConfig.kind === "ready" ? contractConfig.service.receiptFeed(runId) : undefined;
+      if (feed === undefined) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(feed));
+      return;
+    }
+
     // A Responder exchanges the URL-fragment capability exactly once. The
     // capability is never sent in a query string and the response is never
     // cacheable. All public failures intentionally collapse to one code.

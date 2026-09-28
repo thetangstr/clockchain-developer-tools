@@ -116,6 +116,8 @@ export interface SimRun {
   issueTickets(input: unknown): SimIssueResult | SimRefusal;
   lookupOrder(input: unknown): SimOrderObservation;
   cancelOrder(input: unknown): SimCancelResult | SimRefusal;
+  /** The deterministic offer board — canonical rows plus quoted generated ones. */
+  itinerary(itineraryId: string): SimItinerary | undefined;
   readonly payments: SimPaymentRail;
 }
 
@@ -407,6 +409,9 @@ function createSimRun(
       return structuredClone(result);
     },
 
+    itinerary(itineraryId) {
+      return knownItineraries.get(itineraryId);
+    },
     payments: createSimPaymentRail({ runId, now }),
   };
 }

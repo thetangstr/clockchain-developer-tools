@@ -584,13 +584,14 @@ test("client XFF is not trusted by default; only the last hop with trust on", as
 
 // --- scoping + receipts --------------------------------------------------------
 
-test("role scoping on tools/call; unimplemented tools refuse cleanly", async () => {
+test("role scoping on tools/call; unknown and pre-bind tools refuse cleanly", async () => {
   const res = await rpc("tools/call", { name: "catalog_quote", arguments: { query: {} } });
   assert.equal(res.body.result.structuredContent.error, "ROLE_REFUSED");
   const missing = await rpc("tools/call", { name: "not_a_tool", arguments: {} });
   assert.equal(missing.body.result.structuredContent.error, "NOT_FOUND");
-  const unimpl = await rpc("tools/call", { name: "mandate_prepare", arguments: { mandate: {} } });
-  assert.equal(unimpl.body.result.structuredContent.error, "CONTRACT_UNAVAILABLE");
+  // N4b-2b: all catalogue tools are live now — an UNBOUND caller is refused.
+  const unbound = await rpc("tools/call", { name: "mandate_prepare", arguments: { mandate: {} } }, "tev");
+  assert.equal(unbound.body.result.structuredContent.error, "STATE_REFUSED");
 });
 
 test("malformed call arguments fail as JSON-RPC invalid params, not a refusal", async () => {
