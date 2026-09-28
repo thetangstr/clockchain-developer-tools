@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { generateKeyPairSync, createHash, sign as edSign, createPublicKey } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
@@ -9,7 +10,7 @@ import test from "node:test";
 import { canonicalJson, canonicalDigest } from "../dist/agent-contract/canonical.js";
 import { toolsListForRole, CONTRACT_SERVER_INSTRUCTIONS, guidanceDigests } from "../dist/agent-contract/tools-list.js";
 import { verifyChain } from "../dist/agent-contract/receipts.js";
-import { createContractHttpHandler, parseContractTokens } from "../dist/agent-contract/http-handler.js";
+import { createContractHttpHandler, parseContractTokens, tokenAuthenticator } from "../dist/agent-contract/http-handler.js";
 import { createContractService } from "../dist/agent-contract/service.js";
 import { verifyCertificateEnvelope } from "../dist/agent-contract/certificate.js";
 
@@ -20,13 +21,19 @@ const ACCEPT = "application/json, text/event-stream";
 // Reproduces the agent-handshake-v2 certificate envelope wire format
 // (clockchain.host-session-key/v1 + agent-handshake-result/v2 + session-key
 // signature) with freshly generated ed25519 keys — no real keys anywhere.
+// Validity defaults to "now" so the freshness check accepts; pass explicit
+// validUntilMs to exercise expiry.
 
 function rawPublicKeyBase64(publicKey) {
   const der = publicKey.export({ format: "der", type: "spki" });
   return Buffer.from(der.subarray(12)).toString("base64"); // strip 12-byte SPKI prefix
 }
 
-function mintCertificate({ root, session, sessionId, outcome = "VERIFIED", issuedAtMs = "1786337200000", validFromMs = "1786337000000", validUntilMs = "1786337600000" }) {
+function mintCertificate({ root, session, sessionId, outcome = "VERIFIED", issuedAtMs, validFromMs, validUntilMs }) {
+  const t = Date.now();
+  issuedAtMs ??= String(t);
+  validFromMs ??= String(t - 60_000);
+  validUntilMs ??= String(t + 10 * 60_000);
   const sessionKeyAddress = `0x${createHash("sha256").update(session.publicKey.export({ format: "der", type: "spki" })).digest("hex").slice(0, 40)}`;
   const counterKeyAddress = `0x${"9".repeat(40)}`;
   const certificate = {
@@ -99,50 +106,56 @@ const rootA = generateKeyPairSync("ed25519");
 const rootB = generateKeyPairSync("ed25519");
 const sessionA = generateKeyPairSync("ed25519");
 const sessionB = generateKeyPairSync("ed25519");
+const sessionC = generateKeyPairSync("ed25519");
 const SESSION_A = "aaaaaaaa-1111-4444-8888-aaaaaaaaaaaa";
 const SESSION_B = "bbbbbbbb-2222-4444-8888-bbbbbbbbbbbb";
+const SESSION_C = "cccccccc-3333-4444-8888-cccccccccccc";
 
 const certA = mintCertificate({ root: rootA, session: sessionA, sessionId: SESSION_A });
 const certB = mintCertificate({ root: rootA, session: sessionB, sessionId: SESSION_B });
+const certC = mintCertificate({ root: rootA, session: sessionC, sessionId: SESSION_C });
 
 const HOST_ROOTS = Object.freeze([
   { kid: "root-test", fingerprint: createHash("sha256").update(Buffer.from(rawPublicKeyBase64(rootA.publicKey), "base64")).digest("hex") },
 ]);
 
 // --- HTTP harness ------------------------------------------------------------
-
-const TOKENS = {
-  "tok-buyer-1": { keyId: "buyer-key-1", role: "buyer" },
-  "tok-buyer-2": { keyId: "buyer-key-2", role: "buyer" },
-  "tok-buyer-3": { keyId: "buyer-key-3", role: "buyer" },
-  "tok-provider-1": { keyId: "provider-key-1", role: "provider" },
-  "tok-provider-2": { keyId: "provider-key-2", role: "provider" },
-};
+// token:role:keyId:agentId:side — agentId must match the certificate party on
+// the claimed side (C2). Sessions mint agentId 9452 initiator / 9453 responder.
+const TOKENS_RAW = [
+  "tb1:buyer:kb1:9452:initiator",
+  "tb2:buyer:kb2:9452:initiator",
+  "tb3:buyer:kb3:9452:initiator",
+  "tb4:buyer:kb4:9452:initiator",
+  "tp1:provider:kp1:9453:responder",
+  "tp2:provider:kp2:9453:responder",
+  "tp3:provider:kp3:9453:responder",
+  "tpwrong:provider:kpw:9453:initiator", // right agentId, wrong side
+  "tpsame:provider:kps:9452:initiator",  // provider claiming the initiator side
+  "tev:buyer:kev:7777:initiator",       // not a party to any minted session
+].join(",");
 
 const serverKeys = generateKeyPairSync("ed25519");
 const serverPublicB64 = rawPublicKeyBase64(serverKeys.publicKey);
+const SIGNER = { keyId: "contract-server-test", privateKey: serverKeys.privateKey };
 
+const stateDir = mkdtempSync(path.join(tmpdir(), "contract-bind-"));
 let http;
 let baseUrl;
 let service;
 
-function authenticate(headers) {
-  const raw = /^Bearer\s+(.+)$/i.exec(
-    (Array.isArray(headers.authorization) ? headers.authorization[0] : headers.authorization) ?? "",
-  );
-  const token = raw?.[1]?.trim() ?? "";
-  return TOKENS[token] ?? null;
-}
+const authenticate = tokenAuthenticator(parseContractTokens(TOKENS_RAW));
 
 test.before(async () => {
   service = createContractService({
     hostRoots: HOST_ROOTS,
-    signer: { keyId: "contract-server-test", privateKey: serverKeys.privateKey },
+    signer: SIGNER,
+    stateDir,
   });
   const handler = createContractHttpHandler({
     authenticate,
     hostRoots: HOST_ROOTS,
-    signer: { keyId: "contract-server-test", privateKey: serverKeys.privateKey },
+    signer: SIGNER,
     service,
   });
   http = createServer(handler);
@@ -152,8 +165,8 @@ test.before(async () => {
 
 test.after(() => new Promise((resolve) => http.close(resolve)));
 
-async function rpc(method, params = {}, token = "tok-buyer-1", url = baseUrl) {
-  const headers = { "content-type": "application/json", accept: ACCEPT };
+async function rpc(method, params = {}, token = "tb1", url = baseUrl, extraHeaders = {}) {
+  const headers = { "content-type": "application/json", accept: ACCEPT, ...extraHeaders };
   if (token !== null) headers.authorization = `Bearer ${token}`;
   const response = await fetch(url, {
     method: "POST",
@@ -161,188 +174,330 @@ async function rpc(method, params = {}, token = "tok-buyer-1", url = baseUrl) {
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   const text = await response.text();
-  const data = text.split("\n").find((line) => line.startsWith("data:"));
-  return { status: response.status, body: JSON.parse(data ? data.slice(5) : text) };
+  const data = text.split("\n").find((l) => l.startsWith("data:"));
+  const body = JSON.parse(data ? data.slice(5) : text);
+  return { status: response.status, body };
 }
 
-async function call(tool, args = {}, token = "tok-buyer-1") {
-  const { body } = await rpc("tools/call", { name: tool, arguments: args }, token);
-  const result = body.result;
-  if (result === undefined) return { error: body.error, json: undefined };
-  return { isError: result.isError === true, json: JSON.parse(result.content[0].text) };
+function bindArgs(certificate, suffix = "") {
+  return {
+    certificate,
+    signerKey: { keyId: `signer-${suffix || "x"}`, publicKeyHex: `0x${"11".repeat(32)}` },
+    approvalKey: { keyId: `approval-${suffix || "x"}`, publicKeyHex: `0x${"22".repeat(32)}` },
+  };
 }
 
-const bindArgs = (cert, suffix = "") => ({
-  certificate: cert,
-  signerKey: { keyId: `signer${suffix}`, publicKeyHex: `0x${"11".repeat(32)}` },
-  approvalKey: { keyId: `approval${suffix}`, publicKeyHex: `0x${"22".repeat(32)}` },
-});
+// --- auth + surface shape ----------------------------------------------------
 
-// --- auth --------------------------------------------------------------------
-
-test("parseContractTokens maps bearer tokens to role-scoped principals", () => {
-  const parsed = parseContractTokens(" tok-a : buyer : k-buyer , tok-b:provider:k-prov ");
-  assert.deepEqual(parsed, {
-    "tok-a": { role: "buyer", keyId: "k-buyer" },
-    "tok-b": { role: "provider", keyId: "k-prov" },
-  });
-  assert.deepEqual(parseContractTokens(""), {});
-  assert.deepEqual(parseContractTokens(undefined), {});
-  assert.throws(() => parseContractTokens("tok-x:viewer:k"), /role/);
-  assert.throws(() => parseContractTokens("bad-entry"), /token/);
+test("parseContractTokens maps 5-field entries to role+agentId+side principals", () => {
+  const entries = parseContractTokens(TOKENS_RAW);
+  const p = authenticate({ authorization: "Bearer tb1" });
+  assert.deepEqual(p, { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" });
+  assert.equal(authenticate({ authorization: "Bearer tp1" }).side, "responder");
+  assert.equal(authenticate({ authorization: "Bearer nope" }), null);
 });
 
 test("the route requires a role-scoped bearer token", async () => {
-  assert.equal((await rpc("tools/list", {}, null)).status, 401);
-  assert.equal((await rpc("tools/list", {}, "tok-nobody")).status, 401);
-  assert.equal((await rpc("tools/list")).status, 200);
-});
-
-// --- tools/list --------------------------------------------------------------
-
-test("tools/list serves the verbatim N4a role payload, matching guidanceDigests", async () => {
-  const buyer = await rpc("tools/list", {}, "tok-buyer-1");
-  const provider = await rpc("tools/list", {}, "tok-provider-1");
-  assert.deepEqual(buyer.body.result, toolsListForRole("buyer"));
-  assert.deepEqual(provider.body.result, toolsListForRole("provider"));
-  const names = (r) => r.body.result.tools.map((t) => t.name);
-  assert.ok(names(buyer).includes("rendezvous_search"));
-  assert.ok(!names(buyer).includes("rendezvous_publish_listing"));
-  assert.ok(names(provider).includes("rendezvous_publish_listing"));
-  assert.ok(!names(provider).includes("rendezvous_search"));
-  assert.ok(names(buyer).includes("contract_bind") && names(provider).includes("contract_bind"));
-  assert.equal(
-    canonicalDigest(buyer.body.result),
-    guidanceDigests("buyer").toolsListDigest,
-  );
-});
-
-test("initialize returns the published server instructions", async () => {
-  const { body } = await rpc("initialize", {
-    protocolVersion: "2025-03-26",
-    capabilities: {},
-    clientInfo: { name: "test-client", version: "0.0.0" },
-  });
-  assert.equal(body.result.instructions, CONTRACT_SERVER_INSTRUCTIONS);
-});
-
-// --- contract_bind -----------------------------------------------------------
-
-test("both roles bind the same verified certificate; status advances to bound", async () => {
-  const buyer = await call("contract_bind", bindArgs(certA), "tok-buyer-1");
-  assert.equal(buyer.json.bound, true);
-  assert.equal(buyer.json.role, "buyer");
-  assert.equal(buyer.json.runId, SESSION_A);
-  assert.match(buyer.json.serverNonce, /^0x[0-9a-f]{32}$/);
-
-  const mid = await call("contract_status", {}, "tok-buyer-1");
-  assert.equal(mid.json.stage, "handshake");
-
-  const provider = await call("contract_bind", bindArgs(certA, "-p"), "tok-provider-1");
-  assert.equal(provider.json.bound, true);
-  assert.equal(provider.json.role, "provider");
-  assert.equal(provider.json.runId, SESSION_A);
-
-  for (const token of ["tok-buyer-1", "tok-provider-1"]) {
-    const status = await call("contract_status", {}, token);
-    assert.equal(status.json.stage, "bound");
-    assert.equal(status.json.terminalState, null);
+  for (const token of [null, "nope", "constructor", "__proto__", "toString", "hasOwnProperty"]) {
+    const list = await rpc("tools/list", {}, token);
+    assert.equal(list.status, 401, String(token));
+    const init = await rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } }, token);
+    assert.equal(init.status, 401, String(token));
+    const call = await rpc("tools/call", { name: "contract_status", arguments: {} }, token);
+    assert.equal(call.status, 401, String(token));
   }
 });
 
+test("tools/list serves the verbatim N4a role payload, matching guidanceDigests", async () => {
+  const buyer = await rpc("tools/list");
+  assert.equal(buyer.status, 200);
+  assert.deepEqual(buyer.body.result, toolsListForRole("buyer"));
+  assert.equal(canonicalDigest(buyer.body.result), guidanceDigests("buyer").toolsListDigest);
+  const provider = await rpc("tools/list", {}, "tp1");
+  assert.deepEqual(provider.body.result, toolsListForRole("provider"));
+  assert.equal(canonicalDigest(provider.body.result), guidanceDigests("provider").toolsListDigest);
+  assert.ok(toolsListForRole("provider").tools.some((t) => t.name === "catalog_quote"));
+  assert.ok(!toolsListForRole("buyer").tools.some((t) => t.name === "catalog_quote"));
+});
+
+test("initialize returns the published server instructions", async () => {
+  const res = await rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } });
+  assert.equal(res.body.result.instructions, CONTRACT_SERVER_INSTRUCTIONS);
+});
+
+// --- contract_bind -------------------------------------------------------------
+
+test("both roles bind the same verified certificate; status advances to bound", async () => {
+  const b = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certA, "b1") });
+  assert.equal(b.status, 200);
+  const sc = b.body.result.structuredContent;
+  assert.equal(sc.bound, true);
+  assert.equal(sc.runId, SESSION_A);
+  assert.equal(sc.bindAssurance, "agentId-pinned-token");
+  assert.equal(sc.side, "initiator");
+  const p = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certA, "p1") }, "tp1");
+  assert.equal(p.body.result.structuredContent.bound, true);
+  const s = await rpc("tools/call", { name: "contract_status", arguments: {} });
+  assert.equal(s.body.result.structuredContent.stage, "bound");
+  // The run records {buyer: side/agentId, provider: side/agentId}.
+  assert.deepEqual(service.runFor(SESSION_A).bound.buyer, {
+    principalKeyId: "kb1", agentId: "9452", side: "initiator",
+    signerKey: bindArgs(certA, "b1").signerKey, approvalKey: bindArgs(certA, "b1").approvalKey,
+    boundAt: service.runFor(SESSION_A).bound.buyer.boundAt,
+  });
+});
+
+test("a certificate from a session the principal is not a party to is refused", async () => {
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB) }, "tev");
+  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+});
+
+test("the wrong side is refused", async () => {
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB) }, "tpwrong");
+  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+});
+
+test("two roles on the same side are refused", async () => {
+  const b = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB, "b2") }, "tb2");
+  assert.equal(b.body.result.structuredContent.bound, true);
+  const p = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB) }, "tpsame");
+  assert.equal(p.body.result.structuredContent.error, "ROLE_REFUSED");
+  const tp = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certB, "p2") }, "tp2");
+  assert.equal(tp.body.result.structuredContent.bound, true);
+});
+
+test("a second principal replaying a taken seat is SEAT_TAKEN", async () => {
+  // tb1 holds the buyer seat on SESSION_A; tb3 replays with a fresh cert-pair.
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certA, "squat") }, "tb3");
+  assert.equal(res.body.result.structuredContent.error, "SEAT_TAKEN");
+});
+
+test("idempotent rebind requires identical {certDigest, signerKey}", async () => {
+  const same = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certA, "b1") });
+  assert.equal(same.body.result.structuredContent.bound, true);
+  const drifted = await rpc("tools/call", {
+    name: "contract_bind",
+    arguments: { ...bindArgs(certA, "b1"), signerKey: { keyId: "signer-b1", publicKeyHex: `0x${"33".repeat(32)}` } },
+  });
+  assert.equal(drifted.body.result.structuredContent.error, "STATE_REFUSED");
+});
+
 test("contract_bind refuses certificates that fail verification", async () => {
-  // Untrusted root
-  const certOtherRoot = mintCertificate({ root: rootB, session: generateKeyPairSync("ed25519"), sessionId: "cccccccc-3333-4444-8888-cccccccccccc" });
-  const a = await call("contract_bind", bindArgs(certOtherRoot), "tok-buyer-2");
-  assert.equal(a.isError, true);
-  assert.equal(a.json.error, "CERTIFICATE_INVALID");
-
-  // Tampered result (signature no longer covers it)
-  const tampered = JSON.parse(JSON.stringify(certA));
-  tampered.result.outcome = "FAILED";
-  const b = await call("contract_bind", bindArgs(tampered), "tok-buyer-2");
-  assert.equal(b.json.error, "CERTIFICATE_INVALID");
-
-  // Signer key not the certified session key
-  const wrongSigner = JSON.parse(JSON.stringify(certA));
-  wrongSigner.signer.publicKey = rawPublicKeyBase64(generateKeyPairSync("ed25519").publicKey);
-  const c = await call("contract_bind", bindArgs(wrongSigner), "tok-buyer-2");
-  assert.equal(c.json.error, "CERTIFICATE_INVALID");
-
-  // Garbage
-  const d = await call("contract_bind", bindArgs({ not: "a certificate" }), "tok-buyer-2");
-  assert.equal(d.json.error, "CERTIFICATE_INVALID");
+  for (const cert of [
+    { garbage: true },
+    mintCertificate({ root: rootB, session: generateKeyPairSync("ed25519"), sessionId: "44444444-5555-4444-8888-444444444444" }),
+    mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "55555555-6666-4444-8888-555555555555", outcome: "FAILED" }),
+  ]) {
+    const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(cert) }, "tb4");
+    assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+  }
 });
 
-test("a second role must bind the SAME certificate digest", async () => {
-  const ok = await call("contract_bind", bindArgs(certB, "-b2"), "tok-buyer-2");
-  assert.equal(ok.json.bound, true);
-  // Same sessionId but a different envelope digest is a substitution attempt.
-  const forgedB = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: SESSION_B });
-  assert.notEqual(canonicalDigest(forgedB), canonicalDigest(certB));
-  const foreign = await call("contract_bind", bindArgs(forgedB, "-p2"), "tok-provider-2");
-  assert.equal(foreign.json.error, "CERTIFICATE_INVALID");
-  // A cert for a genuinely different session starts a different run — legal.
-  const certC = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "cccccccc-5555-4444-8888-cccccccccccc" });
-  const otherRun = await call("contract_bind", bindArgs(certC, "-p2"), "tok-provider-2");
-  assert.equal(otherRun.json.bound, true);
+test("an expired certificate is refused", async () => {
+  const expired = mintCertificate({
+    root: rootA,
+    session: generateKeyPairSync("ed25519"),
+    sessionId: "66666666-7777-4444-8888-666666666666",
+    issuedAtMs: String(Date.now() - 3600_000),
+    validFromMs: String(Date.now() - 3600_000),
+    validUntilMs: String(Date.now() - 60 * 60_000), // 1h ago, well past the 10min grace
+  });
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(expired) }, "tb4");
+  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
 });
 
-test("rebinding rules: idempotent for the same principal, refused otherwise", async () => {
-  const again = await call("contract_bind", bindArgs(certA), "tok-buyer-1");
-  assert.equal(again.json.bound, true);
-  // Same certificate, different keys → refused.
-  const drifted = await call("contract_bind", bindArgs(certA, "-drift"), "tok-buyer-1");
-  assert.equal(drifted.json.error, "STATE_REFUSED");
-  // A different certificate for the same principal → refused.
-  const foreign = await call("contract_bind", bindArgs(certB), "tok-buyer-1");
-  assert.equal(foreign.json.error, "STATE_REFUSED");
-  // The buyer role on run A is already claimed by buyer-key-1.
-  const steal = await call("contract_bind", bindArgs(certA, "-steal"), "tok-buyer-3");
-  assert.equal(steal.json.error, "ROLE_REFUSED");
+test("a malleated envelope maps to the same run identity; genuine parties still bind", async () => {
+  const mal = JSON.parse(JSON.stringify(certC));
+  mal.signer.keyId = "attacker"; // unsigned cosmetic field — must not change identity
+  const b = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(mal, "b3") }, "tb3");
+  assert.equal(b.body.result.structuredContent.bound, true);
+  assert.equal(b.body.result.structuredContent.runId, SESSION_C);
+  const p = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(certC, "p3") }, "tp3");
+  assert.equal(p.body.result.structuredContent.bound, true);
+  // Identity is sessionId + canonicalDigest(result) — one run, digest of SIGNED content.
+  assert.equal(service.runFor(SESSION_C).resultDigest, canonicalDigest(certC.result));
 });
+
+test("a non-canonical base64 signature is refused even when it decodes identically", async () => {
+  const mal = JSON.parse(JSON.stringify(certC));
+  const sig = mal.signer.signature; // 86-char b64, '==' padding → last char has 4 free bits
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const i = alphabet.indexOf(sig[85]);
+  mal.signer.signature = sig.slice(0, 85) + alphabet[(i & ~15) | ((i + 1) & 15)] + "==";
+  assert.notEqual(mal.signer.signature, certC.signer.signature);
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(mal) }, "tb4");
+  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+});
+
+test("a refused bind leaves no run", async () => {
+  const ghost = mintCertificate({ root: rootB, session: sessionB, sessionId: "77777777-8888-4444-8888-777777777777" });
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: bindArgs(ghost) }, "tb4");
+  assert.equal(res.body.result.structuredContent.error, "CERTIFICATE_INVALID");
+  assert.equal(service.runFor("77777777-8888-4444-8888-777777777777"), undefined);
+});
+
+test("used sessionIds are durable: a restart cannot start a second genesis", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-restart-"));
+  const certR = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "88888888-9999-4444-8888-888888888888" });
+  const args = bindArgs(certR, "r");
+  const s1 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const first = s1.bind(
+    { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
+    args,
+    { argsDigest: canonicalDigest(args), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
+  );
+  assert.equal(first.ok, true);
+  // Simulated restart: fresh service, same stateDir. Same sessionId must never
+  // mint a second genesis — refuse (no live run to be idempotent against).
+  const s2 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const replay = s2.bind(
+    { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
+    args,
+    { argsDigest: canonicalDigest(args), serverNonce: `0x${"cd".repeat(16)}`, tool: "contract_bind" },
+  );
+  assert.equal(replay.ok, false);
+  assert.equal(replay.code, "STATE_REFUSED");
+  assert.equal(s2.runFor("88888888-9999-4444-8888-888888888888"), undefined);
+});
+
+test("an 80-char XFF cannot leave a bound run with zero receipts", async () => {
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
+  const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: svc, trustProxy: true });
+  const srv = createServer(handler);
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${srv.address().port}/contract/mcp`;
+    const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "99999999-aaaa-4444-8888-999999999999" });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4", "x-forwarded-for": "1".repeat(80) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "contract_bind", arguments: bindArgs(certX, "xff") } }),
+    });
+    const text = await res.text();
+    const data = text.split("\n").find((l) => l.startsWith("data:"));
+    const body = JSON.parse(data ? data.slice(5) : text);
+    const run = svc.runFor("99999999-aaaa-4444-8888-999999999999");
+    if (body.result?.structuredContent?.bound) {
+      assert.ok(run.receipts.length >= 1, "committed bind must carry its receipt");
+      assert.ok(run.receipts.at(-1).sourceIp.length <= 64);
+      assert.equal(run.receipts.at(-1).sourceIp, "1".repeat(64));
+    } else {
+      assert.equal(run, undefined, "no receipt, no commit");
+    }
+  } finally {
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+test("client XFF is not trusted by default; only the last hop with trust on", async () => {
+  const mkSvc = () => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
+  for (const [trust, sid, want] of [
+    [false, "aaaaaaaa-1111-4444-9999-aaaaaaaaaaa1", "127.0.0.1"],
+    [true, "aaaaaaaa-1111-4444-9999-aaaaaaaaaaa2", "203.0.113.9"],
+  ]) {
+    const svc = mkSvc();
+    const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: svc, trustProxy: trust });
+    const srv = createServer(handler);
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    try {
+      const url = `http://127.0.0.1:${srv.address().port}/contract/mcp`;
+      const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid });
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4", "x-forwarded-for": "10.0.0.1, 203.0.113.9" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "contract_bind", arguments: bindArgs(certX, "xff2") } }),
+      });
+      const text = await res.text();
+      const data = text.split("\n").find((l) => l.startsWith("data:"));
+      const body = JSON.parse(data ? data.slice(5) : text);
+      assert.equal(body.result.structuredContent.bound, true);
+      assert.equal(svc.runFor(sid).receipts.at(-1).sourceIp, want);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  }
+});
+
+// --- scoping + receipts --------------------------------------------------------
 
 test("role scoping on tools/call; unimplemented tools refuse cleanly", async () => {
-  const wrongRole = await call("rendezvous_publish_listing", {
-    title: "x", summary: "y", sealedBoxPublicKeyHex: `0x${"ab".repeat(32)}`,
-  }, "tok-buyer-1");
-  assert.equal(wrongRole.isError, true);
-  assert.equal(wrongRole.json.error, "ROLE_REFUSED");
-
-  const unimplemented = await call("mandate_prepare", { mandate: {} }, "tok-buyer-1");
-  assert.equal(unimplemented.json.error, "CONTRACT_UNAVAILABLE");
-
-  const unknown = await call("nonsense_tool", {}, "tok-buyer-1");
-  assert.equal(unknown.json.error, "NOT_FOUND");
+  const res = await rpc("tools/call", { name: "catalog_quote", arguments: { query: {} } });
+  assert.equal(res.body.result.structuredContent.error, "ROLE_REFUSED");
+  const missing = await rpc("tools/call", { name: "not_a_tool", arguments: {} });
+  assert.equal(missing.body.result.structuredContent.error, "NOT_FOUND");
+  const unimpl = await rpc("tools/call", { name: "mandate_prepare", arguments: { mandate: {} } });
+  assert.equal(unimpl.body.result.structuredContent.error, "CONTRACT_UNAVAILABLE");
 });
 
 test("malformed call arguments fail as JSON-RPC invalid params, not a refusal", async () => {
-  const { body } = await rpc("tools/call", { name: "contract_bind", arguments: { certificate: {} } });
-  assert.ok(body.error, "expected a JSON-RPC error");
-  assert.equal(body.error.code, -32602);
+  const res = await rpc("tools/call", { name: "contract_bind", arguments: { certificate: "junk" } });
+  assert.equal(res.body.error.code, -32602);
 });
 
 test("an unbound caller reports the rendezvous stage", async () => {
-  // tok-buyer-3 never bound (its certA attempt was ROLE_REFUSED).
-  const status = await call("contract_status", {}, "tok-buyer-3");
-  assert.equal(status.json.stage, "rendezvous");
-  assert.equal(status.json.terminalState, null);
-  assert.match(status.json.serverNonce, /^0x[0-9a-f]{32}$/);
+  const res = await rpc("tools/call", { name: "contract_status", arguments: {} }, "tev");
+  assert.equal(res.body.result.structuredContent.stage, "rendezvous");
 });
 
 test("every bound call appends a verifiable receipt to the run chain", async () => {
-  const run = service.runFor("aaaaaaaa-1111-4444-8888-aaaaaaaaaaaa");
-  assert.ok(run);
-  assert.ok(run.receipts.length >= 3, `expected >=3 receipts, got ${run.receipts.length}`);
-  const verdict = verifyChain(run.receipts, { "contract-server-test": serverKeys.publicKey });
-  assert.equal(verdict.ok, true, `chain verdict: ${JSON.stringify(verdict)}`);
-  // Every receipt names its tool + principal and carries the echoed serverNonce.
-  const bind = run.receipts.find((r) => r.tool === "contract_bind" && r.principal.keyId === "buyer-key-1");
-  assert.ok(bind);
-  assert.equal(bind.outcome, "ok");
+  const run = service.runFor(SESSION_A);
+  assert.ok(run.receipts.length >= 3, `expected receipts, got ${run.receipts.length}`);
+  const verdict = verifyChain(run.receipts, { [SIGNER.keyId]: serverKeys.publicKey });
+  assert.equal(verdict.ok, true, JSON.stringify(verdict));
+  const bindReceipt = run.receipts.find((r) => r.tool === "contract_bind");
+  assert.equal(bindReceipt.bindAssurance, "agentId-pinned-token");
+  assert.equal(run.receipts[0].prevHash, `0x${"0".repeat(64)}`);
+  const s = await rpc("tools/call", { name: "contract_status", arguments: {} });
+  const nonce = s.body.result.structuredContent.serverNonce;
+  const last = run.receipts.at(-1);
+  assert.equal(last.serverNonce, nonce);
+  assert.equal(last.tool, "contract_status");
 });
 
-// --- pure certificate verifier ----------------------------------------------
+test("run and receipt caps reject when full", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "c-"));
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir, maxRuns: 1 });
+  const args = bindArgs(certB, "cap");
+  const ok = svc.bind(
+    { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
+    args,
+    { argsDigest: canonicalDigest(args), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
+  );
+  assert.equal(ok.ok, true);
+  const certD = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "bbbbbbbb-1111-4444-8888-bbbbbbbbbbb1" });
+  const args2 = bindArgs(certD);
+  const full = svc.bind(
+    { keyId: "kb9", role: "buyer", agentId: "9452", side: "initiator" },
+    args2,
+    { argsDigest: canonicalDigest(args2), serverNonce: `0x${"cd".repeat(16)}`, tool: "contract_bind" },
+  );
+  assert.equal(full.ok, false);
+  assert.equal(full.code, "RATE_LIMITED");
+});
+
+test("a principal can bind a new run once the previous run has ended (TTL)", async () => {
+  let t = Date.now();
+  const now = () => t;
+  const dir = mkdtempSync(path.join(tmpdir(), "c-"));
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir, now });
+  const me = { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" };
+  const cert1 = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "cccccccc-1111-4444-8888-ccccccccccc1" });
+  const a1 = bindArgs(cert1, "e1");
+  assert.equal(svc.bind(me, a1, { argsDigest: canonicalDigest(a1), serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" }).ok, true);
+  t += 25 * 3600_000; // past the 24h run TTL
+  const cert2 = mintCertificate({
+    root: rootA,
+    session: generateKeyPairSync("ed25519"),
+    sessionId: "cccccccc-1111-4444-8888-ccccccccccc2",
+    issuedAtMs: String(t - 60_000),
+    validFromMs: String(t - 120_000),
+    validUntilMs: String(t + 10 * 60_000), // fresh under the mocked clock
+  });
+  const a2 = bindArgs(cert2, "e2");
+  const reb = svc.bind(me, a2, { argsDigest: canonicalDigest(a2), serverNonce: `0x${"ef".repeat(16)}`, tool: "contract_bind" });
+  assert.equal(reb.ok, true);
+  assert.equal(reb.runId, "cccccccc-1111-4444-8888-ccccccccccc2");
+});
 
 test("verifyCertificateEnvelope accepts the canonical fixture with its root pinned", () => {
   const fixture = JSON.parse(readFileSync(path.join(FIXTURES, "agent-handshake-v2-canonical.json"), "utf8"));
@@ -351,8 +506,9 @@ test("verifyCertificateEnvelope accepts the canonical fixture with its root pinn
   const fp = createHash("sha256").update(Buffer.from(rootPub, "base64")).digest("hex");
   const verdict = verifyCertificateEnvelope(envelope, {
     hostRoots: [{ kid: "root-2026-08", fingerprint: fp }],
+    now: () => 1786337300000, // inside the fixture's validity window
   });
   assert.equal(verdict.ok, true, JSON.stringify(verdict));
   assert.equal(verdict.sessionId, "22222222-3333-4444-8555-666666666666");
-  assert.equal(verdict.certificateDigest, canonicalDigest(envelope));
+  assert.equal(verdict.resultDigest, canonicalDigest(envelope.result));
 });

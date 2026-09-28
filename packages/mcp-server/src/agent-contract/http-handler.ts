@@ -1,10 +1,11 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
 import { buildContractServer } from "./server.js";
-import { createContractService, type ContractPrincipal, type ContractService } from "./service.js";
+import { createContractService, type ContractPrincipal, type ContractService, type ContractSide } from "./service.js";
 import type { ContractSigner } from "./envelope.js";
 import type { HostRootPin } from "./certificate.js";
 import type { ContractRole } from "./schemas.js";
@@ -14,54 +15,97 @@ import type { ContractRole } from "./schemas.js";
  * handshake handler: stateless StreamableHTTP transports, a per-principal
  * call bucket, and auth that fails closed.
  *
- * Auth is bearer-token based: the harness provisions one token per role
- * (LLD §8 — credential sets are disjoint per role). `authenticate` maps a
- * request's Authorization header to `{keyId, role}`; a null return is a 401.
- * There is no anonymous mode — a contract surface without tokens refuses
- * every request.
+ * Auth (C2, orchestrator decision): `CONTRACT_AUTH_TOKENS` provisions one
+ * `token:role:keyId:agentId:side` entry per principal. The token digest map
+ * is a flat array compared with `timingSafeEqual` — never a plain-object
+ * lookup, so `Bearer constructor`/`__proto__` can never resolve to a
+ * principal. No anonymous mode: an empty token set refuses every request.
+ *
+ * `sourceIp` is the socket peer, or the LAST X-Forwarded-For hop (the one
+ * appended by our own proxy) — and only when `CONTRACT_TRUST_PROXY=1` was
+ * set, since a client-supplied XFF is otherwise pure spoof. Values are
+ * sanitized to printable ASCII and truncated to the receipt schema's 64.
  */
 
 const CONTRACT_PATH = "/contract/mcp";
+const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+
+export interface ContractTokenEntry {
+  /** sha256 of the raw bearer token — the token itself is never retained. */
+  readonly digest: Buffer;
+  readonly principal: ContractPrincipal;
+}
 
 /**
- * Parse `CONTRACT_AUTH_TOKENS`: comma-separated `token:role:keyId` entries.
- * Tokens may not contain `:` or whitespace; role is buyer|provider. Throws on
- * malformed entries — bad config must fail loudly at startup, not silently
- * drop an entry.
+ * Parse `CONTRACT_AUTH_TOKENS`: comma-separated `token:role:keyId:agentId:side`
+ * entries. Throws on malformed entries, duplicate tokens, or tokens containing
+ * `:` — bad config must fail loudly at startup, not lazily on traffic.
  */
-export function parseContractTokens(raw: string | undefined): Record<string, ContractPrincipal> {
-  const out: Record<string, ContractPrincipal> = {};
+export function parseContractTokens(raw: string | undefined): ContractTokenEntry[] {
+  const out: ContractTokenEntry[] = [];
+  const seen = new Set<string>();
   for (const entry of (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
     const parts = entry.split(":").map((p) => p.trim());
-    if (parts.length !== 3 || parts.some((p) => p.length === 0)) {
-      throw new Error(`malformed CONTRACT_AUTH_TOKENS entry (want token:role:keyId)`);
+    if (parts.length !== 5 || parts.some((p) => p.length === 0)) {
+      throw new Error(`malformed CONTRACT_AUTH_TOKENS entry (want token:role:keyId:agentId:side)`);
     }
-    const [token, role, keyId] = parts as [string, string, string];
+    const [token, role, keyId, agentId, side] = parts as [string, string, string, string, string];
     if (role !== "buyer" && role !== "provider") {
       throw new Error(`CONTRACT_AUTH_TOKENS: unknown role "${role}"`);
     }
-    out[token] = { keyId, role: role as ContractRole };
+    if (side !== "initiator" && side !== "responder") {
+      throw new Error(`CONTRACT_AUTH_TOKENS: unknown side "${side}"`);
+    }
+    if (!DECIMAL.test(agentId)) {
+      throw new Error(`CONTRACT_AUTH_TOKENS: agentId "${agentId}" is not a decimal ERC-8004 id`);
+    }
+    if (seen.has(token)) {
+      throw new Error(`CONTRACT_AUTH_TOKENS: duplicate token`);
+    }
+    seen.add(token);
+    out.push({
+      digest: createHash("sha256").update(token, "utf8").digest(),
+      principal: { keyId, role: role as ContractRole, agentId, side: side as ContractSide },
+    });
   }
   return out;
 }
 
-/** Bearer-token authenticate over a parsed token map. */
+/**
+ * Bearer-token authenticate over sha256 digests with `timingSafeEqual` — the
+ * loop runs every entry so lookup time doesn't leak which token matched.
+ */
 export function tokenAuthenticator(
-  tokens: Readonly<Record<string, ContractPrincipal>>,
+  tokens: readonly ContractTokenEntry[],
 ): (headers: IncomingHttpHeaders) => ContractPrincipal | null {
   return (headers) => {
     const raw = headers.authorization;
     const header = (Array.isArray(raw) ? raw[0] : raw) ?? "";
-    const match = /^Bearer\s+(.+)$/i.exec(header);
+    const match = /^Bearer\s+(\S+)\s*$/i.exec(header);
     if (match === null) return null;
-    return tokens[match[1].trim()] ?? null;
+    const candidate = createHash("sha256").update(match[1], "utf8").digest();
+    for (const entry of tokens) {
+      if (timingSafeEqual(candidate, entry.digest)) return entry.principal;
+    }
+    return null;
   };
 }
 
-function clientIp(headers: IncomingHttpHeaders, remoteAddress: string | undefined): string {
-  const xff = (Array.isArray(headers["x-forwarded-for"]) ? headers["x-forwarded-for"][0] : headers["x-forwarded-for"]) ?? "";
-  const first = xff.split(",")[0]?.trim();
-  return first || remoteAddress || "unknown";
+function clientIp(
+  headers: IncomingHttpHeaders,
+  remoteAddress: string | undefined,
+  trustProxy: boolean,
+): string {
+  let ip = remoteAddress ?? "";
+  if (trustProxy) {
+    const xff = (Array.isArray(headers["x-forwarded-for"]) ? headers["x-forwarded-for"][0] : headers["x-forwarded-for"]) ?? "";
+    // The LAST hop is the one our own proxy appended; earlier hops are
+    // attacker-controlled input the proxy merely forwards.
+    const hops = xff.split(",").map((h) => h.trim()).filter(Boolean);
+    if (hops.length > 0) ip = hops[hops.length - 1];
+  }
+  const clean = ip.replace(/[^\x21-\x7e]/g, "").slice(0, 64);
+  return clean || "unknown";
 }
 
 export function createContractHttpHandler(options: {
@@ -70,6 +114,7 @@ export function createContractHttpHandler(options: {
   signer: ContractSigner;
   service?: ContractService;
   callsPerMinute?: number;
+  trustProxy?: boolean;
   now?: () => number;
   onRateLimited?: () => void;
 }) {
@@ -103,7 +148,7 @@ export function createContractHttpHandler(options: {
     const server = buildContractServer({
       principal,
       service,
-      sourceIp: clientIp(req.headers, req.socket.remoteAddress),
+      sourceIp: clientIp(req.headers, req.socket.remoteAddress, options.trustProxy === true),
     });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { void transport.close(); void server.close(); });

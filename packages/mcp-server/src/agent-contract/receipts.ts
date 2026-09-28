@@ -40,6 +40,7 @@ export const serverReceiptSchema = z.object({
     version: z.string().min(1).max(64),
   }).strict().optional(),
   sourceIp: z.string().min(1).max(64).optional(),
+  bindAssurance: z.literal("agentId-pinned-token").optional(),
   serverNonce: z.string().regex(/^0x[0-9a-f]{32}$/),
   responseDigest: digestHex,
   prevHash: digestHex,
@@ -77,6 +78,7 @@ export function makeReceipt(
     mcpSessionId?: string;
     clientInfo?: { name: string; version: string };
     sourceIp?: string;
+    bindAssurance?: "agentId-pinned-token";
     serverNonce?: string;
     ts?: number;
   },
@@ -97,6 +99,7 @@ export function makeReceipt(
     mcpSessionId: fields.mcpSessionId,
     clientInfo: fields.clientInfo,
     sourceIp: fields.sourceIp,
+    bindAssurance: fields.bindAssurance,
     serverNonce: fields.serverNonce ?? newServerNonce(),
     responseDigest: fields.responseDigest,
     prevHash: prev === null ? RECEIPT_CHAIN_GENESIS : canonicalDigest(prev),

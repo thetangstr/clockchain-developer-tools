@@ -1,9 +1,10 @@
-import { createHash, createPrivateKey, generateKeyPairSync, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   createServer,
   type IncomingHttpHeaders,
   type IncomingMessage,
+  type Server,
   type ServerResponse,
 } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -67,9 +68,8 @@ import { createStatusCache, type PerformanceSnapshot, type StatusDeps } from "./
 import { renderStatusPage } from "./status-page.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 import { V2RoleAccessError } from "./agent-handshake/v2/access.js";
-import { createContractHttpHandler, parseContractTokens, tokenAuthenticator } from "./agent-contract/http-handler.js";
-import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./agent-contract/certificate.js";
-import type { ContractSigner } from "./agent-contract/envelope.js";
+import { createContractHttpHandler } from "./agent-contract/http-handler.js";
+import { loadContractConfig } from "./agent-contract/config.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -427,7 +427,7 @@ export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promis
   });
 }
 
-export async function runHttp(): Promise<void> {
+export async function runHttp(): Promise<Server> {
   // PORT is injected by Cloud Run / most PaaS hosts (8080); MCP_PORT is our own
   // override; 3000 is the local default. Honor them in that order.
   const port = Number(process.env.PORT ?? process.env.MCP_PORT ?? "3000");
@@ -502,48 +502,28 @@ export async function runHttp(): Promise<void> {
   const allowChainVerify = keyedWindowLimiter(Number(process.env.STANDALONE_HANDSHAKE_VERIFY_PER_MINUTE ?? "60"), 60_000, Date.now);
 
   // ---- /contract/mcp (agent-contract business surface, N4b) ---------------
-  // Bearer auth is per-role: CONTRACT_AUTH_TOKENS holds "token:role:keyId"
-  // entries. Unset or empty → every call is a 401 (fail closed, never open).
-  // Host roots pin the handshake-host signing root that contract_bind trusts;
-  // CONTRACT_HOST_ROOTS ("kid:fingerprint,...") overrides the published
-  // default. The receipt/envelope signer is CONTRACT_SERVER_ED25519_SEED
-  // (base64 32-byte seed); when unset an ephemeral dev key is generated per
-  // process — fine locally, never acceptable where receipts must be verified.
+  // Off by default: the route only exists when CONTRACT_MCP_ENABLED=1.
+  // Config is loaded EAGERLY here (startup), never per request: enabled with
+  // a broken CONTRACT_AUTH_TOKENS/CONTRACT_HOST_ROOTS or a missing
+  // CONTRACT_SERVER_ED25519_SEED (and no CONTRACT_ALLOW_EPHEMERAL_KEY=1)
+  // verdicts "misconfigured" → the route refuses with a deterministic 503.
+  const contractConfig = loadContractConfig(process.env);
+  if (contractConfig.kind === "misconfigured") {
+    console.error(`[clockchain-mcp] /contract/mcp misconfigured (closed): ${contractConfig.reason}`);
+  } else if (contractConfig.kind === "ready" && contractConfig.signerEphemeral) {
+    console.warn(JSON.stringify({ event: "contract_ephemeral_signer", note: "ephemeral dev signer in use — receipts are not durably verifiable", keyId: contractConfig.signer.keyId }));
+  }
   let contractHandler: ReturnType<typeof createContractHttpHandler> | undefined;
   const getContractHandler = () => {
     if (contractHandler) return contractHandler;
-    const tokens = parseContractTokens(process.env.CONTRACT_AUTH_TOKENS);
-    const hostRoots: readonly HostRootPin[] = (process.env.CONTRACT_HOST_ROOTS ?? "")
-      .split(",").map((s) => s.trim()).filter(Boolean)
-      .map((entry) => {
-        const [kid, fingerprint] = entry.split(":", 2);
-        if (!kid || !/^[0-9a-f]{64}$/.test(fingerprint ?? "")) {
-          throw new Error("malformed CONTRACT_HOST_ROOTS entry (want kid:sha256fingerprint)");
-        }
-        return Object.freeze({ kid, fingerprint });
-      });
-    const seedB64 = (process.env.CONTRACT_SERVER_ED25519_SEED ?? "").trim();
-    let signer: ContractSigner;
-    if (seedB64) {
-      const seed = Buffer.from(seedB64, "base64");
-      if (seed.length !== 32) throw new Error("CONTRACT_SERVER_ED25519_SEED must be a base64 32-byte seed");
-      signer = {
-        keyId: process.env.CONTRACT_SERVER_KEY_ID ?? "contract-server",
-        privateKey: createPrivateKey({
-          key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]),
-          format: "der",
-          type: "pkcs8",
-        }),
-      };
-    } else {
-      console.warn(JSON.stringify({ event: "contract_ephemeral_signer", note: "CONTRACT_SERVER_ED25519_SEED unset — receipts/envelopes signed with a per-process dev key" }));
-      signer = { keyId: "contract-server-dev", privateKey: generateKeyPairSync("ed25519").privateKey };
-    }
+    if (contractConfig.kind !== "ready") throw new Error("contract route is not configured");
     contractHandler = createContractHttpHandler({
-      authenticate: tokenAuthenticator(tokens),
-      hostRoots: hostRoots.length > 0 ? hostRoots : PUBLISHED_HOST_ROOTS,
-      signer,
-      callsPerMinute: Number(process.env.CONTRACT_CALLS_PER_MINUTE ?? "120"),
+      authenticate: contractConfig.authenticate,
+      hostRoots: contractConfig.hostRoots,
+      signer: contractConfig.signer,
+      service: contractConfig.service,
+      callsPerMinute: contractConfig.callsPerMinute,
+      trustProxy: contractConfig.trustProxy,
       onRateLimited: () => rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) }),
     });
     return contractHandler;
@@ -1141,9 +1121,19 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
-    // Agent-contract business surface (LLD §3). Bearer-token role auth; fails
-    // closed when CONTRACT_AUTH_TOKENS is unset. Stateless per request.
+    // Agent-contract business surface (LLD §3). Off unless explicitly enabled;
+    // enabled-but-misconfigured refuses closed instead of half-serving.
     if (pathOf(req.url) === "/contract/mcp") {
+      if (contractConfig.kind === "disabled") {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      if (contractConfig.kind === "misconfigured") {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "contract_unavailable" }));
+        return;
+      }
       try {
         await getContractHandler()(req, res);
       } catch {
@@ -1529,14 +1519,18 @@ export async function runHttp(): Promise<void> {
     }
   });
 
-  httpServer.listen(port, () => {
-    console.error(`[clockchain-mcp] http server listening on :${port}`);
-    console.error(
-      `[clockchain-mcp] self-serve tokens: ${
-        selfServeEnabled
-          ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
-          : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
-      }`,
-    );
+  await new Promise<void>((resolve) => {
+    httpServer.listen(port, () => {
+      console.error(`[clockchain-mcp] http server listening on :${port}`);
+      console.error(
+        `[clockchain-mcp] self-serve tokens: ${
+          selfServeEnabled
+            ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
+            : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
+        }`,
+      );
+      resolve();
+    });
   });
+  return httpServer;
 }

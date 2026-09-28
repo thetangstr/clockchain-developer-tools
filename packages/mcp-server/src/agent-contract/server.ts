@@ -77,25 +77,24 @@ export function buildContractServer(options: {
     let outcome: CallOutcome;
 
     if (name === "contract_bind") {
+      // P-GAP: the caller proves it holds the bearer token pinned to a party's
+      // agentId, but NOT that it possesses that party's handshake session key.
+      // Closing the gap needs the handshake helper to sign a bind statement;
+      // until then the result/receipt carry bindAssurance:"agentId-pinned-token"
+      // so consumers know exactly what was proven.
       const bound = service.bind(
         principal,
         parsed.data as { certificate: unknown; signerKey: unknown; approvalKey: unknown },
-        { argsDigest, sourceIp: options.sourceIp },
+        { argsDigest, serverNonce, tool: name, sourceIp: options.sourceIp },
       );
       if (!bound.ok) {
         outcome = refusal(bound.code);
+        // A refused bind never creates or alters run state — the refusal is
+        // receipted only on an ALREADY-EXISTING run (evidence, not state).
+        if (run !== undefined) recordCall(run, name, argsDigest, outcome, serverNonce);
       } else {
-        outcome = ok({
-          runId: bound.runId,
-          role: bound.role,
-          bound: true,
-          boundAt: bound.boundAt,
-          serverNonce,
-        });
+        outcome = ok(bound.result);
       }
-      // The bind call's own receipt lands on the run it created/joined.
-      const target = bound.ok ? bound.run : run;
-      if (target !== undefined) recordCall(target, name, argsDigest, outcome, serverNonce);
       return asResult(outcome);
     }
 
