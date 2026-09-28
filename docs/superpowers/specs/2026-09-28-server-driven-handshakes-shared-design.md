@@ -1,9 +1,9 @@
 # Server-driven handshakes: a shared design for Standalone and Agent Handshake v2
 
-**Date:** 2026-09-28 · **Status:** draft for review (plan only, no code) · rev 4
+**Date:** 2026-09-28 · **Status:** draft for review (plan only, no code) · rev 5
 **Rev history:** rev 1 was Standalone-only; rev 2 folded in an independent design review; rev 3
 turns it into a shared design at the founder's direction ("it should be a shared design
-that can be used by the travel MVP"), after a cross-check with the travel MVP session. Rev 4 applies the travel review of rev 3.
+that can be used by the travel MVP"), after a cross-check with the travel MVP session. Rev 4 applies the travel review of rev 3. Rev 5 adds supervised sessions (S1–S4) after the second Muse run failed and could only be recovered by a human relay.
 **Builds on:** `2026-09-14-standalone-handshake-design.md`, the Agent Handshake v2 code in `packages/mcp-server/src/agent-handshake/v2/`
 
 ## Why
@@ -166,6 +166,53 @@ ERC-8004 identity lookups still use the RPC.
     makes handles durable, a deploy during the bind window loses the handle, so the
     notice/freeze rule applies.
 - **Standalone use:** none required, but the same module is available.
+
+### Supervised sessions (S1–S4): no human relay, ever
+
+**Rule:** no agent may ever need its human to relay something to the other agent. Anything
+one side needs from the other goes through the server, and people see what happened from
+the server, not by reading an assistant's screen.
+
+Evidence, from the 2026-09-28 second Muse run (staging session `fe08b229`):
+- Monica's readiness failed with `MANIFEST_MISMATCH`: her data-handling class differed from
+  the Initiator's. The session went terminal and the invitation was burned.
+- Monica could only ask her human to "get a fresh invitation plus the exact purpose from
+  your Claude Code agent". In real use that message never reaches the other agent.
+- She also misstated the cause (she said the purpose, not the data class). The server knew
+  the precise reason; her summary didn't.
+
+- **S1. Preview before accepting.** A public, read-only `handshake_preview_invitation { invitation }`
+  returns the terms the Responder must match: purpose, channel limits, identity policy, the
+  required `dataHandlingClass`, and the invitation expiry. It burns nothing and needs no
+  access. Its free-text fields are marked untrusted. With B4 this becomes
+  `review_invitation`.
+- **S2. Failed checks can be recovered.** A readiness that fails the checklist no longer
+  ends the session:
+  - The session enters `readiness_retry`. The invitation stays claimable by the **same**
+    Responder, up to 3 attempts, and only within the invitation TTL.
+  - Failure codes are specific: `PURPOSE_MISMATCH`, `DATA_CLASS_MISMATCH`,
+    `AUTHORITY_INVALID`, `IDENTITY_UNVERIFIED`. Each comes with a machine-readable
+    `required` object, e.g. `{ capabilityManifest.dataHandlingClass: "public" }`.
+  - The Responder's `handshake_next` returns `action: "fix_readiness"` with those details.
+  - The Initiator's `handshake_next` returns `wait` with templated status: "counterparty
+    correcting readiness (attempt 2/3, DATA_CLASS_MISMATCH)".
+  - After the last attempt, the session ends as `ready_failed` for both sides, with the
+    same reason.
+- **S3. Both sides hear the same facts, from the server.** Every terminal or blocking state
+  reaches **both** parties through `handshake_next`, with the precise reason code and the
+  next legitimate step (e.g. "the Initiator may issue a new invitation"). A templated
+  `tellYourUser` line gives the agent an accurate, non-speculative sentence to report.
+  Agents are told never to ask their human to relay anything to the counterparty.
+- **S4. The server keeps a timeline for supervision.** Every session keeps an append-only
+  event timeline:
+  - Events: invited, previewed, accepted/attempted, checklist result per attempt with
+    codes, consent per role, open, message (kind, seq, digest, never the body), close,
+    revoke, expire, abandon.
+  - Each event carries a timestamp and, where anchored, block and digest.
+  - Parties read their own session's timeline with `handshake_timeline { access }`.
+  - Operators read all sessions through an admin-only read API. This is the data source for
+    the Agent Contract ops dashboard (handshakes, contracts, negotiation steps).
+  - The timeline is persisted with B2. Bodies are never stored in it.
 
 ## Surface-specific changes
 
