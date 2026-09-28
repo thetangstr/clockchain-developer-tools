@@ -143,6 +143,12 @@ export function createBusinessOps(options: {
   signer: ContractSigner;
   now?: () => number;
   sim: SimWorld;
+  /**
+   * N4b-4 key validity at the source: when the published key's `validUntil`
+   * has passed this returns false — no envelope may be signed, so dispatch
+   * refuses outright (the receipted caller can never reach it anyway).
+   */
+  signingOpen?: () => boolean;
   /** Required per-role §13 policy pins (`CONTRACT_POLICY_DIGESTS`). */
   policyDigests: Readonly<Record<ContractRole, string>>;
   /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
@@ -158,6 +164,7 @@ export function createBusinessOps(options: {
 }): BusinessOps {
   const now = options.now ?? Date.now;
   const sim = options.sim;
+  const signingOpen = options.signingOpen ?? (() => true);
   const principals = options.principals ?? new Map<string, string>();
   // In-memory fallback ledger (no state dir): keeps the mandate's expiry so
   // entries past expiresAt can be pruned — same rule as the durable ledger,
@@ -452,6 +459,9 @@ export function createBusinessOps(options: {
     args: Record<string, unknown>,
     serverNonce: string,
   ): BusinessOutcome {
+    // N4b-4: a signer past its published validUntil signs nothing — no
+    // envelope, no receipt — so no business call can dispatch at all.
+    if (!signingOpen()) return refuse("CONTRACT_UNAVAILABLE");
     switch (tool) {
       // -- rendezvous / discovery (pre-run) -----------------------------------
       case "rendezvous_publish_listing": {

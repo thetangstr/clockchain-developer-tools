@@ -518,6 +518,12 @@ export function createContractService(options: {
   /** N4b-3: retained pre-bind segments per principal (default 8). */
   preBindMaxSegments?: number;
   /**
+   * N4b-4: the published key's `validUntil` (ms epoch; null/undefined = no
+   * expiry). Past it, the server REFUSES TO SIGN — no receipts, no envelopes,
+   * so no call may dispatch at all (everything is evidenced or refused).
+   */
+  signerValidUntilMs?: number | null;
+  /**
    * §13 policy pins, REQUIRED (N4b-2b fix): `CONTRACT_POLICY_DIGESTS` —
    * `buyer:0x…,provider:0x…`. Approval records must carry exactly the role's
    * pinned digest; no pin means no consequential action can ever pass.
@@ -549,6 +555,13 @@ export function createContractService(options: {
   const preBindChains = new Map<string, PreBindSegment[]>();
   const preBindSegmentMax = options.preBindSegmentMax ?? DEFAULT_PREBIND_SEGMENT_MAX;
   const preBindMaxSegments = options.preBindMaxSegments ?? DEFAULT_PREBIND_MAX_SEGMENTS;
+  /**
+   * N4b-4 key validity at the source: once the published `validUntil` has
+   * passed the signer is dead — checked in the receipt preflight AND at every
+   * makeReceipt call site so nothing executes unevidenced.
+   */
+  const signerValidUntilMs = options.signerValidUntilMs ?? null;
+  const signingOpen = (): boolean => signerValidUntilMs === null || now() <= signerValidUntilMs;
   let releaseLock: (() => void) | undefined;
   let usedSessions: Map<string, string> = new Map();
   let usedMandates: Map<string, UsedMandate> = new Map();
@@ -838,8 +851,9 @@ export function createContractService(options: {
       return { ok: false, code: "RATE_LIMITED" };
     }
 
-    // N4b-3: the receipt is built (and schema-validated) BEFORE any state
-    // mutation — a receipt that can't be built means the bind can't commit.
+    // N4b-3/N4b-4: the receipt is built (and schema-validated) BEFORE any
+    // state mutation — and signing is refused past the key's validUntil.
+    if (!signingOpen()) return { ok: false, code: "CONTRACT_UNAVAILABLE" };
     let receipt: ServerReceipt;
     try {
       receipt = makeReceipt(prevReceipt, {
@@ -942,6 +956,7 @@ export function createContractService(options: {
     signer: options.signer,
     now,
     sim,
+    signingOpen,
     policyDigests: options.policyDigests,
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
     claimMandate,
@@ -953,6 +968,7 @@ export function createContractService(options: {
     business,
     recordReceipt(run, fields) {
       evictEnded();
+      if (!signingOpen()) return { ok: false, code: "CONTRACT_UNAVAILABLE" };
       const count = run.receiptsByPrincipal.get(fields.principal.keyId) ?? 0;
       if (run.receipts.length >= maxReceiptsPerRun || count >= maxReceiptsPerPrincipal) {
         return { ok: false, code: "RATE_LIMITED" };
@@ -977,6 +993,9 @@ export function createContractService(options: {
     },
     checkReceiptEvidence(run, principal, fields) {
       evictEnded(); // same hygiene as the old canReceipt gate
+      // N4b-4: past the key's validUntil nothing can be signed — no receipt,
+      // no envelope — so the call is refused BEFORE any dispatch.
+      if (!signingOpen()) return { ok: false, code: "CONTRACT_UNAVAILABLE" };
       if (run !== undefined) {
         // Budget AND buildability, before any dispatch (N4b-3).
         const count = run.receiptsByPrincipal.get(principal.keyId) ?? 0;
@@ -1011,6 +1030,7 @@ export function createContractService(options: {
       // N4b-3: segments roll by count — capacity is never the reason a poll
       // is refused; a build failure (unreachable after the pre-dispatch
       // check) is a refusal, never a throw.
+      if (!signingOpen()) return { ok: false, code: "CONTRACT_UNAVAILABLE" };
       const segment = activePreBindSegment(principal.keyId);
       let receipt: ServerReceipt;
       try {

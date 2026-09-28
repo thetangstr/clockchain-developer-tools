@@ -147,6 +147,11 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
   if (keyValidUntilRaw !== "" && Number.isNaN(Date.parse(keyValidUntilRaw))) {
     return misconfigured("CONTRACT_SERVER_KEY_VALID_UNTIL is not an ISO-8601 timestamp");
   }
+  // N4b-4: an already-expired key can never sign — refuse to start.
+  const keyValidUntilMs = keyValidUntilRaw === "" ? null : Date.parse(keyValidUntilRaw);
+  if (keyValidUntilMs !== null && keyValidUntilMs <= Date.now()) {
+    return misconfigured("CONTRACT_SERVER_KEY_VALID_UNTIL is already in the past — rotate the key before serving");
+  }
   const publicKeyHex = `0x${Buffer.from(
     createPublicKey(signer.privateKey as Parameters<typeof createPublicKey>[0])
       .export({ format: "der", type: "spki" })
@@ -243,6 +248,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       expectedErc8004,
       policyDigests: policyDigests as { buyer: string; provider: string },
       principals,
+      // N4b-4: the service refuses to sign once the published window closes.
+      signerValidUntilMs: keyValidUntilMs,
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);
