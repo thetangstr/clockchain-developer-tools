@@ -46,6 +46,12 @@ export type ContractRouteConfig =
       readonly sessionTtlMs: number;
       /** Bearer token for the read-only observer receipt feed, if configured. */
       readonly observerToken?: string;
+      /**
+       * Bearer token for the verifier-scoped salt disclosure endpoint
+       * (`/contract/run-salt`, M4). Deliberately a SEPARATE credential from
+       * `observerToken` — the observer feed never discloses salts.
+       */
+      readonly verifierToken?: string;
       /** §13 pins: the exact policy digest each role's approvals must carry. */
       readonly policyDigests: Readonly<{ buyer: string; provider: string }>;
       /** Family-principal pin per buyer keyId (`CONTRACT_PRINCIPALS`). */
@@ -244,6 +250,9 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     sessionTtlMs: Number.isFinite(sessionTtlMs) ? sessionTtlMs : 30 * 60_000,
     ...(env.CONTRACT_OBSERVER_TOKEN !== undefined && env.CONTRACT_OBSERVER_TOKEN !== ""
       ? { observerToken: env.CONTRACT_OBSERVER_TOKEN }
+      : {}),
+    ...(env.CONTRACT_VERIFIER_TOKEN !== undefined && env.CONTRACT_VERIFIER_TOKEN !== ""
+      ? { verifierToken: env.CONTRACT_VERIFIER_TOKEN }
       : {}),
     policyDigests: policyDigests as { buyer: string; provider: string },
     principals,

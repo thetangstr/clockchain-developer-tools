@@ -1228,6 +1228,53 @@ export async function runHttp(): Promise<Server> {
       return;
     }
 
+    // M4: `GET /contract/run-salt?runId=…|keyId=…` — the VERIFIER-scoped salt
+    // disclosure endpoint. Deliberately a different credential from the
+    // observer token: the observer feed carries salted argsDigests, and the
+    // salt is what lets a verifier (not the observer) reconstruct them.
+    // Unset CONTRACT_VERIFIER_TOKEN → closed (404).
+    if (pathOf(req.url) === "/contract/run-salt") {
+      const token = contractConfig.kind === "ready" ? contractConfig.verifierToken : undefined;
+      if (contractConfig.kind !== "ready" || token === undefined) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      if (req.method !== "GET") {
+        res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "forbidden" }));
+        return;
+      }
+      const expected = createHash("sha256").update(token).digest();
+      const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
+      const presented = bearer ? createHash("sha256").update(bearer[1].trim()).digest() : null;
+      if (presented === null || !timingSafeEqual(presented, expected)) {
+        res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      if (!allowObserverFeed("verifier")) {
+        rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) });
+        res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "rate_limited" }));
+        return;
+      }
+      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
+      const keyIdQ = q.get("keyId");
+      const runIdQ = q.get("runId");
+      const salt = contractConfig.service.saltFor(
+        keyIdQ !== null ? { keyId: keyIdQ } : runIdQ !== null ? { runId: runIdQ } : {},
+      );
+      if (salt === undefined) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify(salt));
+      return;
+    }
+
     // A Responder exchanges the URL-fragment capability exactly once. The
     // capability is never sent in a query string and the response is never
     // cacheable. All public failures intentionally collapse to one code.

@@ -29,6 +29,17 @@ export const serverReceiptSchema = z.object({
   surface: z.enum(["handshake", "business", "anchoring"]),
   tool: z.string().min(1).max(64),
   argsDigest: digestHex,
+  /**
+   * M4 (N4b-3): which scheme `argsDigest` uses — `"canonical"` =
+   * `sha256(canonicalJson(args))`; `"hmac-sha256"` =
+   * `HMAC-SHA256(scopeSalt, canonicalJson(args))` where scopeSalt is the
+   * per-run `runSalt` (run receipts) or the per-principal pre-bind salt,
+   * disclosed only through the verifier-scoped `/contract/run-salt`
+   * endpoint. Cap-bearing calls (mandate_*, any `*Minor`/price/amount key)
+   * are always salted so the observer feed cannot leak caps to a brute
+   * force. Absent on receipts predating M4 — treat as `"canonical"`.
+   */
+  argsDigestScheme: z.enum(["canonical", "hmac-sha256"]).optional(),
   principal: z.object({
     role: z.enum(["buyer", "provider"]),
     keyId: z.string().min(1).max(64),
@@ -77,6 +88,8 @@ export function makeReceipt(
     runId: string;
     tool: string;
     argsDigest: string;
+    /** M4: the argsDigest scheme — salted digests are disclosed per scope. */
+    argsDigestScheme?: "canonical" | "hmac-sha256";
     principal: { role: "buyer" | "provider"; keyId: string };
     outcome: string;
     responseDigest: string;
@@ -102,6 +115,7 @@ export function makeReceipt(
     surface: fields.surface ?? "business",
     tool: fields.tool,
     argsDigest: fields.argsDigest,
+    argsDigestScheme: fields.argsDigestScheme,
     principal: fields.principal,
     outcome: fields.outcome,
     preBindHead: fields.preBindHead,

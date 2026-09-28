@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 /**
  * Canonical JSON per the pairing LLD §9: object keys sorted recursively, no
@@ -48,4 +48,33 @@ export function canonicalJson(value: unknown): string {
 /** sha256 of canonical JSON, `0x`-prefixed hex. */
 export function canonicalDigest(value: unknown): string {
   return `0x${createHash("sha256").update(canonicalJson(value), "utf8").digest("hex")}`;
+}
+
+/** HMAC-SHA256 over canonical JSON, `0x`-prefixed hex (M4 salted argsDigests). */
+export function saltedCanonicalDigest(saltHex: string, value: unknown): string {
+  return `0x${createHmac("sha256", Buffer.from(saltHex, "hex"))
+    .update(canonicalJson(value), "utf8")
+    .digest("hex")}`;
+}
+
+/**
+ * M4 (N4b-3): a call is CAP-BEARING — its arguments could leak a money value
+ * through a brute-forced argsDigest — when the tool is in the `mandate_*`
+ * family or any argument key carries an amount (`*Minor`, `price`, `cap`,
+ * `amount`, `fare`, `fee`, `total`, `cost` — matched case-insensitively at
+ * any depth). Cap-bearing receipts carry HMAC-SHA256(runSalt, args) instead
+ * of the plain canonicalDigest; the per-scope salt is disclosed only to the
+ * verifier endpoint, never to the observer feed.
+ */
+const AMOUNT_KEY = /^(?:.*_)?(?:cap|price|fare|amount|fee|total|cost)(?:minor|usd|cents|decimal)?$/i;
+export function isCapBearingCall(toolName: string, args: unknown): boolean {
+  if (toolName.startsWith("mandate_")) return true;
+  const scan = (v: unknown): boolean => {
+    if (v === null || typeof v !== "object") return false;
+    if (Array.isArray(v)) return v.some(scan);
+    return Object.keys(v as Record<string, unknown>).some(
+      (k) => AMOUNT_KEY.test(k) || scan((v as Record<string, unknown>)[k]),
+    );
+  };
+  return scan(args);
 }

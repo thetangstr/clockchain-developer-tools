@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, createHash, createPublicKey, sign as edSign } from "node:crypto";
+import { generateKeyPairSync, createHash, createHmac, createPublicKey, sign as edSign } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -22,7 +22,7 @@ const ENV_KEYS = [
   "CONTRACT_HOST_ROOTS", "CONTRACT_CALLS_PER_MINUTE", "CONTRACT_OBSERVER_TOKEN",
   "CONTRACT_POLICY_DIGESTS", "CONTRACT_PRINCIPALS", "CONTRACT_OBSERVER_PER_MINUTE",
   "CONTRACT_SERVER_KEY_VALID_FROM", "CONTRACT_SERVER_KEY_VALID_UNTIL",
-  "CONTRACT_SESSION_TTL_MS",
+  "CONTRACT_SESSION_TTL_MS", "CONTRACT_VERIFIER_TOKEN",
 ];
 
 const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
@@ -424,5 +424,91 @@ test("M3: the key endpoints stay closed when the contract surface is off", async
   try {
     assert.equal((await fetch(`${app.url}/contract/keys`)).status, 404);
     assert.equal((await fetch(`${app.url}/.well-known/mcp/server-card.json`)).status, 404);
+  } finally { await app.close(); }
+});
+
+// === M4: salted argsDigest for cap-bearing calls ==============================
+
+test("M4: mandate argsDigest is HMAC-salted; the salt is disclosed only to the verifier", async () => {
+  const app = await boot({
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_OBSERVER_TOKEN: "observer-secret",
+    CONTRACT_VERIFIER_TOKEN: "verifier-secret",
+  });
+  try {
+    // A cap-bearing call — mandate_prepare carries mandate.capMinor.
+    const mandateArgs = {
+      mandate: {
+        kind: "agent-contract.mandate/v1", mandateId: "m-salt-1",
+        capMinor: 500_000, currency: "USD",
+        allowedItineraryIds: ["IT-QW-ONESTOP"], expiresAt: "2030-01-01T00:00:00.000Z",
+      },
+      mandateSignature: `0x${"0".repeat(130)}`,
+    };
+    const call = await post(app.url, "tools/call", { name: "mandate_prepare", arguments: mandateArgs }, "tb1");
+    assert.ok(call.status === 200, JSON.stringify(call.body));
+
+    // Observer feed: the receipt's argsDigest is NOT the plain canonicalDigest.
+    const feed = await (await fetch(`${app.url}/contract/receipts?keyId=kb1`, {
+      headers: { authorization: "Bearer observer-secret" },
+    })).json();
+    const receipt = feed.receipts.find((r) => r.tool === "mandate_prepare");
+    assert.ok(receipt, "mandate_prepare receipt on the pre-bind chain");
+    const plain = canonicalDigest(mandateArgs);
+    assert.notEqual(receipt.argsDigest, plain, "cap-bearing argsDigest must be salted");
+    assert.equal(receipt.argsDigestScheme, "hmac-sha256");
+    // A NON-cap call keeps the plain digest.
+    await post(app.url, "tools/call", { name: "contract_status", arguments: {} }, "tb1");
+    const feed2 = await (await fetch(`${app.url}/contract/receipts?keyId=kb1`, {
+      headers: { authorization: "Bearer observer-secret" },
+    })).json();
+    const statusReceipt = feed2.receipts.find((r) => r.tool === "contract_status");
+    assert.equal(statusReceipt.argsDigest, canonicalDigest({}), "non-cap call keeps canonicalDigest");
+    assert.equal(statusReceipt.argsDigestScheme ?? "canonical", "canonical");
+
+    // Brute force without the salt fails: candidate caps digest to `plain`,
+    // never to the salted value (structural — the salt is 32 bytes).
+    for (const cap of [0, 479_000, 500_000, 1_000_000]) {
+      const candidate = { ...mandateArgs, mandate: { ...mandateArgs.mandate, capMinor: cap } };
+      assert.notEqual(canonicalDigest(candidate), receipt.argsDigest);
+    }
+
+    // The observer token CANNOT read the salt — wrong scope.
+    const obsAttempt = await fetch(`${app.url}/contract/run-salt?keyId=kb1`, {
+      headers: { authorization: "Bearer observer-secret" },
+    });
+    assert.equal(obsAttempt.status, 401);
+
+    // The verifier token discloses the principal's salt; the digest verifies.
+    const saltRes = await fetch(`${app.url}/contract/run-salt?keyId=kb1`, {
+      headers: { authorization: "Bearer verifier-secret" },
+    });
+    const saltDoc = await saltRes.json();
+    assert.equal(saltRes.status, 200, JSON.stringify(saltDoc));
+    const { salt } = saltDoc;
+    assert.match(salt, /^[0-9a-f]{64}$/);
+    const hmac = createHmac("sha256", Buffer.from(salt, "hex"))
+      .update(canonicalJson(mandateArgs)).digest("hex");
+    assert.equal(receipt.argsDigest, `0x${hmac}`, "salted digest reconstructs with the disclosed salt");
+  } finally { await app.close(); }
+});
+
+test("M4: no verifier token configured → the run-salt endpoint is closed", async () => {
+  const app = await boot({
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator",
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_OBSERVER_TOKEN: "observer-secret",
+    // CONTRACT_VERIFIER_TOKEN intentionally unset
+  });
+  try {
+    const res = await fetch(`${app.url}/contract/run-salt?keyId=kb1`, {
+      headers: { authorization: "Bearer verifier-secret" },
+    });
+    assert.equal(res.status, 404);
   } finally { await app.close(); }
 });

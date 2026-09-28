@@ -139,6 +139,12 @@ export interface ContractRun {
   settlementPrepared?: boolean;
   terminalState: string | null;
   stage: ContractStage;
+  /**
+   * M4: per-run HMAC salt for cap-bearing call argsDigests — generated at
+   * genesis, never persisted to the observer feed, disclosed only through
+   * the verifier-scoped `/contract/run-salt` endpoint.
+   */
+  readonly runSalt: string;
 }
 
 export type BindOutcome =
@@ -207,6 +213,16 @@ export interface ContractService {
     /** M1: each bound principal's pre-bind chain, served beside the run's. */
     preBind: { principalKeyId: string; role: ContractRole; head: string; receipts: ServerReceipt[] }[];
   } | undefined;
+  /**
+   * M4: the per-scope argsDigest salt — `{ runId }` for a run's salt,
+   * `{ keyId }` for a principal's pre-bind salt. undefined when no such
+   * scope exists. Disclosed ONLY through the verifier-scoped endpoint —
+   * never through the observer feed.
+   */
+  saltFor(query: { runId?: string; keyId?: string }):
+    { scope: "run" | "pre-bind"; id: string; salt: string } | undefined;
+  /** M4: a principal's pre-bind salt (lazily created — server-side use). */
+  preBindSaltFor(keyId: string): string;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
@@ -446,6 +462,9 @@ export function createContractService(options: {
    *  exists — rendezvous, pre-bind status, refused binds. The run genesis
    *  links each side's head (`preBindHead`). */
   const preBindChains = new Map<string, ServerReceipt[]>();
+  /** M4: per-principal salt for cap-bearing PRE-BIND receipts — same
+   *  disclosure rules as runSalt (verifier endpoint only). */
+  const preBindSalts = new Map<string, string>();
   let releaseLock: (() => void) | undefined;
   let usedSessions: Map<string, string> = new Map();
   let usedMandates: Map<string, string> = new Map();
@@ -490,6 +509,16 @@ export function createContractService(options: {
 
   function runEnded(run: ContractRun): boolean {
     return run.terminalState !== null || now() >= run.createdAtMs + runTtlMs;
+  }
+
+  /** M4: the principal's pre-bind salt — created lazily on first need. */
+  function preBindSaltFor(keyId: string): string {
+    let salt = preBindSalts.get(keyId);
+    if (salt === undefined) {
+      salt = randomBytes(32).toString("hex");
+      preBindSalts.set(keyId, salt);
+    }
+    return salt;
   }
 
   /** The head of a principal's pre-bind chain, or undefined if it has none. */
@@ -659,6 +688,7 @@ export function createContractService(options: {
       terminalState: null,
       simRun: sim.forRun(runId),
       stage: "handshake",
+      runSalt: randomBytes(32).toString("hex"),
     };
     // N3: refuse (never throw) at the run cap or this principal's own budget.
     const principalReceipts = run.receiptsByPrincipal.get(principal.keyId) ?? 0;
@@ -830,6 +860,24 @@ export function createContractService(options: {
       }
       return { runId, head, receipts: run.receipts.map((r) => structuredClone(r)), preBind };
     },
+    saltFor(query) {
+      if (query.runId !== undefined) {
+        const run = runs.get(query.runId);
+        return run === undefined
+          ? undefined
+          : { scope: "run" as const, id: query.runId, salt: run.runSalt };
+      }
+      if (query.keyId !== undefined) {
+        // Only a principal that HAS a pre-bind salt gets one — never
+        // materialize a salt for an unknown keyId.
+        const salt = preBindSalts.get(query.keyId);
+        return salt === undefined
+          ? undefined
+          : { scope: "pre-bind" as const, id: query.keyId, salt };
+      }
+      return undefined;
+    },
+    preBindSaltFor,
     endRun,
     runIdForPrincipal(keyId) {
       evictEnded();

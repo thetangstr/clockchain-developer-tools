@@ -3,7 +3,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { z } from "zod";
 
-import { canonicalDigest } from "./canonical.js";
+import { canonicalDigest, isCapBearingCall, saltedCanonicalDigest } from "./canonical.js";
 import { toolsListForRole, CONTRACT_SERVER_INSTRUCTIONS } from "./tools-list.js";
 import { contractToolDef, toolDefsForRole } from "./schemas.js";
 import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
@@ -84,9 +84,19 @@ export function buildContractServer(options: {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
     const serverNonce = newServerNonce();
-    const argsDigest = canonicalDigest(request.params.arguments ?? {});
+    const callArgs = request.params.arguments ?? {};
     const runId = service.runIdForPrincipal(principal.keyId);
     const run = runId === undefined ? undefined : service.runFor(runId);
+
+    // M4: cap-bearing calls (mandate_*, any amount-like argument key) carry
+    // HMAC-SHA256(scopeSalt, canonicalJson(args)) — the observer feed cannot
+    // leak a mandate cap or price to a brute force. The salt is the run's
+    // `runSalt`, or the principal's pre-bind salt when no run exists yet;
+    // either is disclosed ONLY through the verifier-scoped endpoint.
+    const argsScheme = isCapBearingCall(name, callArgs) ? "hmac-sha256" as const : "canonical" as const;
+    const argsDigest = argsScheme === "hmac-sha256"
+      ? saltedCanonicalDigest(run?.runSalt ?? service.preBindSaltFor(principal.keyId), callArgs)
+      : canonicalDigest(callArgs);
 
     const def = contractToolDef(name);
     if (def === undefined) {
@@ -107,6 +117,7 @@ export function buildContractServer(options: {
           principal: { role: principal.role, keyId: principal.keyId },
           outcome: "INVALID_PARAMS",
           responseDigest: canonicalDigest({ error: "invalid_params" }),
+          argsDigestScheme: argsScheme,
           serverNonce,
           ...sessionFields(),
         });
@@ -114,6 +125,7 @@ export function buildContractServer(options: {
         service.recordPreBind(principal, {
           tool: name,
           argsDigest,
+          argsDigestScheme: argsScheme,
           outcome: "INVALID_PARAMS",
           responseDigest: canonicalDigest({ error: "invalid_params" }),
           serverNonce,
@@ -140,7 +152,7 @@ export function buildContractServer(options: {
         outcome = refusal(bound.code, serverNonce);
         // A refused bind never creates or alters run state — with no run
         // the refusal lands on the principal's pre-bind chain (M1).
-        outcome = recordAny(run, name, argsDigest, outcome, serverNonce);
+        outcome = recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme);
       } else {
         outcome = ok(bound.result);
       }
@@ -158,10 +170,10 @@ export function buildContractServer(options: {
         // No run yet — the caller is still in discovery/handshake. The call
         // lands on the principal's pre-bind chain (M1).
         outcome = ok({ stage: "rendezvous", terminalState: null, serverNonce });
-        return asResult(recordAny(run, name, argsDigest, outcome, serverNonce));
+        return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
       }
       outcome = ok({ stage: run.stage, terminalState: run.terminalState, serverNonce });
-      outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
+      outcome = recordCall(run, name, argsDigest, outcome, serverNonce, argsScheme);
       return asResult(outcome);
     }
 
@@ -171,11 +183,11 @@ export function buildContractServer(options: {
       principal, run, name, parsed.data, serverNonce,
     );
     outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
-    return asResult(recordAny(run, name, argsDigest, outcome, serverNonce));
+    return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
   });
 
-  function withReceipt(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
-    return recordAny(run, tool, argsDigest, outcome, serverNonce);
+  function withReceipt(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme?: "canonical" | "hmac-sha256"): CallOutcome {
+    return recordAny(run, tool, argsDigest, outcome, serverNonce, scheme);
   }
 
   /**
@@ -183,18 +195,19 @@ export function buildContractServer(options: {
    * else on the principal's PRE-BIND chain (M1 — rendezvous, pre-bind status
    * and refused binds are still evidence).
    */
-  function recordAny(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
+  function recordAny(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical"): CallOutcome {
     return run === undefined
-      ? recordPreBindCall(tool, argsDigest, outcome, serverNonce)
-      : recordCall(run, tool, argsDigest, outcome, serverNonce);
+      ? recordPreBindCall(tool, argsDigest, outcome, serverNonce, scheme)
+      : recordCall(run, tool, argsDigest, outcome, serverNonce, scheme);
   }
 
   // M1: pre-bind receipt — capped per principal; at the cap the outcome
   // becomes RATE_LIMITED (nothing appended), never a throw.
-  function recordPreBindCall(tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
+  function recordPreBindCall(tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical"): CallOutcome {
     const recorded = service.recordPreBind(principal, {
       tool,
       argsDigest,
+      argsDigestScheme: scheme,
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
       responseDigest: canonicalDigest(outcome.body),
       serverNonce,
@@ -206,10 +219,11 @@ export function buildContractServer(options: {
   // N3: receipt recording can REFUSE at the per-principal budget — the call's
   // outcome then becomes the RATE_LIMITED refusal (nothing is appended), so
   // one principal can never fill the chain to brick the other.
-  function recordCall(run: ContractRun, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
+  function recordCall(run: ContractRun, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical"): CallOutcome {
     const recorded = service.recordReceipt(run, {
       tool,
       argsDigest,
+      argsDigestScheme: scheme,
       principal: { role: principal.role, keyId: principal.keyId },
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
       responseDigest: canonicalDigest(outcome.body),
