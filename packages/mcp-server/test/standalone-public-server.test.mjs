@@ -387,3 +387,32 @@ test("handshake_next resolves csha_ handles like every role-scoped tool, and rea
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test("a client passing its raw sat_ token keeps getting the same csha_ handle instead of minting new ones", async () => {
+  const raw = `sat_${"q".repeat(40)}`;
+  const handler = createStandaloneHttpHandler({ invoke: async () => ({ action: "wait" }), callsPerMinute: 1_000 });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const call = async (access) => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/connect/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "handshake_next", arguments: { access, waitMs: 0 } } }),
+    });
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data:"));
+    return JSON.parse(data ? data.slice(5) : text).result.structuredContent.roleAccess;
+  };
+  try {
+    const handles = new Set();
+    for (let i = 0; i < 25; i += 1) handles.add(await call(raw));
+    assert.equal(handles.size, 1);
+    const [handle] = handles;
+    assert.match(handle, /^csha_/);
+    assert.equal(await call(handle), handle);
+    // A different token still gets its own handle.
+    assert.notEqual(await call(`sat_${"w".repeat(40)}`), handle);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

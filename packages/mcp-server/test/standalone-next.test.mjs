@@ -5,7 +5,12 @@ import { getAddress } from "viem";
 
 import { evaluateStandaloneReadiness } from "../dist/standalone-handshake/checklist.js";
 import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordinator.js";
-import { MAX_NEXT_WAIT_MS, UNTRUSTED_NOTE } from "../dist/standalone-handshake/next.js";
+import { createServer } from "node:http";
+
+import { standaloneRequestContext } from "../dist/standalone-handshake/long-poll.js";
+import { BUSY_RETRY_AFTER_MS, MAX_NEXT_WAIT_MS, NEXT_WAIT_POLL_MS, UNTRUSTED_NOTE, UNTRUSTED_TERMS_NOTE } from "../dist/standalone-handshake/next.js";
+import { createStandaloneHttpHandler } from "../dist/standalone-handshake/public-server.js";
+import { STANDALONE_TOOL_DEFINITIONS } from "../dist/standalone-handshake/tools.js";
 import {
   normalizeStandaloneReadiness,
   normalizeStandaloneTerms,
@@ -351,4 +356,168 @@ test("next ready_failed: a failed checklist is terminal for both roles with its 
 test("next refuses an unknown access", async () => {
   const h = harness();
   await assert.rejects(() => h.next("sat_" + "x".repeat(40)), { name: "StandaloneCoordinatorError" });
+});
+
+// ---------------------------------------------------------------------------
+// Review hardening (PR #161)
+// ---------------------------------------------------------------------------
+
+test("holds: a newer handshake_next for the same role supersedes the older hold", async () => {
+  const h = harness({ coordinator: { nextPollMs: 50 } });
+  const invite = await h.invite();
+  const older = h.next(invite.initiatorAccess, { waitMs: 10_000 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(h.instance.activeHolds(), 1);
+  const newer = h.next(invite.initiatorAccess, { waitMs: 300 });
+  const superseded = await older;
+  assert.equal(superseded.action, "wait");
+  assert.equal(superseded.superseded, true);
+  assert.equal(h.instance.activeHolds(), 1);
+  assert.equal((await newer).superseded, undefined);
+  assert.equal(h.instance.activeHolds(), 0);
+});
+
+test("holds: per-client and global caps answer at once with a longer retryAfterMs", async () => {
+  const h = harness({ coordinator: { nextPollMs: 20, maxHolds: 3, maxHoldsPerClient: 2 } });
+  const invites = [await h.invite(), await h.invite(), await h.invite(), await h.invite()];
+  const holdFrom = (clientKey, invite) => standaloneRequestContext.run({ clientKey }, () => h.next(invite.initiatorAccess, { waitMs: 400 }));
+  const held = [holdFrom("198.51.100.1", invites[0]), holdFrom("198.51.100.1", invites[1])];
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const perClient = await holdFrom("198.51.100.1", invites[2]);
+  assert.equal(perClient.action, "wait");
+  assert.equal(perClient.retryAfterMs, BUSY_RETRY_AFTER_MS);
+  held.push(holdFrom("198.51.100.2", invites[2]));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(h.instance.activeHolds(), 3);
+  const global = await holdFrom("198.51.100.3", invites[3]);
+  assert.equal(global.retryAfterMs, BUSY_RETRY_AFTER_MS);
+  for (const result of await Promise.all(held)) assert.equal(result.retryAfterMs, 1000);
+  assert.equal(h.instance.activeHolds(), 0);
+});
+
+test("holds: a hold stops when its HTTP client disconnects", async () => {
+  const h = harness({ coordinator: { nextPollMs: 5_000 } });
+  const invite = await h.invite();
+  const handler = createStandaloneHttpHandler({ invoke: (name, args) => h.instance.invoke(name, args) });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = new AbortController();
+    const pending = fetch(`http://127.0.0.1:${server.address().port}/connect/mcp`, {
+      method: "POST",
+      signal: client.signal,
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "handshake_next", arguments: { access: invite.initiatorAccess, waitMs: 15_000 } } }),
+    }).catch(() => undefined);
+    for (let i = 0; i < 100 && h.instance.activeHolds() === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.instance.activeHolds(), 1);
+    client.abort();
+    await pending;
+    for (let i = 0; i < 100 && h.instance.activeHolds() > 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(h.instance.activeHolds(), 0, "the hold was released well before its 5s slice");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("holds: with the default 2s slices a state change still wakes the hold at once", async () => {
+  assert.equal(NEXT_WAIT_POLL_MS, 2_000);
+  const h = harness({ coordinator: { nextPollMs: NEXT_WAIT_POLL_MS } });
+  const invite = await h.invite();
+  const held = h.next(invite.initiatorAccess, { waitMs: 12_000 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const started = Date.now();
+  await h.accept(invite.invitation);
+  assert.equal((await held).action, "sign");
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test("sign: the Initiator-written terms text is marked untrusted with a fixed note", async () => {
+  const h = harness();
+  const invite = await h.invite();
+  const accept = await h.accept(invite.invitation);
+  const step = await h.next(accept.responderAccess);
+  assert.deepEqual(step.context.untrustedFields, ["terms.reference", "terms.purpose"]);
+  assert.equal(step.context.untrustedNote, UNTRUSTED_TERMS_NOTE);
+  assert.ok(step.guidance.startsWith(UNTRUSTED_TERMS_NOTE));
+  assert.equal(step.guidance.includes(validTerms().purpose), false);
+});
+
+test("cursor: a cursor beyond the last seq is refused with MALFORMED, never silently hiding messages", async () => {
+  const h = harness();
+  const { a, b } = await openedSession(h);
+  await assert.rejects(() => h.next(b, { cursor: 1 }), (error) => error.reason === "MALFORMED");
+  await h.instance.invoke("channel_send", { access: a, kind: "question", body: "first" });
+  await assert.rejects(() => h.next(b, { cursor: 99 }), (error) => error.reason === "MALFORMED");
+  // Dropping the cursor re-reads from the start, so nothing is lost.
+  const reread = await h.next(b);
+  assert.deepEqual(reread.messages.map((m) => m.body), ["first"]);
+  assert.equal(reread.cursor, 1);
+});
+
+test("opener: the first send-first prompt is immediate and repeats are held, not spun", async () => {
+  const h = harness({ coordinator: { nextPollMs: 20 } });
+  const { a, b } = await openedSession(h);
+  const first = await h.next(a, { waitMs: 5_000 });
+  assert.equal(first.action, "respond");
+  let started = Date.now();
+  const repeat = await h.next(a, { waitMs: 250 });
+  assert.equal(repeat.action, "respond");
+  assert.deepEqual(repeat.messages, []);
+  assert.ok(Date.now() - started >= 200, "the repeat was held for its waitMs");
+  // A reply that arrives during a held repeat is delivered at once.
+  const held = h.next(a, { waitMs: 5_000 });
+  await h.instance.invoke("channel_send", { access: b, kind: "question", body: "hello?" });
+  started = Date.now();
+  assert.deepEqual((await held).messages.map((m) => m.body), ["hello?"]);
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test("abandoned: an unaccepted invitation and an unopened channel end at their deadlines", async () => {
+  const t0 = 1_750_000_000_000;
+  const unaccepted = harness({ nowMs: t0 });
+  const invite = await unaccepted.invite();
+  unaccepted.setNow(t0 + 60 * 60_000);
+  const gone = await unaccepted.next(invite.initiatorAccess);
+  assert.equal(gone.action, "abandoned");
+  assert.equal(gone.terminal.reason, "INVITATION_NOT_ACCEPTED");
+  assert.match(gone.guidance, /stop calling handshake_next/);
+
+  const unopened = harness({ nowMs: t0, coordinator: { preOpenTtlMs: 10 * 60_000 } });
+  const invite2 = await unopened.invite();
+  unopened.setNow(t0 + 50 * 60_000);
+  const accept = await unopened.accept(invite2.invitation);
+  await unopened.consent("initiator", invite2.initiatorAccess);
+  unopened.setNow(t0 + 60 * 60_000);
+  const stalled = await unopened.next(accept.responderAccess);
+  assert.equal(stalled.action, "abandoned");
+  assert.equal(stalled.terminal.reason, "NOT_OPENED_BEFORE_DEADLINE");
+  await assert.rejects(() => unopened.instance.invoke("channel_open", { access: invite2.initiatorAccess }));
+});
+
+test("store: authentication touches only the caller's session, and evicted sessions answer SESSION_ENDED", () => {
+  let t = 1_000;
+  const store = createStandaloneSessionStore({ now: () => t, sessionTtlMs: 1_000, terminalRetention: 0 });
+  const terms = normalizeStandaloneTerms(validTerms());
+  store.createSession({ sessionId: "busy", terms, termsDigest: "d".repeat(64), initiatorReadiness: {} });
+  store.createSession({ sessionId: "idle", terms, termsDigest: "d".repeat(64), initiatorReadiness: {} });
+  store.setAccessToken("busy", "initiator", "sat_busy_token_000000000");
+  store.setAccessToken("idle", "initiator", "sat_idle_token_000000000");
+  for (let i = 0; i < 5; i += 1) {
+    t += 400;
+    assert.equal(store.authenticateToken("sat_busy_token_000000000").role, "initiator");
+  }
+  store.createSession({ sessionId: "trigger", terms, termsDigest: "d".repeat(64), initiatorReadiness: {} });
+  assert.deepEqual(store.sessionIds().sort(), ["busy", "trigger"]);
+  assert.throws(() => store.authenticateToken("sat_idle_token_000000000"), (error) => error.reason === "SESSION_ENDED");
+  assert.equal(store.authenticateToken("sat_never_issued_00000000"), undefined);
+});
+
+test("schema: durationSeconds accepts exactly 60..86400 and maxMessageBytes exactly 1..16384", () => {
+  const { channelLimits } = STANDALONE_TOOL_DEFINITIONS.find((tool) => tool.name === "handshake_invite").schema;
+  const limits = (durationSeconds, maxMessageBytes = "4096") => channelLimits.safeParse({ durationSeconds, messageKinds: ["note"], maxMessageBytes }).success;
+  for (const ok of ["60", "90", "900", "999", "9000", "9999", "86400"]) assert.equal(limits(ok), true, ok);
+  for (const bad of ["59", "86401", "0", "0900", "-60", "60.0", " 60", "1e3", ""]) assert.equal(limits(bad), false, JSON.stringify(bad));
+  for (const ok of ["1", "9", "999", "9999", "16000", "16383", "16384"]) assert.equal(limits("600", ok), true, ok);
+  for (const bad of ["0", "16385", "01", "99999"]) assert.equal(limits("600", bad), false, bad);
 });

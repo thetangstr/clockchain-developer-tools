@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-const STAGES = ["invited", "readiness_pending", "ready", "ready_failed", "consent_pending", "consented", "open", "closed", "revoked", "expired"] as const;
+const STAGES = ["invited", "readiness_pending", "ready", "ready_failed", "consent_pending", "consented", "open", "closed", "revoked", "expired", "abandoned"] as const;
 const LEGAL: Record<string, readonly string[]> = {
   invited: ["readiness_pending"],
   readiness_pending: ["ready", "ready_failed"],
@@ -10,7 +10,10 @@ const LEGAL: Record<string, readonly string[]> = {
   open: ["closed", "revoked", "expired"],
 };
 const ROLES = ["initiator", "responder"];
-const TERMINAL_STAGES = new Set(["ready_failed", "closed", "revoked", "expired"]);
+const TERMINAL_STAGES = new Set(["ready_failed", "closed", "revoked", "expired", "abandoned"]);
+// Stages that end as "abandoned" when the session misses its open deadline. readiness_pending
+// is excluded: it only lasts while a checklist evaluation is in flight.
+const ABANDONABLE_STAGES = new Set(["invited", "ready", "consent_pending", "consented"]);
 
 // Terminal sessions are retained for post-hoc inspection up to this cap; the oldest
 // are evicted (Map insertion order) so a long-lived process cannot grow unbounded.
@@ -22,6 +25,16 @@ export const NON_TERMINAL_SESSION_TTL_MS = 24 * 60 * 60_000;
 export const INVITATION_TTL_MS = 60 * 60_000;
 // Bodies live in memory; a bounded channel still needs a bounded transcript.
 export const MAX_MESSAGES_PER_SESSION = 10_000;
+// After acceptance, both consents and channel_open must happen within this window, or
+// the session ends as "abandoned". Before acceptance the deadline is the invitation TTL.
+export const PRE_OPEN_TTL_MS = 60 * 60_000;
+// Access tokens of evicted sessions are remembered (as digests, bounded FIFO) so a
+// late caller learns SESSION_ENDED instead of a generic refusal.
+export const ENDED_TOKEN_MEMORY = 10_000;
+
+function tokenDigest(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
 
 export class StandaloneIllegalTransitionError extends Error {
   constructor() {
@@ -47,6 +60,8 @@ export function createStandaloneSessionStore(options: {
   invitationTtlMs?: number;
   /** Cap on stored channel messages; defaults to MAX_MESSAGES_PER_SESSION. */
   maxMessagesPerSession?: number;
+  /** Window from acceptance to channel_open; defaults to PRE_OPEN_TTL_MS. */
+  preOpenTtlMs?: number;
 } = {}) {
   const now = options.now ?? Date.now;
   // Housekeeping (TTL eviction, invitation expiry) is resource management, not a
@@ -63,7 +78,12 @@ export function createStandaloneSessionStore(options: {
   const sessionTtlMs = options.sessionTtlMs ?? NON_TERMINAL_SESSION_TTL_MS;
   const invitationTtlMs = options.invitationTtlMs ?? INVITATION_TTL_MS;
   const maxMessagesPerSession = options.maxMessagesPerSession ?? MAX_MESSAGES_PER_SESSION;
+  const preOpenTtlMs = options.preOpenTtlMs ?? PRE_OPEN_TTL_MS;
   const sessions = new Map<string, any>();
+  // Access-token digest -> session and role, so authenticating one caller never touches
+  // (and never refreshes the idle timer of) any other session.
+  const tokens = new Map<string, { sessionId: string; role: string }>();
+  const endedTokens = new Set<string>();
   const invitations = new Map<string, { sessionId: string; expiresAtMs: number }>();
   // Pinned closure records: prepared before anchoring so retries produce the identical digest.
   // Kept beside (not on) the session objects, which stay read-only everywhere else.
@@ -85,25 +105,41 @@ export function createStandaloneSessionStore(options: {
       if (current >= invitation.expiresAtMs) invitations.delete(secret);
     }
     for (const [sessionId, session] of sessions) {
-      if (!TERMINAL_STAGES.has(session.stage) && current - session.touchedAtMs > sessionTtlMs) {
-        sessions.delete(sessionId);
-        pendingClosures.delete(sessionId);
-      }
+      if (!TERMINAL_STAGES.has(session.stage) && current - session.touchedAtMs > sessionTtlMs) dropSession(sessionId);
     }
     let terminal = 0;
     for (const session of sessions.values()) if (TERMINAL_STAGES.has(session.stage)) terminal += 1;
     for (const [sessionId, session] of sessions) {
       if (terminal <= terminalRetention) return;
       if (TERMINAL_STAGES.has(session.stage)) {
-        sessions.delete(sessionId);
-        pendingClosures.delete(sessionId);
+        dropSession(sessionId);
         terminal -= 1;
       }
     }
   }
 
+  function dropSession(sessionId: string): void {
+    const session = sessions.get(sessionId);
+    for (const role of ROLES) {
+      const token = session?.auth[role];
+      if (typeof token !== "string") continue;
+      const digest = tokenDigest(token);
+      tokens.delete(digest);
+      endedTokens.add(digest);
+      if (endedTokens.size > ENDED_TOKEN_MEMORY) endedTokens.delete(endedTokens.values().next().value as string);
+    }
+    sessions.delete(sessionId);
+    pendingClosures.delete(sessionId);
+  }
+
+  // Applies the session's clocks: an open channel expires at expiresAtMs, and a session
+  // that never opened is abandoned at its open deadline.
   function expireIfDue(session: any): void {
     if (session.stage === "open" && now() >= session.expiresAtMs) session.stage = "expired";
+    else if (ABANDONABLE_STAGES.has(session.stage) && housekeepingNow() >= session.openDeadlineMs) {
+      session.abandonedFrom = session.stage;
+      session.stage = "abandoned";
+    }
   }
 
   function other(role: string): string {
@@ -128,6 +164,9 @@ export function createStandaloneSessionStore(options: {
         messages: [],
         seq: 0,
         anchors: [],
+        openerPrompted: false,
+        abandonedFrom: undefined,
+        openDeadlineMs: housekeepingNow() + invitationTtlMs,
         touchedAtMs: housekeepingNow(),
       });
       evictStaleSessions();
@@ -159,6 +198,21 @@ export function createStandaloneSessionStore(options: {
 
     requireSession,
 
+    // Resolves an access token to its session and role through the digest index. Only the
+    // matching session is read (and its idle timer refreshed). A token of a session that
+    // was evicted refuses with SESSION_ENDED; an unknown token returns undefined.
+    authenticateToken(token: string): { session: any; role: string } | undefined {
+      const digest = tokenDigest(token);
+      const entry = tokens.get(digest);
+      if (entry === undefined) {
+        if (endedTokens.has(digest)) throw new StandaloneAdmissionError("SESSION_ENDED");
+        return undefined;
+      }
+      const session = this.getSession(entry.sessionId);
+      if (!session || session.auth[entry.role] !== token) return undefined;
+      return { session, role: entry.role };
+    },
+
     authenticate(sessionId: string, token: string): string | undefined {
       const session = this.getSession(sessionId);
       if (!session) return undefined;
@@ -167,13 +221,18 @@ export function createStandaloneSessionStore(options: {
     },
 
     setAccessToken(sessionId: string, role: string, token: string): void {
-      requireSession(sessionId).auth[role] = token;
+      const session = requireSession(sessionId);
+      if (typeof session.auth[role] === "string") tokens.delete(tokenDigest(session.auth[role]));
+      session.auth[role] = token;
+      tokens.set(tokenDigest(token), { sessionId, role });
     },
 
     setStage(sessionId: string, stage: string): void {
       const session = requireSession(sessionId);
       if (!(STAGES as readonly string[]).includes(stage) || !LEGAL[session.stage]?.includes(stage)) throw new StandaloneIllegalTransitionError();
       session.stage = stage;
+      // Accepted: consent and channel_open now have their own window.
+      if (stage === "ready") session.openDeadlineMs = housekeepingNow() + preOpenTtlMs;
     },
 
     // Narrow escape hatch for the coordinator's accept path: when checklist
@@ -250,6 +309,11 @@ export function createStandaloneSessionStore(options: {
       return session.messages
         .filter((message: any) => message.toRole === role && message.seq > afterSeq)
         .map((message: any) => Object.freeze({ ...message }));
+    },
+
+    // The Initiator's "send the first message" prompt has been delivered once; repeats are held.
+    markOpenerPrompted(sessionId: string): void {
+      requireSession(sessionId).openerPrompted = true;
     },
 
     // Highest seq admitted on the channel so far (0 before the first message).

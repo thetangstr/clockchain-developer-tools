@@ -31,10 +31,20 @@ const identityPolicy = z.discriminatedUnion("erc8004", [
   z.object({ erc8004: z.literal("not_required"), chainId: z.null(), registryAddress: z.null() }).strict(),
 ]);
 
-const channelLimits = z.object({
-  durationSeconds: z.string().regex(/^(?:[6-9][0-9]|[1-8][0-9]{2,3}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400)$/),
+// A canonical decimal string (no sign, no leading zeros) whose value is within [min, max].
+// Parsed and bounds-checked rather than encoded as a digit regex, which is easy to get
+// wrong: the earlier patterns rejected "900" through "999" and "16000" through "16383".
+function decimalInRange(min: number, max: number) {
+  return z.string().regex(/^(?:0|[1-9][0-9]{0,5})$/, `a decimal string from ${min} to ${max}`).refine((value) => {
+    const parsed = Number(value);
+    return parsed >= min && parsed <= max;
+  }, `must be from ${min} to ${max}`);
+}
+
+export const channelLimits = z.object({
+  durationSeconds: decimalInRange(60, 86400),
   messageKinds: z.array(z.enum(["question", "proposal", "evidence", "note"])).min(1).max(4),
-  maxMessageBytes: z.string().regex(/^(?:[1-9][0-9]{0,3}|1[0-5][0-9]{3}|16384)$/),
+  maxMessageBytes: decimalInRange(1, 16384),
 }).strict();
 
 const readiness = z.object({
