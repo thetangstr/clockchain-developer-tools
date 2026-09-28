@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createPrivateKey, generateKeyPairSync, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   createServer,
@@ -67,6 +67,9 @@ import { createStatusCache, type PerformanceSnapshot, type StatusDeps } from "./
 import { renderStatusPage } from "./status-page.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 import { V2RoleAccessError } from "./agent-handshake/v2/access.js";
+import { createContractHttpHandler, parseContractTokens, tokenAuthenticator } from "./agent-contract/http-handler.js";
+import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./agent-contract/certificate.js";
+import type { ContractSigner } from "./agent-contract/envelope.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -498,6 +501,54 @@ export async function runHttp(): Promise<void> {
   const chainVerifyCache = new Map<string, unknown>();
   const allowChainVerify = keyedWindowLimiter(Number(process.env.STANDALONE_HANDSHAKE_VERIFY_PER_MINUTE ?? "60"), 60_000, Date.now);
 
+  // ---- /contract/mcp (agent-contract business surface, N4b) ---------------
+  // Bearer auth is per-role: CONTRACT_AUTH_TOKENS holds "token:role:keyId"
+  // entries. Unset or empty → every call is a 401 (fail closed, never open).
+  // Host roots pin the handshake-host signing root that contract_bind trusts;
+  // CONTRACT_HOST_ROOTS ("kid:fingerprint,...") overrides the published
+  // default. The receipt/envelope signer is CONTRACT_SERVER_ED25519_SEED
+  // (base64 32-byte seed); when unset an ephemeral dev key is generated per
+  // process — fine locally, never acceptable where receipts must be verified.
+  let contractHandler: ReturnType<typeof createContractHttpHandler> | undefined;
+  const getContractHandler = () => {
+    if (contractHandler) return contractHandler;
+    const tokens = parseContractTokens(process.env.CONTRACT_AUTH_TOKENS);
+    const hostRoots: readonly HostRootPin[] = (process.env.CONTRACT_HOST_ROOTS ?? "")
+      .split(",").map((s) => s.trim()).filter(Boolean)
+      .map((entry) => {
+        const [kid, fingerprint] = entry.split(":", 2);
+        if (!kid || !/^[0-9a-f]{64}$/.test(fingerprint ?? "")) {
+          throw new Error("malformed CONTRACT_HOST_ROOTS entry (want kid:sha256fingerprint)");
+        }
+        return Object.freeze({ kid, fingerprint });
+      });
+    const seedB64 = (process.env.CONTRACT_SERVER_ED25519_SEED ?? "").trim();
+    let signer: ContractSigner;
+    if (seedB64) {
+      const seed = Buffer.from(seedB64, "base64");
+      if (seed.length !== 32) throw new Error("CONTRACT_SERVER_ED25519_SEED must be a base64 32-byte seed");
+      signer = {
+        keyId: process.env.CONTRACT_SERVER_KEY_ID ?? "contract-server",
+        privateKey: createPrivateKey({
+          key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]),
+          format: "der",
+          type: "pkcs8",
+        }),
+      };
+    } else {
+      console.warn(JSON.stringify({ event: "contract_ephemeral_signer", note: "CONTRACT_SERVER_ED25519_SEED unset — receipts/envelopes signed with a per-process dev key" }));
+      signer = { keyId: "contract-server-dev", privateKey: generateKeyPairSync("ed25519").privateKey };
+    }
+    contractHandler = createContractHttpHandler({
+      authenticate: tokenAuthenticator(tokens),
+      hostRoots: hostRoots.length > 0 ? hostRoots : PUBLISHED_HOST_ROOTS,
+      signer,
+      callsPerMinute: Number(process.env.CONTRACT_CALLS_PER_MINUTE ?? "120"),
+      onRateLimited: () => rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) }),
+    });
+    return contractHandler;
+  };
+
   let standaloneHandshakeHandler: ReturnType<typeof createStandaloneHttpHandler> | undefined;
   let standaloneHandshakeCoordinator: ReturnType<typeof createRuntimeStandaloneCoordinator> | undefined;
   const getStandaloneHandshakeHandler = () => {
@@ -521,7 +572,7 @@ export async function runHttp(): Promise<void> {
   const ROUTE_CLASSES = [
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
     "llms", "manifest", "handshake_manifest", "standalone_manifest", "connect_verify",
-    "connect_mcp", "handshake_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
+    "connect_mcp", "handshake_mcp", "contract_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
     "landing", "asset", "mcp_rpc", "keeper", "other",
   ] as const;
   const STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
@@ -538,7 +589,7 @@ export async function runHttp(): Promise<void> {
     "sign_evidence", "evidence_submitted", "certificate_available",
   ] as const;
   const DEP_NAMES = ["relay_discovery", "relay_result", "gateway_pool", "evm_rpc"] as const;
-  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call"] as const;
+  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call"] as const;
 
   const httpRequests = metrics.counter("clockchain_http_requests_total", "HTTP requests by route class and status class.");
   const httpDuration = metrics.histogram("clockchain_http_request_duration_seconds", "HTTP request duration by route class.");
@@ -572,6 +623,7 @@ export async function runHttp(): Promise<void> {
     if (method === "GET" && p === "/connect/verify") return "connect_verify";
     if (p === "/connect/mcp") return "connect_mcp";
     if (p === "/handshake/mcp") return "handshake_mcp";
+    if (p === "/contract/mcp") return "contract_mcp";
     if (p.startsWith("/handshake/local-action")) return "handshake_local_action";
     if (p === "/handshake/invitations/exchange") return "invitation_exchange";
     if (method === "POST" && p === "/token") return "token";
@@ -1084,6 +1136,20 @@ export async function runHttp(): Promise<void> {
         if (!res.headersSent) {
           res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify({ error: "agent_handshake_unavailable" }));
+        }
+      }
+      return;
+    }
+
+    // Agent-contract business surface (LLD §3). Bearer-token role auth; fails
+    // closed when CONTRACT_AUTH_TOKENS is unset. Stateless per request.
+    if (pathOf(req.url) === "/contract/mcp") {
+      try {
+        await getContractHandler()(req, res);
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "contract_unavailable" }));
         }
       }
       return;
