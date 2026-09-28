@@ -27,6 +27,26 @@ export const GENERAL_MCP_ENDPOINT = `${MCP_HOST_ORIGIN}/mcp`;
 
 export const SERVER_CARD_SCHEMA_ID = "agent-contract.server-card/v1";
 export const SERVER_CARD_PATH = "/.well-known/mcp/server-card.json";
+export const SERVER_KEYS_SCHEMA_ID = "agent-contract.server-keys/v1";
+export const SERVER_KEYS_PATH = "/contract/keys";
+
+/**
+ * A published receipt/envelope signing key (M3, LLD §3): agents pin the
+ * keyId+publicKey BEFORE any run so receipt chains verify offline. Rotation
+ * metadata (`validFrom`/`validUntil`, ISO-8601; `validUntil: null` = no
+ * scheduled expiry) lets a verifier reject receipts signed outside the key's
+ * window. `ephemeral: true` marks a disposable dev key — it must never
+ * appear at production.
+ */
+export interface PublishedServerKey {
+  keyId: string;
+  alg: "Ed25519";
+  /** 0x-prefixed hex of the raw 32-byte public key. */
+  publicKeyHex: string;
+  validFrom: string;
+  validUntil: string | null;
+  ephemeral?: true;
+}
 
 export interface ContractServerCard {
   schema: typeof SERVER_CARD_SCHEMA_ID;
@@ -41,11 +61,13 @@ export interface ContractServerCard {
     buyer: { toolsListDigest: string; instructionsDigest: string };
     provider: { toolsListDigest: string; instructionsDigest: string };
   };
+  /** Published signing keys (M3) — empty only on a card built without a signer. */
+  keys?: readonly PublishedServerKey[];
   cardDigest?: string;
 }
 
 /** The server card body; `cardDigest` covers the card minus itself. */
-export function buildServerCard(): ContractServerCard {
+export function buildServerCard(keys: readonly PublishedServerKey[] = []): ContractServerCard {
   const card: ContractServerCard = {
     schema: SERVER_CARD_SCHEMA_ID,
     host: MCP_HOST_ORIGIN,
@@ -71,6 +93,15 @@ export function buildServerCard(): ContractServerCard {
       buyer: guidanceDigests("buyer"),
       provider: guidanceDigests("provider"),
     },
+    keys,
   };
   return { ...card, cardDigest: canonicalDigest(card) };
+}
+
+/** `GET /contract/keys` — the standalone key-discovery document (M3). */
+export function buildServerKeysDoc(keys: readonly PublishedServerKey[]): {
+  schema: typeof SERVER_KEYS_SCHEMA_ID;
+  keys: readonly PublishedServerKey[];
+} {
+  return { schema: SERVER_KEYS_SCHEMA_ID, keys };
 }

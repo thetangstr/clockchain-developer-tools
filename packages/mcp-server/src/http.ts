@@ -70,6 +70,12 @@ import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 import { V2RoleAccessError } from "./agent-handshake/v2/access.js";
 import { createContractHttpHandler } from "./agent-contract/http-handler.js";
 import { loadContractConfig } from "./agent-contract/config.js";
+import {
+  buildServerCard,
+  buildServerKeysDoc,
+  SERVER_CARD_PATH,
+  SERVER_KEYS_PATH,
+} from "./agent-contract/server-card.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -1145,6 +1151,31 @@ export async function runHttp(): Promise<Server> {
           res.end(JSON.stringify({ error: "contract_unavailable" }));
         }
       }
+      return;
+    }
+
+    // M3: public key discovery — the server card and the standalone key
+    // document carry the receipt/envelope signing key(s) with rotation
+    // metadata so agents can pin a keyId+publicKey before any run. Public
+    // (public-key material only); closed (404) when the surface is off.
+    if (pathOf(req.url) === SERVER_CARD_PATH) {
+      if (req.method !== "GET" || contractConfig.kind !== "ready") {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });
+      res.end(JSON.stringify(buildServerCard(contractConfig.serverKeys)));
+      return;
+    }
+    if (pathOf(req.url) === SERVER_KEYS_PATH) {
+      if (req.method !== "GET" || contractConfig.kind !== "ready") {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });
+      res.end(JSON.stringify(buildServerKeysDoc(contractConfig.serverKeys)));
       return;
     }
 

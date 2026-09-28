@@ -1,4 +1,4 @@
-import { createPrivateKey, generateKeyPairSync } from "node:crypto";
+import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import path from "node:path";
 
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
@@ -7,6 +7,7 @@ import { createContractService, type ContractService } from "./service.js";
 import type { ContractSigner } from "./envelope.js";
 import type { IncomingHttpHeaders } from "node:http";
 import type { ContractPrincipal } from "./service.js";
+import type { PublishedServerKey } from "./server-card.js";
 
 /**
  * Eager, fail-closed configuration for the `/contract/mcp` route (H3).
@@ -49,6 +50,8 @@ export type ContractRouteConfig =
       readonly policyDigests: Readonly<{ buyer: string; provider: string }>;
       /** Family-principal pin per buyer keyId (`CONTRACT_PRINCIPALS`). */
       readonly principals: ReadonlyMap<string, string>;
+      /** M3: the published receipt/envelope signing keys (card + /contract/keys). */
+      readonly serverKeys: readonly PublishedServerKey[];
       readonly service: ContractService;
     };
 
@@ -117,6 +120,34 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
         "(or set CONTRACT_ALLOW_EPHEMERAL_KEY=1 for a disposable dev signer)",
     );
   }
+
+  // M3: the signing key is published with rotation metadata — agents pin it
+  // before any run so receipt chains verify offline. The validity window is
+  // env-pinned (`CONTRACT_SERVER_KEY_VALID_*`, ISO-8601); an ephemeral dev
+  // signer is always flagged `ephemeral: true` so it can never pass as a
+  // durable production key.
+  const keyValidFromRaw = (env.CONTRACT_SERVER_KEY_VALID_FROM ?? "").trim();
+  const keyValidUntilRaw = (env.CONTRACT_SERVER_KEY_VALID_UNTIL ?? "").trim();
+  const keyValidFrom = keyValidFromRaw === "" ? new Date().toISOString() : keyValidFromRaw;
+  if (Number.isNaN(Date.parse(keyValidFrom))) {
+    return misconfigured("CONTRACT_SERVER_KEY_VALID_FROM is not an ISO-8601 timestamp");
+  }
+  if (keyValidUntilRaw !== "" && Number.isNaN(Date.parse(keyValidUntilRaw))) {
+    return misconfigured("CONTRACT_SERVER_KEY_VALID_UNTIL is not an ISO-8601 timestamp");
+  }
+  const publicKeyHex = `0x${Buffer.from(
+    createPublicKey(signer.privateKey as Parameters<typeof createPublicKey>[0])
+      .export({ format: "der", type: "spki" })
+      .subarray(-32),
+  ).toString("hex")}`;
+  const serverKeys: readonly PublishedServerKey[] = [{
+    keyId: signer.keyId,
+    alg: "Ed25519",
+    publicKeyHex,
+    validFrom: keyValidFrom,
+    validUntil: keyValidUntilRaw === "" ? null : keyValidUntilRaw,
+    ...(signerEphemeral ? { ephemeral: true as const } : {}),
+  }];
 
   // §13 approval policy pins are REQUIRED (N4b-2b): `buyer:0x…,provider:0x…`.
   // A missing pin is a startup error — the route refuses, never half-serves.
@@ -216,6 +247,7 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       : {}),
     policyDigests: policyDigests as { buyer: string; provider: string },
     principals,
+    serverKeys,
     service,
   };
 }

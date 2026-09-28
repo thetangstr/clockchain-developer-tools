@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, createHash, sign as edSign } from "node:crypto";
+import { generateKeyPairSync, createHash, createPublicKey, sign as edSign } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +9,7 @@ import test from "node:test";
 import { runHttp } from "../dist/http.js";
 import { loadContractConfig } from "../dist/agent-contract/config.js";
 import { canonicalJson, canonicalDigest } from "../dist/agent-contract/canonical.js";
+import { verifyChain } from "../dist/agent-contract/receipts.js";
 
 // H3/C1: these tests boot the REAL runHttp wiring — env → loadContractConfig →
 // dispatch — so the enable gate, fail-closed config and prototype-key probes
@@ -20,6 +21,8 @@ const ENV_KEYS = [
   "CONTRACT_SERVER_KEY_ID", "CONTRACT_TRUST_PROXY", "CONTRACT_STATE_DIR",
   "CONTRACT_HOST_ROOTS", "CONTRACT_CALLS_PER_MINUTE", "CONTRACT_OBSERVER_TOKEN",
   "CONTRACT_POLICY_DIGESTS", "CONTRACT_PRINCIPALS", "CONTRACT_OBSERVER_PER_MINUTE",
+  "CONTRACT_SERVER_KEY_VALID_FROM", "CONTRACT_SERVER_KEY_VALID_UNTIL",
+  "CONTRACT_SESSION_TTL_MS",
 ];
 
 const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
@@ -340,5 +343,86 @@ test("observer feed: /contract/receipts is token-gated and serves a bound run's 
     assert.equal(body.runId, runId);
     assert.ok(Array.isArray(body.receipts) && body.receipts.length >= 2);
     assert.match(body.head, /^0x[0-9a-f]{64}$/);
+  } finally { await app.close(); }
+});
+
+// === M3: published server signing key =========================================
+
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const pubFromHex = (hex) => createPublicKey({
+  key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(hex.slice(2), "hex")]),
+  format: "der", type: "spki",
+});
+
+test("M3: the server card and /contract/keys publish the signing key + rotation metadata", async () => {
+  const app = await boot({
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator",
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_SERVER_KEY_ID: "contract-server-test",
+    CONTRACT_SERVER_KEY_VALID_FROM: "2026-09-01T00:00:00.000Z",
+    CONTRACT_SERVER_KEY_VALID_UNTIL: "2027-03-01T00:00:00.000Z",
+    CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_OBSERVER_TOKEN: "observer-secret",
+  });
+  try {
+    // The server card is public discovery — no bearer token.
+    const cardRes = await fetch(`${app.url}/.well-known/mcp/server-card.json`);
+    assert.equal(cardRes.status, 200);
+    const card = await cardRes.json();
+    assert.equal(card.schema, "agent-contract.server-card/v1");
+    assert.ok(Array.isArray(card.keys) && card.keys.length === 1);
+    const pub = card.keys[0];
+    assert.equal(pub.keyId, "contract-server-test");
+    assert.equal(pub.alg, "Ed25519");
+    assert.match(pub.publicKeyHex, /^0x[0-9a-f]{64}$/);
+    assert.equal(pub.validFrom, "2026-09-01T00:00:00.000Z");
+    assert.equal(pub.validUntil, "2027-03-01T00:00:00.000Z");
+    assert.equal(pub.ephemeral, undefined);
+
+    // The key endpoint serves the same key list.
+    const keysRes = await fetch(`${app.url}/contract/keys`);
+    assert.equal(keysRes.status, 200);
+    const keysDoc = await keysRes.json();
+    assert.equal(keysDoc.schema, "agent-contract.server-keys/v1");
+    assert.deepEqual(keysDoc.keys, card.keys);
+
+    // The published key actually verifies live receipts: a pre-bind call
+    // lands a signed receipt; the observer feed hands it back.
+    await post(app.url, "tools/call", { name: "contract_status", arguments: {} }, "tb1");
+    const feed = await fetch(`${app.url}/contract/receipts?keyId=kb1`, {
+      headers: { authorization: "Bearer observer-secret" },
+    });
+    assert.equal(feed.status, 200);
+    const body = await feed.json();
+    const verdict = verifyChain(body.receipts, { [pub.keyId]: pubFromHex(pub.publicKeyHex) });
+    assert.equal(verdict.ok, true, JSON.stringify(verdict));
+  } finally { await app.close(); }
+});
+
+test("M3: an ephemeral dev key is published flagged ephemeral:true", async () => {
+  const app = await boot({
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator",
+    CONTRACT_ALLOW_EPHEMERAL_KEY: "1",
+    CONTRACT_POLICY_DIGESTS: POLICIES,
+  });
+  try {
+    const keysRes = await fetch(`${app.url}/contract/keys`);
+    assert.equal(keysRes.status, 200);
+    const keysDoc = await keysRes.json();
+    assert.equal(keysDoc.keys.length, 1);
+    assert.equal(keysDoc.keys[0].ephemeral, true);
+    assert.match(keysDoc.keys[0].keyId, /^ephemeral-dev-/);
+    const card = await (await fetch(`${app.url}/.well-known/mcp/server-card.json`)).json();
+    assert.equal(card.keys[0].ephemeral, true);
+  } finally { await app.close(); }
+});
+
+test("M3: the key endpoints stay closed when the contract surface is off", async () => {
+  const app = await boot({ MCP_TOKEN_SIGNING_SECRET: "", MCP_AUTH_TOKENS: "" });
+  try {
+    assert.equal((await fetch(`${app.url}/contract/keys`)).status, 404);
+    assert.equal((await fetch(`${app.url}/.well-known/mcp/server-card.json`)).status, 404);
   } finally { await app.close(); }
 });
