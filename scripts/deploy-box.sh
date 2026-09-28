@@ -39,6 +39,9 @@
 #      restarts the whole unit
 #   4. prints container status, and in code-only mode the caddy/host/mcp container created/started
 #      times before and after, so you can see caddy and host were not recreated
+# Local exit codes: 0 deployed; 64 usage; 3/4/5 box-side refusal (dirty checkout / target predates
+# code-only / infra drift), printed as "REFUSED (exit N): <reason> — production unchanged";
+# 1 anything else, including a failed remote run ("deploy FAILED ... see the runbook rollback").
 # Then, from this machine: the runbook canaries and the read-only clock gates G0.1–G0.5
 # (needs CC_MCP_TOKEN for the gates; skipped if unset).
 #
@@ -202,9 +205,22 @@ while [[ "$STATUS" == "InProgress" || "$STATUS" == "Pending" || "$STATUS" == "De
   sleep 10
   STATUS=$(aws --region "$AWS_REGION" ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query Status --output text 2>/dev/null || echo Pending)
 done
-aws --region "$AWS_REGION" ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-  --query '[StandardOutputContent,StandardErrorContent]' --output text
-[[ "$STATUS" == "Success" ]] || { echo "deploy FAILED ($STATUS) — production may be on the previous build; see the runbook rollback." >&2; exit 1; }
+INVOCATION=$(aws --region "$AWS_REGION" ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --output json)
+REMOTE_OUT=$(jq -r '.StandardOutputContent // ""' <<<"$INVOCATION")
+jq -r '.StandardOutputContent // "", .StandardErrorContent // ""' <<<"$INVOCATION"
+if [[ "$STATUS" != "Success" ]]; then
+  REMOTE_RC=$(jq -r '.ResponseCode // -1' <<<"$INVOCATION")
+  REFUSAL=$(grep -m1 '^REFUSING:' <<<"$REMOTE_OUT" || true)
+  # Box-side refusals (3 dirty checkout, 4 pre-code-only target, 5 infra drift) all happen before
+  # the checkout and print a REFUSING: line: production is untouched. Both signals are required,
+  # so an unrelated child exit code of 3-5 is still reported as a real failure.
+  if [[ "$REMOTE_RC" =~ ^[345]$ && -n "$REFUSAL" ]]; then
+    echo "REFUSED (exit $REMOTE_RC): ${REFUSAL#REFUSING: } — production unchanged" >&2
+    exit "$REMOTE_RC"
+  fi
+  echo "deploy FAILED ($STATUS, exit $REMOTE_RC) — production may be on the previous build; see the runbook rollback." >&2
+  exit 1
+fi
 
 echo "--- canaries (RUNBOOK)"
 code() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }

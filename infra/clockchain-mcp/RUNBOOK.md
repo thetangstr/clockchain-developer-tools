@@ -115,6 +115,12 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
        recreate only `mcp` anyway (caddy/host keep their current config until
        the next full restart).
 
+     A dirty box checkout is refused the same way in both modes (exit 3). For
+     these refusals (exit 3, 4, 5) `deploy-box.sh` prints
+     `REFUSED (exit N): <reason> — production unchanged` and exits with the same
+     code. Production was not touched. Any other remote failure prints
+     `deploy FAILED ...` and exits 1: check production and follow the rollback.
+
      Code-only installs the new unit and wrapper to disk **before** `mcp` is
      proven healthy. A changed `ExecStop` or wrapper therefore takes effect at
      the next stop, full restart or reboot even if this deploy fails.

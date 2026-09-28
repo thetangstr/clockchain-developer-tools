@@ -1324,6 +1324,93 @@ test("the repo's installer and compose-up.sh carry the code-only capability mark
   assert.ok(src.includes('*"deploy-box: supports --only mcp"*'));
 });
 
+// Local side of deploy-box.sh after SSM returns: stub aws/git/sleep/curl, real jq.
+async function runDeployBoxAgainstSsmResult({ status, responseCode, stdout }) {
+  const temp = await mkdtemp(path.join(tmpdir(), "clockchain-deploy-box-local."));
+  const bin = path.join(temp, "bin");
+  const log = path.join(temp, "commands.log");
+  const invocation = path.join(temp, "invocation.json");
+  await writeFile(invocation, JSON.stringify({
+    Status: status,
+    ResponseCode: responseCode,
+    StandardOutputContent: stdout,
+    StandardErrorContent: "",
+  }));
+  const logLine = `printf '%s %s\\n' "$(basename "$0")" "$*" >> "$CMD_LOG"`;
+  await writeExecutable(path.join(bin, "aws"), `#!/usr/bin/env bash
+${logLine}
+case "$*" in
+  *"send-command"*) echo cmd-123 ;;
+  *"--query Status"*) echo "$FAKE_STATUS" ;;
+  *"get-command-invocation"*"--output json"*) cat "$FAKE_INVOCATION" ;;
+  *) echo "unexpected aws: $*" >&2; exit 65 ;;
+esac
+`);
+  await writeExecutable(path.join(bin, "git"), `#!/usr/bin/env bash\n${logLine}\n[[ "$1" == "log" ]] && echo "abc1234 subject"\nexit 0\n`);
+  await writeExecutable(path.join(bin, "sleep"), `#!/usr/bin/env bash\nexit 0\n`);
+  await writeExecutable(path.join(bin, "curl"), `#!/usr/bin/env bash\n${logLine}\necho 200\n`);
+  try {
+    const r = await run("bash", [deployBoxScript, testSha, "--yes"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CMD_LOG: log,
+        FAKE_STATUS: status,
+        FAKE_INVOCATION: invocation,
+        CC_MCP_TOKEN: "",
+      },
+    });
+    const calls = (await readFile(log, "utf8").catch(() => "")).split("\n").filter(Boolean);
+    return { ...r, calls };
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+}
+
+test("deploy-box.sh reports box-side refusals as REFUSED with the remote exit code, production unchanged", async () => {
+  for (const [code, line] of [
+    [3, "REFUSING: the box checkout has local changes. Commit them to the repo (or preserve them on a local branch) first:"],
+    [4, "REFUSING: target predates code-only deploy; re-run with --full-restart"],
+    [5, "REFUSING: infra drift in code-only mode; re-run with --full-restart (after the notices) or --allow-infra-drift"],
+  ]) {
+    const r = await runDeployBoxAgainstSsmResult({
+      status: "Failed",
+      responseCode: code,
+      stdout: `box: mode=code-only before=abc1234\n${line}\n`,
+    });
+    assert.equal(r.code, code, r.stderr);
+    assert.match(r.stderr, new RegExp(`REFUSED \\(exit ${code}\\): .+ — production unchanged`));
+    assert.ok(r.stderr.includes(line.replace(/^REFUSING: /, "")), "reason is the box's REFUSING line");
+    assert.doesNotMatch(r.stderr, /deploy FAILED/);
+    assert.equal(r.calls.filter((c) => c.startsWith("curl")).length, 0, "no canaries after a refusal");
+  }
+});
+
+test("deploy-box.sh keeps 'deploy FAILED' (exit 1) for real remote failures", async () => {
+  for (const result of [
+    { status: "Failed", responseCode: 1, stdout: "box: pre-build\nerror\n" },
+    // Exit code in the refusal range but no REFUSING line: a child failed after the checkout.
+    { status: "Failed", responseCode: 3, stdout: "box: after=abc1234\ncompose failed\n" },
+    // REFUSING text but a non-refusal exit code.
+    { status: "Failed", responseCode: 1, stdout: "REFUSING: something\n" },
+    { status: "TimedOut", responseCode: -1, stdout: "" },
+  ]) {
+    const r = await runDeployBoxAgainstSsmResult(result);
+    assert.equal(r.code, 1, JSON.stringify(result) + r.stderr);
+    assert.match(r.stderr, /deploy FAILED \(.+\) — production may be on the previous build; see the runbook rollback\./);
+    assert.doesNotMatch(r.stderr, /REFUSED/);
+  }
+});
+
+test("deploy-box.sh proceeds to the canaries when the remote run succeeds", async () => {
+  const r = await runDeployBoxAgainstSsmResult({ status: "Success", responseCode: 0, stdout: "box: up\n" });
+  // The stub curl answers 200 everywhere, so the /mcp 401 canary is what stops it: it did reach the canaries.
+  assert.ok(r.calls.some((c) => c.startsWith("curl")), "canaries ran");
+  assert.doesNotMatch(r.stderr, /REFUSED|deploy FAILED/);
+  assert.match(r.stdout, /box: up/);
+});
+
 async function deployBoxParse(args) {
   return run("bash", [deployBoxScript, ...args], {
     cwd: repoRoot,
