@@ -299,8 +299,15 @@ export function createStandaloneCoordinator(options: {
   }
 }
 
+// The mcp container is given EVM_RPC_URL (compose); SEPOLIA_RPC_URL is only set on the
+// host service. Reading SEPOLIA_RPC_URL alone left rpcUrl empty in production, so every
+// signature recovery threw and the checklist reported AUTHORITY_INVALID for everyone.
+export function resolveStandaloneRpcUrl(env: Record<string, string | undefined>): string {
+  return env.SEPOLIA_RPC_URL || env.EVM_RPC_URL || "";
+}
+
 export function createRuntimeStandaloneCoordinator(env: Record<string, string | undefined> = process.env) {
-  const rpcUrl = env.SEPOLIA_RPC_URL ?? "";
+  const rpcUrl = resolveStandaloneRpcUrl(env);
   const client = new ClockchainClient(readConfigFromEnv(env));
   // All protocol time judgments run on Clockchain consensus time: a disciplined
   // local clock synced against the ledger's timestamp endpoint, never the server
