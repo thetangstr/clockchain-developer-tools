@@ -20,6 +20,7 @@ import {
 import { createStandaloneSessionStore } from "../dist/standalone-handshake/session-store.js";
 import { validTerms } from "./helpers/standalone-fixtures.mjs";
 import { canonicalJson, fakeLedger, newSessionKey, recoverLocally, sha256Hex, verifyAndSign } from "./helpers/standalone-signer.mjs";
+import { harness, openedSession } from "./helpers/standalone-harness.mjs";
 
 const PARTY = "Acme Buying LLC";
 const STATEMENT = "I am authorized to discuss delivery options for Acme.";
@@ -127,60 +128,6 @@ test("cursor: a negative, fractional or non-numeric cursor is refused", () => {
 // ---------------------------------------------------------------------------
 // handshake_next actions
 // ---------------------------------------------------------------------------
-
-function harness(options = {}) {
-  let nowMs = options.nowMs ?? 1_750_000_000_000;
-  const ledger = fakeLedger();
-  const instance = createStandaloneCoordinator({
-    client: ledger,
-    now: () => nowMs,
-    recoverEip191Address: recoverLocally,
-    resolveIdentity: async () => true,
-    nextPollMs: 5,
-    ...options.coordinator,
-  });
-  const keys = { initiator: newSessionKey(), responder: newSessionKey() };
-  async function readiness(role, overrides = {}) {
-    const account = keys[role];
-    const prepared = await instance.invoke("readiness_prepare", { sessionKeyAddress: getAddress(account.address), accountableParty: PARTY, statement: STATEMENT });
-    return {
-      sessionKeyAddress: getAddress(account.address),
-      identity: null,
-      authorityStatement: { accountableParty: PARTY, statement: STATEMENT },
-      authoritySignatureHex: await verifyAndSign(account, prepared),
-      capabilityManifest: { dataHandlingClass: "confidential", purpose: validTerms().purpose },
-      ...overrides,
-    };
-  }
-  const next = (access, extra = {}) => instance.invoke("handshake_next", { access, waitMs: 0, ...extra });
-  return {
-    instance,
-    ledger,
-    keys,
-    next,
-    setNow(value) { nowMs = value; },
-    async invite() {
-      return instance.invoke("handshake_invite", { ...validTerms(), readiness: await readiness("initiator") });
-    },
-    async accept(invitation, overrides) {
-      return instance.invoke("handshake_accept_invitation", { invitation, readiness: await readiness("responder", overrides) });
-    },
-    async consent(role, access) {
-      const step = await next(access);
-      assert.equal(step.action, "sign");
-      return instance.invoke("consent_sign", { access, signatureHex: await verifyAndSign(keys[role], step.sign) });
-    },
-  };
-}
-
-async function openedSession(h) {
-  const invite = await h.invite();
-  const accept = await h.accept(invite.invitation);
-  await h.consent("initiator", invite.initiatorAccess);
-  await h.consent("responder", accept.responderAccess);
-  await h.instance.invoke("channel_open", { access: invite.initiatorAccess });
-  return { a: invite.initiatorAccess, b: accept.responderAccess };
-}
 
 test("next wait: the initiator waits for acceptance, and the hold ends as soon as the invitation is accepted", async () => {
   const h = harness();
@@ -338,18 +285,26 @@ test("next revoked and expired are terminal with their own reasons", async () =>
   assert.deepEqual(e.terminal.anchors.map((anchor) => anchor.kind), ["terms-readiness", "consent", "open"]);
 });
 
-test("next ready_failed: a failed checklist is terminal for both roles with its reason codes", async () => {
+test("next ready_failed: a failure the Responder cannot fix is terminal at once for both roles", async () => {
   const h = harness();
-  const invite = await h.invite();
-  const accept = await h.accept(invite.invitation, { capabilityManifest: { dataHandlingClass: "public", purpose: validTerms().purpose } });
+  // The Initiator's own manifest purpose contradicts its terms: no Responder can fix that.
+  const invite = await h.instance.invoke("handshake_invite", {
+    ...validTerms(),
+    readiness: { ...(await h.readiness("initiator")), capabilityManifest: { dataHandlingClass: "confidential", purpose: "Something else entirely" } },
+  });
+  const accept = await h.accept(invite.invitation);
   assert.equal(accept.stage, "ready_failed");
-  for (const access of [invite.initiatorAccess, accept.responderAccess]) {
+  assert.equal(accept.attemptsLeft, 0);
+  for (const [role, access] of [["initiator", invite.initiatorAccess], ["responder", accept.responderAccess]]) {
     const result = await h.next(access);
     assert.equal(result.action, "ready_failed");
     assert.equal(result.terminal.outcome, "ready_failed");
-    assert.equal(result.terminal.reason, "MANIFEST_MISMATCH");
+    assert.equal(result.terminal.reason, "PURPOSE_MISMATCH");
+    assert.equal(result.reason, "PURPOSE_MISMATCH");
     assert.deepEqual(result.terminal.anchors, []);
-    assert.equal(result.terminal.checks.find((check) => check.check === "manifest").passed, false);
+    assert.deepEqual(result.terminal.failures.map((f) => f.party), ["initiator"]);
+    assert.match(result.nextStep, /new invitation/);
+    assert.match(result.tellYourUser, role === "initiator" ? /my readiness/ : /the other agent's readiness/);
   }
 });
 

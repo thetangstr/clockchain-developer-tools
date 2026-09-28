@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 
-const STAGES = ["invited", "readiness_pending", "ready", "ready_failed", "consent_pending", "consented", "open", "closed", "revoked", "expired", "abandoned"] as const;
+const STAGES = ["invited", "readiness_pending", "readiness_retry", "ready", "ready_failed", "consent_pending", "consented", "open", "closed", "revoked", "expired", "abandoned"] as const;
 const LEGAL: Record<string, readonly string[]> = {
   invited: ["readiness_pending"],
-  readiness_pending: ["ready", "ready_failed"],
+  readiness_pending: ["ready", "ready_failed", "readiness_retry"],
+  readiness_retry: ["readiness_pending", "ready_failed"],
   ready: ["consent_pending"],
   consent_pending: ["consented"],
   consented: ["open"],
@@ -13,7 +14,8 @@ const ROLES = ["initiator", "responder"];
 const TERMINAL_STAGES = new Set(["ready_failed", "closed", "revoked", "expired", "abandoned"]);
 // Stages that end as "abandoned" when the session misses its open deadline. readiness_pending
 // is excluded: it only lasts while a checklist evaluation is in flight.
-const ABANDONABLE_STAGES = new Set(["invited", "ready", "consent_pending", "consented"]);
+const ABANDONABLE_STAGES = new Set(["invited", "readiness_retry", "ready", "consent_pending", "consented"]);
+const TERMINAL_EVENTS = new Set(["ready_failed", "close", "revoke", "expire", "abandon"]);
 
 // Terminal sessions are retained for post-hoc inspection up to this cap; the oldest
 // are evicted (Map insertion order) so a long-lived process cannot grow unbounded.
@@ -31,6 +33,13 @@ export const PRE_OPEN_TTL_MS = 60 * 60_000;
 // Access tokens of evicted sessions are remembered (as digests, bounded FIFO) so a
 // late caller learns SESSION_ENDED instead of a generic refusal.
 export const ENDED_TOKEN_MEMORY = 10_000;
+// A Responder whose readiness fails the checklist may correct it this many times in all
+// (first claim included), within the invitation TTL.
+export const READINESS_MAX_ATTEMPTS = 3;
+// Timeline bounds: events per session (terminal events are always kept), and previews
+// per session so an invitation holder cannot flood the timeline.
+export const MAX_TIMELINE_EVENTS = 500;
+export const MAX_PREVIEW_EVENTS = 20;
 
 function tokenDigest(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
@@ -118,6 +127,22 @@ export function createStandaloneSessionStore(options: {
     }
   }
 
+  function isoNow(): string {
+    return new Date(housekeepingNow()).toISOString();
+  }
+
+  // Append-only, bounded. Bodies never enter the timeline: callers pass digests only.
+  function pushEvent(session: any, event: Record<string, unknown>): void {
+    const type = String(event.type);
+    const previews = type === "previewed" ? session.timeline.filter((item: any) => item.type === "previewed").length : 0;
+    const full = session.timeline.length >= MAX_TIMELINE_EVENTS && !TERMINAL_EVENTS.has(type);
+    if (full || previews >= MAX_PREVIEW_EVENTS) {
+      session.timelineDropped += 1;
+      return;
+    }
+    session.timeline.push(Object.freeze({ at: isoNow(), ...event }));
+  }
+
   function dropSession(sessionId: string): void {
     const session = sessions.get(sessionId);
     for (const role of ROLES) {
@@ -135,10 +160,13 @@ export function createStandaloneSessionStore(options: {
   // Applies the session's clocks: an open channel expires at expiresAtMs, and a session
   // that never opened is abandoned at its open deadline.
   function expireIfDue(session: any): void {
-    if (session.stage === "open" && now() >= session.expiresAtMs) session.stage = "expired";
-    else if (ABANDONABLE_STAGES.has(session.stage) && housekeepingNow() >= session.openDeadlineMs) {
+    if (session.stage === "open" && now() >= session.expiresAtMs) {
+      session.stage = "expired";
+      pushEvent(session, { type: "expire" });
+    } else if (ABANDONABLE_STAGES.has(session.stage) && housekeepingNow() >= session.openDeadlineMs) {
       session.abandonedFrom = session.stage;
       session.stage = "abandoned";
+      pushEvent(session, { type: "abandon", fromStage: session.abandonedFrom });
     }
   }
 
@@ -148,7 +176,8 @@ export function createStandaloneSessionStore(options: {
 
   return {
     createSession(input: { sessionId: string; terms: any; termsDigest: string; initiatorReadiness: any }): void {
-      sessions.set(input.sessionId, {
+      const createdAtMs = housekeepingNow();
+      const session = {
         sessionId: input.sessionId,
         terms: input.terms,
         termsDigest: input.termsDigest,
@@ -164,16 +193,30 @@ export function createStandaloneSessionStore(options: {
         messages: [],
         seq: 0,
         anchors: [],
-        openerPrompted: false,
+        prompted: new Set<string>(),
+        attempts: [] as any[],
+        timeline: [] as any[],
+        timelineDropped: 0,
         abandonedFrom: undefined,
-        openDeadlineMs: housekeepingNow() + invitationTtlMs,
-        touchedAtMs: housekeepingNow(),
-      });
+        invitationExpiresAtMs: createdAtMs + invitationTtlMs,
+        openDeadlineMs: createdAtMs + invitationTtlMs,
+        touchedAtMs: createdAtMs,
+      };
+      sessions.set(input.sessionId, session);
+      pushEvent(session, { type: "invited", termsDigest: input.termsDigest });
       evictStaleSessions();
     },
 
-    putInvitation(input: { secret: string; sessionId: string }): void {
-      invitations.set(input.secret, { sessionId: input.sessionId, expiresAtMs: housekeepingNow() + invitationTtlMs });
+    // A restored invitation keeps its original expiry when one is given.
+    putInvitation(input: { secret: string; sessionId: string; expiresAtMs?: number }): void {
+      invitations.set(input.secret, { sessionId: input.sessionId, expiresAtMs: input.expiresAtMs ?? housekeepingNow() + invitationTtlMs });
+    },
+
+    // Reads an unclaimed, unexpired invitation without claiming it.
+    peekInvitation(secret: string): { sessionId: string; expiresAtMs: number } | undefined {
+      const invitation = invitations.get(secret);
+      if (invitation === undefined || housekeepingNow() >= invitation.expiresAtMs) return undefined;
+      return { ...invitation };
     },
 
     claimInvitation(secret: string): string | undefined {
@@ -247,6 +290,52 @@ export function createStandaloneSessionStore(options: {
       session.responderReadiness = undefined;
     },
 
+    // Rolls an attempt whose checklist evaluation died mid-flight back to where it started
+    // (invited, or readiness_retry with the previous readiness), without counting it.
+    rollbackAttempt(sessionId: string, previous: { stage: string; readiness: any }): void {
+      const session = requireSession(sessionId);
+      if (session.stage !== "readiness_pending" || (previous.stage !== "invited" && previous.stage !== "readiness_retry")) throw new StandaloneIllegalTransitionError();
+      session.stage = previous.stage;
+      session.responderReadiness = previous.readiness;
+    },
+
+    // Records a completed checklist attempt and its timeline event.
+    recordAttempt(sessionId: string, attempt: { passed: boolean; codes: readonly string[] }): number {
+      const session = requireSession(sessionId);
+      session.attempts.push(Object.freeze({ passed: attempt.passed, codes: Object.freeze([...attempt.codes]) }));
+      pushEvent(session, { type: "attempt", attempt: session.attempts.length, passed: attempt.passed, codes: [...attempt.codes] });
+      return session.attempts.length;
+    },
+
+    appendEvent(sessionId: string, event: Record<string, unknown>): void {
+      pushEvent(requireSession(sessionId), event);
+    },
+
+    timeline(sessionId: string): { events: readonly any[]; dropped: number } | undefined {
+      const session = sessions.get(sessionId);
+      if (!session) return undefined;
+      expireIfDue(session);
+      return Object.freeze({ events: Object.freeze([...session.timeline]), dropped: session.timelineDropped });
+    },
+
+    // Summaries of every retained session, for an operator view. Reads do not refresh idle timers.
+    listSessions(): readonly any[] {
+      return [...sessions.values()].map((session) => {
+        expireIfDue(session);
+        const events = session.timeline;
+        return Object.freeze({
+          sessionId: session.sessionId,
+          stage: session.stage,
+          termsDigest: session.termsDigest,
+          createdAt: events[0]?.at,
+          lastEventAt: events[events.length - 1]?.at,
+          eventCount: events.length,
+          attempts: session.attempts.length,
+          messageCount: session.messages.length,
+        });
+      });
+    },
+
     setResponderReadiness(sessionId: string, readiness: any): void {
       requireSession(sessionId).responderReadiness = readiness;
     },
@@ -296,6 +385,7 @@ export function createStandaloneSessionStore(options: {
         body,
       };
       session.messages.push(message);
+      pushEvent(session, { type: "message", seq: message.seq, kind, fromRole: role, bodyDigest: message.bodyDigest });
       return message;
     },
 
@@ -311,9 +401,14 @@ export function createStandaloneSessionStore(options: {
         .map((message: any) => Object.freeze({ ...message }));
     },
 
-    // The Initiator's "send the first message" prompt has been delivered once; repeats are held.
-    markOpenerPrompted(sessionId: string): void {
-      requireSession(sessionId).openerPrompted = true;
+    // An actionable prompt (e.g. the Initiator's "send first", or a fix_readiness for one
+    // attempt) has been delivered once; handshake_next holds repeats of it.
+    markPrompted(sessionId: string, key: string): void {
+      requireSession(sessionId).prompted.add(key);
+    },
+
+    wasPrompted(sessionId: string, key: string): boolean {
+      return requireSession(sessionId).prompted.has(key);
     },
 
     // Highest seq admitted on the channel so far (0 before the first message).

@@ -129,10 +129,13 @@ test("two unconnected agents go from invitation to anchored closure over HTTP", 
 // Two scripted agents finish a handshake knowing only the playbook: every byte they sign
 // comes from readiness_prepare or handshake_next and is re-derived locally before signing.
 // The one thing passed between them is the invitation string, as the playbook says.
-test("two scripted agents complete invite → accept → consent → open → 2 messages → close by looping on handshake_next", async () => {
+test("two scripted agents complete invite → preview → failed accept → corrected readiness → consent → open → 2 messages → close by looping on handshake_next", async () => {
   const { getAddress } = await import("viem");
   const { canonicalJson, newSessionKey, recoverLocally, sha256Hex, verifyAndSign } = await import("./helpers/standalone-signer.mjs");
-  const ALLOWED_TOOLS = new Set(["readiness_prepare", "handshake_invite", "handshake_accept_invitation", "handshake_next", "consent_sign", "channel_open", "channel_send", "channel_close"]);
+  const ALLOWED_TOOLS = new Set([
+    "readiness_prepare", "handshake_preview_invitation", "handshake_invite", "handshake_accept_invitation", "handshake_retry_readiness",
+    "handshake_next", "consent_sign", "channel_open", "channel_send", "channel_close", "handshake_timeline",
+  ]);
 
   const coordinator = createStandaloneCoordinator({
     client: fakeLedger(),
@@ -162,7 +165,7 @@ test("two scripted agents complete invite → accept → consent → open → 2 
   }
 
   const terms = validTerms();
-  async function readiness(account) {
+  async function readiness(account, capabilityManifest = { dataHandlingClass: "confidential", purpose: terms.purpose }) {
     const prepared = await call("readiness_prepare", {
       sessionKeyAddress: getAddress(account.address),
       accountableParty: "Acme Buying LLC",
@@ -174,21 +177,36 @@ test("two scripted agents complete invite → accept → consent → open → 2 
       identity: null,
       authorityStatement: { accountableParty: prepared.record.accountableParty, statement: prepared.record.statement },
       authoritySignatureHex: await verifyAndSign(account, prepared),
-      capabilityManifest: { dataHandlingClass: "confidential", purpose: terms.purpose },
+      capabilityManifest,
     };
   }
 
   // The loop the playbook describes, with a scripted "brain" deciding what to say.
-  async function loop({ role, access, sessionId, account, decide }) {
+  async function loop({ role, access, sessionId, account, decide, initialManifest }) {
     const transcript = [];
     let cursor;
+    let currentManifest = initialManifest;
     for (let step = 0; step < 100; step += 1) {
       const next = await call("handshake_next", { access, waitMs: 2000, ...(cursor === undefined ? {} : { cursor }) });
       transcript.push(next.action);
       if (next.cursor !== undefined) cursor = next.cursor;
       switch (next.action) {
         case "wait":
+          assert.equal(typeof next.tellYourUser, "string");
           break;
+        case "fix_readiness": {
+          // Apply exactly what the server says is required; nothing is asked of any human.
+          const manifest = { ...currentManifest };
+          for (const [path, value] of Object.entries(next.required)) {
+            const [section, field] = path.split(".");
+            assert.equal(section, "capabilityManifest", `unexpected required path ${path}`);
+            manifest[field] = value;
+          }
+          currentManifest = manifest;
+          const retried = await call("handshake_retry_readiness", { access, readiness: await readiness(account, manifest) });
+          assert.equal(retried.error, undefined, JSON.stringify(retried));
+          break;
+        }
         case "sign": {
           assert.equal(next.sign.record.sessionId, sessionId);
           assert.equal(next.sign.record.role, role);
@@ -215,7 +233,7 @@ test("two scripted agents complete invite → accept → consent → open → 2 
           break;
         }
         default:
-          return { transcript, terminal: next.terminal, messages: next.messages ?? [] };
+          return { transcript, access, tellYourUser: next.tellYourUser, terminal: next.terminal, messages: next.messages ?? [] };
       }
     }
     throw new Error(`${role} never reached a terminal action`);
@@ -245,10 +263,17 @@ test("two scripted agents complete invite → accept → consent → open → 2 
 
     const responder = (async () => {
       const invitation = await invitationPassed;
-      const accepted = await call("handshake_accept_invitation", { invitation, readiness: await readiness(bob) });
-      assert.equal(accepted.checklist.passed, true);
+      // Preview first, then make the staging mistake anyway: a data-handling class that
+      // differs from the Initiator's. The session survives it and the loop corrects it.
+      const preview = await call("handshake_preview_invitation", { invitation });
+      assert.equal(preview.required["capabilityManifest.dataHandlingClass"], "confidential");
+      const wrongManifest = { dataHandlingClass: "public", purpose: preview.terms.purpose };
+      const accepted = await call("handshake_accept_invitation", { invitation, readiness: await readiness(bob, wrongManifest) });
+      assert.equal(accepted.stage, "readiness_retry");
+      assert.deepEqual(accepted.codes, ["DATA_CLASS_MISMATCH"]);
       const received = [];
       return { received, ...(await loop({
+        initialManifest: wrongManifest,
         role: "responder",
         access: accepted.roleAccess,
         sessionId: accepted.sessionId,
@@ -268,7 +293,16 @@ test("two scripted agents complete invite → accept → consent → open → 2 
       assert.equal(side.terminal.reason, "CLOSED_BY_INITIATOR");
       assert.deepEqual(side.terminal.anchors.map((anchor) => anchor.kind), ["terms-readiness", "consent", "open", "closure"]);
       assert.ok(side.transcript.includes("sign") && side.transcript.includes("respond"));
+      assert.equal(typeof side.tellYourUser, "string");
     }
+    assert.ok(b.transcript.includes("fix_readiness"));
+    // Both parties see the same server-side history, with the failed attempt in it.
+    const timeline = await call("handshake_timeline", { access: a.access });
+    assert.deepEqual(timeline.events.map((event) => event.type), [
+      "invited", "previewed", "attempt", "attempt", "accepted", "consent", "consent", "open", "message", "message", "close",
+    ]);
+    assert.deepEqual(timeline.events[2].codes, ["DATA_CLASS_MISMATCH"]);
+    assert.deepEqual((await call("handshake_timeline", { access: b.access })).events, timeline.events);
     assert.deepEqual([...toolsUsed].sort(), [...ALLOWED_TOOLS].sort());
   } finally {
     await new Promise((resolve) => server.close(resolve));

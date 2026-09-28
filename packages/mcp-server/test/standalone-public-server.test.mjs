@@ -14,12 +14,15 @@ import { StandaloneAdmissionError } from "../dist/standalone-handshake/session-s
 
 const ACCEPT = "application/json, text/event-stream";
 
-test("the tool surface is exactly the twelve designed tools", () => {
+test("the tool surface is exactly the fifteen designed tools", () => {
   assert.deepEqual([...STANDALONE_TOOL_NAMES], [
     "readiness_prepare",
+    "handshake_preview_invitation",
     "handshake_invite",
     "handshake_accept_invitation",
+    "handshake_retry_readiness",
     "handshake_next",
+    "handshake_timeline",
     "handshake_status",
     "consent_sign",
     "channel_open",
@@ -44,7 +47,11 @@ test("instructions are a playbook of at most 25 lines built on readiness_prepare
   for (const step of [/readiness_prepare/, /personal_sign/, /handshake_invite/, /handshake_accept_invitation/, /handshake_next/, /consent_sign/, /channel_open/, /channel_send/, /channel_close/, /untrusted/]) {
     assert.match(text, step);
   }
-  for (const action of ["wait", "sign", "open", "respond", "closed", "expired", "revoked", "ready_failed"]) assert.match(text, new RegExp(`\\b${action}\\b`));
+  assert.match(text, /Never ask your user to relay anything to the counterparty/);
+  assert.match(text, /handshake_preview_invitation/);
+  assert.match(text, /handshake_retry_readiness/);
+  assert.match(text, /tellYourUser/);
+  for (const action of ["wait", "fix_readiness", "sign", "open", "respond", "closed", "expired", "revoked", "ready_failed", "abandoned"]) assert.match(text, new RegExp(`\\b${action}\\b`));
   // The old text claimed handshake_status returns the consent bytes; it never did.
   assert.doesNotMatch(text, /bytes returned in handshake_status/);
 });

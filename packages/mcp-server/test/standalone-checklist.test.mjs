@@ -46,8 +46,9 @@ async function run(overrides = {}) {
 test("a fully consistent pair passes with a stable checklist digest", async () => {
   const result = await run();
   assert.equal(result.passed, true);
-  assert.deepEqual(result.checks.map((c) => c.check), ["identity", "authority", "manifest"]);
+  assert.deepEqual(result.checks.map((c) => c.check), ["identity", "authority", "data_class", "purpose"]);
   assert.equal(/^[0-9a-f]{64}$/.test(result.checklistDigest), true);
+  assert.deepEqual(result.failures, []);
   const again = await run();
   assert.equal(again.checklistDigest, result.checklistDigest);
 });
@@ -69,16 +70,30 @@ test("a wrong authority signer fails with AUTHORITY_INVALID", async () => {
   assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["AUTHORITY_INVALID"]);
 });
 
-test("mismatched data-handling class fails with MANIFEST_MISMATCH", async () => {
+test("a Responder data-handling class that differs from the Initiator's fails with DATA_CLASS_MISMATCH and names the required class", async () => {
   const result = await run({ responder: { capabilityManifest: { dataHandlingClass: "public", purpose: "Discuss delivery options for Q3 orders" } } });
   assert.equal(result.passed, false);
-  assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["MANIFEST_MISMATCH"]);
+  assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["DATA_CLASS_MISMATCH"]);
+  assert.deepEqual(result.failures, [{ code: "DATA_CLASS_MISMATCH", party: "responder", required: { "capabilityManifest.dataHandlingClass": "confidential" } }]);
+});
+
+test("a Responder purpose that differs from the terms fails with PURPOSE_MISMATCH attributed to the Responder", async () => {
+  const result = await run({ responder: { capabilityManifest: { dataHandlingClass: "confidential", purpose: "Something else" } } });
+  assert.deepEqual(result.failures, [{ code: "PURPOSE_MISMATCH", party: "responder", required: { "capabilityManifest.purpose": "Discuss delivery options for Q3 orders" } }]);
+});
+
+test("identity is resolved for both parties and each failure names its party", async () => {
+  const policy = { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" };
+  const identity = (agentId) => ({ identity: { agentId, chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } });
+  const result = await run({ terms: { identityPolicy: policy }, initiator: identity("1"), responder: identity("2"), resolveIdentity: async (value) => value.agentId === "1" });
+  assert.deepEqual(result.failures.map((f) => [f.code, f.party]), [["IDENTITY_UNVERIFIED", "responder"]]);
 });
 
 test("a party whose manifest purpose differs from the terms fails with PURPOSE_MISMATCH", async () => {
   const result = await run({ initiator: { capabilityManifest: { dataHandlingClass: "confidential", purpose: "Sell advertising inventory" } } });
   assert.equal(result.passed, false);
   assert.deepEqual(result.checks.filter((c) => !c.passed).map((c) => c.reason), ["PURPOSE_MISMATCH"]);
+  assert.deepEqual(result.failures.map((f) => [f.code, f.party]), [["PURPOSE_MISMATCH", "initiator"]]);
 });
 
 test("a recoverAddress that throws fails closed with AUTHORITY_INVALID, not a crash", async () => {

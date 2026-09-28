@@ -8,7 +8,18 @@ import { recoverEip191Address, resolveOwnedAgentRegistration } from "../handshak
 
 import { evaluateStandaloneReadiness } from "./checklist.js";
 import { createHoldRegistry, standaloneRequestContext } from "./long-poll.js";
-import { BUSY_RETRY_AFTER_MS, DEFAULT_NEXT_WAIT_MS, MAX_NEXT_WAIT_MS, MAX_NEXT_WAIT_POLLS, NEXT_WAIT_POLL_MS, evaluateStandaloneNext } from "./next.js";
+import {
+  BUSY_RETRY_AFTER_MS,
+  DEFAULT_NEXT_WAIT_MS,
+  MAX_NEXT_WAIT_MS,
+  MAX_NEXT_WAIT_POLLS,
+  NEXT_WAIT_POLL_MS,
+  UNTRUSTED_TERMS_FIELDS,
+  UNTRUSTED_TERMS_NOTE,
+  evaluateStandaloneNext,
+  lastFailureCodes,
+  promptKey,
+} from "./next.js";
 import {
   DIGEST,
   STANDALONE_HANDSHAKE_PROTOCOL,
@@ -20,7 +31,7 @@ import {
   prepareStandaloneAuthority,
   standaloneCanonicalRecord,
 } from "./protocol.js";
-import { createStandaloneSessionStore, StandaloneAdmissionError } from "./session-store.js";
+import { READINESS_MAX_ATTEMPTS, createStandaloneSessionStore, StandaloneAdmissionError } from "./session-store.js";
 
 export class StandaloneCoordinatorError extends Error {
   constructor(message = "Standalone handshake coordinator refused.") {
@@ -49,11 +60,27 @@ function nextCursor(value: unknown): number {
 }
 
 // Tools whose success changes a session: holds on that session re-evaluate at once.
-const SESSION_MUTATING_TOOLS = new Set(["handshake_accept_invitation", "consent_sign", "channel_open", "channel_send", "channel_close", "channel_revoke"]);
+const SESSION_MUTATING_TOOLS = new Set(["handshake_accept_invitation", "handshake_retry_readiness", "consent_sign", "channel_open", "channel_send", "channel_close", "channel_revoke"]);
 
-// A respond with nothing to respond to: the Initiator's "send the first message" prompt.
-function isOpenerPrompt(result: Record<string, any>): boolean {
-  return result.action === "respond" && Array.isArray(result.messages) && result.messages.length === 0;
+// One uniform refusal for every way an invitation can be unusable (malformed, unknown,
+// expired, already claimed), so preview cannot be used to enumerate sessions.
+function invitationUnavailable(): never {
+  throw new StandaloneAdmissionError("INVITATION_UNAVAILABLE");
+}
+
+function decodeInvitation(invitation: unknown): { sessionId: string; secret: string } | undefined {
+  if (typeof invitation !== "string" || invitation.length < 80 || invitation.length > 4096) return undefined;
+  try {
+    const decoded = JSON.parse(Buffer.from(invitation, "base64url").toString("utf8"));
+    if (decoded?.v !== 1 || typeof decoded.sessionId !== "string" || typeof decoded.secret !== "string") return undefined;
+    return { sessionId: decoded.sessionId, secret: decoded.secret };
+  } catch {
+    return undefined;
+  }
+}
+
+function anchorSummary(anchor: Record<string, any>): Record<string, unknown> {
+  return { kind: anchor.kind, blockHeight: anchor.blockHeight, digest: anchor.digest, ledgerId: anchor.ledgerId };
 }
 
 const KIND_REFERENCES = { TERMS_READINESS: "terms-readiness", CONSENT: "consent", OPEN: "open" } as const;
@@ -154,6 +181,36 @@ export function createStandaloneCoordinator(options: {
 
     if (name === "handshake_next") return next(args);
 
+    if (name === "handshake_preview_invitation") {
+      // Public and read-only: what a Responder's readiness must match. Burns nothing.
+      const decoded = decodeInvitation(args.invitation) ?? invitationUnavailable();
+      const invitation = store.peekInvitation(decoded.secret);
+      if (invitation === undefined || invitation.sessionId !== decoded.sessionId) invitationUnavailable();
+      const session = store.getSession(invitation.sessionId);
+      if (session === undefined || session.stage !== "invited") invitationUnavailable();
+      store.appendEvent(session.sessionId, { type: "previewed" });
+      const identityRequired = session.terms.identityPolicy.erc8004 !== "not_required";
+      return {
+        protocol: STANDALONE_HANDSHAKE_PROTOCOL,
+        sessionId: session.sessionId,
+        terms: session.terms,
+        required: {
+          "capabilityManifest.dataHandlingClass": session.initiatorReadiness.capabilityManifest.dataHandlingClass,
+          "capabilityManifest.purpose": session.terms.purpose,
+          identity: identityRequired ? "an ERC-8004 registration on eip155:11155111 owned by your sessionKeyAddress" : null,
+        },
+        invitationExpiresAtMs: String(invitation.expiresAtMs),
+        invitationExpiresAt: new Date(invitation.expiresAtMs).toISOString(),
+        maxReadinessAttempts: READINESS_MAX_ATTEMPTS,
+        untrustedFields: UNTRUSTED_TERMS_FIELDS,
+        untrustedNote: UNTRUSTED_TERMS_NOTE,
+        guidance:
+          `${UNTRUSTED_TERMS_NOTE} To accept, build a readiness whose capabilityManifest has exactly the values in required (and identity as shown), ` +
+          "sign its authority record via readiness_prepare, then call handshake_accept_invitation with this invitation before invitationExpiresAt. Previewing claims nothing.",
+        thenCall: "handshake_accept_invitation",
+      };
+    }
+
     if (name === "handshake_invite") {
       const terms = normalizeStandaloneTerms({ reference: args.reference, purpose: args.purpose, channelLimits: args.channelLimits, identityPolicy: args.identityPolicy });
       const readiness = normalizeStandaloneReadiness(args.readiness, terms.identityPolicy.erc8004);
@@ -161,7 +218,7 @@ export function createStandaloneCoordinator(options: {
       const sessionId = randomUUID();
       store.createSession({ sessionId, terms, termsDigest, initiatorReadiness: readiness });
       const secret = randomBytes(24).toString("base64url");
-      store.putInvitation({ secret, sessionId });
+      store.putInvitation({ secret, sessionId, expiresAtMs: store.requireSession(sessionId).invitationExpiresAtMs });
       const initiatorAccess = `sat_${randomBytes(32).toString("base64url")}`;
       store.setAccessToken(sessionId, "initiator", initiatorAccess);
       const invitation = Buffer.from(JSON.stringify({ v: 1, sessionId, secret })).toString("base64url");
@@ -169,15 +226,8 @@ export function createStandaloneCoordinator(options: {
     }
 
     if (name === "handshake_accept_invitation") {
-      const invitation = args.invitation;
-      if (typeof invitation !== "string" || invitation.length < 80 || invitation.length > 4096) throw new StandaloneCoordinatorError();
-      let decoded: any;
-      try {
-        decoded = JSON.parse(Buffer.from(invitation, "base64url").toString("utf8"));
-      } catch {
-        throw new StandaloneCoordinatorError();
-      }
-      if (decoded?.v !== 1 || typeof decoded.sessionId !== "string" || typeof decoded.secret !== "string") throw new StandaloneCoordinatorError();
+      const decoded = decodeInvitation(args.invitation);
+      if (decoded === undefined) throw new StandaloneCoordinatorError();
       const sessionId = store.claimInvitation(decoded.secret);
       if (sessionId === undefined || sessionId !== decoded.sessionId) {
         // A claimed-but-mismatched envelope restores the claim so that tampering
@@ -187,37 +237,32 @@ export function createStandaloneCoordinator(options: {
       }
       const session = store.requireSession(sessionId);
       if (session.stage !== "invited") throw new StandaloneCoordinatorError();
-      const responderReadiness = normalizeStandaloneReadiness(args.readiness, session.terms.identityPolicy.erc8004);
-      store.setResponderReadiness(sessionId, responderReadiness);
-      store.setStage(sessionId, "readiness_pending");
-      let checklist;
-      try {
-        checklist = await evaluateStandaloneReadiness({
-          sessionId,
-          terms: session.terms,
-          termsDigest: session.termsDigest,
-          initiator: session.initiatorReadiness,
-          responder: responderReadiness,
-          resolveIdentity: requiredIdentity(session) ? resolveIdentity : async () => true,
-          recoverAddress: recover ?? (async () => {
-            throw new StandaloneCoordinatorError("Signature recovery is not configured.");
-          }),
-        });
-      } catch (error) {
-        // Evaluation died mid-flight (e.g. the identity-resolution RPC dropped) — never
-        // a completed checklist. Roll the session back to invited and restore the
-        // invitation so the responder can retry the identical claim instead of
-        // bricking the session in readiness_pending forever.
-        store.resetToInvited(sessionId);
-        store.putInvitation({ secret: decoded.secret, sessionId });
-        if (error instanceof StandaloneCoordinatorError || error instanceof StandaloneTransientCoordinatorError) throw error;
-        throw new StandaloneTransientCoordinatorError();
-      }
-      store.setChecklist(sessionId, checklist);
-      store.setStage(sessionId, checklist.passed ? "ready" : "ready_failed");
+      const readiness = normalizeStandaloneReadiness(args.readiness, session.terms.identityPolicy.erc8004);
+      // The first claim burns the invitation. A failed checklist does not end the session:
+      // the same Responder corrects its readiness through handshake_retry_readiness, which
+      // is bound to the responder access issued here, so nobody else can take over.
+      const outcome = await readinessAttempt(session, readiness, {
+        previousStage: "invited",
+        onRollback: () => store.putInvitation({ secret: decoded.secret, sessionId, expiresAtMs: session.invitationExpiresAtMs }),
+      });
       const responderAccess = `sat_${randomBytes(32).toString("base64url")}`;
       store.setAccessToken(sessionId, "responder", responderAccess);
-      return { sessionId, stage: checklist.passed ? "ready" : "ready_failed", checklist, responderAccess };
+      return { ...outcome, responderAccess };
+    }
+
+    if (name === "handshake_retry_readiness") {
+      const { session, role } = authedSession(args);
+      if (role !== "responder") throw new StandaloneAdmissionError("NOT_RESPONDER");
+      refuseIfAbandoned(session.sessionId);
+      if (session.stage !== "readiness_retry") throw new StandaloneAdmissionError("NOT_IN_RETRY");
+      const readiness = normalizeStandaloneReadiness(args.readiness, session.terms.identityPolicy.erc8004);
+      return readinessAttempt(session, readiness, { previousStage: "readiness_retry" });
+    }
+
+    if (name === "handshake_timeline") {
+      const { session, role } = authedSession(args);
+      const timeline = store.timeline(session.sessionId);
+      return { sessionId: session.sessionId, role, stage: store.getSession(session.sessionId).stage, events: timeline?.events ?? [], droppedEvents: timeline?.dropped ?? 0 };
     }
 
     if (name === "handshake_status" || name === "channel_status") {
@@ -250,6 +295,7 @@ export function createStandaloneCoordinator(options: {
       refuseIfAbandoned(session.sessionId);
       if (session.stage === "ready") store.setStage(session.sessionId, "consent_pending");
       store.setConsent(session.sessionId, role, standaloneCanonicalRecord(consentRecord).digest);
+      store.appendEvent(session.sessionId, { type: "consent", role, consentDigest: standaloneCanonicalRecord(consentRecord).digest });
       const stage = store.bothConsented(session.sessionId) ? (store.setStage(session.sessionId, "consented"), "consented") : "consent_pending";
       return { sessionId: session.sessionId, role, stage, consentDigest: standaloneCanonicalRecord(consentRecord).digest };
     }
@@ -309,6 +355,7 @@ export function createStandaloneCoordinator(options: {
       const anchor = await anchorStandalone(client, closureRecord, `standalone-handshake-v1:${session.sessionId}:closure`, true);
       (outcome === "closed" ? store.closeChannel : store.revokeChannel).call(store, session.sessionId, role);
       store.addAnchors(session.sessionId, [{ kind: outcome === "closed" ? "closure" : "revocation", ...anchor }]);
+      store.appendEvent(session.sessionId, { type: outcome === "closed" ? "close" : "revoke", byRole: role, anchor: anchorSummary({ kind: outcome === "closed" ? "closure" : "revocation", ...anchor }) });
       store.clearPendingClosure(session.sessionId);
       return { sessionId: session.sessionId, outcome, byRole: role, closureAnchor: anchor };
     }
@@ -331,13 +378,17 @@ export function createStandaloneCoordinator(options: {
     const evaluate = () => {
       const current = store.getSession(session.sessionId);
       if (current === undefined) throw new StandaloneAdmissionError("SESSION_ENDED");
-      return { current, result: evaluateStandaloneNext({ store, session: current, role, cursor, now }) };
+      return { current, result: evaluateStandaloneNext({ store, session: current, role, cursor, now, maxAttempts: READINESS_MAX_ATTEMPTS }) };
     };
-    // The opener prompt goes out at once the first time; a repeat is held like a wait so an
-    // agent that has not sent yet cannot spin on it.
-    const holdable = (result: Record<string, any>, current: any) => result.action === "wait" || (isOpenerPrompt(result) && current.openerPrompted);
+    // An actionable prompt (the opener's "send first", a fix_readiness) goes out at once the
+    // first time; a repeat is held like a wait so an agent that has not acted cannot spin.
+    const holdable = (result: Record<string, any>, _current: any) => {
+      const key = promptKey(result);
+      return result.action === "wait" || (key !== undefined && store.wasPrompted(session.sessionId, `${role}:${key}`));
+    };
     const deliver = (result: Record<string, any>) => {
-      if (isOpenerPrompt(result)) store.markOpenerPrompted(session.sessionId);
+      const key = promptKey(result);
+      if (key !== undefined) store.markPrompted(session.sessionId, `${role}:${key}`);
       return result;
     };
 
@@ -413,6 +464,7 @@ export function createStandaloneCoordinator(options: {
     store.setStage(session.sessionId, "open");
     store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
     store.addAnchors(session.sessionId, anchors);
+    store.appendEvent(session.sessionId, { type: "open", anchors: anchors.map(anchorSummary) });
     return {
       schema: "clockchain.standalone-handshake-opening/v1",
       protocol: STANDALONE_HANDSHAKE_PROTOCOL,
@@ -424,6 +476,65 @@ export function createStandaloneCoordinator(options: {
       expiresAtMs: String(expiresAtMs),
       anchors: Object.freeze(anchors),
       externalBusinessActionPerformed: false,
+    };
+  }
+
+  // Runs one readiness attempt for the Responder (first claim or a retry). Pass: ready.
+  // Fail: readiness_retry while attempts remain and every failure is the Responder's to
+  // fix; otherwise ready_failed for both. Nothing is anchored here: the terms-readiness
+  // transition is anchored by channel_open, which only a passed checklist can reach.
+  async function readinessAttempt(session: any, readiness: Readonly<Record<string, any>>, options: { previousStage: "invited" | "readiness_retry"; onRollback?: () => void }): Promise<Record<string, unknown>> {
+    const sessionId = session.sessionId;
+    const previousReadiness = session.responderReadiness;
+    store.setResponderReadiness(sessionId, readiness);
+    store.setStage(sessionId, "readiness_pending");
+    let checklist;
+    try {
+      checklist = await evaluateStandaloneReadiness({
+        sessionId,
+        terms: session.terms,
+        termsDigest: session.termsDigest,
+        initiator: session.initiatorReadiness,
+        responder: readiness,
+        resolveIdentity: requiredIdentity(session) ? resolveIdentity : async () => true,
+        recoverAddress: recover ?? (async () => {
+          throw new StandaloneCoordinatorError("Signature recovery is not configured.");
+        }),
+      });
+    } catch (error) {
+      // Evaluation died mid-flight (e.g. the identity-resolution RPC dropped): never a
+      // completed checklist, so it does not count as an attempt. Roll back so the identical
+      // call can be retried instead of bricking the session in readiness_pending.
+      store.rollbackAttempt(sessionId, { stage: options.previousStage, readiness: previousReadiness });
+      options.onRollback?.();
+      if (error instanceof StandaloneCoordinatorError || error instanceof StandaloneTransientCoordinatorError) throw error;
+      throw new StandaloneTransientCoordinatorError();
+    }
+    store.setChecklist(sessionId, checklist);
+    const codes = [...new Set(checklist.failures.map((failure) => failure.code))];
+    const attempt = store.recordAttempt(sessionId, { passed: checklist.passed, codes });
+    const responderCanFix = checklist.failures.every((failure) => failure.party === "responder");
+    let stage: string;
+    if (checklist.passed) {
+      stage = "ready";
+      store.setStage(sessionId, stage);
+      store.appendEvent(sessionId, { type: "accepted", attempt });
+    } else if (responderCanFix && attempt < READINESS_MAX_ATTEMPTS) {
+      stage = "readiness_retry";
+      store.setStage(sessionId, stage);
+    } else {
+      stage = "ready_failed";
+      store.setStage(sessionId, stage);
+      store.appendEvent(sessionId, { type: "ready_failed", reason: codes.join(","), attempts: attempt });
+    }
+    const retry = stage === "readiness_retry";
+    return {
+      sessionId,
+      stage,
+      checklist,
+      attempt,
+      attemptsLeft: retry ? READINESS_MAX_ATTEMPTS - attempt : 0,
+      ...(retry ? { codes, thenCall: "handshake_next" } : {}),
     };
   }
 
@@ -507,4 +618,16 @@ export function createRuntimeStandaloneCoordinator(env: Record<string, string | 
       return registration !== null && registration.agentId === identity.agentId;
     },
   });
+}
+
+type StandaloneCoordinatorLike = { store: { listSessions(): readonly any[]; timeline(sessionId: string): { events: readonly any[]; dropped: number } | undefined } };
+
+/** Operator view (no HTTP route yet): a summary of every retained session. */
+export function listStandaloneSessions(coordinator: StandaloneCoordinatorLike): readonly any[] {
+  return coordinator.store.listSessions();
+}
+
+/** Operator view (no HTTP route yet): one session's timeline, or undefined once evicted. */
+export function getStandaloneTimeline(coordinator: StandaloneCoordinatorLike, sessionId: string): { events: readonly any[]; dropped: number } | undefined {
+  return coordinator.store.timeline(sessionId);
 }
