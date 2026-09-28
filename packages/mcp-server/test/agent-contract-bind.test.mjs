@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { generateKeyPairSync, createHash, sign as edSign, createPublicKey } from "node:crypto";
-import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, chmodSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -674,4 +675,62 @@ test("verifyCertificateEnvelope accepts the canonical fixture with its root pinn
   assert.equal(verdict.ok, true, JSON.stringify(verdict));
   assert.equal(verdict.sessionId, "22222222-3333-4444-8555-666666666666");
   assert.equal(verdict.resultDigest, canonicalDigest(envelope.result));
+});
+
+test("a lock holding our own pid but a prior boot id is recovered (PID-1 reuse)", () => {
+  // Container runs node as PID 1 across restarts — pid liveness alone can
+  // never detect the stale lock; the boot id does.
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-bootlock-"));
+  writeFileSync(
+    path.join(dir, "used-sessions.lock"),
+    JSON.stringify({ pid: process.pid, bootId: "prior-boot-id", at: new Date(0).toISOString() }),
+  );
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  svc.close();
+});
+
+test("an empty or half-written lock file is never treated as stale", () => {
+  for (const content of ["", "{\"pid\":"]) {
+    const dir = mkdtempSync(path.join(tmpdir(), "contract-emptylock-"));
+    writeFileSync(path.join(dir, "used-sessions.lock"), content);
+    assert.throws(
+      () => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir }),
+      /lock/i,
+    );
+  }
+});
+
+test("SIGTERM releases the state-dir lock", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-sigterm-"));
+  const child = `
+    import { createContractService } from ${JSON.stringify(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "agent-contract", "service.js"),
+    )};
+    import { generateKeyPairSync } from "node:crypto";
+    const svc = createContractService({
+      hostRoots: [], signer: { keyId: "k", privateKey: generateKeyPairSync("ed25519").privateKey },
+      stateDir: ${JSON.stringify(dir)},
+    });
+    console.log("locked");
+    setInterval(() => {}, 1000);
+  `;
+  // Spawn → wait for it to hold the lock → SIGTERM → lock file must be gone.
+  const cp = spawn(process.execPath, ["--input-type=module", "-e", child], { stdio: ["ignore", "pipe", "pipe"] });
+  return new Promise((resolve, reject) => {
+    let out = "";
+    cp.stdout.on("data", (d) => {
+      out += d;
+      if (out.includes("locked")) {
+        assert.ok(existsSync(path.join(dir, "used-sessions.lock")));
+        cp.kill("SIGTERM");
+      }
+    });
+    cp.on("exit", () => {
+      try {
+        assert.equal(existsSync(path.join(dir, "used-sessions.lock")), false);
+        resolve();
+      } catch (e) { reject(e); }
+    });
+    cp.stderr.on("data", () => {});
+  });
 });

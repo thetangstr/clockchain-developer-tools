@@ -35,4 +35,4 @@ scripts/slides-created.json
 .superpowers/
 
 # Local runtime state (contract surface dev/testing)
-state/
+packages/mcp-server/state/

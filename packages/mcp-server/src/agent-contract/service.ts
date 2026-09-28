@@ -1,7 +1,8 @@
 import {
-  closeSync, existsSync, fsyncSync, mkdirSync, openSync,
+  closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync,
   readFileSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { z } from "zod";
@@ -165,44 +166,77 @@ function persistUsedSessions(stateDir: string, used: ReadonlyMap<string, string>
 }
 
 /**
- * Exclusive lock on the state directory (N2): two processes sharing the
- * volume must not interleave used-session writes — the second is refused.
+ * Exclusive lock on the state directory (N2 + pre-N7 fixes):
+ * - The lock records {pid, bootId}. The container runs node as PID 1, so a
+ *   recycled pid is alive forever — a lock whose pid is OURS but whose bootId
+ *   is not this process's boot id is stale (a prior boot) and is recovered.
+ * - The lock body is written to a temp file and HARD-LINKED into place, so an
+ *   empty or half-written lock file can only exist if we crashed mid-link —
+ *   it is never treated as stale (fail closed: refuse, don't take over).
+ * - SIGTERM/SIGINT release the lock before exit.
  */
+const PROCESS_BOOT_ID = randomBytes(16).toString("hex");
+
 function acquireStateLock(stateDir: string): () => void {
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, LOCK_FILE);
-  const fd = tryLock(file);
-  writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
-  closeSync(fd);
+  linkLock(file);
   let held = true;
-  return () => {
+  const onTerm = () => { try { release(); } finally { process.exit(143); } };
+  const onInt = () => { try { release(); } finally { process.exit(130); } };
+  process.on("SIGTERM", onTerm);
+  process.on("SIGINT", onInt);
+  function release(): void {
     if (held) {
       held = false;
+      process.off("SIGTERM", onTerm);
+      process.off("SIGINT", onInt);
       rmSync(file, { force: true });
     }
-  };
-}
-
-function tryLock(file: string): number {
-  try {
-    return openSync(file, "wx");
-  } catch {
-    // Crash recovery: a lock whose recorded pid is dead is stale — remove it
-    // and retry once. A lock held by a LIVE process refuses the second one.
-    const pid = lockPid(file);
-    if (pid !== null && pidAlive(pid)) {
-      throw new Error(`contract state dir is locked by pid ${pid}: ${file}`);
-    }
-    rmSync(file, { force: true });
-    return openSync(file, "wx");
   }
+  return release;
 }
 
-function lockPid(file: string): number | null {
+function linkLock(file: string): void {
+  const tmp = `${file}.${process.pid}.${PROCESS_BOOT_ID}.tmp`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    writeFileSync(tmp, JSON.stringify({
+      pid: process.pid,
+      bootId: PROCESS_BOOT_ID,
+      at: new Date().toISOString(),
+    }));
+    try {
+      linkSync(tmp, file); // atomic create — EEXIST if a lock is present
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+    const holder = lockHolder(file);
+    if (holder === null) {
+      // Unreadable/empty/half-written — never treated as stale; refuse.
+      throw new Error(`contract state dir lock is unreadable: ${file}`);
+    }
+    const stale =
+      (holder.pid === process.pid && holder.bootId !== PROCESS_BOOT_ID) ||
+      (holder.pid !== process.pid && !pidAlive(holder.pid));
+    if (!stale) {
+      throw new Error(`contract state dir is locked by pid ${holder.pid}: ${file}`);
+    }
+    rmSync(file, { force: true }); // stale — break and retry the link once
+  }
+  throw new Error(`contract state dir is locked: ${file}`);
+}
+
+interface LockHolder { pid: number; bootId: string | undefined }
+
+function lockHolder(file: string): LockHolder | null {
   try {
     const raw = JSON.parse(readFileSync(file, "utf8"));
     const pid = Number(raw?.pid);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return { pid, bootId: typeof raw?.bootId === "string" ? raw.bootId : undefined };
   } catch {
     return null;
   }
