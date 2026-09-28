@@ -14,10 +14,12 @@ import { StandaloneAdmissionError } from "../dist/standalone-handshake/session-s
 
 const ACCEPT = "application/json, text/event-stream";
 
-test("the tool surface is exactly the ten designed tools", () => {
+test("the tool surface is exactly the twelve designed tools", () => {
   assert.deepEqual([...STANDALONE_TOOL_NAMES], [
+    "readiness_prepare",
     "handshake_invite",
     "handshake_accept_invitation",
+    "handshake_next",
     "handshake_status",
     "consent_sign",
     "channel_open",
@@ -34,6 +36,17 @@ test("instructions lead with the local-signing boundary", () => {
   assert.match(text, /never holds a private key/);
   assert.match(text, /clockchain\.standalone-handshake\/v1/);
   assert.match(text, /external business action/i);
+});
+
+test("instructions are a playbook of at most 25 lines built on readiness_prepare and handshake_next", () => {
+  const text = buildStandaloneInstructions();
+  assert.ok(text.split("\n").length <= 25, `${text.split("\n").length} lines`);
+  for (const step of [/readiness_prepare/, /personal_sign/, /handshake_invite/, /handshake_accept_invitation/, /handshake_next/, /consent_sign/, /channel_open/, /channel_send/, /channel_close/, /untrusted/]) {
+    assert.match(text, step);
+  }
+  for (const action of ["wait", "sign", "open", "respond", "closed", "expired", "revoked", "ready_failed"]) assert.match(text, new RegExp(`\\b${action}\\b`));
+  // The old text claimed handshake_status returns the consent bytes; it never did.
+  assert.doesNotMatch(text, /bytes returned in handshake_status/);
 });
 
 test("discovery manifest names the endpoint and every tool", () => {
@@ -315,6 +328,62 @@ test("tool failures surface reason codes and constants only, and log structured 
     );
   } finally {
     console.warn = originalWarn;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("handshake_next resolves csha_ handles like every role-scoped tool, and readiness_prepare needs none", async () => {
+  const calls = [];
+  const handler = createStandaloneHttpHandler({
+    invoke: async (name, args) => {
+      calls.push({ name, args });
+      if (name === "handshake_invite") return { sessionId: "s", initiatorAccess: `sat_${"i".repeat(40)}` };
+      if (name === "readiness_prepare") return { record: {}, bytes: "{}", bytesSha256: "0".repeat(64) };
+      return { action: "wait", stage: "invited", guidance: "g", retryAfterMs: 1000 };
+    },
+  });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
+  const call = async (name, args) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data:"));
+    return JSON.parse(data ? data.slice(5) : text).result;
+  };
+  try {
+    const prepared = await call("readiness_prepare", { sessionKeyAddress: `0x${"ab".repeat(20)}`, accountableParty: "party", statement: "statement" });
+    assert.equal(prepared.isError, undefined);
+    assert.equal("roleAccess" in prepared.structuredContent, false);
+    assert.deepEqual(calls.at(-1).args, { sessionKeyAddress: `0x${"ab".repeat(20)}`, accountableParty: "party", statement: "statement" });
+
+    const invite = await call("handshake_invite", {
+      reference: "r",
+      purpose: "p",
+      channelLimits: { durationSeconds: "600", messageKinds: ["note"], maxMessageBytes: "4096" },
+      identityPolicy: { erc8004: "not_required", chainId: null, registryAddress: null },
+      readiness: {
+        sessionKeyAddress: `0x${"1".repeat(40)}`,
+        identity: null,
+        authorityStatement: { accountableParty: "party", statement: "statement" },
+        authoritySignatureHex: `0x${"2".repeat(130)}`,
+        capabilityManifest: { dataHandlingClass: "public", purpose: "p" },
+      },
+    });
+    const handle = invite.structuredContent.roleAccess;
+    assert.match(handle, /^csha_/);
+    const next = await call("handshake_next", { access: handle, waitMs: 0, cursor: 0 });
+    assert.equal(next.structuredContent.action, "wait");
+    assert.equal(next.structuredContent.roleAccess, handle);
+    // The coordinator sees the underlying signed access, never the public handle.
+    assert.deepEqual(calls.at(-1), { name: "handshake_next", args: { access: `sat_${"i".repeat(40)}`, waitMs: 0, cursor: 0 } });
+    const unknown = await call("handshake_next", { access: `csha_${"z".repeat(22)}` });
+    assert.equal(unknown.isError, true);
+  } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 });

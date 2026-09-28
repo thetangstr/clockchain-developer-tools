@@ -127,6 +127,7 @@ export function createStandaloneSessionStore(options: {
         closedBy: undefined,
         messages: [],
         seq: 0,
+        anchors: [],
         touchedAtMs: housekeepingNow(),
       });
       evictStaleSessions();
@@ -239,11 +240,32 @@ export function createStandaloneSessionStore(options: {
       return message;
     },
 
-    readMessages(sessionId: string, role: string): readonly any[] {
+    // Messages addressed to `role`. With `afterSeq`, only those with seq > afterSeq, so a
+    // caller holding a cursor (the highest seq it has seen) reads just what is new.
+    readMessages(sessionId: string, role: string, afterSeq = 0): readonly any[] {
+      if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new StandaloneAdmissionError("MALFORMED");
       const session = requireSession(sessionId);
       expireIfDue(session);
       if (!ROLES.includes(role)) throw new StandaloneAdmissionError("UNKNOWN_PARTY");
-      return session.messages.filter((message: any) => message.toRole === role).map((message: any) => Object.freeze({ ...message }));
+      return session.messages
+        .filter((message: any) => message.toRole === role && message.seq > afterSeq)
+        .map((message: any) => Object.freeze({ ...message }));
+    },
+
+    // Highest seq admitted on the channel so far (0 before the first message).
+    lastSeq(sessionId: string): number {
+      return requireSession(sessionId).seq;
+    },
+
+    // Ledger anchors witnessed for this session (opening transitions, then closure),
+    // kept so a terminal next-action can report them to either role.
+    addAnchors(sessionId: string, anchors: readonly any[]): void {
+      const session = requireSession(sessionId);
+      session.anchors = [...session.anchors, ...anchors.map((anchor) => Object.freeze({ ...anchor }))];
+    },
+
+    anchors(sessionId: string): readonly any[] {
+      return Object.freeze([...requireSession(sessionId).anchors]);
     },
 
     status(sessionId: string): any {

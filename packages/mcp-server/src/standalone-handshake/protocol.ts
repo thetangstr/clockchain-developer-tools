@@ -8,9 +8,11 @@ export const DATA_HANDLING_CLASSES = ["public", "confidential", "restricted"] as
 
 type JsonRecord = Record<string, any>;
 
-// ADDRESS and SIGNATURE accept mixed-case hex (EIP-55 checksummed addresses,
-// uppercase signatures). Values are stored verbatim — the authority record must
-// byte-match what the signer signed — and every comparison lowercases both sides.
+// ADDRESS and SIGNATURE accept mixed-case hex on input (EIP-55 checksummed
+// addresses, uppercase signatures), but the stored and signed form is always
+// canonical lowercase: normalizeStandaloneReadiness lowercases sessionKeyAddress
+// before the authority record is rebuilt, so a signer must sign the record built
+// from the lowercase address. readiness_prepare serves those exact bytes.
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -126,6 +128,37 @@ export function standaloneAuthorityRecord(readiness: Readonly<JsonRecord>): Read
     accountableParty: readiness.authorityStatement.accountableParty,
     statement: readiness.authorityStatement.statement,
   });
+}
+
+/**
+ * Something the caller signs locally: the structured record, its exact canonical
+ * bytes as a UTF-8 string (what EIP-191 personal_sign is applied to) and the sha256
+ * of those bytes. The signer re-derives bytes and digest from `record` before signing;
+ * the server's copy is a convenience, never an authority.
+ */
+export interface StandaloneSigningPayload {
+  record: Readonly<JsonRecord>;
+  bytes: string;
+  bytesSha256: string;
+}
+
+export function standaloneSigningPayload(record: Readonly<JsonRecord>): StandaloneSigningPayload {
+  const bytes = canonicalBytes(record);
+  return Object.freeze({ record, bytes: bytes.toString("utf8"), bytesSha256: digestHex(record) });
+}
+
+/**
+ * The authority record a party signs for its readiness package, built from the
+ * canonical lowercase session-key address exactly as the checklist rebuilds it.
+ */
+export function prepareStandaloneAuthority(value: unknown): StandaloneSigningPayload {
+  const item = exact(value, ["sessionKeyAddress", "accountableParty", "statement"]);
+  if (typeof item.sessionKeyAddress !== "string" || !ADDRESS.test(item.sessionKeyAddress)) invalid();
+  if (!printable(item.accountableParty, 128) || !printable(item.statement, 512)) invalid();
+  return standaloneSigningPayload(standaloneAuthorityRecord({
+    sessionKeyAddress: item.sessionKeyAddress.toLowerCase(),
+    authorityStatement: { accountableParty: item.accountableParty, statement: item.statement },
+  }));
 }
 
 export function buildStandaloneConsentRecord(input: { sessionId: string; role: string; termsDigest: string; checklistDigest: string }): Readonly<JsonRecord> {

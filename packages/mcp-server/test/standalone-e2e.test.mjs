@@ -125,3 +125,152 @@ test("two unconnected agents go from invitation to anchored closure over HTTP", 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+// Two scripted agents finish a handshake knowing only the playbook: every byte they sign
+// comes from readiness_prepare or handshake_next and is re-derived locally before signing.
+// The one thing passed between them is the invitation string, as the playbook says.
+test("two scripted agents complete invite → accept → consent → open → 2 messages → close by looping on handshake_next", async () => {
+  const { getAddress } = await import("viem");
+  const { canonicalJson, newSessionKey, recoverLocally, sha256Hex, verifyAndSign } = await import("./helpers/standalone-signer.mjs");
+  const ALLOWED_TOOLS = new Set(["readiness_prepare", "handshake_invite", "handshake_accept_invitation", "handshake_next", "consent_sign", "channel_open", "channel_send", "channel_close"]);
+
+  const coordinator = createStandaloneCoordinator({
+    client: fakeLedger(),
+    now: () => 1_750_000_000_000,
+    recoverEip191Address: recoverLocally,
+    resolveIdentity: async () => true,
+    nextPollMs: 10,
+  });
+  const handler = createStandaloneHttpHandler({ invoke: (name, args) => coordinator.invoke(name, args) });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
+  const toolsUsed = new Set();
+
+  async function call(name, args) {
+    assert.ok(ALLOWED_TOOLS.has(name), `agents may not call ${name}`);
+    toolsUsed.add(name);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data:"));
+    const result = JSON.parse(data ? data.slice(5) : text).result;
+    return JSON.parse(result.content[0].text);
+  }
+
+  const terms = validTerms();
+  async function readiness(account) {
+    const prepared = await call("readiness_prepare", {
+      sessionKeyAddress: getAddress(account.address),
+      accountableParty: "Acme Buying LLC",
+      statement: "I am authorized to discuss delivery options for Acme.",
+    });
+    assert.equal(prepared.record.sessionKeyAddress, account.address.toLowerCase());
+    return {
+      sessionKeyAddress: getAddress(account.address),
+      identity: null,
+      authorityStatement: { accountableParty: prepared.record.accountableParty, statement: prepared.record.statement },
+      authoritySignatureHex: await verifyAndSign(account, prepared),
+      capabilityManifest: { dataHandlingClass: "confidential", purpose: terms.purpose },
+    };
+  }
+
+  // The loop the playbook describes, with a scripted "brain" deciding what to say.
+  async function loop({ role, access, sessionId, account, decide }) {
+    const transcript = [];
+    let cursor;
+    for (let step = 0; step < 100; step += 1) {
+      const next = await call("handshake_next", { access, waitMs: 2000, ...(cursor === undefined ? {} : { cursor }) });
+      transcript.push(next.action);
+      if (next.cursor !== undefined) cursor = next.cursor;
+      switch (next.action) {
+        case "wait":
+          break;
+        case "sign": {
+          assert.equal(next.sign.record.sessionId, sessionId);
+          assert.equal(next.sign.record.role, role);
+          assert.equal(next.sign.record.termsDigest, sha256Hex(canonicalJson(next.context.terms)));
+          const signed = await call("consent_sign", { access, signatureHex: await verifyAndSign(account, next.sign) });
+          assert.equal(signed.error, undefined);
+          break;
+        }
+        case "open": {
+          const opened = await call("channel_open", { access });
+          assert.ok(opened.error === undefined || opened.error === "ALREADY_OPEN", JSON.stringify(opened));
+          break;
+        }
+        case "respond": {
+          for (const message of next.messages) assert.equal(message.untrusted, true);
+          const decision = decide(next.messages);
+          if (decision.close) {
+            const closed = await call("channel_close", { access });
+            assert.equal(closed.outcome, "closed");
+          } else {
+            const sent = await call("channel_send", { access, kind: decision.kind, body: decision.body });
+            assert.equal(typeof sent.seq, "number");
+          }
+          break;
+        }
+        default:
+          return { transcript, terminal: next.terminal, messages: next.messages ?? [] };
+      }
+    }
+    throw new Error(`${role} never reached a terminal action`);
+  }
+
+  try {
+    const alice = newSessionKey();
+    const bob = newSessionKey();
+    let handInvitation;
+    const invitationPassed = new Promise((resolve) => { handInvitation = resolve; });
+
+    const initiator = (async () => {
+      const invite = await call("handshake_invite", { ...terms, readiness: await readiness(alice) });
+      handInvitation(invite.invitation);
+      const received = [];
+      return { received, ...(await loop({
+        role: "initiator",
+        access: invite.roleAccess,
+        sessionId: invite.sessionId,
+        account: alice,
+        decide: (messages) => {
+          received.push(...messages.map((m) => m.body));
+          return messages.length === 0 ? { kind: "question", body: "Can we talk Tuesday at 10:00 UTC?" } : { close: true };
+        },
+      })) };
+    })();
+
+    const responder = (async () => {
+      const invitation = await invitationPassed;
+      const accepted = await call("handshake_accept_invitation", { invitation, readiness: await readiness(bob) });
+      assert.equal(accepted.checklist.passed, true);
+      const received = [];
+      return { received, ...(await loop({
+        role: "responder",
+        access: accepted.roleAccess,
+        sessionId: accepted.sessionId,
+        account: bob,
+        decide: (messages) => {
+          received.push(...messages.map((m) => m.body));
+          return { kind: "proposal", body: "Tuesday at 10:00 UTC works." };
+        },
+      })) };
+    })();
+
+    const [a, b] = await Promise.all([initiator, responder]);
+    assert.deepEqual(a.received, ["Tuesday at 10:00 UTC works."]);
+    assert.deepEqual(b.received, ["Can we talk Tuesday at 10:00 UTC?"]);
+    for (const side of [a, b]) {
+      assert.equal(side.terminal.outcome, "closed");
+      assert.equal(side.terminal.reason, "CLOSED_BY_INITIATOR");
+      assert.deepEqual(side.terminal.anchors.map((anchor) => anchor.kind), ["terms-readiness", "consent", "open", "closure"]);
+      assert.ok(side.transcript.includes("sign") && side.transcript.includes("respond"));
+    }
+    assert.deepEqual([...toolsUsed].sort(), [...ALLOWED_TOOLS].sort());
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

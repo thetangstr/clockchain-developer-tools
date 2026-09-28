@@ -4,8 +4,10 @@ import { StandaloneAdmissionError } from "./session-store.js";
 import { STANDALONE_CHAIN_ID, STANDALONE_REGISTRY_ADDRESS } from "./protocol.js";
 
 export const STANDALONE_TOOL_NAMES = Object.freeze([
+  "readiness_prepare",
   "handshake_invite",
   "handshake_accept_invitation",
+  "handshake_next",
   "handshake_status",
   "consent_sign",
   "channel_open",
@@ -16,8 +18,11 @@ export const STANDALONE_TOOL_NAMES = Object.freeze([
   "channel_revoke",
 ]);
 
+// Public tools take no role access; every other tool is scoped to one role's access.
+export const STANDALONE_PUBLIC_TOOLS = Object.freeze(["readiness_prepare", "handshake_invite", "handshake_accept_invitation"]);
+
 export const STANDALONE_ROLE_SCOPED_TOOLS = Object.freeze(
-  STANDALONE_TOOL_NAMES.filter((name) => name !== "handshake_invite" && name !== "handshake_accept_invitation"),
+  STANDALONE_TOOL_NAMES.filter((name) => !STANDALONE_PUBLIC_TOOLS.includes(name)),
 );
 
 const identityPolicy = z.discriminatedUnion("erc8004", [
@@ -41,8 +46,16 @@ const readiness = z.object({
 }).strict();
 
 const access = z.string().min(20).max(200);
+const sessionKeyAddress = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
 
 export const STANDALONE_TOOL_DEFINITIONS = Object.freeze([
+  {
+    name: "readiness_prepare",
+    title: "Prepare your authority record",
+    description: "Returns the exact authority record, its canonical bytes (a UTF-8 string) and their sha256 for your readiness package. The address is canonical lowercase. Verify the record, sign the bytes locally with EIP-191 personal_sign, and use the signature as authoritySignatureHex.",
+    schema: { sessionKeyAddress, accountableParty: z.string().min(1).max(128), statement: z.string().min(1).max(512) },
+    readOnly: true,
+  },
   {
     name: "handshake_invite",
     title: "Propose a standalone handshake",
@@ -56,6 +69,13 @@ export const STANDALONE_TOOL_DEFINITIONS = Object.freeze([
     description: "Claim one invitation once with your readiness package. The coordinator runs the readiness checklist and issues your role access.",
     schema: { invitation: z.string().min(80).max(4096), readiness },
     readOnly: false,
+  },
+  {
+    name: "handshake_next",
+    title: "Get your next action",
+    description: "Long-polls (waitMs, default 12000, max 15000) until there is something for your role to do, then returns action: wait, sign, open, respond, or a terminal outcome (closed, expired, revoked, ready_failed). Pass back the cursor it returns. Never acts for you.",
+    schema: { access, waitMs: z.number().int().min(0).optional(), cursor: z.number().int().min(0).optional() },
+    readOnly: true,
   },
   { name: "handshake_status", title: "Read handshake status", description: "Read progress, checklist results, channel state, remaining time, and scope for this role.", schema: { access }, readOnly: true },
   { name: "consent_sign", title: "Sign consent", description: "Sign consent over the exact terms and checklist digest with your session key (local signing; the server never holds keys).", schema: { access, signatureHex: z.string().regex(/^0x[0-9a-fA-F]{130}$/) }, readOnly: false },

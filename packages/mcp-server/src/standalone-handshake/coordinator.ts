@@ -7,6 +7,7 @@ import { canonicalBytes } from "../handshake/protocol.js";
 import { recoverEip191Address, resolveOwnedAgentRegistration } from "../handshake/evm.js";
 
 import { evaluateStandaloneReadiness } from "./checklist.js";
+import { DEFAULT_NEXT_WAIT_MS, MAX_NEXT_WAIT_MS, MAX_NEXT_WAIT_POLLS, NEXT_WAIT_POLL_MS, evaluateStandaloneNext } from "./next.js";
 import {
   DIGEST,
   STANDALONE_HANDSHAKE_PROTOCOL,
@@ -15,6 +16,7 @@ import {
   normalizeStandaloneClosure,
   normalizeStandaloneReadiness,
   normalizeStandaloneTerms,
+  prepareStandaloneAuthority,
   standaloneCanonicalRecord,
 } from "./protocol.js";
 import { createStandaloneSessionStore, StandaloneAdmissionError } from "./session-store.js";
@@ -31,6 +33,22 @@ export class StandaloneTransientCoordinatorError extends Error {
     super("Standalone handshake coordinator is temporarily unavailable.");
     this.name = "StandaloneTransientCoordinatorError";
   }
+}
+
+function boundedNextWaitMs(value: unknown): number {
+  if (value === undefined || value === null) return DEFAULT_NEXT_WAIT_MS;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new StandaloneCoordinatorError();
+  return Math.min(value, MAX_NEXT_WAIT_MS);
+}
+
+function nextCursor(value: unknown): number {
+  if (value === undefined || value === null) return 0;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new StandaloneCoordinatorError();
+  return value;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 const KIND_REFERENCES = { TERMS_READINESS: "terms-readiness", CONSENT: "consent", OPEN: "open" } as const;
@@ -68,11 +86,24 @@ export function createStandaloneCoordinator(options: {
   rpcUrl?: string;
   recoverEip191Address?: (input: { bytes: Buffer; signatureHex: string }) => Promise<string>;
   resolveIdentity?: (identity: Readonly<Record<string, any>> | null, sessionKeyAddress: string) => Promise<boolean>;
+  /** handshake_next long-poll slice; defaults to NEXT_WAIT_POLL_MS. */
+  nextPollMs?: number;
+  /**
+   * Monotonic clock that bounds a handshake_next hold. Deliberately separate from `now`
+   * (the protocol clock): a long-poll budget is wall-time resource management.
+   */
+  waitClock?: () => number;
 } = {}) {
   if (!options.client) throw new StandaloneCoordinatorError("A ledger client is required.");
   const client = options.client;
   const now = options.now ?? Date.now;
   const store = createStandaloneSessionStore({ now });
+  const nextPollMs = options.nextPollMs ?? NEXT_WAIT_POLL_MS;
+  const waitClock = options.waitClock ?? (() => performance.now());
+  // Either party may open, and a looping agent on each side can call channel_open at the
+  // same moment. Concurrent calls for one session share a single in-flight open, so the
+  // opening transitions are anchored once.
+  const openings = new Map<string, Promise<Record<string, unknown>>>();
   const recover = options.recoverEip191Address;
   const resolveIdentity =
     options.resolveIdentity ??
@@ -95,6 +126,27 @@ export function createStandaloneCoordinator(options: {
     store,
 
     async invoke(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+      if (name === "readiness_prepare") {
+        // Public and stateless: the exact authority bytes the checklist will verify.
+        return { ...prepareStandaloneAuthority({ sessionKeyAddress: args.sessionKeyAddress, accountableParty: args.accountableParty, statement: args.statement }), protocol: STANDALONE_HANDSHAKE_PROTOCOL, thenCall: "handshake_invite or handshake_accept_invitation" };
+      }
+
+      if (name === "handshake_next") {
+        const { session, role } = authedSession(args);
+        const waitMs = boundedNextWaitMs(args.waitMs);
+        const cursor = nextCursor(args.cursor);
+        const startedAt = waitClock();
+        for (let polls = 0; ; polls += 1) {
+          const current = store.getSession(session.sessionId);
+          if (current === undefined) throw new StandaloneCoordinatorError();
+          const result = evaluateStandaloneNext({ store, session: current, role, cursor, now });
+          if (result.action !== "wait" || polls >= MAX_NEXT_WAIT_POLLS) return result;
+          const budgetMs = waitMs - (waitClock() - startedAt);
+          if (budgetMs <= 0) return result;
+          await sleep(Math.min(nextPollMs, budgetMs));
+        }
+      }
+
       if (name === "handshake_invite") {
         const terms = normalizeStandaloneTerms({ reference: args.reference, purpose: args.purpose, channelLimits: args.channelLimits, identityPolicy: args.identityPolicy });
         const readiness = normalizeStandaloneReadiness(args.readiness, terms.identityPolicy.erc8004);
@@ -192,58 +244,19 @@ export function createStandaloneCoordinator(options: {
 
       if (name === "channel_open") {
         const { session } = authedSession(args);
+        const inFlight = openings.get(session.sessionId);
+        if (inFlight !== undefined) return inFlight;
+        // The counterparty already opened it: a distinct reason code, so a looping agent
+        // knows to carry on with handshake_next rather than treat this as a failure.
+        if (session.stage === "open") throw new StandaloneAdmissionError("ALREADY_OPEN");
         if (session.stage !== "consented" || !store.bothConsented(session.sessionId)) throw new StandaloneCoordinatorError();
-        const base = {
-          protocol: STANDALONE_HANDSHAKE_PROTOCOL,
-          sessionId: session.sessionId,
-          reference: session.terms.reference,
-          termsDigest: session.termsDigest,
-          checklistDigest: session.checklist.checklistDigest,
-          initiator: { sessionKeyAddress: session.initiatorReadiness.sessionKeyAddress },
-          responder: { sessionKeyAddress: session.responderReadiness.sessionKeyAddress },
-          externalBusinessActionPerformed: false,
-        };
-        const consentDigests = Object.freeze({ initiator: session.consents.initiator, responder: session.consents.responder });
-        const transitions: Array<Record<string, any>> = [
-          { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "TERMS_READINESS", sequence: "1", predecessor: null },
-          { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "CONSENT", sequence: "2", predecessor: "", consentDigests },
-          { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "OPEN", sequence: "3", predecessor: "", consentDigests },
-        ];
-        transitions[1].predecessor = standaloneCanonicalRecord(transitions[0]).digest;
-        transitions[2].predecessor = standaloneCanonicalRecord(transitions[1]).digest;
-        const anchors: any[] = [];
-        // Transition ownership is initiator/responder/initiator, but this standalone coordinator is the single
-        // mediator (both parties' tokens live in one store, and consent_sign anchors nothing), so it writes all
-        // three transitions on the session's behalf; a missing counterpart record would otherwise deadlock open.
-        for (let index = 0; index < transitions.length; index += 1) {
-          const reference = `standalone-handshake-v1:${session.sessionId}:${KIND_REFERENCES[transitions[index].kind as keyof typeof KIND_REFERENCES]}`;
-          const receipt = await anchorStandalone(client, transitions[index], reference, true);
-          anchors.push({ kind: KIND_REFERENCES[transitions[index].kind as keyof typeof KIND_REFERENCES], ...receipt });
+        const opening = openChannel(session);
+        openings.set(session.sessionId, opening);
+        try {
+          return await opening;
+        } finally {
+          openings.delete(session.sessionId);
         }
-        // Anchor before mutate: every transition is witnessed before the session becomes an open, usable channel,
-        // so a transient anchor failure leaves the stage at "consented" and channel_open can simply be retried.
-        // The session's clock starts at the ledger's consensus time (the open anchor's block time), not the server clock.
-        // An unparseable block time is a transient upstream defect: fail rather than silently
-        // restarting the session clock on the server wall clock. The anchors already exist, so a
-        // retry re-anchors the identical records and re-reads the block.
-        const anchorOpenMs = Date.parse(anchors[anchors.length - 1].blockTimeRaw);
-        if (Number.isNaN(anchorOpenMs)) throw new StandaloneTransientCoordinatorError();
-        const openedAtMs = anchorOpenMs;
-        const expiresAtMs = openedAtMs + Number(session.terms.channelLimits.durationSeconds) * 1000;
-        store.setStage(session.sessionId, "open");
-        store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
-        return {
-          schema: "clockchain.standalone-handshake-opening/v1",
-          protocol: STANDALONE_HANDSHAKE_PROTOCOL,
-          sessionId: session.sessionId,
-          reference: session.terms.reference,
-          termsDigest: session.termsDigest,
-          checklistDigest: session.checklist.checklistDigest,
-          openedAtMs: String(openedAtMs),
-          expiresAtMs: String(expiresAtMs),
-          anchors: Object.freeze(anchors),
-          externalBusinessActionPerformed: false,
-        };
       }
 
       if (name === "channel_send") {
@@ -282,6 +295,7 @@ export function createStandaloneCoordinator(options: {
         store.setPendingClosure(session.sessionId, closureRecord);
         const anchor = await anchorStandalone(client, closureRecord, `standalone-handshake-v1:${session.sessionId}:closure`, true);
         (outcome === "closed" ? store.closeChannel : store.revokeChannel).call(store, session.sessionId, role);
+        store.addAnchors(session.sessionId, [{ kind: outcome === "closed" ? "closure" : "revocation", ...anchor }]);
         store.clearPendingClosure(session.sessionId);
         return { sessionId: session.sessionId, outcome, byRole: role, closureAnchor: anchor };
       }
@@ -289,6 +303,61 @@ export function createStandaloneCoordinator(options: {
       throw new StandaloneCoordinatorError(`Unknown tool ${name}.`);
     },
   };
+
+  async function openChannel(session: any): Promise<Record<string, unknown>> {
+    const base = {
+      protocol: STANDALONE_HANDSHAKE_PROTOCOL,
+      sessionId: session.sessionId,
+      reference: session.terms.reference,
+      termsDigest: session.termsDigest,
+      checklistDigest: session.checklist.checklistDigest,
+      initiator: { sessionKeyAddress: session.initiatorReadiness.sessionKeyAddress },
+      responder: { sessionKeyAddress: session.responderReadiness.sessionKeyAddress },
+      externalBusinessActionPerformed: false,
+    };
+    const consentDigests = Object.freeze({ initiator: session.consents.initiator, responder: session.consents.responder });
+    const transitions: Array<Record<string, any>> = [
+      { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "TERMS_READINESS", sequence: "1", predecessor: null },
+      { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "CONSENT", sequence: "2", predecessor: "", consentDigests },
+      { ...base, schema: "clockchain.standalone-handshake-transition/v1", kind: "OPEN", sequence: "3", predecessor: "", consentDigests },
+    ];
+    transitions[1].predecessor = standaloneCanonicalRecord(transitions[0]).digest;
+    transitions[2].predecessor = standaloneCanonicalRecord(transitions[1]).digest;
+    const anchors: any[] = [];
+    // Transition ownership is initiator/responder/initiator, but this standalone coordinator is the single
+    // mediator (both parties' tokens live in one store, and consent_sign anchors nothing), so it writes all
+    // three transitions on the session's behalf; a missing counterpart record would otherwise deadlock open.
+    for (let index = 0; index < transitions.length; index += 1) {
+      const reference = `standalone-handshake-v1:${session.sessionId}:${KIND_REFERENCES[transitions[index].kind as keyof typeof KIND_REFERENCES]}`;
+      const receipt = await anchorStandalone(client, transitions[index], reference, true);
+      anchors.push({ kind: KIND_REFERENCES[transitions[index].kind as keyof typeof KIND_REFERENCES], ...receipt });
+    }
+    // Anchor before mutate: every transition is witnessed before the session becomes an open, usable channel,
+    // so a transient anchor failure leaves the stage at "consented" and channel_open can simply be retried.
+    // The session's clock starts at the ledger's consensus time (the open anchor's block time), not the server clock.
+    // An unparseable block time is a transient upstream defect: fail rather than silently
+    // restarting the session clock on the server wall clock. The anchors already exist, so a
+    // retry re-anchors the identical records and re-reads the block.
+    const anchorOpenMs = Date.parse(anchors[anchors.length - 1].blockTimeRaw);
+    if (Number.isNaN(anchorOpenMs)) throw new StandaloneTransientCoordinatorError();
+    const openedAtMs = anchorOpenMs;
+    const expiresAtMs = openedAtMs + Number(session.terms.channelLimits.durationSeconds) * 1000;
+    store.setStage(session.sessionId, "open");
+    store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
+    store.addAnchors(session.sessionId, anchors);
+    return {
+      schema: "clockchain.standalone-handshake-opening/v1",
+      protocol: STANDALONE_HANDSHAKE_PROTOCOL,
+      sessionId: session.sessionId,
+      reference: session.terms.reference,
+      termsDigest: session.termsDigest,
+      checklistDigest: session.checklist.checklistDigest,
+      openedAtMs: String(openedAtMs),
+      expiresAtMs: String(expiresAtMs),
+      anchors: Object.freeze(anchors),
+      externalBusinessActionPerformed: false,
+    };
+  }
 
   function requiredIdentity(session: any): boolean {
     return session.terms.identityPolicy.erc8004 !== "not_required";
