@@ -49,8 +49,26 @@ export function buildContractServer(options: {
   principal: ContractPrincipal;
   service: ContractService;
   sourceIp?: string;
+  /**
+   * Live MCP session evidence (M2): `id` is filled on
+   * `onsessioninitialized`, `clientInfo` from `initialize`. Every receipt
+   * carries them as EVIDENCE (LLD §9 R9), never proof.
+   */
+  session?: {
+    id?: string;
+    clientInfo?: { name: string; version: string };
+    /** Per-request peer IP — the handler refreshes it before every call. */
+    sourceIp?: string;
+  };
 }): Server {
   const { principal, service } = options;
+  const sessionFields = () => ({
+    mcpSessionId: options.session?.id,
+    clientInfo: options.session?.clientInfo,
+    // The session ctx carries the per-REQUEST ip when live; fall back to the
+    // fixed option for direct (non-transport) server construction.
+    sourceIp: options.session?.sourceIp ?? options.sourceIp,
+  });
   const visible = new Set(toolDefsForRole(principal.role).map((def) => def.name));
 
   const server = new Server(
@@ -90,7 +108,7 @@ export function buildContractServer(options: {
           outcome: "INVALID_PARAMS",
           responseDigest: canonicalDigest({ error: "invalid_params" }),
           serverNonce,
-          sourceIp: options.sourceIp,
+          ...sessionFields(),
         });
       } else if (run === undefined) {
         service.recordPreBind(principal, {
@@ -99,7 +117,7 @@ export function buildContractServer(options: {
           outcome: "INVALID_PARAMS",
           responseDigest: canonicalDigest({ error: "invalid_params" }),
           serverNonce,
-          sourceIp: options.sourceIp,
+          ...sessionFields(),
         });
       }
       throw new McpError(ErrorCode.InvalidParams, "invalid tool arguments");
@@ -116,7 +134,7 @@ export function buildContractServer(options: {
       const bound = service.bind(
         principal,
         parsed.data as { certificate: unknown; signerKey: unknown; approvalKey: unknown },
-        { argsDigest, serverNonce, tool: name, sourceIp: options.sourceIp },
+        { argsDigest, serverNonce, tool: name, ...sessionFields() },
       );
       if (!bound.ok) {
         outcome = refusal(bound.code, serverNonce);
@@ -180,7 +198,7 @@ export function buildContractServer(options: {
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
       responseDigest: canonicalDigest(outcome.body),
       serverNonce,
-      sourceIp: options.sourceIp,
+      ...sessionFields(),
     });
     return recorded.ok ? outcome : refusal(recorded.code, serverNonce);
   }
@@ -196,7 +214,7 @@ export function buildContractServer(options: {
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
       responseDigest: canonicalDigest(outcome.body),
       serverNonce,
-      sourceIp: options.sourceIp,
+      ...sessionFields(),
     });
     return recorded.ok ? outcome : refusal(recorded.code, serverNonce);
   }

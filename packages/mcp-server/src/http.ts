@@ -524,6 +524,7 @@ export async function runHttp(): Promise<Server> {
       service: contractConfig.service,
       callsPerMinute: contractConfig.callsPerMinute,
       trustProxy: contractConfig.trustProxy,
+      sessionTtlMs: contractConfig.sessionTtlMs,
       onRateLimited: () => rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) }),
     });
     return contractHandler;

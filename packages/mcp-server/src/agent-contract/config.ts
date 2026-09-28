@@ -41,6 +41,8 @@ export type ContractRouteConfig =
       readonly maxReceiptsPerPrincipal: number;
       readonly runTtlMs: number;
       readonly certGraceMs: number;
+      /** Idle MCP-session TTL for the stateful transport (M2). */
+      readonly sessionTtlMs: number;
       /** Bearer token for the read-only observer receipt feed, if configured. */
       readonly observerToken?: string;
       /** §13 pins: the exact policy digest each role's approvals must carry. */
@@ -162,6 +164,7 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
   const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL ?? "512");
   const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS ?? String(24 * 3600_000));
   const certGraceMs = Number(env.CONTRACT_CERT_GRACE_MS ?? "600000");
+  const sessionTtlMs = Number(env.CONTRACT_SESSION_TTL_MS ?? String(30 * 60_000));
   const stateDir = env.CONTRACT_STATE_DIR ?? path.join(process.cwd(), "state", "contract");
 
   // Optional ERC-8004 chain/registry pins (LOW): when set, certificates must
@@ -207,6 +210,7 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
     runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
     certGraceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
+    sessionTtlMs: Number.isFinite(sessionTtlMs) ? sessionTtlMs : 30 * 60_000,
     ...(env.CONTRACT_OBSERVER_TOKEN !== undefined && env.CONTRACT_OBSERVER_TOKEN !== ""
       ? { observerToken: env.CONTRACT_OBSERVER_TOKEN }
       : {}),

@@ -169,9 +169,40 @@ test.before(async () => {
 
 test.after(() => new Promise((resolve) => http.close(resolve)));
 
+// M2: the transport is stateful — negotiate an mcp-session-id once per token.
+const sessions = new Map();
+async function ensureSession(token, url = baseUrl) {
+  if (sessions.has(`${url}|${token}`)) return;
+  const headers = { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}` };
+  const response = await fetch(url, {
+    method: "POST", headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 0, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    }),
+  });
+  // Tolerant: auth-refusal tests probe with bad tokens — a refused
+  // initialize must not throw; the probe call reports its own status.
+  const sid = response.status < 300 ? response.headers.get("mcp-session-id") : null;
+  sessions.set(`${url}|${token}`, sid);
+  if (sid !== null) {
+    await fetch(url, {
+      method: "POST",
+      headers: { ...headers, "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+  }
+}
+
 async function rpc(method, params = {}, token = "tb1", url = baseUrl, extraHeaders = {}) {
   const headers = { "content-type": "application/json", accept: ACCEPT, ...extraHeaders };
-  if (token !== null) headers.authorization = `Bearer ${token}`;
+  if (token !== null) {
+    headers.authorization = `Bearer ${token}`;
+    await ensureSession(token, url);
+    const sid = sessions.get(`${url}|${token}`);
+    // initialize must never carry a session id (it CREATES the session).
+    if (sid && method !== "initialize") headers["mcp-session-id"] = sid;
+  }
   const response = await fetch(url, {
     method: "POST",
     headers,
@@ -533,23 +564,31 @@ test("an 80-char XFF cannot leave a bound run with zero receipts", async () => {
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   try {
     const url = `http://127.0.0.1:${srv.address().port}/contract/mcp`;
+    const init = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 0, method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+      }),
+    });
+    const sessId = init.headers.get("mcp-session-id");
     const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "99999999-aaaa-4444-8888-999999999999" });
     const res = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4", "x-forwarded-for": "1".repeat(80) },
+      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4", "x-forwarded-for": "1".repeat(80), "mcp-session-id": sessId },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "contract_bind", arguments: bindArgs(certX, "xff") } }),
     });
     const text = await res.text();
     const data = text.split("\n").find((l) => l.startsWith("data:"));
     const body = JSON.parse(data ? data.slice(5) : text);
     const run = svc.runFor("99999999-aaaa-4444-8888-999999999999");
-    if (body.result?.structuredContent?.bound) {
-      assert.ok(run.receipts.length >= 1, "committed bind must carry its receipt");
-      assert.ok(run.receipts.at(-1).sourceIp.length <= 64);
-      assert.equal(run.receipts.at(-1).sourceIp, "1".repeat(64));
-    } else {
-      assert.equal(run, undefined, "no receipt, no commit");
-    }
+    // Under the stateful transport the call is guaranteed to dispatch —
+    // assert the committed path, not a silent "no commit" branch.
+    assert.equal(body.result?.structuredContent?.bound, true, JSON.stringify(body));
+    assert.ok(run.receipts.length >= 1, "committed bind must carry its receipt");
+    assert.ok(run.receipts.at(-1).sourceIp.length <= 64);
+    assert.equal(run.receipts.at(-1).sourceIp, "1".repeat(64));
   } finally {
     await new Promise((r) => srv.close(r));
   }
@@ -567,10 +606,19 @@ test("client XFF is not trusted by default; only the last hop with trust on", as
     await new Promise((r) => srv.listen(0, "127.0.0.1", r));
     try {
       const url = `http://127.0.0.1:${srv.address().port}/contract/mcp`;
+      const init = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 0, method: "initialize",
+          params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+        }),
+      });
+      const sessId = init.headers.get("mcp-session-id");
       const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid });
       const res = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4", "x-forwarded-for": "10.0.0.1, 203.0.113.9" },
+        headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4", "x-forwarded-for": "10.0.0.1, 203.0.113.9", "mcp-session-id": sessId },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "contract_bind", arguments: bindArgs(certX, "xff2") } }),
       });
       const text = await res.text();

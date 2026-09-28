@@ -43,9 +43,33 @@ async function boot(env) {
   };
 }
 
+// M2: the transport is stateful — negotiate an mcp-session-id once per
+// (server, token) before any other call.
+const sessions = new Map();
+async function ensureSession(url, token) {
+  const key = `${url}|${token}`;
+  if (sessions.has(key)) return;
+  const headers = { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}` };
+  const res = await fetch(`${url}/contract/mcp`, {
+    method: "POST", headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 0, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    }),
+  });
+  // Tolerant: tests probing disabled/misconfigured routes expect the probe
+  // call's own status (404/503), so a refused initialize must not throw.
+  sessions.set(key, res.status < 300 ? res.headers.get("mcp-session-id") : null);
+}
+
 async function post(url, method, params = {}, token = null) {
   const headers = { "content-type": "application/json", accept: ACCEPT };
-  if (token !== null) headers.authorization = `Bearer ${token}`;
+  if (token !== null) {
+    headers.authorization = `Bearer ${token}`;
+    await ensureSession(url, token);
+    const sid = sessions.get(`${url}|${token}`);
+    if (sid) headers["mcp-session-id"] = sid;
+  }
   const res = await fetch(`${url}/contract/mcp`, {
     method: "POST",
     headers,

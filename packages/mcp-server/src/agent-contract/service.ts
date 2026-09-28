@@ -157,7 +157,14 @@ export interface ContractService {
   bind(
     principal: ContractPrincipal,
     args: { certificate: unknown; signerKey: unknown; approvalKey: unknown },
-    evidence: { argsDigest: string; serverNonce: string; tool: string; sourceIp?: string },
+    evidence: {
+      argsDigest: string;
+      serverNonce: string;
+      tool: string;
+      sourceIp?: string;
+      mcpSessionId?: string;
+      clientInfo?: { name: string; version: string };
+    },
   ): BindOutcome;
   /**
    * Record a call's receipt onto the run chain (run-scoped, order-committed).
@@ -519,7 +526,14 @@ export function createContractService(options: {
   function bind(
     principal: ContractPrincipal,
     args: { certificate: unknown; signerKey: unknown; approvalKey: unknown },
-    evidence: { argsDigest: string; serverNonce: string; tool: string; sourceIp?: string },
+    evidence: {
+      argsDigest: string;
+      serverNonce: string;
+      tool: string;
+      sourceIp?: string;
+      mcpSessionId?: string;
+      clientInfo?: { name: string; version: string };
+    },
   ): BindOutcome {
     evictEnded(); // M4/M5: free cap slots before deciding
     // N4: buyer ≡ initiator, provider ≡ responder — enforced at token parse
@@ -661,6 +675,8 @@ export function createContractService(options: {
       responseDigest: canonicalDigest(resultBody),
       serverNonce: evidence.serverNonce,
       sourceIp: evidence.sourceIp,
+      mcpSessionId: evidence.mcpSessionId,
+      clientInfo: evidence.clientInfo,
       bindAssurance: "agentId-pinned-token",
       // M1: the bind receipt carries THIS principal's pre-bind chain head —
       // the run chain's link back to the evidence that preceded it.

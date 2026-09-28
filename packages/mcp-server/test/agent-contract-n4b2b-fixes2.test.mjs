@@ -214,9 +214,38 @@ test.before(async () => {
 
 test.after(() => new Promise((resolve) => http.close(resolve)));
 
+// M2: the transport is stateful — negotiate an mcp-session-id once per token.
+const sessions = new Map();
+async function ensureSession(token) {
+  if (sessions.has(token)) return;
+  const headers = { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}` };
+  const response = await fetch(baseUrl, {
+    method: "POST", headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 0, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    }),
+  });
+  assert.ok(response.status < 300, `initialize: ${response.status}`);
+  const sid = response.headers.get("mcp-session-id");
+  sessions.set(token, sid);
+  if (sid !== null) {
+    await fetch(baseUrl, {
+      method: "POST",
+      headers: { ...headers, "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+  }
+}
+
 async function rpc(method, params = {}, token = "tb1") {
   const headers = { "content-type": "application/json", accept: ACCEPT };
-  if (token !== null) headers.authorization = `Bearer ${token}`;
+  if (token !== null) {
+    headers.authorization = `Bearer ${token}`;
+    await ensureSession(token);
+    const sid = sessions.get(token);
+    if (sid) headers["mcp-session-id"] = sid;
+  }
   const response = await fetch(baseUrl, {
     method: "POST", headers,
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),

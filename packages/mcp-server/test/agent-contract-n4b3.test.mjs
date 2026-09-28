@@ -290,3 +290,120 @@ test("M1: a refused bind is receipted on the principal's pre-bind chain", async 
   assert.notEqual(last.outcome, "ok");
   assert.equal(verifyChain(feed.receipts, SERVER_PUBKEYS).ok, true);
 });
+
+// === M2: stateful MCP sessions =================================================
+
+test("M2: receipts carry the MCP session id and the initialize clientInfo", async () => {
+  const s = await callTool("tb4", "contract_status", {});
+  assert.equal(s.stage, "rendezvous");
+  const sessionId = sessions.get("tb4");
+  assert.ok(typeof sessionId === "string" && sessionId.length > 0, "stateful session negotiated");
+  const receipt = service.preBindFeed("kb4")?.receipts.at(-1);
+  assert.equal(receipt.tool, "contract_status");
+  assert.equal(receipt.mcpSessionId, sessionId, "receipt carries mcpSessionId");
+  assert.deepEqual(receipt.clientInfo, CLIENT_INFO, "receipt carries clientInfo");
+});
+
+test("M2: a non-initialize request without a session is refused per the MCP spec", async () => {
+  // tools/call with NO mcp-session-id → 400
+  const noSession = await fetch(`${baseUrl}/contract/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb4" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "contract_status", arguments: {} } }),
+  });
+  assert.equal(noSession.status, 400, await noSession.text());
+
+  // …and a BOGUS session id → 404
+  const bogus = await fetch(`${baseUrl}/contract/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json", accept: ACCEPT,
+      authorization: "Bearer tb4", "mcp-session-id": "deadbeef-dead-beef-dead-beefdeadbeef",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "contract_status", arguments: {} } }),
+  });
+  assert.equal(bogus.status, 404, await bogus.text());
+});
+
+test("M2: a session is bound to its principal — a different token on it is refused", async () => {
+  await ensureSession("tb5");
+  const sid = sessions.get("tb5");
+  const r = await fetch(`${baseUrl}/contract/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json", accept: ACCEPT,
+      authorization: "Bearer tp5", "mcp-session-id": sid,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "contract_status", arguments: {} } }),
+  });
+  assert.ok(r.status === 401 || r.status === 403, `expected 401/403, got ${r.status}`);
+});
+
+test("M2: session TTL — an idle session expires; DELETE terminates it", async () => {
+  // Dedicated handler with a tiny TTL and an injectable clock.
+  let nowMs = Date.now();
+  const ttlService = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER,
+    policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
+  });
+  const h2 = createServer(createContractHttpHandler({
+    authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: ttlService,
+    sessionTtlMs: 500, now: () => nowMs,
+  }));
+  await new Promise((r) => h2.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${h2.address().port}/contract/mcp`;
+  try {
+    const init = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb6" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 0, method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: CLIENT_INFO },
+      }),
+    });
+    assert.ok(init.status < 300, `initialize: ${init.status}`);
+    const sid = init.headers.get("mcp-session-id");
+    assert.ok(sid, "session id issued");
+
+    const call = (headers = {}) => fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json", accept: ACCEPT,
+        authorization: "Bearer tb6", "mcp-session-id": sid, ...headers,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "contract_status", arguments: {} } }),
+    });
+    assert.equal((await call()).status, 200, "live session serves");
+
+    // Idle past the TTL → the session is gone.
+    nowMs += 5_000;
+    assert.equal((await call()).status, 404, "expired session is refused");
+
+    // Fresh session → DELETE terminates it → subsequent calls 404.
+    const init2 = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb6" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 0, method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: CLIENT_INFO },
+      }),
+    });
+    const sid2 = init2.headers.get("mcp-session-id");
+    const del = await fetch(url, {
+      method: "DELETE",
+      headers: { authorization: "Bearer tb6", "mcp-session-id": sid2, accept: ACCEPT },
+    });
+    assert.ok(del.status < 300, `DELETE: ${del.status}`);
+    assert.equal((await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json", accept: ACCEPT,
+        authorization: "Bearer tb6", "mcp-session-id": sid2,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "contract_status", arguments: {} } }),
+    })).status, 404);
+  } finally {
+    await new Promise((r) => h2.close(r));
+    ttlService.close();
+  }
+});
