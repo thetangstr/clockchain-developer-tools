@@ -1063,70 +1063,309 @@ test("installer enables and restarts the systemd unit", async () => {
   assert.match(install, /systemctl restart clockchain-mcp\.service/);
 });
 
-test("installer --no-restart refreshes the installed assets without restarting the unit", async () => {
-  const install = await readFile(installScript, "utf8");
-  assert.match(install, /--no-restart\) RESTART=0/);
-  assert.match(install, /if \[\[ "\$RESTART" == 1 \]\]; then\n\s+systemctl restart clockchain-mcp\.service\n/);
+// ---- deploy-box.sh + installer, executed against stub sudo/git/docker/systemctl/stat ----
+
+const testSha = "0123456789abcdef0123456789abcdef01234567";
+const stubMarker = "# deploy-box: supports --only mcp";
+
+async function writeExecutable(file, body) {
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, body, { mode: 0o755 });
+  await chmod(file, 0o755);
+}
+
+// A fake box: APP_ROOT with the REAL installer + unit, a logging compose-up.sh stub, and stub
+// commands that append every invocation to one command log.
+async function createBoxFixture({ oldTarget = false } = {}) {
+  const temp = await mkdtemp(path.join(tmpdir(), "clockchain-deploy-box-test."));
+  const app = path.join(temp, "app");
+  const bin = path.join(temp, "bin");
+  const log = path.join(temp, "commands.log");
+  const installRoot = path.join(temp, "install");
+  const systemdDir = path.join(temp, "systemd");
+  await mkdir(systemdDir, { recursive: true });
+  const appInstaller = path.join(app, "infra", "scripts", "install-clockchain-mcp-deploy-assets.sh");
+  const appComposeUp = path.join(app, "infra", "clockchain-mcp", "compose-up.sh");
+  await mkdir(path.dirname(appComposeUp), { recursive: true });
+  await writeFile(path.join(app, "infra", "clockchain-mcp", "clockchain-mcp.service"), await readFile(systemdUnit, "utf8"));
+  if (oldTarget) {
+    // Pre-code-only versions: ignore every argument, always restart / always bring up everything.
+    await writeExecutable(appInstaller, `#!/usr/bin/env bash\nset -euo pipefail\nsystemctl restart clockchain-mcp.service\n`);
+    await writeExecutable(appComposeUp, `#!/usr/bin/env bash\nprintf 'compose-up %s\\n' "$*" >> "$CMD_LOG"\n`);
+  } else {
+    await writeExecutable(appInstaller, await readFile(installScript, "utf8"));
+    await writeExecutable(appComposeUp, `#!/usr/bin/env bash\n${stubMarker} (test stub)\nprintf 'compose-up %s\\n' "$*" >> "$CMD_LOG"\n`);
+  }
+  const logLine = `printf '%s %s\\n' "$(basename "$0")" "$*" >> "$CMD_LOG"`;
+  await writeExecutable(path.join(bin, "stat"), `#!/usr/bin/env bash\necho owner\n`);
+  await writeExecutable(path.join(bin, "sudo"), `#!/usr/bin/env bash\n${logLine}\n[[ "$1" == "-u" ]] && shift 2\nexec "$@"\n`);
+  await writeExecutable(
+    path.join(bin, "git"),
+    `#!/usr/bin/env bash
+${logLine}
+[[ "$1" == "-c" ]] && shift 2
+case "$1 \${2:-}" in
+  "rev-parse --short") echo abc1234 ;;
+  "rev-parse HEAD") echo ${"f".repeat(40)} ;;
+  "status --short") printf '%s' "\${FAKE_DIRTY:-}" ;;
+  "diff --name-only") printf '%s' "\${FAKE_DIFF:-}" ;;
+  show*) cat "$APP_ROOT_FOR_TEST/\${2#*:}" ;;
+  *) ;;
+esac
+`,
+  );
+  await writeExecutable(
+    path.join(bin, "docker"),
+    `#!/usr/bin/env bash
+${logLine}
+case "$*" in
+  *" ps -aq caddy host mcp") printf 'c1\\nh1\\nm1\\n' ;;
+  inspect*) echo "/\${!#} created=2026-09-01T00:00:00Z started=2026-09-01T00:00:00Z" ;;
+esac
+`,
+  );
+  await writeExecutable(
+    path.join(bin, "systemctl"),
+    `#!/usr/bin/env bash\n${logLine}\n[[ "$1" == "is-active" ]] && echo active\nexit 0\n`,
+  );
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    CMD_LOG: log,
+    APP_ROOT_FOR_TEST: app,
+    CLOCKCHAIN_MCP_APP_ROOT: app,
+    CLOCKCHAIN_MCP_INSTALL_ROOT: installRoot,
+    CLOCKCHAIN_MCP_SYSTEMD_DIR: systemdDir,
+  };
+  return { temp, app, appInstaller, log, installRoot, systemdDir, env };
+}
+
+async function renderRemote(args, env) {
+  const r = await run("bash", [deployBoxScript, ...args], {
+    cwd: repoRoot,
+    env: { ...env, DEPLOY_BOX_TEST_RENDER_REMOTE_DO_NOT_DEPLOY: "1" },
+  });
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /RENDER ONLY — nothing deployed/);
+  return r.stdout;
+}
+
+async function runRemote(fixture, args, extraEnv = {}) {
+  const script = await renderRemote([testSha, ...args], fixture.env);
+  const scriptFile = path.join(fixture.temp, "remote.sh");
+  await writeFile(scriptFile, script);
+  const syntax = await run("bash", ["-n", scriptFile], {});
+  assert.equal(syntax.code, 0, `rendered remote script parses: ${syntax.stderr}`);
+  const result = await run("bash", [scriptFile], { cwd: fixture.temp, env: { ...fixture.env, ...extraEnv } });
+  const log = (await readFile(fixture.log, "utf8").catch(() => "")).split("\n").filter(Boolean);
+  return { ...result, log };
+}
+
+const indexOfLine = (log, re) => log.findIndex((line) => re.test(line));
+
+test("remote script, code-only: installs without restart, then recreates only mcp", async () => {
+  const fx = await createBoxFixture();
+  try {
+    const r = await runRemote(fx, []);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.equal(indexOfLine(r.log, /^systemctl restart/), -1, "no systemctl restart in code-only");
+    assert.equal(indexOfLine(r.log, /^systemctl stop/), -1);
+    const checkout = indexOfLine(r.log, new RegExp(`^git .*checkout --quiet --detach ${testSha}$`));
+    const build = indexOfLine(r.log, /^docker compose -f infra\/clockchain-mcp\/docker-compose\.yml build mcp$/);
+    const reload = indexOfLine(r.log, /^systemctl daemon-reload$/);
+    const composeUp = indexOfLine(r.log, /^compose-up --only mcp$/);
+    assert.ok(checkout >= 0 && build > checkout, "checkout, then pre-build");
+    assert.ok(reload > build, "installer (--no-restart) ran after the pre-build");
+    assert.ok(composeUp > reload, "--no-restart installer runs before compose-up.sh --only mcp");
+    assert.equal(r.log.filter((l) => l.startsWith("compose-up")).length, 1);
+    // Installed copies refreshed on disk.
+    assert.equal(await pathExists(path.join(fx.installRoot, "compose-up.sh")), true);
+    assert.equal(await pathExists(path.join(fx.systemdDir, "clockchain-mcp.service")), true);
+    // Container times printed before and after.
+    assert.match(r.stdout, /container times BEFORE[\s\S]*\/h1 created=[\s\S]*container times AFTER[\s\S]*\/c1 created=/);
+    assert.match(r.stdout, /deploy assets installed; clockchain-mcp\.service NOT restarted/);
+  } finally {
+    await rm(fx.temp, { recursive: true, force: true });
+  }
+});
+
+test("remote script, --full-restart: runs the installer, which restarts the unit", async () => {
+  const fx = await createBoxFixture();
+  try {
+    const r = await runRemote(fx, ["--full-restart"]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const build = indexOfLine(r.log, /build mcp$/);
+    const restart = indexOfLine(r.log, /^systemctl restart clockchain-mcp\.service$/);
+    assert.ok(restart > build, "full mode restarts the unit after the pre-build");
+    assert.equal(indexOfLine(r.log, /^compose-up/), -1, "full mode does not call compose-up.sh directly");
+    assert.equal(indexOfLine(r.log, /^git .* show /), -1, "no code-only capability probe in full mode");
+  } finally {
+    await rm(fx.temp, { recursive: true, force: true });
+  }
+});
+
+test("remote script refuses a code-only rollback to a target that predates code-only deploys", async () => {
+  const fx = await createBoxFixture({ oldTarget: true });
+  try {
+    const r = await runRemote(fx, []);
+    assert.equal(r.code, 4, r.stdout + r.stderr);
+    assert.match(r.stdout, /target predates code-only deploy; re-run with --full-restart/);
+    assert.equal(indexOfLine(r.log, /checkout/), -1, "box checkout untouched");
+    assert.equal(indexOfLine(r.log, /^systemctl/), -1);
+    assert.equal(indexOfLine(r.log, /^compose-up/), -1);
+    assert.equal(indexOfLine(r.log, /build mcp/), -1);
+
+    // The same target deploys with an explicit --full-restart.
+    await writeFile(fx.log, "");
+    const full = await runRemote(fx, ["--full-restart"]);
+    assert.equal(full.code, 0, full.stdout + full.stderr);
+    assert.ok(indexOfLine(full.log, /^systemctl restart clockchain-mcp\.service$/) >= 0);
+  } finally {
+    await rm(fx.temp, { recursive: true, force: true });
+  }
+});
+
+for (const file of [
+  "infra/clockchain-mcp/Caddyfile",
+  "infra/clockchain-mcp/docker-compose.yml",
+  "infra/clockchain-mcp/clockchain-mcp.service",
+  "infra/scripts/install-clockchain-mcp-deploy-assets.sh",
+  "infra/clockchain-mcp/compose-up.sh",
+]) {
+  test(`remote script refuses code-only infra drift in ${path.basename(file)} unless --allow-infra-drift`, async () => {
+    const fx = await createBoxFixture();
+    try {
+      const refused = await runRemote(fx, [], { FAKE_DIFF: `${file}\n` });
+      assert.equal(refused.code, 5, refused.stdout + refused.stderr);
+      assert.match(refused.stdout, /REFUSING: infra drift in code-only mode; re-run with --full-restart .* or --allow-infra-drift/);
+      assert.equal(indexOfLine(refused.log, /checkout/), -1, "box checkout untouched");
+      assert.equal(indexOfLine(refused.log, /^compose-up/), -1);
+      const diffCall = refused.log[indexOfLine(refused.log, /diff --name-only/)];
+      assert.ok(diffCall.includes(file), `drift check covers ${file}`);
+
+      await writeFile(fx.log, "");
+      const allowed = await runRemote(fx, ["--allow-infra-drift"], { FAKE_DIFF: `${file}\n` });
+      assert.equal(allowed.code, 0, allowed.stdout + allowed.stderr);
+      assert.match(allowed.stdout, /WARNING: --allow-infra-drift/);
+      assert.equal(indexOfLine(allowed.log, /^systemctl restart/), -1);
+      assert.ok(indexOfLine(allowed.log, /^compose-up --only mcp$/) >= 0);
+    } finally {
+      await rm(fx.temp, { recursive: true, force: true });
+    }
+  });
+}
+
+test("remote script still refuses a dirty box checkout before fetching", async () => {
+  const fx = await createBoxFixture();
+  try {
+    for (const args of [[], ["--full-restart"]]) {
+      await writeFile(fx.log, "");
+      const r = await runRemote(fx, args, { FAKE_DIRTY: " M infra/clockchain-mcp/Caddyfile\n" });
+      assert.equal(r.code, 3);
+      assert.match(r.stdout, /REFUSING: the box checkout has local changes/);
+      assert.equal(indexOfLine(r.log, /fetch|checkout|^systemctl|^compose-up/), -1);
+    }
+  } finally {
+    await rm(fx.temp, { recursive: true, force: true });
+  }
+});
+
+test("remote script redirects stdin of child commands so they cannot swallow the SSM heredoc", async () => {
+  const fx = await createBoxFixture();
+  try {
+    const body = await renderRemote([testSha], fx.env);
+    for (const re of [
+      /"\$INSTALLER" <\/dev\/null/,
+      /"\$INSTALLER" --no-restart <\/dev\/null/,
+      /"\$COMPOSE_UP" --only mcp <\/dev\/null/,
+      /build mcp <\/dev\/null/,
+      /checkout --quiet --detach "\$SHA" <\/dev\/null/,
+    ]) {
+      assert.match(body, re);
+    }
+  } finally {
+    await rm(fx.temp, { recursive: true, force: true });
+  }
+});
+
+test("installer run with a stub systemctl: --no-restart never restarts; default restarts; extra args rejected", async () => {
+  const fx = await createBoxFixture();
+  try {
+    const noRestart = await run(fx.appInstaller, ["--no-restart"], { env: fx.env });
+    assert.equal(noRestart.code, 0, noRestart.stderr);
+    let log = await readFile(fx.log, "utf8");
+    assert.match(log, /^systemctl daemon-reload$/m);
+    assert.match(log, /^systemctl enable clockchain-mcp\.service$/m);
+    assert.doesNotMatch(log, /restart/);
+    assert.equal(await pathExists(path.join(fx.installRoot, "compose-up.sh")), true);
+
+    await writeFile(fx.log, "");
+    const full = await run(fx.appInstaller, [], { env: fx.env });
+    assert.equal(full.code, 0, full.stderr);
+    log = await readFile(fx.log, "utf8");
+    assert.match(log, /^systemctl restart clockchain-mcp\.service$/m);
+
+    for (const bad of [["--no-restart", "--no-restart"], ["--no-restart", "x"], ["--restart"]]) {
+      await writeFile(fx.log, "");
+      const r = await run(fx.appInstaller, bad, { env: fx.env });
+      assert.equal(r.code, 64, JSON.stringify(bad));
+      assert.equal(await readFile(fx.log, "utf8"), "", "no systemctl call on bad args");
+    }
+  } finally {
+    await rm(fx.temp, { recursive: true, force: true });
+  }
+});
+
+test("the repo's installer and compose-up.sh carry the code-only capability markers deploy-box checks", async () => {
+  assert.match(await readFile(installScript, "utf8"), /^# deploy-box: supports --no-restart/m);
+  assert.match(await readFile(wrapper, "utf8"), /^# deploy-box: supports --only mcp/m);
+  const src = await readFile(deployBoxScript, "utf8");
+  assert.ok(src.includes('*"deploy-box: supports --no-restart"*'));
+  assert.ok(src.includes('*"deploy-box: supports --only mcp"*'));
 });
 
 async function deployBoxParse(args) {
   return run("bash", [deployBoxScript, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, DEPLOY_BOX_PARSE_ONLY: "1" },
+    env: { ...process.env, DEPLOY_BOX_TEST_PARSE_ONLY_DO_NOT_DEPLOY: "1" },
   });
 }
 
 test("deploy-box.sh defaults to the code-only mode and accepts flags in any order", async () => {
-  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const sha = testSha;
   const plain = await deployBoxParse([sha]);
   assert.equal(plain.code, 0, plain.stderr);
-  assert.match(plain.stdout, /MODE: CODE-ONLY \(default\)/);
-  assert.match(plain.stdout, new RegExp(`mode=code-only sha=${sha} confirm=0`));
-  assert.doesNotMatch(plain.stdout, /FULL RESTART/);
+  assert.match(plain.stderr, /PARSE ONLY — nothing deployed/);
+  assert.match(plain.stderr, /MODE: CODE-ONLY \(default\)/);
+  assert.match(plain.stdout, new RegExp(`mode=code-only sha=${sha} confirm=0 allow_infra_drift=0`));
+  assert.doesNotMatch(plain.stderr, /FULL RESTART/);
 
   for (const args of [[sha, "--yes"], ["--yes", sha]]) {
     const r = await deployBoxParse(args);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, new RegExp(`mode=code-only sha=${sha} confirm=1`));
   }
+  for (const args of [["--allow-infra-drift", sha], [sha, "--yes", "--allow-infra-drift"]]) {
+    const r = await deployBoxParse(args);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /mode=code-only .* allow_infra_drift=1/);
+  }
   for (const args of [[sha, "--full-restart"], ["--full-restart", sha, "--yes"], ["--yes", "--full-restart", sha]]) {
     const r = await deployBoxParse(args);
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, /MODE: FULL RESTART \(--full-restart\)/);
-    assert.match(r.stdout, /travel_mvp orchestrator AND the ACM4 production owner/);
+    assert.match(r.stderr, /MODE: FULL RESTART \(--full-restart\)/);
+    assert.match(r.stderr, /travel_mvp orchestrator AND the ACM4 production owner/);
     assert.match(r.stdout, new RegExp(`mode=full-restart sha=${sha} confirm=${args.includes("--yes") ? 1 : 0}`));
   }
   for (const args of [[], ["abc"], [sha, "--bogus"], [sha, sha], ["--yes"]]) {
     const r = await deployBoxParse(args);
     assert.equal(r.code, 64, `rejects ${JSON.stringify(args)}`);
   }
-});
-
-test("deploy-box.sh code-only path recreates only mcp; the unit restart is behind --full-restart", async () => {
-  const src = await readFile(deployBoxScript, "utf8");
-  const remote = src.slice(src.indexOf("REMOTE_SCRIPT=$(cat <<EOF"), src.indexOf("PARAMS=$("));
-  assert.ok(remote.length > 0, "remote script found");
-  // Guard rails kept in both modes.
-  assert.match(remote, /REFUSING: the box checkout has local changes/);
-  assert.match(remote, /checkout --quiet --detach "\$SHA"/);
-  assert.match(remote, /\$DC build mcp/);
-  // The installer's restarting form runs only in the full-restart branch.
-  const fullBranch = remote.slice(remote.indexOf('if [[ "\\$MODE" == "full-restart" ]]; then'), remote.indexOf("else"));
-  const codeBranch = remote.slice(remote.indexOf("else"), remote.indexOf("\nfi\n", remote.indexOf("else")));
-  assert.match(fullBranch, /infra\/scripts\/install-clockchain-mcp-deploy-assets\.sh\n/);
-  assert.doesNotMatch(codeBranch, /install-clockchain-mcp-deploy-assets\.sh\n/);
-  assert.match(codeBranch, /install-clockchain-mcp-deploy-assets\.sh --no-restart/);
-  assert.match(codeBranch, /infra\/clockchain-mcp\/compose-up\.sh --only mcp/);
-  assert.doesNotMatch(remote, /^\s*systemctl (restart|stop)/m, "deploy-box never restarts the unit itself; only the installer does");
-  // Operator can see caddy and host were not recreated.
-  assert.match(remote, /ps -aq caddy host mcp/);
-  assert.match(remote, /\{\{\.Created\}\}.*\{\{\.State\.StartedAt\}\}/);
-  assert.match(codeBranch, /container times BEFORE[\s\S]*compose-up\.sh --only mcp[\s\S]*container times AFTER/);
   // Canaries unchanged.
+  const src = await readFile(deployBoxScript, "utf8");
   assert.match(src, /\/next\/handshake\/mcp/);
   assert.match(src, /mcp without creds \$A \(expect 401\)/);
 });
-
 
 test("release runbook reinstalls deploy assets before every MCP restart", async () => {
   const runbook = await readFile(path.join(deployDir, "RUNBOOK.md"), "utf8");

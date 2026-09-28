@@ -5,7 +5,7 @@
 # learned on 2026-09-11: the box is the AWS EC2 instance running Caddy + docker-compose; the GitHub
 # "Deploy MCP to Cloud Run" workflow is NOT production.
 #
-#   scripts/deploy-box.sh <commit-sha> [--yes] [--full-restart]      (flags in any order)
+#   scripts/deploy-box.sh <commit-sha> [--yes] [--full-restart] [--allow-infra-drift]   (any order)
 #
 # Two modes. The DEFAULT is CODE-ONLY; the full-unit restart needs --full-restart.
 #
@@ -17,8 +17,12 @@
 #     (install-clockchain-mcp-deploy-assets.sh --no-restart), so a later reboot or full restart runs
 #     the same compose-up.sh that just deployed mcp. In-memory mcp state (ccra_/csha_ handles) is
 #     still lost: the notice/freeze rule still applies (spec, "Deploy blast radius").
-#     Changes to the Caddyfile, docker-compose.yml, the unit or the installer are NOT applied to
-#     caddy/host by this mode; it warns when the deploy diff touches them.
+#     Before checking anything out it REFUSES (box untouched) when
+#       - the target's installer/compose-up.sh predate code-only deploys (a rollback to a pre-code-only
+#         SHA would otherwise silently become a full restart): exit 4, use --full-restart;
+#       - the deploy diff touches the Caddyfile, docker-compose.yml, the unit, the installer or
+#         compose-up.sh (infra drift this mode would not apply to caddy/host): exit 5, use
+#         --full-restart, or --allow-infra-drift to install them to disk and recreate only mcp anyway.
 #
 #   --full-restart: the previous behaviour, for infra/config changes. The installer refreshes the
 #     wrapper + unit and `systemctl restart clockchain-mcp`, whose ExecStop is `docker compose down`:
@@ -46,24 +50,26 @@ AWS_REGION="${AWS_REGION:-us-west-2}"
 APP_ROOT="${CLOCKCHAIN_MCP_APP_ROOT:-/opt/clockchain-mcp/app}"
 BASE_URL="${CLOCKCHAIN_MCP_URL:-https://mcp.clockchain.network}"
 
-usage() { echo "usage: $0 <full-commit-sha> [--yes] [--full-restart]   (flags in any order)" >&2; exit 64; }
+usage() { echo "usage: $0 <full-commit-sha> [--yes] [--full-restart] [--allow-infra-drift]   (flags in any order)" >&2; exit 64; }
 
 SHA=""
 CONFIRM=0
 MODE=code-only
+ALLOW_INFRA_DRIFT=0
 for arg in "$@"; do
   case "$arg" in
     --yes) CONFIRM=1 ;;
     --full-restart) MODE=full-restart ;;
+    --allow-infra-drift) ALLOW_INFRA_DRIFT=1 ;;
     -*) usage ;;
     *) [[ -z "$SHA" ]] || usage; SHA="$arg" ;;
   esac
 done
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || usage
 
-# Print the mode loudly (also used by the tests: `DEPLOY_BOX_PARSE_ONLY=1` stops here).
+# Print the mode loudly (stderr, so it is visible however stdout is used).
 if [[ "$MODE" == "full-restart" ]]; then
-  cat <<'BANNER'
+  cat >&2 <<'BANNER'
 ==============================================================================
  MODE: FULL RESTART (--full-restart)
  systemctl restart clockchain-mcp => docker compose down + up: mcp, host AND caddy are
@@ -73,16 +79,100 @@ if [[ "$MODE" == "full-restart" ]]; then
 ==============================================================================
 BANNER
 else
-  cat <<'BANNER'
+  cat >&2 <<'BANNER'
 ==============================================================================
  MODE: CODE-ONLY (default)
  Recreates ONLY the mcp container (compose up --no-deps mcp). caddy and host keep running.
  mcp in-memory state (ccra_/csha_ handles) is still lost: the notice/freeze rule still applies.
- Infra/config changes (Caddyfile, compose file, unit) need --full-restart.
+ Refuses if the deploy changes infra files (Caddyfile, compose file, unit, installer,
+ compose-up.sh) or the target predates code-only deploys: use --full-restart.
 ==============================================================================
 BANNER
+  [[ "$ALLOW_INFRA_DRIFT" == 1 ]] && echo " --allow-infra-drift: infra changes will be installed to disk but NOT applied to caddy/host." >&2
 fi
-[[ "${DEPLOY_BOX_PARSE_ONLY:-0}" == "1" ]] && { echo "mode=$MODE sha=$SHA confirm=$CONFIRM"; exit 0; }
+
+# The script run on the box, as root, via SSM. Parameters are prepended as shell-quoted
+# assignments; the body is a quoted heredoc, so nothing in it expands on this machine.
+REMOTE_BODY=$(cat <<'EOF'
+set -euo pipefail
+cd "$APP_ROOT"
+OWNER=$(stat -c %U .)
+G=(sudo -u "$OWNER" git -c "safe.directory=$APP_ROOT")
+DC=(docker compose -f infra/clockchain-mcp/docker-compose.yml)
+INSTALLER=infra/scripts/install-clockchain-mcp-deploy-assets.sh
+COMPOSE_UP=infra/clockchain-mcp/compose-up.sh
+echo "box: mode=$MODE before=$("${G[@]}" rev-parse --short HEAD) $(date -u +%FT%TZ)"
+DIRTY=$("${G[@]}" status --short)
+if [[ -n "$DIRTY" ]]; then
+  echo "REFUSING: the box checkout has local changes. Commit them to the repo (or preserve them on a local branch) first:"
+  echo "$DIRTY"
+  exit 3
+fi
+"${G[@]}" fetch --quiet origin main </dev/null
+if [[ "$MODE" == "code-only" ]]; then
+  # Checked BEFORE the checkout, so a refusal leaves the box exactly as it was.
+  # 1. The target's own installer/wrapper must support the code-only flags. Older versions
+  #    ignore --no-restart (=> systemctl restart, i.e. compose down/up) and --only mcp (=> full up).
+  TARGET_INSTALLER=$("${G[@]}" show "$SHA:$INSTALLER")
+  TARGET_COMPOSE_UP=$("${G[@]}" show "$SHA:$COMPOSE_UP")
+  if [[ "$TARGET_INSTALLER" != *"deploy-box: supports --no-restart"* || "$TARGET_COMPOSE_UP" != *"deploy-box: supports --only mcp"* ]]; then
+    echo "REFUSING: target predates code-only deploy; re-run with --full-restart"
+    exit 4
+  fi
+  # 2. Infra drift: code-only never applies these to caddy/host.
+  INFRA=$("${G[@]}" diff --name-only HEAD "$SHA" -- \
+    infra/clockchain-mcp/Caddyfile infra/clockchain-mcp/docker-compose.yml \
+    infra/clockchain-mcp/clockchain-mcp.service "$INSTALLER" "$COMPOSE_UP")
+  if [[ -n "$INFRA" ]]; then
+    echo "infra files changed by this deploy:"
+    echo "$INFRA"
+    if [[ "$ALLOW_INFRA_DRIFT" != 1 ]]; then
+      echo "REFUSING: infra drift in code-only mode; re-run with --full-restart (after the notices) or --allow-infra-drift"
+      exit 5
+    fi
+    echo "WARNING: --allow-infra-drift: installing these to disk; caddy/host keep their current config until a full restart."
+  fi
+fi
+"${G[@]}" checkout --quiet --detach "$SHA" </dev/null
+echo "box: after=$("${G[@]}" rev-parse --short HEAD)"
+echo "box: pre-build $(date -u +%FT%TZ)"
+"${DC[@]}" build mcp </dev/null 2>&1 | tail -1
+container_times() {
+  local id
+  for id in $("${DC[@]}" ps -aq caddy host mcp </dev/null); do
+    docker inspect -f '{{.Name}} created={{.Created}} started={{.State.StartedAt}}' "$id" </dev/null
+  done
+}
+if [[ "$MODE" == "full-restart" ]]; then
+  echo "box: FULL RESTART: install + systemctl restart (mcp, host, caddy recreated) $(date -u +%FT%TZ)"
+  "$INSTALLER" </dev/null
+else
+  echo "box: container times BEFORE (code-only):"
+  container_times
+  echo "box: CODE-ONLY: install deploy assets without restart, then compose-up.sh --only mcp $(date -u +%FT%TZ)"
+  "$INSTALLER" --no-restart </dev/null
+  "$COMPOSE_UP" --only mcp </dev/null
+  echo "box: container times AFTER (code-only; caddy and host created= must be unchanged):"
+  container_times
+fi
+echo "box: up $(date -u +%FT%TZ) mode=$MODE systemd=$(systemctl is-active clockchain-mcp)"
+docker ps --format '{{.Names}} {{.Status}}' </dev/null
+EOF
+)
+REMOTE_SCRIPT="$(printf 'MODE=%q\nSHA=%q\nAPP_ROOT=%q\nALLOW_INFRA_DRIFT=%q\n' "$MODE" "$SHA" "$APP_ROOT" "$ALLOW_INFRA_DRIFT")
+$REMOTE_BODY"
+
+# Test hooks (infra/test/deploy-assets.test.mjs). Neither touches git, AWS or the box.
+if [[ "${DEPLOY_BOX_TEST_PARSE_ONLY_DO_NOT_DEPLOY:-0}" == "1" ]]; then
+  echo "PARSE ONLY — nothing deployed" >&2
+  echo "mode=$MODE sha=$SHA confirm=$CONFIRM allow_infra_drift=$ALLOW_INFRA_DRIFT"
+  exit 0
+fi
+if [[ "${DEPLOY_BOX_TEST_RENDER_REMOTE_DO_NOT_DEPLOY:-0}" == "1" ]]; then
+  echo "RENDER ONLY — nothing deployed" >&2
+  printf '%s\n' "$REMOTE_SCRIPT"
+  exit 0
+fi
 
 command -v aws >/dev/null || { echo "aws CLI required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 1; }
@@ -99,55 +189,6 @@ if [[ "$CONFIRM" != 1 ]]; then
   fi
   [[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "aborted"; exit 1; }
 fi
-
-REMOTE_SCRIPT=$(cat <<EOF
-set -euo pipefail
-MODE="$MODE"
-cd "$APP_ROOT"
-OWNER=\$(stat -c %U .)
-G="sudo -u \$OWNER git -c safe.directory=$APP_ROOT"
-DC="docker compose -f infra/clockchain-mcp/docker-compose.yml"
-BEFORE=\$(\$G rev-parse HEAD)
-echo "box: mode=\$MODE before=\$(\$G rev-parse --short HEAD) \$(date -u +%FT%TZ)"
-DIRTY=\$(\$G status --short)
-if [[ -n "\$DIRTY" ]]; then
-  echo "REFUSING: the box checkout has local changes. Commit them to the repo (or preserve them on a local branch) first:"
-  echo "\$DIRTY"
-  exit 3
-fi
-\$G fetch --quiet origin main
-\$G checkout --quiet --detach "$SHA"
-echo "box: after=\$(\$G rev-parse --short HEAD)"
-echo "box: pre-build \$(date -u +%FT%TZ)"
-\$DC build mcp 2>&1 | tail -1
-container_times() {
-  local id
-  for id in \$(\$DC ps -aq caddy host mcp); do
-    docker inspect -f '{{.Name}} created={{.Created}} started={{.State.StartedAt}}' "\$id"
-  done
-}
-if [[ "\$MODE" == "full-restart" ]]; then
-  echo "box: FULL RESTART: install + systemctl restart (mcp, host, caddy recreated) \$(date -u +%FT%TZ)"
-  infra/scripts/install-clockchain-mcp-deploy-assets.sh
-else
-  INFRA=\$(\$G diff --name-only "\$BEFORE" HEAD -- infra/clockchain-mcp/Caddyfile infra/clockchain-mcp/docker-compose.yml infra/clockchain-mcp/clockchain-mcp.service infra/scripts/install-clockchain-mcp-deploy-assets.sh)
-  if [[ -n "\$INFRA" ]]; then
-    echo "WARNING: this deploy changes infra files that CODE-ONLY mode does NOT apply to caddy/host:"
-    echo "\$INFRA"
-    echo "WARNING: run a --full-restart (after the notices) to apply them."
-  fi
-  echo "box: container times BEFORE (code-only):"
-  container_times
-  echo "box: CODE-ONLY: install deploy assets without restart, then compose-up.sh --only mcp \$(date -u +%FT%TZ)"
-  infra/scripts/install-clockchain-mcp-deploy-assets.sh --no-restart
-  infra/clockchain-mcp/compose-up.sh --only mcp
-  echo "box: container times AFTER (code-only; caddy and host created= must be unchanged):"
-  container_times
-fi
-echo "box: up \$(date -u +%FT%TZ) mode=\$MODE systemd=\$(systemctl is-active clockchain-mcp)"
-docker ps --format '{{.Names}} {{.Status}}'
-EOF
-)
 
 PARAMS=$(jq -cn --arg s "bash -s <<'EOS'
 $REMOTE_SCRIPT

@@ -7,6 +7,7 @@
 #   compose-up.sh --only mcp   code-only deploy: identical mcp environment, but recreates ONLY the
 #                              mcp service (`up --no-deps ... mcp`). host and caddy keep running, and
 #                              the host's private secret files are not re-materialized.
+# deploy-box: supports --only mcp (scripts/deploy-box.sh checks for this line before a code-only deploy)
 set -euo pipefail
 
 usage() {

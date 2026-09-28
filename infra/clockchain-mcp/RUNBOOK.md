@@ -85,7 +85,7 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
    clean, load the active host-root private key from SSM, and record its public
    fingerprint in the release pin.
 3. Install the matching MCP commit and rotate the active/previous role-access
-   key pair if required. `scripts/deploy-box.sh <sha> [--yes] [--full-restart]`
+   key pair if required. `scripts/deploy-box.sh <sha> [--yes] [--full-restart] [--allow-infra-drift]`
    does this step over SSM in one of two modes (flags in any order):
 
    - **Code-only (default).** Recreates only the `mcp` container; `caddy`
@@ -103,9 +103,21 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
      containers before and after; `caddy` and `host` `created=` must not change
      (`host` restarts itself every ~121s by design, so its `started=` moves).
      In-memory `mcp` state is still lost, so the notice/freeze rule still applies.
-     It warns, and does not apply to caddy/host, when the deploy diff touches the
-     Caddyfile, `docker-compose.yml`, the unit or the installer: use a full
-     restart for those.
+     Before checking anything out, it **refuses** (box untouched) when:
+     - the target's installer or `compose-up.sh` predates code-only deploys (no
+       `deploy-box: supports ...` marker). Older versions ignore `--no-restart`
+       and `--only mcp`, so a rollback to them would silently become a full
+       restart. Message: "target predates code-only deploy; re-run with
+       --full-restart" (exit 4);
+     - the deploy diff touches the Caddyfile, `docker-compose.yml`, the unit, the
+       installer or `compose-up.sh` (infra drift, exit 5). Use `--full-restart`
+       to apply it, or `--allow-infra-drift` to install the files to disk and
+       recreate only `mcp` anyway (caddy/host keep their current config until
+       the next full restart).
+
+     Code-only installs the new unit and wrapper to disk **before** `mcp` is
+     proven healthy. A changed `ExecStop` or wrapper therefore takes effect at
+     the next stop, full restart or reboot even if this deploy fails.
    - **Full restart (`--full-restart`).** For infra/config changes only. Notify
      the travel_mvp orchestrator and the ACM4 production owner first. From that
      exact checkout it runs `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`.
