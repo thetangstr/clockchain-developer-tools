@@ -8,6 +8,8 @@ import { z } from "zod";
  */
 export const CONTRACT_REFUSAL_CODES = Object.freeze([
   "MANDATE_REFUSED",
+  "MANDATE_INVALID",
+  "PAYLOAD_INVALID",
   "STATE_REFUSED",
   "ROLE_REFUSED",
   "NOT_FOUND",
@@ -37,6 +39,9 @@ export const contractRefusalSchema = z.object({
   error: contractRefusalCodeSchema,
   retryable: z.literal(false),
   retryAfterMs: z.number().int().positive().max(3_600_000).optional(),
+  // The per-call nonce rides refusals too — the caller can correlate a
+  // refused call to its receipt without a side channel (R8).
+  serverNonce: z.string().regex(/^0x[0-9a-f]{32}$/).optional(),
 }).strict();
 export type ContractRefusal = z.infer<typeof contractRefusalSchema>;
 

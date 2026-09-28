@@ -19,9 +19,12 @@ const ENV_KEYS = [
   "CONTRACT_SERVER_ED25519_SEED", "CONTRACT_ALLOW_EPHEMERAL_KEY",
   "CONTRACT_SERVER_KEY_ID", "CONTRACT_TRUST_PROXY", "CONTRACT_STATE_DIR",
   "CONTRACT_HOST_ROOTS", "CONTRACT_CALLS_PER_MINUTE", "CONTRACT_OBSERVER_TOKEN",
+  "CONTRACT_POLICY_DIGESTS", "CONTRACT_PRINCIPALS", "CONTRACT_OBSERVER_PER_MINUTE",
 ];
 
 const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
+// Required §13 policy pins — a "ready" config is impossible without them.
+const POLICIES = `buyer:0x${"77".repeat(32)},provider:0x${"88".repeat(32)}`;
 const ACCEPT = "application/json, text/event-stream";
 
 async function boot(env) {
@@ -67,6 +70,7 @@ test("H3: enabled without a seed (and no ephemeral opt-in) refuses the route", a
   const app = await boot({
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator",
+    CONTRACT_POLICY_DIGESTS: POLICIES,
   });
   try {
     const res = await post(app.url, "tools/list", {}, "tb1");
@@ -81,6 +85,7 @@ test("H3: ephemeral key requires explicit opt-in and is forced to ephemeral-dev-
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator",
     CONTRACT_ALLOW_EPHEMERAL_KEY: "1",
     CONTRACT_SERVER_KEY_ID: "attacker-supplied", // must NOT be honored
+    CONTRACT_POLICY_DIGESTS: POLICIES,
   });
   assert.equal(cfg.kind, "ready");
   assert.equal(cfg.signerEphemeral, true);
@@ -89,6 +94,7 @@ test("H3: ephemeral key requires explicit opt-in and is forced to ephemeral-dev-
   const noOptIn = loadContractConfig({
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator",
+    CONTRACT_POLICY_DIGESTS: POLICIES,
   });
   assert.equal(noOptIn.kind, "misconfigured");
 });
@@ -97,6 +103,7 @@ test("C1: no tokens configured — prototype keys and constructor get 401 on eve
   const app = await boot({
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
     // CONTRACT_AUTH_TOKENS intentionally unset
   });
   try {
@@ -133,6 +140,7 @@ test("H3: enabled + seeded + tokens → route serves; disabled env → not mount
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
   });
   try {
     const noTok = await post(app.url, "tools/list");
@@ -150,6 +158,7 @@ test("N1: a corrupt used-sessions record closes the route (503, no binds)", asyn
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
     CONTRACT_STATE_DIR: dir,
   });
   try {
@@ -165,6 +174,7 @@ test("N2: a second process on the same state dir is refused (exclusive lock)", a
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
     CONTRACT_STATE_DIR: dir,
   };
   const app = await boot(env);
@@ -253,6 +263,7 @@ test("observer feed: /contract/receipts is token-gated and serves a bound run's 
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_HOST_ROOTS: `root-test:${fingerprint}`,
     CONTRACT_OBSERVER_TOKEN: "observer-secret",
+    CONTRACT_POLICY_DIGESTS: POLICIES,
   };
 
   // Off without the observer token even when the route is ready.

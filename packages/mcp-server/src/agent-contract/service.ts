@@ -73,7 +73,10 @@ export interface OfferRecord {
   payload: Record<string, unknown>;
   role: ContractRole;
   principalKeyId: string;
-  state: "live" | "accepted" | "rejected";
+  /** "superseded": a same-party offer replaced it — it can never be accepted. */
+  state: "live" | "accepted" | "rejected" | "superseded";
+  /** Monotonic per-run sequence — "latest live" is decided by this, not map order. */
+  seq: number;
   submittedAt: string;
 }
 
@@ -108,9 +111,13 @@ export interface ContractRun {
   readonly claimedNonces: Set<string>;
   mandate?: {
     digest: string;
-    capMinor?: number;
-    currency?: string;
-    itineraryIds?: string[];
+    mandateId: string;
+    capMinor: number;
+    currency: string;
+    allowedItineraryIds: string[];
+    expiresAt: string;
+    /** The family-principal address the mandate signature recovered to. */
+    principalAddress: string;
     submittedAt: string;
   };
   readonly offers: Map<string, OfferRecord>;
@@ -121,6 +128,10 @@ export interface ContractRun {
     result: "match" | "mismatch";
     verificationDigest: string;
     findingsDigest: string;
+    agreementId: string;
+    agreementDigest: string;
+    orderRef: string;
+    bookingRef: string;
     flagged: boolean;
     submittedAt: string;
   };
@@ -157,6 +168,12 @@ export interface ContractService {
     run: ContractRun,
     fields: Omit<Parameters<typeof makeReceipt>[1], "runId">,
   ): { ok: true; receipt: ServerReceipt } | { ok: false; code: "RATE_LIMITED" };
+  /**
+   * Reserve-before-dispatch (N4b-2b fix): true iff a receipt COULD be appended
+   * for this principal right now. The caller checks this BEFORE dispatching —
+   * a consequential call whose receipt can't be written must not happen.
+   */
+  canReceipt(run: ContractRun, principalKeyId: string): boolean;
   runFor(runId: string): ContractRun | undefined;
   runIdForPrincipal(keyId: string): string | undefined;
   /**
@@ -331,8 +348,14 @@ export function createContractService(options: {
   expectedErc8004?: { chainId: string; registryAddress: string };
   /** Closed sim world (ticketing + payment rail); one is created if absent. */
   sim?: SimWorld;
-  /** §13: when pinned, approval records must carry exactly this policyDigest. */
-  expectedPolicyDigest?: string;
+  /**
+   * §13 policy pins, REQUIRED (N4b-2b fix): `CONTRACT_POLICY_DIGESTS` —
+   * `buyer:0x…,provider:0x…`. Approval records must carry exactly the role's
+   * pinned digest; no pin means no consequential action can ever pass.
+   */
+  policyDigests: Readonly<Record<ContractRole, string>>;
+  /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
+  principals?: ReadonlyMap<string, string>;
 }): ContractService {
   const now = options.now ?? Date.now;
   const sim = options.sim ?? createSimWorld({ now, ttlMs: options.runTtlMs ?? RUN_TTL_MS });
@@ -340,6 +363,15 @@ export function createContractService(options: {
   const maxReceiptsPerRun = options.maxReceiptsPerRun ?? DEFAULT_MAX_RECEIPTS_PER_RUN;
   const maxReceiptsPerPrincipal = options.maxReceiptsPerPrincipal ?? DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL;
   const runTtlMs = options.runTtlMs ?? RUN_TTL_MS;
+  if (
+    options.policyDigests === undefined ||
+    !/^0x[0-9a-f]{64}$/.test(options.policyDigests.buyer ?? "") ||
+    !/^0x[0-9a-f]{64}$/.test(options.policyDigests.provider ?? "")
+  ) {
+    // Fail closed at construction: without the policy pins every approval
+    // check would be ambiguous — never silently degrade.
+    throw new Error("policyDigests {buyer,provider} are required (0x + 64 lower hex)");
+  }
   const runs = new Map<string, ContractRun>();
   const principalRuns = new Map<string, string>();
   let releaseLock: (() => void) | undefined;
@@ -399,6 +431,14 @@ export function createContractService(options: {
     const signerKey = boundKeySchema.safeParse(args.signerKey);
     const approvalKey = boundKeySchema.safeParse(args.approvalKey);
     if (!signerKey.success || !approvalKey.success) return { ok: false, code: "CERTIFICATE_INVALID" };
+    // The approval key must be a DIFFERENT key from the signer key — a single
+    // compromised signer key must not be able to mint consequential approvals.
+    if (
+      signerKey.data.keyId === approvalKey.data.keyId ||
+      signerKey.data.publicKeyHex === approvalKey.data.publicKeyHex
+    ) {
+      return { ok: false, code: "CERTIFICATE_INVALID" };
+    }
 
     const verdict = verifyCertificateEnvelope(args.certificate, {
       hostRoots: options.hostRoots,
@@ -595,9 +635,8 @@ export function createContractService(options: {
     signer: options.signer,
     now,
     sim,
-    ...(options.expectedPolicyDigest !== undefined
-      ? { expectedPolicyDigest: options.expectedPolicyDigest }
-      : {}),
+    policyDigests: options.policyDigests,
+    ...(options.principals !== undefined ? { principals: options.principals } : {}),
     endRun,
   });
 
@@ -618,6 +657,11 @@ export function createContractService(options: {
       run.receipts.push(receipt);
       run.receiptsByPrincipal.set(fields.principal.keyId, count + 1);
       return { ok: true, receipt };
+    },
+    canReceipt(run, principalKeyId) {
+      evictEnded();
+      const count = run.receiptsByPrincipal.get(principalKeyId) ?? 0;
+      return run.receipts.length < maxReceiptsPerRun && count < maxReceiptsPerPrincipal;
     },
     runFor(runId) {
       evictEnded();

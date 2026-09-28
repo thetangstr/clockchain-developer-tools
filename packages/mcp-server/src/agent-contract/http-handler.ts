@@ -5,7 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
 import { buildContractServer } from "./server.js";
-import { createContractService, type ContractPrincipal, type ContractService, type ContractSide } from "./service.js";
+import type { ContractPrincipal, ContractService, ContractSide } from "./service.js";
 import type { ContractSigner } from "./envelope.js";
 import type { HostRootPin } from "./certificate.js";
 import type { ContractRole } from "./schemas.js";
@@ -117,18 +117,14 @@ export function createContractHttpHandler(options: {
   authenticate: (headers: IncomingHttpHeaders) => ContractPrincipal | null;
   hostRoots: readonly HostRootPin[];
   signer: ContractSigner;
-  service?: ContractService;
+  service: ContractService;
   callsPerMinute?: number;
   trustProxy?: boolean;
   now?: () => number;
   onRateLimited?: () => void;
 }) {
   const now = options.now ?? Date.now;
-  const service = options.service ?? createContractService({
-    hostRoots: options.hostRoots,
-    signer: options.signer,
-    now,
-  });
+  const service = options.service;
   const allowCall = keyedWindowLimiter(options.callsPerMinute ?? 120, 60_000, now);
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {

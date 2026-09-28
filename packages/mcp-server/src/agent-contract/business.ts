@@ -6,9 +6,11 @@ import { canonicalDigest } from "./canonical.js";
 import {
   signEnvelope, verifyEnvelope, type ContractSigner, type PrepareEnvelope,
 } from "./envelope.js";
-import { verifyRoleSignature } from "./eip191.js";
+import {
+  eip191RecoverPublicKey, publicKeyToAddress, verifyRoleSignature,
+} from "./eip191.js";
 import { verifyApprovalRecord } from "./approval.js";
-import type { ApprovalRecord, ContractRole } from "./schemas.js";
+import { sealedBoxV2Schema, type ApprovalRecord, type ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import type {
   AgreementRecord, ContractPrincipal, ContractRun, OfferRecord,
@@ -16,8 +18,9 @@ import type {
 import type { SimWorld } from "./sim/index.js";
 
 /**
- * The `/contract/mcp` business semantics (N4b-2b, LLD §3/§13): every
- * catalogued tool except `contract_bind`/`contract_status` (service-owned).
+ * The `/contract/mcp` business semantics (N4b-2b, LLD §3/§13 + rev 6.5):
+ * every catalogued tool except `contract_bind`/`contract_status`
+ * (service-owned).
  *
  * The rules that make this deterministic rather than runner-driven:
  *  - every `*_prepare` returns a server-signed envelope whose PAYLOAD is
@@ -28,10 +31,14 @@ import type { SimWorld } from "./sim/index.js";
  *    pinned server key, claims its nonce per-run, verifies the EIP-191 role
  *    signature against the signer key bound at contract_bind, and re-checks
  *    the payload against live state;
- *  - buyer-side priced operations re-check the mandate caps; every cap
- *    refusal is the identical generic MANDATE_REFUSED body;
+ *  - the mandate is the family PRINCIPAL's signed statement (rev 6.5),
+ *    verified against `CONTRACT_PRINCIPALS`, write-once per run;
+ *  - the agreement is WRITE-ONCE: once formed, every offer/accept path is
+ *    closed; before it forms, a new offer supersedes the same party's live
+ *    offers and only the counterparty's LATEST live offer can be accepted;
  *  - booking/settlement additionally require a §13 approval record verified
- *    against the bound approval key;
+ *    against the bound approval key AND the configured per-role policy
+ *    digest (`CONTRACT_POLICY_DIGESTS`);
  *  - booking touches the run's closed ticketing sim, settlement the run's
  *    payment rail — every sim-derived output carries `simulated: true`.
  */
@@ -47,7 +54,8 @@ interface Listing {
   summary: string;
   sealedBoxPublicKeyHex: string;
   terms?: Record<string, unknown>;
-  publishedAt: string;
+  publishedAtMs: number;
+  expiresAtMs: number;
   invitationDelivered: boolean;
 }
 
@@ -75,14 +83,23 @@ const ok = (result: Record<string, unknown>): BusinessOutcome => ({ ok: true, re
 const refuse = (code: ContractRefusalCode): BusinessOutcome => ({ ok: false, code });
 
 const AGREEMENT_DOMAIN = "agent-contract.agreement/v1";
+const MANDATE_DOMAIN = "agent-contract.mandate/v1";
 
-/** Lenient cap extraction — the mandate blob is agent-authored (N5-owned shape). */
-const mandateCapsSchema = z.object({
-  capMinor: z.number().int().nonnegative().optional(),
-  maxTotalMinor: z.number().int().nonnegative().optional(),
-  currency: z.string().min(3).max(8).optional(),
-  itineraryIds: z.array(z.string().min(1).max(64)).max(64).optional(),
-}).passthrough();
+/** rev 6.5: the mandate is the family principal's statement — all fields required. */
+const mandateSchema = z.object({
+  kind: z.literal("mandate"),
+  mandateId: z.string().min(4).max(64),
+  capMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  allowedItineraryIds: z.array(z.string().min(1).max(64)).min(1).max(64),
+  expiresAt: z.string().datetime({ offset: false }),
+}).strict();
+type Mandate = z.infer<typeof mandateSchema>;
+
+const LISTING_TTL_MS = 60 * 60_000;
+const MAX_LISTINGS = 512;
+const MAX_INBOX_MESSAGES = 256;
+const MAX_DELIVERIES_PER_MINUTE = 12;
 
 function pad4(n: number): string {
   return String(n).padStart(4, "0");
@@ -92,14 +109,20 @@ export function createBusinessOps(options: {
   signer: ContractSigner;
   now?: () => number;
   sim: SimWorld;
-  expectedPolicyDigest?: string;
+  /** Required per-role §13 policy pins (`CONTRACT_POLICY_DIGESTS`). */
+  policyDigests: Readonly<Record<ContractRole, string>>;
+  /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
+  principals?: ReadonlyMap<string, string>;
   endRun: (run: ContractRun, terminalState: string) => void;
 }): BusinessOps {
   const now = options.now ?? Date.now;
   const sim = options.sim;
+  const principals = options.principals ?? new Map<string, string>();
   const serverPublicKeys = { [options.signer.keyId]: publicKeyOf(options.signer.privateKey) };
   const listings = new Map<string, Listing>();
   const inbox = new Map<string, InboxMessage[]>();
+  /** Deliveries per sender per rolling minute (rendezvous abuse cap). */
+  const deliveries = new Map<string, number[]>();
 
   function publicKeyOf(privateKey: ContractSigner["privateKey"]): KeyObject | string | Buffer {
     try {
@@ -164,17 +187,35 @@ export function createBusinessOps(options: {
   }
 
   /**
-   * Buyer mandate caps — one identical MANDATE_REFUSED whatever the cap
+   * The principal-signed mandate (rev 6.5): strict schema, live expiry, and
+   * an EIP-191 signature over `canonicalDigest({domain, ...mandate})` that
+   * recovers to the buyer's pinned family-principal address. Every failure
+   * is the same generic MANDATE_INVALID.
+   */
+  function verifyMandate(principal: ContractPrincipal, mandate: unknown, mandateSignature: unknown): Mandate | ContractRefusalCode {
+    const parsed = mandateSchema.safeParse(mandate);
+    if (!parsed.success) return "MANDATE_INVALID";
+    if (Date.parse(parsed.data.expiresAt) <= now()) return "MANDATE_INVALID";
+    const pinned = principals.get(principal.keyId);
+    if (pinned === undefined || typeof mandateSignature !== "string") return "MANDATE_INVALID";
+    const digest = canonicalDigest({ domain: MANDATE_DOMAIN, ...parsed.data });
+    const recovered = eip191RecoverPublicKey(Buffer.from(digest.slice(2), "hex"), mandateSignature);
+    if (recovered === null) return "MANDATE_INVALID";
+    if (publicKeyToAddress(recovered).toLowerCase() !== pinned.toLowerCase()) return "MANDATE_INVALID";
+    return parsed.data;
+  }
+
+  /**
+   * Buyer mandate checks — one identical MANDATE_REFUSED whatever the cap
    * (cap values must never ride the refusal, refusals.ts comment).
    */
   function capCheck(run: ContractRun, totalMinor: number, currency: string, itineraryId: string): BusinessOutcome | null {
     const m = run.mandate;
     if (m === undefined) return refuse("STATE_REFUSED");
-    if (m.capMinor !== undefined && totalMinor > m.capMinor) return refuse("MANDATE_REFUSED");
-    if (m.currency !== undefined && currency !== m.currency) return refuse("MANDATE_REFUSED");
-    if (m.itineraryIds !== undefined && !m.itineraryIds.includes(itineraryId)) {
-      return refuse("MANDATE_REFUSED");
-    }
+    if (Date.parse(m.expiresAt) <= now()) return refuse("MANDATE_REFUSED");
+    if (totalMinor > m.capMinor) return refuse("MANDATE_REFUSED");
+    if (currency !== m.currency) return refuse("MANDATE_REFUSED");
+    if (!m.allowedItineraryIds.includes(itineraryId)) return refuse("MANDATE_REFUSED");
     return null;
   }
 
@@ -185,50 +226,106 @@ export function createBusinessOps(options: {
     );
   }
 
-  /** The counterparty's latest live offer — the offer a counter replies to. */
+  /** The counterparty's LATEST live offer — the only acceptable one. */
   function latestCounterpartyOffer(run: ContractRun, role: ContractRole): OfferRecord | undefined {
     let latest: OfferRecord | undefined;
     for (const offer of run.offers.values()) {
-      if (offer.state === "live" && offer.role !== role) latest = offer;
+      if (offer.state === "live" && offer.role !== role &&
+        (latest === undefined || offer.seq > latest.seq)) {
+        latest = offer;
+      }
     }
     return latest;
   }
 
-  function bookingPayload(run: ContractRun, agreement: AgreementRecord): Record<string, unknown> {
+  /** The offer terms the v2 accept/booking/settlement payloads flatten. */
+  function flatTerms(offer: OfferRecord): Record<string, unknown> {
+    return {
+      itineraryId: offer.payload.itineraryId,
+      currency: offer.payload.currency,
+      fareMinor: offer.payload.fareMinor,
+      feeMinor: offer.payload.feeMinor,
+      totalMinor: offer.payload.totalMinor,
+    };
+  }
+
+  /** v2 accept payload: the full offer verbatim plus the flat terms. */
+  function acceptPayload(offer: OfferRecord): Record<string, unknown> {
+    return {
+      kind: "accept",
+      offer: offer.payload,
+      offerId: offer.offerId,
+      offerDigest: canonicalDigest(offer.payload),
+      ...flatTerms(offer),
+    };
+  }
+
+  /**
+   * `agreementDigest = canonicalDigest({domain:"agent-contract.agreement/v1",
+   * runId, offerDigest})` — the exact v2 tuple the signers reproduce (the
+   * signer records it from the accept it signs; the server checks it twice).
+   */
+  function agreementDigest(runId: string, offerDigest: string): string {
+    return canonicalDigest({ domain: AGREEMENT_DOMAIN, runId, offerDigest });
+  }
+
+  /** v2 booking payload — server-derived from the agreement only. */
+  function bookingPayload(agreement: AgreementRecord): Record<string, unknown> {
     return {
       kind: "booking",
       agreementId: agreement.agreementId,
       agreementDigest: agreement.agreementDigest,
       itineraryId: agreement.itineraryId,
       currency: agreement.currency,
-      fareMinor: agreement.fareMinor,
-      feeMinor: agreement.feeMinor,
       totalMinor: agreement.totalMinor,
     };
   }
 
+  /** v2 settlement payload — server-derived from agreement + verification. */
   function settlementPayload(run: ContractRun): Record<string, unknown> | null {
     const agreement = run.agreement;
     const verification = run.verification;
-    const buyer = run.bound.buyer;
-    const provider = run.bound.provider;
-    if (agreement === undefined || verification === undefined || buyer === undefined || provider === undefined) {
-      return null;
-    }
+    if (agreement === undefined || verification === undefined) return null;
     return {
       kind: "settlement",
       agreementId: agreement.agreementId,
       agreementDigest: agreement.agreementDigest,
       verificationDigest: verification.verificationDigest,
-      amountMinor: agreement.totalMinor,
+      itineraryId: agreement.itineraryId,
       currency: agreement.currency,
-      payerPartyId: buyer.agentId,
-      providerPartyId: provider.agentId,
+      amountMinor: agreement.totalMinor,
+      simulated: true,
     };
   }
 
   function samePayload(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
     return canonicalDigest(a) === canonicalDigest(b);
+  }
+
+  // -- rendezvous state maintenance -----------------------------------------
+
+  function purgeListings(): void {
+    const t = now();
+    for (const [id, l] of listings) if (t >= l.expiresAtMs) listings.delete(id);
+    for (const [k, ts] of deliveries) {
+      const fresh = ts.filter((x) => t - x < 60_000);
+      if (fresh.length === 0) deliveries.delete(k); else deliveries.set(k, fresh);
+    }
+  }
+
+  /** A listing matches a filter only if its terms don't contradict it. */
+  function listingMatches(l: Listing, args: Record<string, unknown>): boolean {
+    const terms = l.terms ?? {};
+    const eq = (key: string, want: unknown) => {
+      if (want === undefined) return true;
+      const have = terms[key];
+      if (have === undefined) return true; // undeclared term can't contradict
+      if (Array.isArray(have)) return have.includes(want);
+      return have === want;
+    };
+    return eq("origin", args.origin) && eq("destination", args.destination)
+      && eq("departDate", args.departDate) && eq("departDates", args.departDate)
+      && eq("returnDate", args.returnDate) && eq("returnDates", args.returnDate);
   }
 
   function dispatch(
@@ -241,48 +338,79 @@ export function createBusinessOps(options: {
     switch (tool) {
       // -- rendezvous / discovery (pre-run) -----------------------------------
       case "rendezvous_publish_listing": {
+        purgeListings();
         const listingId = `lst-${canonicalDigest({
           kind: "listing", providerKeyId: principal.keyId,
           title: args.title, sealedBoxPublicKeyHex: args.sealedBoxPublicKeyHex,
         }).slice(2, 14)}`;
+        const existing = listings.get(listingId);
+        if (existing !== undefined && existing.providerKeyId !== principal.keyId) {
+          // Only the listing's owner may republish/reset it.
+          return refuse("LISTING_UNAVAILABLE");
+        }
+        if (existing === undefined && listings.size >= MAX_LISTINGS) {
+          return refuse("RATE_LIMITED");
+        }
+        const t = now();
         listings.set(listingId, {
           listingId,
           providerKeyId: principal.keyId,
           title: args.title as string,
           summary: args.summary as string,
           sealedBoxPublicKeyHex: args.sealedBoxPublicKeyHex as string,
-          ...(args.terms !== undefined ? { terms: args.terms as Record<string, unknown> } : {}),
-          publishedAt: iso(now()),
-          invitationDelivered: false,
+          // Republishing without terms keeps the existing ones — a refresh is
+          // not a wipe.
+          ...(args.terms !== undefined || existing?.terms !== undefined
+            ? { terms: (args.terms ?? existing?.terms) as Record<string, unknown> }
+            : {}),
+          publishedAtMs: existing?.publishedAtMs ?? t,
+          expiresAtMs: t + LISTING_TTL_MS,
+          // Republishing a spent listing does NOT resurrect it.
+          invitationDelivered: existing?.invitationDelivered ?? false,
         });
-        return ok({ listingId, publishedAt: iso(now()), serverNonce });
+        return ok({ listingId, publishedAt: iso(existing?.publishedAtMs ?? t), serverNonce });
       }
 
       case "rendezvous_search": {
-        const out = [...listings.values()].map((l) => ({
-          listingId: l.listingId,
-          title: l.title,
-          summary: l.summary,
-          sealedBoxPublicKeyHex: l.sealedBoxPublicKeyHex,
-        }));
+        purgeListings();
+        const out = [...listings.values()]
+          .filter((l) => listingMatches(l, args))
+          .map((l) => ({
+            listingId: l.listingId,
+            title: l.title,
+            summary: l.summary,
+            sealedBoxPublicKeyHex: l.sealedBoxPublicKeyHex,
+          }));
         return ok({ listings: out, serverNonce });
       }
 
       case "rendezvous_send_invitation": {
+        purgeListings();
+        // A delivery that doesn't parse as the real v2 seal is refused
+        // WITHOUT burning the listing.
+        const seal = sealedBoxV2Schema.safeParse(args.sealedInvitation);
+        if (!seal.success) return refuse("PAYLOAD_INVALID");
+        // Per-sender delivery rate limit.
+        const t = now();
+        const sent = (deliveries.get(principal.keyId) ?? []).filter((x) => t - x < 60_000);
+        if (sent.length >= MAX_DELIVERIES_PER_MINUTE) return refuse("RATE_LIMITED");
         const listing = listings.get(args.listingId as string);
         if (listing === undefined) return refuse("NOT_FOUND");
         if (listing.invitationDelivered) return refuse("LISTING_UNAVAILABLE");
         listing.invitationDelivered = true;
-        const receivedAt = iso(now());
+        sent.push(t);
+        deliveries.set(principal.keyId, sent);
+        const receivedAt = iso(t);
         const message: InboxMessage = {
           messageId: `msg-${canonicalDigest({ kind: "inbox", listingId: listing.listingId, receivedAt }).slice(2, 14)}`,
           kind: "handshake_invitation",
           listingId: listing.listingId,
-          sealedPayload: args.sealedInvitation as Record<string, unknown>,
+          sealedPayload: seal.data,
           receivedAt,
         };
         const list = inbox.get(listing.providerKeyId) ?? [];
         list.push(message);
+        if (list.length > MAX_INBOX_MESSAGES) list.splice(0, list.length - MAX_INBOX_MESSAGES);
         inbox.set(listing.providerKeyId, list);
         return ok({ delivered: true, deliveredAt: receivedAt, serverNonce });
       }
@@ -304,6 +432,12 @@ export function createBusinessOps(options: {
     if (gate !== null) return gate;
     const liveRun = run!;
 
+    // The agreement is WRITE-ONCE: once formed, every offer/accept path is
+    // closed — a stale accept can never rewrite the booked agreement.
+    if (liveRun.agreement !== undefined && tool.startsWith("offer_")) {
+      return refuse("STATE_REFUSED");
+    }
+
     switch (tool) {
       case "catalog_quote": {
         const quote = liveRun.simRun!.quote(args);
@@ -311,43 +445,53 @@ export function createBusinessOps(options: {
       }
 
       case "mandate_prepare": {
-        const mandate = args.mandate as Record<string, unknown>;
-        const caps = mandateCapsSchema.safeParse(mandate);
-        if (!caps.success) return refuse("MANDATE_REFUSED");
-        const mandateDigest = canonicalDigest({ domain: "agent-contract.mandate/v1", runId: liveRun.runId, mandate });
+        // The mandate is presented, not created — verify the principal
+        // signature eagerly so a bad mandate never even gets an envelope.
+        const mandate = verifyMandate(principal, args.mandate, args.mandateSignature);
+        if (typeof mandate === "string") return refuse(mandate);
+        const mandateDigest = canonicalDigest({ domain: MANDATE_DOMAIN, ...mandate });
         const envelope = prepare(liveRun, "buyer", "mandate_prepare", {
           kind: "mandate",
           mandate,
+          mandateSignature: args.mandateSignature,
           mandateDigest,
         });
         return ok({ envelope, mandateDigest, serverNonce });
       }
 
       case "mandate_submit": {
+        // Envelope verification first so a REPLAYED nonce reports NONCE_REUSED
+        // precisely; a fresh-envelope resubmission then hits the write-once
+        // guard as STATE_REFUSED.
         const submitted = verifySubmission(liveRun, "buyer", "mandate_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
+        if (liveRun.mandate !== undefined) return refuse("STATE_REFUSED"); // write-once
         const payload = submitted.envelope.payload;
-        const mandate = payload.mandate;
-        if (payload.kind !== "mandate" || mandate === null || typeof mandate !== "object") {
-          return refuse("ENVELOPE_INVALID");
+        const mandate = verifyMandate(principal, payload.mandate, payload.mandateSignature);
+        if (payload.kind !== "mandate" || typeof mandate === "string") {
+          return refuse("MANDATE_INVALID");
         }
-        const caps = mandateCapsSchema.safeParse(mandate);
-        if (!caps.success) return refuse("MANDATE_REFUSED");
-        const mandateDigest = canonicalDigest({ domain: "agent-contract.mandate/v1", runId: liveRun.runId, mandate });
+        const mandateDigest = canonicalDigest({ domain: MANDATE_DOMAIN, ...mandate });
         if (payload.mandateDigest !== mandateDigest) return refuse("ENVELOPE_INVALID");
-        const capMinor = caps.data.capMinor ?? caps.data.maxTotalMinor;
         liveRun.mandate = {
           digest: mandateDigest,
+          mandateId: mandate.mandateId,
+          capMinor: mandate.capMinor,
+          currency: mandate.currency,
+          allowedItineraryIds: [...mandate.allowedItineraryIds],
+          expiresAt: mandate.expiresAt,
+          principalAddress: principals.get(principal.keyId)!,
           submittedAt: iso(now()),
-          ...(capMinor !== undefined ? { capMinor } : {}),
-          ...(caps.data.currency !== undefined ? { currency: caps.data.currency } : {}),
-          ...(caps.data.itineraryIds !== undefined ? { itineraryIds: caps.data.itineraryIds } : {}),
         };
         if (liveRun.stage === "bound" || liveRun.stage === "handshake") liveRun.stage = "mandated";
         return ok({ bound: true, mandateDigest, serverNonce });
       }
 
       case "offer_prepare": {
+        // A mandate must be in force before ANY buyer offer or accept.
+        if (principal.role === "buyer" && liveRun.mandate === undefined) {
+          return refuse("STATE_REFUSED");
+        }
         const itineraryId = args.itineraryId as string;
         const itinerary = liveRun.simRun!.itinerary(itineraryId);
         if (itinerary === undefined) return refuse("NOT_FOUND");
@@ -380,6 +524,9 @@ export function createBusinessOps(options: {
       }
 
       case "offer_submit": {
+        if (principal.role === "buyer" && liveRun.mandate === undefined) {
+          return refuse("STATE_REFUSED");
+        }
         const submitted = verifySubmission(liveRun, principal.role, "offer_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
         const payload = submitted.envelope.payload;
@@ -407,8 +554,13 @@ export function createBusinessOps(options: {
           role: principal.role,
           principalKeyId: principal.keyId,
           state: "live",
+          seq: liveRun.offerSeq + 1,
           submittedAt: iso(now()),
         };
+        // A new offer supersedes all earlier live offers FROM THE SAME PARTY.
+        for (const prior of liveRun.offers.values()) {
+          if (prior.state === "live" && prior.role === principal.role) prior.state = "superseded";
+        }
         liveRun.offers.set(offer.offerId, offer);
         liveRun.offerSeq += 1;
         if (liveRun.stage === "mandated" || liveRun.stage === "bound" || liveRun.stage === "handshake") {
@@ -421,26 +573,19 @@ export function createBusinessOps(options: {
         const offer = liveRun.offers.get(args.offerId as string);
         if (offer === undefined) return refuse("NOT_FOUND");
         if (offer.state !== "live" || offer.role === principal.role) return refuse("STATE_REFUSED");
+        // Only the counterparty's LATEST live offer can be accepted.
+        if (latestCounterpartyOffer(liveRun, principal.role)?.offerId !== offer.offerId) {
+          return refuse("STATE_REFUSED");
+        }
         if (principal.role === "buyer") {
+          if (liveRun.mandate === undefined) return refuse("STATE_REFUSED");
           const cap = capCheck(
             liveRun, offer.payload.totalMinor as number,
             offer.payload.currency as string, offer.payload.itineraryId as string,
           );
           if (cap !== null) return cap;
         }
-        const payload: Record<string, unknown> = {
-          kind: "accept",
-          offerId: offer.offerId,
-          offerDigest: canonicalDigest(offer.payload),
-          agreedTerms: {
-            itineraryId: offer.payload.itineraryId,
-            currency: offer.payload.currency,
-            fareMinor: offer.payload.fareMinor,
-            feeMinor: offer.payload.feeMinor,
-            totalMinor: offer.payload.totalMinor,
-          },
-        };
-        const envelope = prepare(liveRun, principal.role, "offer_accept_prepare", payload);
+        const envelope = prepare(liveRun, principal.role, "offer_accept_prepare", acceptPayload(offer));
         return ok({ envelope, serverNonce });
       }
 
@@ -451,20 +596,26 @@ export function createBusinessOps(options: {
         const offer = liveRun.offers.get(payload.offerId as string);
         if (offer === undefined) return refuse("NOT_FOUND");
         if (offer.state !== "live" || offer.role === principal.role) return refuse("STATE_REFUSED");
+        if (latestCounterpartyOffer(liveRun, principal.role)?.offerId !== offer.offerId) {
+          return refuse("STATE_REFUSED");
+        }
         if (
           payload.kind !== "accept" ||
           payload.offerDigest !== canonicalDigest(offer.payload) ||
-          !samePayload(payload.agreedTerms as Record<string, unknown>, {
-            itineraryId: offer.payload.itineraryId,
-            currency: offer.payload.currency,
-            fareMinor: offer.payload.fareMinor,
-            feeMinor: offer.payload.feeMinor,
-            totalMinor: offer.payload.totalMinor,
-          })
+          !samePayload(payload.offer as Record<string, unknown>, offer.payload) ||
+          !samePayload(
+            {
+              itineraryId: payload.itineraryId, currency: payload.currency,
+              fareMinor: payload.fareMinor, feeMinor: payload.feeMinor,
+              totalMinor: payload.totalMinor,
+            },
+            flatTerms(offer),
+          )
         ) {
           return refuse("ENVELOPE_INVALID");
         }
         if (principal.role === "buyer") {
+          if (liveRun.mandate === undefined) return refuse("STATE_REFUSED");
           const cap = capCheck(
             liveRun, offer.payload.totalMinor as number,
             offer.payload.currency as string, offer.payload.itineraryId as string,
@@ -473,18 +624,12 @@ export function createBusinessOps(options: {
         }
         offer.state = "accepted";
         const agreementId = `agr-${pad4(liveRun.offerSeq)}`;
-        const agreementDigest = canonicalDigest({
-          domain: AGREEMENT_DOMAIN,
-          runId: liveRun.runId,
-          agreementId,
-          offerDigest: canonicalDigest(offer.payload),
-          acceptedBy: principal.role,
-        });
+        const digest = agreementDigest(liveRun.runId, canonicalDigest(offer.payload));
         liveRun.agreement = {
           agreementId,
           offerId: offer.offerId,
           offerDigest: canonicalDigest(offer.payload),
-          agreementDigest,
+          agreementDigest: digest,
           offerPayload: offer.payload,
           acceptPayload: payload,
           itineraryId: offer.payload.itineraryId as string,
@@ -507,6 +652,9 @@ export function createBusinessOps(options: {
       }
 
       case "contract_withdraw": {
+        // After the booking is on the sim ledger there is no withdrawal —
+        // the run ends only through the explicit terminal path.
+        if (liveRun.booking !== undefined) return refuse("STATE_REFUSED");
         options.endRun(liveRun, "no_agreement");
         return ok({ state: "withdrawn", serverNonce });
       }
@@ -530,7 +678,7 @@ export function createBusinessOps(options: {
           return refuse("NOT_FOUND");
         }
         if (liveRun.booking !== undefined) return refuse("STATE_REFUSED");
-        const envelope = prepare(liveRun, "provider", "booking_prepare", bookingPayload(liveRun, agreement));
+        const envelope = prepare(liveRun, "provider", "booking_prepare", bookingPayload(agreement));
         return ok({ envelope, serverNonce });
       }
 
@@ -540,7 +688,7 @@ export function createBusinessOps(options: {
         if (liveRun.booking !== undefined) return refuse("STATE_REFUSED");
         const submitted = verifySubmission(liveRun, "provider", "booking_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
-        if (!samePayload(submitted.envelope.payload, bookingPayload(liveRun, agreement))) {
+        if (!samePayload(submitted.envelope.payload, bookingPayload(agreement))) {
           return refuse("ENVELOPE_INVALID");
         }
         const approvalKey = liveRun.bound.provider!.approvalKey;
@@ -554,8 +702,9 @@ export function createBusinessOps(options: {
             nonce: submitted.envelope.nonce,
             envelopeDigest: canonicalDigest(submitted.envelope),
             expiresAt: submitted.envelope.expiresAt,
-            approvalPublicKeyHex: approvalKey.publicKeyHex,
-            ...(options.expectedPolicyDigest !== undefined ? { expectedPolicyDigest: options.expectedPolicyDigest } : {}),
+            approvalKey,
+            expectedPolicyDigest: options.policyDigests.provider,
+            nowMs: now(),
           })
         ) {
           return refuse("APPROVAL_INVALID");
@@ -591,23 +740,28 @@ export function createBusinessOps(options: {
       }
 
       case "verification_prepare": {
-        if (liveRun.booking === undefined || liveRun.booking.orderRef !== args.orderRef) {
+        if (liveRun.verification !== undefined) return refuse("STATE_REFUSED"); // write-once
+        if (
+          liveRun.booking === undefined || liveRun.agreement === undefined ||
+          liveRun.booking.orderRef !== args.orderRef
+        ) {
           return refuse("NOT_FOUND");
         }
-        const agreement = liveRun.agreement!;
+        const agreement = liveRun.agreement;
         const payload: Record<string, unknown> = {
           kind: "verification",
-          orderRef: args.orderRef,
-          bookingRef: liveRun.booking.pnr,
+          agreementId: agreement.agreementId,
           agreementDigest: agreement.agreementDigest,
+          bookingRef: liveRun.booking.pnr,
           result: args.result,
-          findingsDigest: canonicalDigest({ findings: args.findings ?? "" }),
+          findingsDigest: args.findingsDigest,
         };
         const envelope = prepare(liveRun, "buyer", "verification_prepare", payload);
         return ok({ envelope, serverNonce });
       }
 
       case "verification_submit": {
+        if (liveRun.verification !== undefined) return refuse("STATE_REFUSED"); // write-once
         if (liveRun.booking === undefined || liveRun.agreement === undefined) {
           return refuse("STATE_REFUSED");
         }
@@ -616,9 +770,9 @@ export function createBusinessOps(options: {
         const payload = submitted.envelope.payload;
         if (
           payload.kind !== "verification" ||
-          payload.orderRef !== liveRun.booking.orderRef ||
-          payload.bookingRef !== liveRun.booking.pnr ||
+          payload.agreementId !== liveRun.agreement.agreementId ||
           payload.agreementDigest !== liveRun.agreement.agreementDigest ||
+          payload.bookingRef !== liveRun.booking.pnr ||
           (payload.result !== "match" && payload.result !== "mismatch")
         ) {
           return refuse("ENVELOPE_INVALID");
@@ -632,17 +786,15 @@ export function createBusinessOps(options: {
           observation.totalMinor === liveRun.agreement.totalMinor
         ) ? "match" : "mismatch";
         const claimed = payload.result as "match" | "mismatch";
-        const verificationDigest = canonicalDigest({
-          domain: "agent-contract.verification/v1",
-          runId: liveRun.runId,
-          orderRef: liveRun.booking.orderRef,
-          claimed,
-          observed,
-        });
+        const verificationDigest = canonicalDigest(payload);
         liveRun.verification = {
           result: claimed,
           verificationDigest,
           findingsDigest: payload.findingsDigest as string,
+          agreementId: liveRun.agreement.agreementId,
+          agreementDigest: liveRun.agreement.agreementDigest,
+          orderRef: liveRun.booking.orderRef,
+          bookingRef: liveRun.booking.pnr,
           flagged: claimed !== observed,
           submittedAt: iso(now()),
         };
@@ -655,7 +807,13 @@ export function createBusinessOps(options: {
       }
 
       case "settlement_prepare": {
-        if (liveRun.verification === undefined || liveRun.verification.result !== "match" || liveRun.verification.flagged) {
+        if (
+          liveRun.verification === undefined ||
+          liveRun.verification.result !== "match" ||
+          liveRun.verification.flagged ||
+          liveRun.verification.agreementDigest !== liveRun.agreement?.agreementDigest ||
+          liveRun.verification.orderRef !== liveRun.booking?.orderRef
+        ) {
           return refuse("STATE_REFUSED");
         }
         const payload = settlementPayload(liveRun);
@@ -672,7 +830,13 @@ export function createBusinessOps(options: {
         if (expected === null || liveRun.settlementPrepared !== true || liveRun.settlement !== undefined) {
           return refuse("STATE_REFUSED");
         }
-        if (liveRun.verification === undefined || liveRun.verification.result !== "match" || liveRun.verification.flagged) {
+        if (
+          liveRun.verification === undefined ||
+          liveRun.verification.result !== "match" ||
+          liveRun.verification.flagged ||
+          liveRun.verification.agreementDigest !== liveRun.agreement?.agreementDigest ||
+          liveRun.verification.orderRef !== liveRun.booking?.orderRef
+        ) {
           return refuse("STATE_REFUSED");
         }
         const submitted = verifySubmission(liveRun, "buyer", "settlement_prepare", args.envelope, args.signatureHex as string);
@@ -693,8 +857,9 @@ export function createBusinessOps(options: {
             nonce: submitted.envelope.nonce,
             envelopeDigest: canonicalDigest(submitted.envelope),
             expiresAt: submitted.envelope.expiresAt,
-            approvalPublicKeyHex: approvalKey.publicKeyHex,
-            ...(options.expectedPolicyDigest !== undefined ? { expectedPolicyDigest: options.expectedPolicyDigest } : {}),
+            approvalKey,
+            expectedPolicyDigest: options.policyDigests.buyer,
+            nowMs: now(),
           })
         ) {
           return refuse("APPROVAL_INVALID");
@@ -703,8 +868,8 @@ export function createBusinessOps(options: {
           agreementId: expected.agreementId,
           agreementDigest: expected.agreementDigest,
           verificationDigest: expected.verificationDigest,
-          payerPartyId: expected.payerPartyId,
-          providerPartyId: expected.providerPartyId,
+          payerPartyId: liveRun.bound.buyer!.agentId,
+          providerPartyId: liveRun.bound.provider!.agentId,
           amountMinor: expected.amountMinor,
           currency: expected.currency,
         });

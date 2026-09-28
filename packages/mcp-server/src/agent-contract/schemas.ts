@@ -36,11 +36,20 @@ const registeredKey = z.object({
   publicKeyHex,
 }).strict();
 
-/** X25519 sealed box (libsodium `crypto_box_seal` output: ephemeral key + ciphertext, self-contained). */
+/**
+ * The real v2 rendezvous seal (N5 `sealTo`, CONTRACT-PAYLOADS-v2 §Seal):
+ * ephemeral-x25519 → HKDF → AES-256-GCM, all fields 0x-hex — epk 32B,
+ * iv 12B, tag 16B. Anything else refuses at the schema, so a malformed
+ * delivery can never reach — let alone burn — a listing.
+ */
 const sealedBox = z.object({
-  alg: z.literal("x25519-xsalsa20-poly1305"),
-  ciphertextHex: z.string().regex(/^0x[0-9a-fA-F]{2,16384}$/),
+  v: z.literal(2),
+  epk: z.string().regex(/^0x[0-9a-f]{64}$/),
+  iv: z.string().regex(/^0x[0-9a-f]{24}$/),
+  ct: z.string().regex(/^0x(?:[0-9a-f]{2}){1,8192}$/),
+  tag: z.string().regex(/^0x[0-9a-f]{32}$/),
 }).strict();
+export const sealedBoxV2Schema = sealedBox;
 
 /**
  * The signed consequential-action approval record (LLD §13, T0
@@ -52,7 +61,9 @@ export const approvalRecordSchema = z.object({
   action: z.string().min(1).max(64),
   digest: digestHex,
   policyDigest: digestHex,
-  decision: z.enum(["approve", "deny"]),
+  // The spec decision word is "allow" (CONTRACT-PAYLOADS-v2 §13) — "approve"
+  // is not a legal record.
+  decision: z.enum(["allow", "deny"]),
   ts: z.number().int().positive(),
   approverKeyId: keyId,
   signature: signatureHex,
@@ -188,7 +199,11 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     name: "mandate_prepare",
     role: "buyer",
     schema: {
+      // The mandate is the family principal's statement (rev 6.5): the buyer
+      // agent PRESENTS it plus the principal's EIP-191 signature; it can
+      // neither create nor alter it.
       mandate: opaqueRecord,
+      mandateSignature: signatureHex,
     },
     outputSchema: z.object({
       ...envelopeOut,
@@ -236,7 +251,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     schema: {
       itineraryId: z.string().min(4).max(64),
       feeMinor: z.number().int().nonnegative().max(10_000_000),
-      note: z.string().max(1024).optional(),
+      note: z.string().max(280).optional(),
     },
     outputSchema: z.object({
       ...envelopeOut,
@@ -378,7 +393,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     schema: {
       orderRef,
       result: z.enum(["match", "mismatch"]),
-      findings: z.string().max(2048).optional(),
+      // The agent supplies the digest of its own findings document (v2).
+      findingsDigest: digestHex,
     },
     outputSchema: z.object({ ...envelopeOut }).strict(),
     readOnly: false,

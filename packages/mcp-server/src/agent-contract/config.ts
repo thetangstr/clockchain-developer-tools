@@ -43,6 +43,10 @@ export type ContractRouteConfig =
       readonly certGraceMs: number;
       /** Bearer token for the read-only observer receipt feed, if configured. */
       readonly observerToken?: string;
+      /** §13 pins: the exact policy digest each role's approvals must carry. */
+      readonly policyDigests: Readonly<{ buyer: string; provider: string }>;
+      /** Family-principal pin per buyer keyId (`CONTRACT_PRINCIPALS`). */
+      readonly principals: ReadonlyMap<string, string>;
       readonly service: ContractService;
     };
 
@@ -112,6 +116,46 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     );
   }
 
+  // §13 approval policy pins are REQUIRED (N4b-2b): `buyer:0x…,provider:0x…`.
+  // A missing pin is a startup error — the route refuses, never half-serves.
+  const DIGEST = /^0x[0-9a-f]{64}$/;
+  const policyDigests: { buyer?: string; provider?: string } = {};
+  const policyRaw = (env.CONTRACT_POLICY_DIGESTS ?? "").trim();
+  try {
+    for (const entry of policyRaw.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const [role, digest] = entry.split(":", 2);
+      if (
+        (role !== "buyer" && role !== "provider") ||
+        !DIGEST.test(digest ?? "") ||
+        /^0x0{64}$/.test(digest ?? "") // the zero digest is not a pin
+      ) {
+        throw new Error("malformed CONTRACT_POLICY_DIGESTS entry (want buyer:0x…,provider:0x…)");
+      }
+      policyDigests[role] = digest;
+    }
+  } catch (err) {
+    return misconfigured((err as Error).message);
+  }
+  if (policyDigests.buyer === undefined || policyDigests.provider === undefined) {
+    return misconfigured("CONTRACT_POLICY_DIGESTS must pin both buyer: and provider: digests");
+  }
+
+  // Family-principal pins (`buyerKeyId:0xaddress`) — the mandate's EIP-191
+  // signature must recover to the buyer's pinned principal (rev 6.5).
+  const principals = new Map<string, string>();
+  const principalsRaw = (env.CONTRACT_PRINCIPALS ?? "").trim();
+  try {
+    for (const entry of principalsRaw.split(",").map((s) => s.trim()).filter(Boolean)) {
+      const [keyId, address] = entry.split(":");
+      if (!keyId || !/^0x[0-9a-fA-F]{40}$/.test(address ?? "")) {
+        throw new Error("malformed CONTRACT_PRINCIPALS entry (want keyId:0xaddress)");
+      }
+      principals.set(keyId, address.toLowerCase());
+    }
+  } catch (err) {
+    return misconfigured((err as Error).message);
+  }
+
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "4096");
@@ -142,6 +186,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
       graceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
       expectedErc8004,
+      policyDigests: policyDigests as { buyer: string; provider: string },
+      principals,
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);
@@ -164,6 +210,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     ...(env.CONTRACT_OBSERVER_TOKEN !== undefined && env.CONTRACT_OBSERVER_TOKEN !== ""
       ? { observerToken: env.CONTRACT_OBSERVER_TOKEN }
       : {}),
+    policyDigests: policyDigests as { buyer: string; provider: string },
+    principals,
     service,
   };
 }

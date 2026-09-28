@@ -11,9 +11,9 @@ import { newServerNonce, type ServerReceipt } from "./receipts.js";
 import type { ContractService, ContractPrincipal, ContractRun } from "./service.js";
 
 /**
- * The `/contract/mcp` MCP server (this slice: `contract_bind` +
- * `contract_status` live; every other catalogued tool answers
- * CONTRACT_UNAVAILABLE until its N4b slice lands).
+ * The `/contract/mcp` MCP server: `contract_bind`/`contract_status` are
+ * service-owned; every other catalogued tool dispatches through
+ * `service.business`.
  *
  * Built on the low-level `Server`, NOT `McpServer.registerTool`: the
  * `tools/list` result must be the verbatim `toolsListForRole(role)` payload
@@ -22,6 +22,11 @@ import type { ContractService, ContractPrincipal, ContractRun } from "./service.
  *
  * The server is constructed per request with the caller's authenticated
  * principal, so `tools/list` is role-scoped by construction.
+ *
+ * Evidence rules (N4b-2b): every refusal body carries the per-call
+ * `serverNonce`; every call that can be tied to a run — INCLUDING refusals —
+ * is receipted; and the receipt slot is RESERVED before dispatch so a
+ * consequential action can never execute unevidenced.
  */
 
 interface CallOutcome {
@@ -29,9 +34,9 @@ interface CallOutcome {
   readonly isError: boolean;
 }
 
-function refusal(code: ContractRefusalCode): CallOutcome {
+function refusal(code: ContractRefusalCode, serverNonce: string): CallOutcome {
   return {
-    body: contractRefusalSchema.parse({ error: code, retryable: false }),
+    body: contractRefusalSchema.parse({ error: code, retryable: false, serverNonce }),
     isError: true,
   };
 }
@@ -60,19 +65,36 @@ export function buildContractServer(options: {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
-    const def = contractToolDef(name);
-    if (def === undefined) return asResult(refusal("NOT_FOUND"));
-    if (!visible.has(name)) return asResult(refusal("ROLE_REFUSED"));
-
-    const parsed = z.object(def.schema).strict().safeParse(request.params.arguments ?? {});
-    if (!parsed.success) {
-      throw new McpError(ErrorCode.InvalidParams, "invalid tool arguments");
-    }
-
     const serverNonce = newServerNonce();
     const argsDigest = canonicalDigest(request.params.arguments ?? {});
     const runId = service.runIdForPrincipal(principal.keyId);
     const run = runId === undefined ? undefined : service.runFor(runId);
+
+    const def = contractToolDef(name);
+    if (def === undefined) {
+      return asResult(withReceipt(run, name, argsDigest, refusal("NOT_FOUND", serverNonce), serverNonce));
+    }
+    if (!visible.has(name)) {
+      return asResult(withReceipt(run, name, argsDigest, refusal("ROLE_REFUSED", serverNonce), serverNonce));
+    }
+
+    const parsed = z.object(def.schema).strict().safeParse(request.params.arguments ?? {});
+    if (!parsed.success) {
+      // Schema-invalid calls are receipted where a principal is known — the
+      // malformed call is evidence too — then fail as JSON-RPC -32602.
+      if (run !== undefined && service.canReceipt(run, principal.keyId)) {
+        service.recordReceipt(run, {
+          tool: name,
+          argsDigest,
+          principal: { role: principal.role, keyId: principal.keyId },
+          outcome: "INVALID_PARAMS",
+          responseDigest: canonicalDigest({ error: "invalid_params" }),
+          serverNonce,
+          sourceIp: options.sourceIp,
+        });
+      }
+      throw new McpError(ErrorCode.InvalidParams, "invalid tool arguments");
+    }
 
     let outcome: CallOutcome;
 
@@ -88,7 +110,7 @@ export function buildContractServer(options: {
         { argsDigest, serverNonce, tool: name, sourceIp: options.sourceIp },
       );
       if (!bound.ok) {
-        outcome = refusal(bound.code);
+        outcome = refusal(bound.code, serverNonce);
         // A refused bind never creates or alters run state — the refusal is
         // receipted only on an ALREADY-EXISTING run (evidence, not state).
         if (run !== undefined) outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
@@ -96,6 +118,12 @@ export function buildContractServer(options: {
         outcome = ok(bound.result);
       }
       return asResult(outcome);
+    }
+
+    // Reserve-before-dispatch: any run-scoped call is receipted — if no
+    // receipt slot is available, the action must not happen at all.
+    if (run !== undefined && !service.canReceipt(run, principal.keyId)) {
+      return asResult(refusal("RATE_LIMITED", serverNonce));
     }
 
     if (name === "contract_status") {
@@ -114,10 +142,14 @@ export function buildContractServer(options: {
     const dispatched = service.business.dispatch(
       principal, run, name, parsed.data, serverNonce,
     );
-    outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code);
+    outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
     if (run !== undefined) outcome = recordCall(run, name, argsDigest, outcome, serverNonce);
     return asResult(outcome);
   });
+
+  function withReceipt(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string): CallOutcome {
+    return run === undefined ? outcome : recordCall(run, tool, argsDigest, outcome, serverNonce);
+  }
 
   // N3: receipt recording can REFUSE at the per-principal budget — the call's
   // outcome then becomes the RATE_LIMITED refusal (nothing is appended), so
@@ -132,7 +164,7 @@ export function buildContractServer(options: {
       serverNonce,
       sourceIp: options.sourceIp,
     });
-    return recorded.ok ? outcome : refusal(recorded.code);
+    return recorded.ok ? outcome : refusal(recorded.code, serverNonce);
   }
 
   return server;

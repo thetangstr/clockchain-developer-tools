@@ -12,7 +12,7 @@ import { verifyChain } from "../dist/agent-contract/receipts.js";
 import { createContractHttpHandler, parseContractTokens, tokenAuthenticator } from "../dist/agent-contract/http-handler.js";
 import { createContractService } from "../dist/agent-contract/service.js";
 import { computeApprovalDigest, computeApprovalSigDigest } from "../dist/agent-contract/approval.js";
-import { eip191SignDigest32, eip191RecoverPublicKey } from "../dist/agent-contract/eip191.js";
+import { eip191SignDigest32, eip191RecoverPublicKey, publicKeyToAddress } from "../dist/agent-contract/eip191.js";
 
 const ACCEPT = "application/json, text/event-stream";
 
@@ -110,16 +110,42 @@ const keys = {
   buyerApproval: { keyId: "approval-buyer", priv: secpPriv(0xb2) },
   providerSigner: { keyId: "signer-provider", priv: secpPriv(0xc1) },
   providerApproval: { keyId: "approval-provider", priv: secpPriv(0xc2) },
+  // The family principal that signs mandates (CONTRACT_PRINCIPALS pin).
+  principal: { keyId: "principal", priv: secpPriv(0xd1) },
 };
 for (const k of Object.values(keys)) k.publicKeyHex = pubFromPriv(k.priv);
+const PRINCIPAL_ADDRESS = publicKeyToAddress(Buffer.from(keys.principal.publicKeyHex.slice(2), "hex"));
 
 const POLICY_DIGEST = `0x${"7".repeat(64)}`;
+const POLICY = { buyer: POLICY_DIGEST, provider: POLICY_DIGEST };
+// Every test buyer keyId pins the same test principal address.
+const PRINCIPALS = new Map(
+  ["kb1", "kb2", "kb3", "kb4", "kb5", "kb6"].map((k) => [k, PRINCIPAL_ADDRESS]),
+);
 
 function signRoleSig(privHex, { runId, role, tool, nonce, payloadDigest }) {
   const digest = canonicalDigest({
     domain: "agent-contract.role-sig/v1", runId, role, tool, nonce, payloadDigest,
   });
   return eip191SignDigest32(Buffer.from(digest.slice(2), "hex"), privHex);
+}
+
+/** The family principal's signed mandate (rev 6.5) — all v2 fields required. */
+function signMandate(overrides = {}) {
+  const mandate = {
+    kind: "mandate",
+    mandateId: `mnd-${Math.floor(Math.random() * 1e9)}`,
+    capMinor: 500_000,
+    currency: "USD",
+    allowedItineraryIds: ["IT-QW-ONESTOP"],
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    ...overrides,
+  };
+  const digest = canonicalDigest({ domain: "agent-contract.mandate/v1", ...mandate });
+  return {
+    mandate,
+    mandateSignature: eip191SignDigest32(Buffer.from(digest.slice(2), "hex"), keys.principal.priv),
+  };
 }
 
 function makeApproval({ envelope, role, action, tool, key, policyDigest = POLICY_DIGEST }) {
@@ -132,7 +158,7 @@ function makeApproval({ envelope, role, action, tool, key, policyDigest = POLICY
   });
   const record = {
     role, action, digest, policyDigest,
-    decision: "approve", ts: Date.now(), approverKeyId: key.keyId,
+    decision: "allow", ts: Date.now(), approverKeyId: key.keyId,
   };
   const sigDigest = computeApprovalSigDigest({ runId: envelope.runId, role, record });
   return { ...record, signature: eip191SignDigest32(Buffer.from(sigDigest.slice(2), "hex"), key.priv) };
@@ -166,7 +192,7 @@ let service;
 const authenticate = tokenAuthenticator(parseContractTokens(TOKENS_RAW));
 
 test.before(async () => {
-  service = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir });
+  service = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir, policyDigests: POLICY, principals: PRINCIPALS });
   const handler = createContractHttpHandler({
     authenticate,
     hostRoots: HOST_ROOTS,
@@ -236,9 +262,9 @@ function uuid(n) {
 }
 
 /** Drive a bound pair through mandate → offer → accept → agreement. */
-async function agreePair(sessionId, buyerToken, providerToken, mandate = { capMinor: 500_000, currency: "USD" }) {
+async function agreePair(sessionId, buyerToken, providerToken, signed = signMandate()) {
   const { runId } = await bindPair(sessionId, buyerToken, providerToken);
-  const prepM = await callTool(buyerToken, "mandate_prepare", { mandate });
+  const prepM = await callTool(buyerToken, "mandate_prepare", signed);
   const m = await signedSubmit({
     token: buyerToken, role: "buyer", prepared: prepM, submitTool: "mandate_submit",
   });
@@ -272,16 +298,20 @@ test("N4b-2: rendezvous → bind → mandate → negotiate → agree → book �
   assert.ok(search.listings.some((l) => l.listingId === listing.listingId));
   const invited = await callTool("tb1", "rendezvous_send_invitation", {
     listingId: listing.listingId,
-    sealedInvitation: { alg: "x25519-xsalsa20-poly1305", ciphertextHex: `0x${"cd".repeat(64)}` },
+    sealedInvitation: {
+      v: 2,
+      epk: `0x${"ab".repeat(32)}`,
+      iv: `0x${"cd".repeat(12)}`,
+      ct: `0x${"ef".repeat(32)}`,
+      tag: `0x${"01".repeat(16)}`,
+    },
   });
   assert.equal(invited.delivered, true);
   const inbox = await callTool("tp1", "rendezvous_inbox", {});
   assert.ok(inbox.messages.some((m) => m.kind === "handshake_invitation" && m.listingId === listing.listingId));
 
-  // mandate (buyer) — cap comfortably above the canonical fare
-  const prepM = await callTool("tb1", "mandate_prepare", {
-    mandate: { capMinor: 500_000, currency: "USD", itineraryIds: ["IT-QW-ONESTOP"] },
-  });
+  // mandate (buyer) — the family principal's signed statement
+  const prepM = await callTool("tb1", "mandate_prepare", signMandate());
   assert.ok(prepM.envelope.payload.mandateDigest === prepM.mandateDigest);
   const mandated = await signedSubmit({ token: "tb1", role: "buyer", prepared: prepM, submitTool: "mandate_submit" });
   assert.match(mandated.mandateDigest, /^0x[0-9a-f]{64}$/, JSON.stringify(mandated));
@@ -341,7 +371,7 @@ test("N4b-2: rendezvous → bind → mandate → negotiate → agree → book �
 
   // buyer verification — the server's own sim observation is ground truth
   const prepV = await callTool("tb1", "verification_prepare", {
-    orderRef: booked.orderRef, result: "match", findings: "matches",
+    orderRef: booked.orderRef, result: "match", findingsDigest: `0x${"aa".repeat(32)}`,
   });
   const verified = await signedSubmit({ token: "tb1", role: "buyer", prepared: prepV, submitTool: "verification_submit" });
   assert.equal(verified.outcome, "match", JSON.stringify(verified));
@@ -378,13 +408,16 @@ test("N4b-2: rendezvous → bind → mandate → negotiate → agree → book �
 
 test("a mandate cap refusal is the identical generic body", async () => {
   await bindPair(uuid(102), "tb2", "tp2");
-  const prepM = await callTool("tb2", "mandate_prepare", { mandate: { capMinor: 400_000, currency: "USD" } });
+  const prepM = await callTool("tb2", "mandate_prepare", signMandate({ capMinor: 400_000 }));
   const mandated = await signedSubmit({ token: "tb2", role: "buyer", prepared: prepM, submitTool: "mandate_submit" });
   assert.match(mandated.mandateDigest, /^0x/);
 
   const offered = await callTool("tb2", "offer_prepare", { itineraryId: "IT-QW-ONESTOP", feeMinor: 10_000 });
-  // The refusal must never leak WHICH cap failed (refusals.ts).
-  assert.deepEqual(offered, { error: "MANDATE_REFUSED", retryable: false });
+  // The refusal must never leak WHICH cap failed (refusals.ts). The
+  // serverNonce is correlation-only — no cap value rides the body.
+  assert.equal(offered.error, "MANDATE_REFUSED");
+  assert.equal(offered.retryable, false);
+  assert.equal(Object.keys(offered).sort().join(","), "error,retryable,serverNonce");
 
   // A wrong-currency offer is refused identically.
   const prepO2 = await callTool("tp2", "offer_prepare", { itineraryId: "IT-QW-ONESTOP", feeMinor: 10_000 });
@@ -393,7 +426,7 @@ test("a mandate cap refusal is the identical generic body", async () => {
 
 test("a tampered role signature and a nonce replay are refused", async () => {
   await bindPair(uuid(103), "tb3", "tp3");
-  const prepared = await callTool("tb3", "mandate_prepare", { mandate: { capMinor: 500_000 } });
+  const prepared = await callTool("tb3", "mandate_prepare", signMandate());
   const env = prepared.envelope;
 
   // a sig made by the provider's key over the buyer tuple
@@ -420,7 +453,7 @@ test("booking_execute needs a §13 approval on the bound approval key", async ()
 
   // Each attempt needs a fresh envelope — a consumed nonce is single-use even
   // when the downstream check refuses.
-  const attempt = async (approvalKey, decision = "approve") => {
+  const attempt = async (approvalKey, decision = "allow") => {
     const prep = await callTool("tp4", "booking_prepare", { agreementId });
     const env = prep.envelope;
     const sig = signRoleSig(keys.providerSigner.priv, {
@@ -468,7 +501,9 @@ test("a claimed-mismatch verification flags and blocks settlement", async () => 
 
   // buyer claims mismatch while the sim observation says match → flagged,
   // and settlement stays locked (the claim is not the truth source).
-  const prepV = await callTool("tb5", "verification_prepare", { orderRef: booked.orderRef, result: "mismatch" });
+  const prepV = await callTool("tb5", "verification_prepare", {
+    orderRef: booked.orderRef, result: "mismatch", findingsDigest: `0x${"bb".repeat(32)}`,
+  });
   const verified = await signedSubmit({ token: "tb5", role: "buyer", prepared: prepV, submitTool: "verification_submit" });
   assert.equal(verified.outcome, "mismatch");
   assert.equal(verified.flagged, true);

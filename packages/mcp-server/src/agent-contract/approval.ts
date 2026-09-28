@@ -41,10 +41,13 @@ export function computeApprovalSigDigest(fields: {
 }
 
 /**
- * Verify an approval record: decision must be `approve`, action must match the
- * consequential payload kind, digest must be the exact binding tuple, the
- * policy digest must match the pinned one when configured, and the EIP-191
- * signature must recover to the role's bound approval key.
+ * Verify an approval record: decision must be `allow` (the spec word —
+ * `approve` is invalid), action must match the consequential payload kind,
+ * digest must be the exact binding tuple, the policy digest must equal the
+ * role's configured pin (`CONTRACT_POLICY_DIGESTS`, REQUIRED — a zero-digest
+ * or unattested policy never passes), `approverKeyId` must be the bound
+ * approval key's id, `ts` must fall inside the envelope's validity window,
+ * and the EIP-191 signature must recover to the bound approval key.
  */
 export function verifyApprovalRecord(fields: {
   approval: ApprovalRecord;
@@ -55,11 +58,18 @@ export function verifyApprovalRecord(fields: {
   nonce: string;
   envelopeDigest: string;
   expiresAt: string;
-  approvalPublicKeyHex: string;
-  expectedPolicyDigest?: string;
+  approvalKey: { keyId: string; publicKeyHex: string };
+  expectedPolicyDigest: string;
+  nowMs?: number;
 }): boolean {
   const a = fields.approval;
-  if (a.role !== fields.role || a.action !== fields.action || a.decision !== "approve") return false;
+  if (a.role !== fields.role || a.action !== fields.action || a.decision !== "allow") return false;
+  if (a.approverKeyId !== fields.approvalKey.keyId) return false;
+  const expiresAtMs = Date.parse(fields.expiresAt);
+  const nowMs = fields.nowMs ?? Date.now();
+  // `ts` must fall within the envelope's validity: not after it expires and
+  // not in the future relative to the server's own clock.
+  if (!Number.isFinite(expiresAtMs) || a.ts > expiresAtMs || a.ts > nowMs) return false;
   if (
     a.digest !== computeApprovalDigest({
       runId: fields.runId,
@@ -69,7 +79,7 @@ export function verifyApprovalRecord(fields: {
       expiresAt: fields.expiresAt,
     })
   ) return false;
-  if (fields.expectedPolicyDigest !== undefined && a.policyDigest !== fields.expectedPolicyDigest) return false;
+  if (a.policyDigest !== fields.expectedPolicyDigest) return false;
   const sigDigest = computeApprovalSigDigest({
     runId: fields.runId,
     role: fields.role,
@@ -77,6 +87,6 @@ export function verifyApprovalRecord(fields: {
   });
   const recovered = eip191RecoverPublicKey(Buffer.from(sigDigest.slice(2), "hex"), a.signature);
   if (recovered === null) return false;
-  const expected = normalizePublicKeyHex(fields.approvalPublicKeyHex);
+  const expected = normalizePublicKeyHex(fields.approvalKey.publicKeyHex);
   return expected !== null && "0x" + Buffer.from(recovered).toString("hex") === expected;
 }

@@ -148,7 +148,13 @@ test("input schemas reject malformed calls per tool", () => {
   }).success, true);
   assert.equal(validator("rendezvous_send_invitation").safeParse({
     listingId: "lst-1",
-    sealedInvitation: { alg: "x25519-xsalsa20-poly1305", ciphertextHex: "0x" + "ab".repeat(64) },
+    sealedInvitation: {
+      v: 2,
+      epk: `0x${"ab".repeat(32)}`,
+      iv: `0x${"cd".repeat(12)}`,
+      ct: `0x${"ef".repeat(32)}`,
+      tag: `0x${"01".repeat(16)}`,
+    },
   }).success, true);
 });
 

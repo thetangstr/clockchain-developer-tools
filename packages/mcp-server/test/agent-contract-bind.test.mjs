@@ -140,6 +140,8 @@ const TOKENS_RAW = [
 const serverKeys = generateKeyPairSync("ed25519");
 const serverPublicB64 = rawPublicKeyBase64(serverKeys.publicKey);
 const SIGNER = { keyId: "contract-server-test", privateKey: serverKeys.privateKey };
+// The service requires both §13 policy pins at construction (fail closed).
+const POLICY = { buyer: `0x${"77".repeat(32)}`, provider: `0x${"88".repeat(32)}` };
 
 const stateDir = mkdtempSync(path.join(tmpdir(), "contract-bind-"));
 let http;
@@ -151,13 +153,13 @@ const authenticate = tokenAuthenticator(parseContractTokens(TOKENS_RAW));
 test.before(async () => {
   service = createContractService({
     hostRoots: HOST_ROOTS,
-    signer: SIGNER,
+    signer: SIGNER, policyDigests: POLICY,
     stateDir,
   });
   const handler = createContractHttpHandler({
     authenticate,
     hostRoots: HOST_ROOTS,
-    signer: SIGNER,
+    signer: SIGNER, policyDigests: POLICY,
     service,
   });
   http = createServer(handler);
@@ -350,7 +352,7 @@ test("used sessionIds are durable: a restart cannot start a second genesis", asy
   const dir = mkdtempSync(path.join(tmpdir(), "contract-restart-"));
   const certR = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "88888888-9999-4444-8888-888888888888" });
   const args = bindArgs(certR, "r");
-  const s1 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const s1 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir });
   const first = s1.bind(
     { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
     args,
@@ -359,7 +361,7 @@ test("used sessionIds are durable: a restart cannot start a second genesis", asy
   assert.equal(first.ok, true);
   // Simulated restart: release the dir lock, fresh service, same stateDir.
   s1.close();
-  const s2 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const s2 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir });
   const replay = s2.bind(
     { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
     args,
@@ -373,23 +375,23 @@ test("used sessionIds are durable: a restart cannot start a second genesis", asy
 
 test("the state directory is exclusively locked — a second service is refused", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "contract-lock-"));
-  const s1 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
-  assert.throws(() => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir }), /lock/i);
+  const s1 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir });
+  assert.throws(() => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir }), /lock/i);
   s1.close();
   // After release the directory is usable again.
-  const s2 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const s2 = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir });
   s2.close();
 });
 
 test("a corrupt used-sessions record fails closed: construction throws", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "contract-corrupt-"));
   writeFileSync(path.join(dir, "used-sessions.json"), "{not json");
-  assert.throws(() => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir }));
+  assert.throws(() => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir }));
 });
 
 test("a used-sessions write failure refuses the bind with NO state change", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "contract-eacces-"));
-  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir });
   const sid = "dddddddd-1111-4444-8888-dddddddddddd";
   const certE = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: sid });
   const args = bindArgs(certE, "eacces");
@@ -409,7 +411,7 @@ test("a used-sessions write failure refuses the bind with NO state change", asyn
 });
 
 test("a principal pinned to the wrong role/side pair is refused at bind", () => {
-  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
   const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "eeeeeeee-2222-4444-8888-eeeeeeeeeeee" });
   const res = svc.bind(
     { keyId: "kx", role: "provider", agentId: "9453", side: "initiator" }, // provider must be responder
@@ -436,11 +438,11 @@ test("a not-yet-valid certificate is refused", async () => {
 
 test("a per-principal receipt budget: provider spam cannot brick the buyer", async () => {
   const svc = createContractService({
-    hostRoots: HOST_ROOTS, signer: SIGNER,
+    hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY,
     stateDir: mkdtempSync(path.join(tmpdir(), "c-")),
     maxReceiptsPerPrincipal: 2,
   });
-  const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: svc });
+  const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, service: svc });
   const srv = createServer(handler);
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   try {
@@ -470,7 +472,7 @@ test("ended runs are evicted, freeing the runs cap slot", () => {
   let t = Date.now();
   const now = () => t;
   const svc = createContractService({
-    hostRoots: HOST_ROOTS, signer: SIGNER, now,
+    hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, now,
     stateDir: mkdtempSync(path.join(tmpdir(), "c-")), maxRuns: 1,
   });
   const sid1 = "13131313-5555-4444-8888-131313131313";
@@ -510,7 +512,7 @@ test("the party check pins agentId AND the erc8004 chain+registry", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "c-"));
   // Pin a DIFFERENT registry than the certificate's identityPolicy carries.
   const svc = createContractService({
-    hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir,
+    hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir,
     expectedErc8004: { chainId: "eip155:1", registryAddress: "0x0000000000000000000000000000000000000001" },
   });
   const certX = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "15151515-7777-4444-8888-151515151515" });
@@ -525,8 +527,8 @@ test("the party check pins agentId AND the erc8004 chain+registry", () => {
 });
 
 test("an 80-char XFF cannot leave a bound run with zero receipts", async () => {
-  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
-  const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: svc, trustProxy: true });
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
+  const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, service: svc, trustProxy: true });
   const srv = createServer(handler);
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   try {
@@ -554,13 +556,13 @@ test("an 80-char XFF cannot leave a bound run with zero receipts", async () => {
 });
 
 test("client XFF is not trusted by default; only the last hop with trust on", async () => {
-  const mkSvc = () => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
+  const mkSvc = () => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: mkdtempSync(path.join(tmpdir(), "c-")) });
   for (const [trust, sid, want] of [
     [false, "aaaaaaaa-1111-4444-9999-aaaaaaaaaaa1", "127.0.0.1"],
     [true, "aaaaaaaa-1111-4444-9999-aaaaaaaaaaa2", "203.0.113.9"],
   ]) {
     const svc = mkSvc();
-    const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: svc, trustProxy: trust });
+    const handler = createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, service: svc, trustProxy: trust });
     const srv = createServer(handler);
     await new Promise((r) => srv.listen(0, "127.0.0.1", r));
     try {
@@ -590,7 +592,10 @@ test("role scoping on tools/call; unknown and pre-bind tools refuse cleanly", as
   const missing = await rpc("tools/call", { name: "not_a_tool", arguments: {} });
   assert.equal(missing.body.result.structuredContent.error, "NOT_FOUND");
   // N4b-2b: all catalogue tools are live now — an UNBOUND caller is refused.
-  const unbound = await rpc("tools/call", { name: "mandate_prepare", arguments: { mandate: {} } }, "tev");
+  const unbound = await rpc("tools/call", {
+    name: "mandate_prepare",
+    arguments: { mandate: {}, mandateSignature: `0x${"0".repeat(130)}` },
+  }, "tev");
   assert.equal(unbound.body.result.structuredContent.error, "STATE_REFUSED");
 });
 
@@ -621,7 +626,7 @@ test("every bound call appends a verifiable receipt to the run chain", async () 
 
 test("run and receipt caps reject when full", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "c-"));
-  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir, maxRuns: 1 });
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir, maxRuns: 1 });
   const args = bindArgs(certB, "cap");
   const ok = svc.bind(
     { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
@@ -644,7 +649,7 @@ test("a principal can bind a new run once the previous run has ended (TTL)", asy
   let t = Date.now();
   const now = () => t;
   const dir = mkdtempSync(path.join(tmpdir(), "c-"));
-  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir, now });
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir, now });
   const me = { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" };
   const cert1 = mintCertificate({ root: rootA, session: generateKeyPairSync("ed25519"), sessionId: "cccccccc-1111-4444-8888-ccccccccccc1" });
   const a1 = bindArgs(cert1, "e1");
@@ -686,7 +691,7 @@ test("a lock holding our own pid but a prior boot id is recovered (PID-1 reuse)"
     path.join(dir, "used-sessions.lock"),
     JSON.stringify({ pid: process.pid, bootId: "prior-boot-id", at: new Date(0).toISOString() }),
   );
-  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir });
+  const svc = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir });
   svc.close();
 });
 
@@ -695,7 +700,7 @@ test("an empty or half-written lock file is never treated as stale", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "contract-emptylock-"));
     writeFileSync(path.join(dir, "used-sessions.lock"), content);
     assert.throws(
-      () => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: dir }),
+      () => createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, stateDir: dir }),
       /lock/i,
     );
   }

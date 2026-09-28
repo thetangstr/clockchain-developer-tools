@@ -15,6 +15,7 @@ import { PUBLISHED_HOST_ROOTS } from "../dist/agent-contract/certificate.js";
 
 const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
 const TOKENS = "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder";
+const POLICIES = `buyer:0x${"77".repeat(32)},provider:0x${"88".repeat(32)}`;
 
 function stateDirEnv() {
   return { CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "contract-cfg-")) };
@@ -30,6 +31,7 @@ test("enabled + valid tokens + seed → ready with published host roots", () => 
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: TOKENS,
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
     ...stateDirEnv(),
   });
   assert.equal(cfg.kind, "ready");
@@ -71,6 +73,27 @@ test("a bad seed (wrong length) is misconfigured", () => {
   assert.equal(cfg.kind, "misconfigured");
 });
 
+test("missing or malformed CONTRACT_POLICY_DIGESTS is misconfigured (fail closed)", () => {
+  const base = {
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: TOKENS,
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+  };
+  for (const raw of [
+    undefined,                                    // absent entirely
+    "",                                           // empty
+    `buyer:0x${"77".repeat(32)}`,                 // provider pin missing
+    `provider:0x${"88".repeat(32)}`,              // buyer pin missing
+    `buyer:0x${"00".repeat(32)},provider:0x${"88".repeat(32)}`, // zero digest is not a pin
+    "buyer:notadigest,provider:0x" + "88".repeat(32),
+    "wizard:0x" + "77".repeat(32) + ",provider:0x" + "88".repeat(32),
+  ]) {
+    const cfg = loadContractConfig({ ...base, CONTRACT_POLICY_DIGESTS: raw });
+    assert.equal(cfg.kind, "misconfigured", String(raw));
+    assert.match(cfg.reason, /policy/i);
+  }
+});
+
 test("malformed CONTRACT_HOST_ROOTS is misconfigured", () => {
   const cfg = loadContractConfig({
     CONTRACT_MCP_ENABLED: "1",
@@ -88,6 +111,7 @@ test("a corrupt used-sessions record makes the route misconfigured (fail closed)
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: TOKENS,
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
     CONTRACT_STATE_DIR: dir,
   });
   assert.equal(cfg.kind, "misconfigured");
@@ -100,6 +124,7 @@ test("a state dir locked by a live service is misconfigured for a second", () =>
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: TOKENS,
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
     CONTRACT_STATE_DIR: dir,
   };
   const first = loadContractConfig(env);

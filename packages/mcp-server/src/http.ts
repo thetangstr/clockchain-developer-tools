@@ -528,6 +528,8 @@ export async function runHttp(): Promise<Server> {
     });
     return contractHandler;
   };
+  // The observer receipt feed is a low-rate surface (default 30/min).
+  const allowObserverFeed = keyedWindowLimiter(Number(process.env.CONTRACT_OBSERVER_PER_MINUTE ?? "30"), 60_000, Date.now);
 
   let standaloneHandshakeHandler: ReturnType<typeof createStandaloneHttpHandler> | undefined;
   let standaloneHandshakeCoordinator: ReturnType<typeof createRuntimeStandaloneCoordinator> | undefined;
@@ -1147,9 +1149,11 @@ export async function runHttp(): Promise<Server> {
 
     // Read-only observer receipt feed (N4b-2b): `GET /contract/receipts?runId=`
     // behind its own bearer token — off unless CONTRACT_OBSERVER_TOKEN is set.
+    // The token compares constant-time over sha256 digests (same pattern as
+    // the metrics token) and the feed itself is rate-limited per observer.
     if (pathOf(req.url) === "/contract/receipts") {
       const token = contractConfig.kind === "ready" ? contractConfig.observerToken : undefined;
-      if (contractConfig.kind === "disabled" || token === undefined) {
+      if (contractConfig.kind !== "ready" || token === undefined) {
         res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ error: "not_found" }));
         return;
@@ -1159,14 +1163,22 @@ export async function runHttp(): Promise<Server> {
         res.end(JSON.stringify({ error: "forbidden" }));
         return;
       }
-      const auth = req.headers.authorization;
-      if (auth !== `Bearer ${token}`) {
+      const expected = createHash("sha256").update(token).digest();
+      const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
+      const presented = bearer ? createHash("sha256").update(bearer[1].trim()).digest() : null;
+      if (presented === null || !timingSafeEqual(presented, expected)) {
         res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ error: "unauthorized" }));
         return;
       }
+      if (!allowObserverFeed("observer")) {
+        rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) });
+        res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "rate_limited" }));
+        return;
+      }
       const runId = new URL(req.url ?? "/", "http://localhost").searchParams.get("runId") ?? "";
-      const feed = contractConfig.kind === "ready" ? contractConfig.service.receiptFeed(runId) : undefined;
+      const feed = contractConfig.service.receiptFeed(runId);
       if (feed === undefined) {
         res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ error: "not_found" }));
