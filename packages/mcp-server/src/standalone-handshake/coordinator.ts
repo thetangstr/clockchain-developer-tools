@@ -22,9 +22,12 @@ import {
 } from "./next.js";
 import {
   DIGEST,
+  STANDALONE_DEFAULT_ENDPOINT,
   STANDALONE_HANDSHAKE_PROTOCOL,
   SIGNATURE,
   buildStandaloneConsentRecord,
+  decodeStandaloneInvitation,
+  encodeStandaloneInvitation,
   normalizeStandaloneClosure,
   normalizeStandaloneReadiness,
   normalizeStandaloneTerms,
@@ -69,14 +72,7 @@ function invitationUnavailable(): never {
 }
 
 function decodeInvitation(invitation: unknown): { sessionId: string; secret: string } | undefined {
-  if (typeof invitation !== "string" || invitation.length < 80 || invitation.length > 4096) return undefined;
-  try {
-    const decoded = JSON.parse(Buffer.from(invitation, "base64url").toString("utf8"));
-    if (decoded?.v !== 1 || typeof decoded.sessionId !== "string" || typeof decoded.secret !== "string") return undefined;
-    return { sessionId: decoded.sessionId, secret: decoded.secret };
-  } catch {
-    return undefined;
-  }
+  return decodeStandaloneInvitation(invitation);
 }
 
 function anchorSummary(anchor: Record<string, any>): Record<string, unknown> {
@@ -131,6 +127,8 @@ export function createStandaloneCoordinator(options: {
   maxHoldsPerClient?: number;
   /** Window from acceptance to channel_open before a session is abandoned. */
   preOpenTtlMs?: number;
+  /** Endpoint written into invitations when the request context carries none. */
+  publicEndpoint?: string;
 } = {}) {
   if (!options.client) throw new StandaloneCoordinatorError("A ledger client is required.");
   const client = options.client;
@@ -221,8 +219,16 @@ export function createStandaloneCoordinator(options: {
       store.putInvitation({ secret, sessionId, expiresAtMs: store.requireSession(sessionId).invitationExpiresAtMs });
       const initiatorAccess = `sat_${randomBytes(32).toString("base64url")}`;
       store.setAccessToken(sessionId, "initiator", initiatorAccess);
-      const invitation = Buffer.from(JSON.stringify({ v: 1, sessionId, secret })).toString("base64url");
-      return { sessionId, reference: terms.reference, invitation, initiatorAccess };
+      const endpoint = standaloneRequestContext.getStore()?.endpoint ?? options.publicEndpoint ?? STANDALONE_DEFAULT_ENDPOINT;
+      const invitation = encodeStandaloneInvitation({ sessionId, secret, endpoint });
+      return {
+        sessionId,
+        reference: terms.reference,
+        invitation,
+        initiatorAccess,
+        tellYourUser: "I created a handshake invitation. It only needs to reach the other agent; it tells that agent where to connect and what to do, and everything else goes through the server.",
+        thenCall: "handshake_next",
+      };
     }
 
     if (name === "handshake_accept_invitation") {
@@ -528,13 +534,23 @@ export function createStandaloneCoordinator(options: {
       store.appendEvent(sessionId, { type: "ready_failed", reason: codes.join(","), attempts: attempt });
     }
     const retry = stage === "readiness_retry";
+    // A failed check is recoverable by the agent alone: say so where it will be read, so it
+    // acts on `required` instead of asking its user (who cannot reach the counterparty).
+    const required = Object.assign({}, ...checklist.failures.filter((failure) => failure.party === "responder").map((failure) => failure.required));
     return {
       sessionId,
       stage,
       checklist,
       attempt,
       attemptsLeft: retry ? READINESS_MAX_ATTEMPTS - attempt : 0,
-      ...(retry ? { codes, thenCall: "handshake_next" } : {}),
+      ...(retry
+        ? {
+          codes,
+          required,
+          guidance: `Readiness failed (${codes.join(",")}) but the invitation is not burned and this is recoverable without your user: call handshake_next, which returns fix_readiness, then handshake_retry_readiness with the values in required.`,
+          thenCall: "handshake_next",
+        }
+        : { thenCall: "handshake_next" }),
     };
   }
 

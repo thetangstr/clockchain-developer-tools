@@ -5,6 +5,13 @@ export const STANDALONE_CHAIN_ID = "eip155:11155111";
 export const STANDALONE_REGISTRY_ADDRESS = "0x8004a818bfb912233c491871b3d84c89a494bd9e";
 export const MESSAGE_KINDS = ["question", "proposal", "evidence", "note"] as const;
 export const DATA_HANDLING_CLASSES = ["public", "confidential", "restricted"] as const;
+// Bumped whenever the rules an agent must follow change (tools, playbook, flows). Every tool
+// response carries it, so an agent running from an old script learns to re-read the rules.
+// 1: handshake_next/readiness_prepare. 2: supervised sessions. 3: self-describing invitations.
+export const STANDALONE_PLAYBOOK_VERSION = 3;
+export const STANDALONE_DEFAULT_ENDPOINT = "https://mcp.clockchain.network/connect/mcp";
+// v2 invitations are readable at a glance: "chs2." + base64url(JSON).
+export const INVITATION_V2_PREFIX = "chs2.";
 
 type JsonRecord = Record<string, any>;
 
@@ -187,4 +194,28 @@ export function normalizeStandaloneClosure(value: unknown): Readonly<JsonRecord>
 export function standaloneCanonicalRecord(value: unknown): Readonly<{ bytesHex: string; digest: string }> {
   const bytes = canonicalBytes(value);
   return Object.freeze({ bytesHex: bytes.toString("hex"), digest: digestHex(value) });
+}
+
+/**
+ * Invitation envelope. Only `secret` authorizes anything; `endpoint` and `next` are
+ * non-secret hints so an agent that is handed the string alone knows where to go and
+ * what to call first. v2 is "chs2." + base64url(JSON); bare base64url v1 still decodes.
+ */
+export function encodeStandaloneInvitation(input: { sessionId: string; secret: string; endpoint: string }): string {
+  const envelope = { v: 2, sessionId: input.sessionId, secret: input.secret, endpoint: input.endpoint, next: "handshake_preview_invitation" };
+  return INVITATION_V2_PREFIX + Buffer.from(JSON.stringify(envelope)).toString("base64url");
+}
+
+export function decodeStandaloneInvitation(invitation: unknown): { v: 1 | 2; sessionId: string; secret: string; endpoint?: string } | undefined {
+  if (typeof invitation !== "string" || invitation.length < 80 || invitation.length > 4096) return undefined;
+  const v2 = invitation.startsWith(INVITATION_V2_PREFIX);
+  try {
+    const decoded = JSON.parse(Buffer.from(v2 ? invitation.slice(INVITATION_V2_PREFIX.length) : invitation, "base64url").toString("utf8"));
+    if (typeof decoded?.sessionId !== "string" || typeof decoded.secret !== "string") return undefined;
+    if (v2 && decoded.v === 2 && typeof decoded.endpoint === "string") return { v: 2, sessionId: decoded.sessionId, secret: decoded.secret, endpoint: decoded.endpoint };
+    if (!v2 && decoded.v === 1) return { v: 1, sessionId: decoded.sessionId, secret: decoded.secret };
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }

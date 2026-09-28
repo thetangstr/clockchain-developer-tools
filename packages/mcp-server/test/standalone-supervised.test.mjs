@@ -51,8 +51,8 @@ test("S1 preview: returns what the Responder must match, marks free text untrust
 test("S1 preview: malformed, unknown, tampered, expired and claimed invitations all get the same refusal", async () => {
   const h = harness({ nowMs: T0 });
   const invite = await h.invite();
-  const decoded = JSON.parse(Buffer.from(invite.invitation, "base64url").toString("utf8"));
-  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const decoded = JSON.parse(Buffer.from(invite.invitation.slice("chs2.".length), "base64url").toString("utf8"));
+  const encode = (value) => "chs2." + Buffer.from(JSON.stringify(value)).toString("base64url");
   const preview = (invitation) => h.instance.invoke("handshake_preview_invitation", { invitation });
 
   await assert.rejects(() => preview("not-an-invitation"), unavailable);

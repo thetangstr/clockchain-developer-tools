@@ -194,7 +194,7 @@ test("the HTTP handler serves /connect/mcp and rate-limits invites per IP", asyn
     assert.equal(second.status, 200);
     assert.equal(second.body.result.isError, true);
     const secondText = JSON.parse(second.body.result.content[0].text);
-    assert.deepEqual(secondText, { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+    assert.deepEqual(secondText, { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 3 });
     assert.deepEqual(calls, ["handshake_invite"]);
 
     const wrong = await fetch(`http://127.0.0.1:${server.address().port}/other/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: ACCEPT }, body: "{}" });
@@ -274,7 +274,7 @@ test("role-access handles slide their TTL on use and role-scoped results never c
     t += 61 * 60_000;
     const stale = await statusViaHandle();
     assert.equal(stale.result.isError, true);
-    assert.deepEqual(JSON.parse(stale.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+    assert.deepEqual(JSON.parse(stale.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 3 });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -313,16 +313,16 @@ test("tool failures surface reason codes and constants only, and log structured 
 
     const admission = await rpc("tools/call", { name: "handshake_status", arguments: access });
     assert.equal(admission.result.isError, true);
-    assert.deepEqual(JSON.parse(admission.result.content[0].text), { error: "SCOPE_VIOLATION", retryable: false });
+    assert.deepEqual(JSON.parse(admission.result.content[0].text), { error: "SCOPE_VIOLATION", retryable: false, playbookVersion: 3 });
 
     const generic = await rpc("tools/call", { name: "consent_sign", arguments: { ...access, signatureHex: `0x${"1".repeat(130)}` } });
     assert.equal(generic.result.isError, true);
-    assert.deepEqual(JSON.parse(generic.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+    assert.deepEqual(JSON.parse(generic.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 3 });
     assert.equal(JSON.stringify(generic.result).includes("secret internal detail"), false);
 
     const retryable = await rpc("tools/call", { name: "channel_send", arguments: { ...access, kind: "note", body: "x" } });
     assert.equal(retryable.result.isError, undefined);
-    assert.deepEqual(retryable.result.structuredContent, { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 });
+    assert.deepEqual(retryable.result.structuredContent, { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000, playbookVersion: 3 });
 
     assert.equal(warnings.length, 3);
     assert.deepEqual(

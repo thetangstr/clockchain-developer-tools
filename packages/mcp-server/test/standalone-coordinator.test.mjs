@@ -431,9 +431,10 @@ test("a tampered or foreign invitation is refused", async () => {
   });
   const a = await invite();
   const b = await invite();
-  const decoded = JSON.parse(Buffer.from(a.invitation, "base64url").toString("utf8"));
+  assert.ok(a.invitation.startsWith("chs2."));
+  const decoded = JSON.parse(Buffer.from(a.invitation.slice("chs2.".length), "base64url").toString("utf8"));
   // Genuine unclaimed secret for session A, but the embedded sessionId points at B.
-  const tampered = Buffer.from(JSON.stringify({ ...decoded, sessionId: b.sessionId })).toString("base64url");
+  const tampered = "chs2." + Buffer.from(JSON.stringify({ ...decoded, sessionId: b.sessionId })).toString("base64url");
   await assert.rejects(
     () => instance.invoke("handshake_accept_invitation", { invitation: tampered, readiness: validReadiness({ sessionKeyAddress: ADDR_RESPONDER, authoritySignatureHex: SIG_RESPONDER }) }),
     StandaloneCoordinatorErrorNamed(),

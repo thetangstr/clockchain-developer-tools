@@ -5,12 +5,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { standaloneRequestContext } from "./long-poll.js";
-import { STANDALONE_HANDSHAKE_PROTOCOL } from "./protocol.js";
+import { STANDALONE_DEFAULT_ENDPOINT, STANDALONE_HANDSHAKE_PROTOCOL, STANDALONE_PLAYBOOK_VERSION } from "./protocol.js";
 import { STANDALONE_ROLE_SCOPED_TOOLS, STANDALONE_TOOL_NAMES, registerStandaloneTools } from "./tools.js";
 
 export { STANDALONE_TOOL_NAMES } from "./tools.js";
 
-const STANDALONE_ENDPOINT = "https://mcp.clockchain.network/connect/mcp";
+const STANDALONE_ENDPOINT = STANDALONE_DEFAULT_ENDPOINT;
 const ROLE_ACCESS_HANDLE = /^csha_[A-Za-z0-9_-]{22}$/;
 const ROLE_ACCESS_HANDLE_TTL_MS = 60 * 60_000;
 const ROLE_ACCESS_HANDLE_LIMIT = 10_000;
@@ -19,7 +19,7 @@ const ROLE_ACCESS_HANDLE_LIMIT = 10_000;
 // Kept to at most 25 lines (asserted in tests) so it survives being pasted into a prompt.
 export function buildStandaloneInstructions(): string {
   return [
-    `Clockchain Standalone Handshake (${STANDALONE_HANDSHAKE_PROTOCOL}): bounded, witnessed communication between two agents.`,
+    `Clockchain Standalone Handshake (${STANDALONE_HANDSHAKE_PROTOCOL}, playbookVersion ${STANDALONE_PLAYBOOK_VERSION}): bounded, witnessed communication between two agents. If a response carries playbookNotice, re-read tools/list and these instructions.`,
     "LOCAL SIGNING ONLY: this server never holds a private key and never signs, sends, opens or closes anything for you.",
     "Playbook. Follow it end to end from one request. Never ask your user to relay anything to the counterparty: everything goes through this server. If blocked, follow handshake_next.",
     "1. Generate a secp256k1 session key locally (Python: eth_account Account.create()). Keep it for the whole handshake. Never send the private key anywhere.",
@@ -27,8 +27,8 @@ export function buildStandaloneInstructions(): string {
     "   Re-derive bytes = JSON of record with keys sorted and no whitespace (json.dumps(record, sort_keys=True, separators=(',', ':'))); check it equals bytes and sha256(bytes) == bytesSha256.",
     "3. Sign bytes locally with EIP-191 personal_sign (eth_account: sign_message(encode_defunct(text=bytes))). That signature is authoritySignatureHex.",
     "   readiness = {sessionKeyAddress, identity: null, authorityStatement: {accountableParty, statement}, authoritySignatureHex, capabilityManifest: {dataHandlingClass, purpose}}.",
-    "4a. To start: handshake_invite {reference, purpose, channelLimits, identityPolicy, readiness}; capabilityManifest.purpose must equal purpose. Give the invitation to your counterparty.",
-    "4b. To join: first handshake_preview_invitation {invitation} (claims nothing), build your readiness with exactly its required values, then handshake_accept_invitation {invitation, readiness}.",
+    "4a. To start: handshake_invite {reference, purpose, channelLimits, identityPolicy, readiness}; capabilityManifest.purpose must equal purpose. Only the invitation string must reach the other agent.",
+    "4b. To join (an invitation looks like chs2.…, and names its endpoint): handshake_preview_invitation {invitation} (read-only, burns nothing), build your readiness with exactly its required values, then handshake_accept_invitation. A failed check does not burn it.",
     "5. Keep the roleAccess from that result. Loop: call handshake_next {access: roleAccess, cursor: <cursor from the last response, if any>} and do what action says:",
     "   wait: call handshake_next again (after retryAfterMs).",
     "   fix_readiness: set every field in required to the value shown (re-run steps 2-3 if authoritySignatureHex is listed), then handshake_retry_readiness {access, readiness}.",
@@ -47,6 +47,7 @@ export function buildStandaloneDiscovery(endpoint: string = STANDALONE_ENDPOINT)
   return {
     name: "clockchain-standalone-handshake",
     protocol: STANDALONE_HANDSHAKE_PROTOCOL,
+    playbookVersion: STANDALONE_PLAYBOOK_VERSION,
     endpoint,
     tools: [...STANDALONE_TOOL_NAMES],
     localSigningRequired: true,
@@ -66,6 +67,20 @@ function normalizePeerAddress(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(value.trim());
   return mapped ? mapped[1] : value;
+}
+
+/**
+ * The public /connect/mcp URL a request arrived on, derived exactly like the discovery
+ * manifest in http.ts: STANDALONE_PUBLIC_ENDPOINT wins; otherwise the forwarded host plus
+ * X-Forwarded-Prefix (a prefixed mount such as /staging never reaches the app otherwise);
+ * otherwise the production endpoint.
+ */
+export function standalonePublicEndpoint(headers: IncomingHttpHeaders, env: Record<string, string | undefined> = process.env): string {
+  const configured = (env.STANDALONE_PUBLIC_ENDPOINT ?? "").trim();
+  if (configured) return configured;
+  const prefix = firstHeader(headers["x-forwarded-prefix"]).trim().replace(/\/+$/, "");
+  const host = (firstHeader(headers["x-forwarded-host"]) || firstHeader(headers.host)).trim();
+  return host ? `https://${host}${prefix}/connect/mcp` : STANDALONE_ENDPOINT;
 }
 
 export function standaloneClientIp(headers: IncomingHttpHeaders, remoteAddress: string | undefined, trustedProxy?: string): string {
@@ -189,8 +204,10 @@ export function createStandaloneHttpHandler(options: {
   invitesPerHour?: number;
   callsPerMinute?: number;
   now?: () => number;
+  env?: Record<string, string | undefined>;
 }) {
   const now = options.now ?? Date.now;
+  const env = options.env ?? process.env;
   const allowInvite = limiter(options.invitesPerHour ?? 5, 60 * 60_000, now);
   const allowCall = limiter(options.callsPerMinute ?? 120, 60_000, now);
   const invoke = createRoleAccessBroker(options.invoke, now);
@@ -221,7 +238,7 @@ export function createStandaloneHttpHandler(options: {
       void server.close();
     });
     try {
-      await standaloneRequestContext.run({ signal: requestGone.signal, clientKey: ip }, async () => {
+      await standaloneRequestContext.run({ signal: requestGone.signal, clientKey: ip, endpoint: standalonePublicEndpoint(req.headers, env) }, async () => {
         await server.connect(transport);
         await transport.handleRequest(req, res);
       });

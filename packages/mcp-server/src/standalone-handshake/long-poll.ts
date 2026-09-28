@@ -13,6 +13,8 @@ export interface StandaloneRequestContext {
   signal?: AbortSignal;
   /** Rate/hold bucket for the caller, e.g. the client IP. */
   clientKey: string;
+  /** The public /connect/mcp URL this request arrived on (prefix-aware), for invitations. */
+  endpoint?: string;
 }
 
 export const standaloneRequestContext = new AsyncLocalStorage<StandaloneRequestContext>();
