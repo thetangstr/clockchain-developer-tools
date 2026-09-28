@@ -407,3 +407,149 @@ test("M2: session TTL — an idle session expires; DELETE terminates it", async 
     ttlService.close();
   }
 });
+
+// === LOWs ===================================================================
+
+import { publicKeyToAddress } from "../dist/agent-contract/eip191.js";
+import { writeFileSync } from "node:fs";
+
+const PRINCIPAL_PRIV = secpPriv(0xd5);
+const PRINCIPAL_ADDRESS = publicKeyToAddress(
+  Buffer.from(pubFromPriv(PRINCIPAL_PRIV).slice(2), "hex"),
+);
+
+function signMandate(privHex, mandate) {
+  const digest = canonicalDigest({ domain: "agent-contract.mandate/v1", ...mandate });
+  return eip191SignDigest32(Buffer.from(digest.slice(2), "hex"), privHex);
+}
+
+test("LOW: inbox deliveries carry the sender's agentId; a bind consumes ONLY that listing", async () => {
+  // kp6 publishes two listings; two buyers each deliver to one of them.
+  const l1 = await callTool("tp6", "rendezvous_publish_listing", {
+    title: "Listing One", summary: "s", sealedBoxPublicKeyHex: `0x${"11".repeat(32)}`,
+  });
+  const l2 = await callTool("tp6", "rendezvous_publish_listing", {
+    title: "Listing Two", summary: "s", sealedBoxPublicKeyHex: `0x${"22".repeat(32)}`,
+  });
+  const d1 = await callTool("tb8", "rendezvous_send_invitation", { listingId: l1.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(d1.delivered, true, JSON.stringify(d1));
+  const d2 = await callTool("tb9", "rendezvous_send_invitation", { listingId: l2.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(d2.delivered, true, JSON.stringify(d2));
+
+  // Inbox messages name the sender's keyId AND its token-pinned agentId.
+  const inbox = await callTool("tp6", "rendezvous_inbox", {});
+  const m1 = inbox.messages.find((m) => m.listingId === l1.listingId);
+  assert.equal(m1.senderKeyId, "kb8");
+  assert.equal(m1.senderAgentId, "9452", "inbox message carries the sender's agentId");
+
+  // The provider binds the handshake that came through l1 — ONLY l1 is
+  // consumed; l2 still accepts deliveries.
+  const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(601) });
+  const bind = await callTool("tp6", "contract_bind", bindArgs(cert, "provider", { listingId: l1.listingId }));
+  assert.equal(bind.bound, true, JSON.stringify(bind));
+
+  const late1 = await callTool("tb10", "rendezvous_send_invitation", { listingId: l1.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(late1.error, "LISTING_UNAVAILABLE");
+  const ok2 = await callTool("tb10", "rendezvous_send_invitation", { listingId: l2.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(ok2.delivered, true, "unconsumed listing still accepts deliveries");
+});
+
+test("LOW: a provider bind naming a listing it does not own is refused", async () => {
+  const l = await callTool("tp8", "rendezvous_publish_listing", {
+    title: "Mine Only", summary: "s", sealedBoxPublicKeyHex: `0x${"33".repeat(32)}`,
+  });
+  const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(602) });
+  // tp9 does NOT own l.listingId — the bind must refuse, not consume.
+  const bind = await callTool("tp9", "contract_bind", bindArgs(cert, "provider", { listingId: l.listingId }));
+  assert.equal(bind.error, "LISTING_UNAVAILABLE", JSON.stringify(bind));
+  // …and the foreign listing was NOT consumed by the refused bind.
+  const still = await callTool("tb11", "rendezvous_send_invitation", { listingId: l.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(still.delivered, true);
+});
+
+test("LOW: used-mandates prunes entries past expiresAt + grace; live and legacy entries survive", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "contract-mandate-prune-"));
+  const principals = new Map([["kb1", PRINCIPAL_ADDRESS], ["kb2", PRINCIPAL_ADDRESS]]);
+  const key = (mid) => `${PRINCIPAL_ADDRESS.toLowerCase()}:${mid}`;
+  // Seed the ledger directly: one expired (expired > grace ago), one live,
+  // one LEGACY string entry (no expiry — kept forever, fail closed).
+  writeFileSync(path.join(dir, "used-mandates.json"), JSON.stringify({
+    mandates: {
+      [key("mdt-expired")]: { runId: "r-old", expiresAt: new Date(Date.now() - 48 * 3600_000).toISOString() },
+      [key("mdt-live")]: { runId: "r-new", expiresAt: new Date(Date.now() + 3600_000).toISOString() },
+      [key("mdt-legacy")]: "r-legacy",
+    },
+  }));
+  const svc = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER,
+    policyDigests: POLICY_DIGESTS, principals, stateDir: dir,
+    graceMs: 600_000,
+  });
+  const h = createServer(createContractHttpHandler({ authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service: svc }));
+  await new Promise((r) => h.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${h.address().port}`;
+  try {
+    // Per-token sessions — M2 binds a session to the principal that
+    // initialized it, so tp1's calls can't ride tb1's session.
+    const localSessions = new Map();
+    const localRpc = async (method, params = {}, token = "tb1") => {
+      if (!localSessions.has(token)) {
+        const init = await fetch(`${url}/contract/mcp`, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}` },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: CLIENT_INFO } }),
+        });
+        localSessions.set(token, init.headers.get("mcp-session-id"));
+      }
+      const r = await fetch(`${url}/contract/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}`, "mcp-session-id": localSessions.get(token) },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      const text = await r.text();
+      const data = text.split("\n").find((l) => l.startsWith("data:"));
+      return JSON.parse(data ? data.slice(5) : text);
+    };
+    const call = async (token, name, args) => (await localRpc("tools/call", { name, arguments: args }, token)).result?.structuredContent ?? {};
+    const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(603) });
+    const bb = await call("tb1", "contract_bind", bindArgs(cert, "buyer"));
+    assert.equal(bb.bound, true, JSON.stringify(bb));
+    const pb = await call("tp1", "contract_bind", bindArgs(cert, "provider"));
+    assert.equal(pb.bound, true, JSON.stringify(pb));
+
+    const submitMandate = async (token, mandateId) => {
+      const mandate = { kind: "mandate", mandateId, capMinor: 1_000, currency: "USD", allowedItineraryIds: ["IT-QW-ONESTOP"], expiresAt: "2030-01-01T00:00:00.000Z" };
+      const prep = await call(token, "mandate_prepare", {
+        mandate, mandateSignature: signMandate(PRINCIPAL_PRIV, mandate),
+      });
+      assert.ok(prep.envelope, `prepare ${mandateId}: ${JSON.stringify(prep)}`);
+      const roleSig = eip191SignDigest32(Buffer.from(canonicalDigest({
+        domain: "agent-contract.role-sig/v1", runId: prep.envelope.runId, role: "buyer",
+        tool: prep.envelope.tool, nonce: prep.envelope.nonce, payloadDigest: prep.envelope.payloadDigest,
+      }).slice(2), "hex"), keys.buyerSigner.priv);
+      return call(token, "mandate_submit", { envelope: prep.envelope, signatureHex: roleSig });
+    };
+
+    // mdt-expired was PRUNED at load — the id is free again, so a correctly
+    // signed submit SUCCEEDS (it claims the id under the new run).
+    const expiredReuse = await submitMandate("tb1", "mdt-expired");
+    assert.match(expiredReuse.mandateDigest ?? "", /^0x[0-9a-f]{64}$/, `pruned id reusable: ${JSON.stringify(expiredReuse)}`);
+
+    // A second run (kb2 is pinned to the SAME principal address): the live
+    // entry still refuses its mandateId, and the legacy string entry (no
+    // expiry — never pruned, fail closed) refuses too.
+    const cert2 = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(604) });
+    const bb2 = await call("tb2", "contract_bind", bindArgs(cert2, "buyer"));
+    assert.equal(bb2.bound, true, JSON.stringify(bb2));
+    const pb2 = await call("tp2", "contract_bind", bindArgs(cert2, "provider"));
+    assert.equal(pb2.bound, true, JSON.stringify(pb2));
+
+    const live = await submitMandate("tb2", "mdt-live");
+    assert.equal(live.error, "MANDATE_INVALID", JSON.stringify(live));
+    const legacySubmit = await submitMandate("tb2", "mdt-legacy");
+    assert.equal(legacySubmit.error, "MANDATE_INVALID", JSON.stringify(legacySubmit));
+  } finally {
+    await new Promise((r) => h.close(r));
+    svc.close();
+  }
+});

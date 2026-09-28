@@ -70,6 +70,13 @@ interface Listing {
 interface InboxMessage {
   messageId: string;
   kind: "handshake_invitation" | "business_message";
+  /**
+   * LOW (N4b-3): the sender's token-pinned identity — the provider's signer
+   * can check the delivered handshake names THIS agentId, not just any
+   * caller who could deliver a sealed blob.
+   */
+  senderKeyId: string;
+  senderAgentId: string;
   listingId?: string;
   sealedPayload?: Record<string, unknown>;
   body?: unknown;
@@ -85,10 +92,19 @@ export interface BusinessOps {
     serverNonce: string,
   ): BusinessOutcome;
   /**
-   * The provider has acted on a handshake — every listing it owns is
-   * consumed and its pending deliveries are cleared from the inbox.
+   * Non-mutating probe (LOW, N4b-3): is `listingId` a live listing owned by
+   * this provider? Used to refuse a provider bind that names a foreign,
+   * unknown or already-consumed listing BEFORE any bind state is claimed.
    */
-  consumeProviderListings(providerKeyId: string): void;
+  consumableListing(providerKeyId: string, listingId: string): boolean;
+  /**
+   * The provider acted on ONE delivery — consumes only the listing it came
+   * through (LOW, N4b-3): other listings stay live. Called at the bind
+   * commit point, after every other check has passed. Idempotent on an
+   * already-consumed listing (the early probe is the gate; a duplicate
+   * consume is a no-op).
+   */
+  consumeListing(providerKeyId: string, listingId: string): boolean;
 }
 
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -137,17 +153,23 @@ export function createBusinessOps(options: {
    * state dir. The claim persists BEFORE the run's mandate record commits.
    * Absent this hook an in-memory ledger still enforces single-use.
    */
-  claimMandate?(principalAddress: string, mandateId: string, runId: string): "ok" | "used" | "unavailable";
+  claimMandate?(principalAddress: string, mandateId: string, runId: string, expiresAtMs: number): "ok" | "used" | "unavailable";
   endRun: (run: ContractRun, terminalState: string) => void;
 }): BusinessOps {
   const now = options.now ?? Date.now;
   const sim = options.sim;
   const principals = options.principals ?? new Map<string, string>();
-  const localMandates = new Set<string>();
-  const claimMandate = options.claimMandate ?? ((principalAddress: string, mandateId: string): "ok" | "used" => {
+  // In-memory fallback ledger (no state dir): keeps the mandate's expiry so
+  // entries past expiresAt can be pruned — same rule as the durable ledger,
+  // without the grace window (which is a persistence-safety margin).
+  const localMandates = new Map<string, number>();
+  const claimMandate = options.claimMandate ?? ((principalAddress: string, mandateId: string, _runId: string, expiresAtMs: number): "ok" | "used" => {
     const key = `${principalAddress.toLowerCase()}:${mandateId}`;
+    for (const [k, exp] of localMandates) {
+      if (now() > exp) localMandates.delete(k);
+    }
     if (localMandates.has(key)) return "used";
-    localMandates.add(key);
+    localMandates.set(key, expiresAtMs);
     return "ok";
   });
   const serverPublicKeys = { [options.signer.keyId]: publicKeyOf(options.signer.privateKey) };
@@ -352,20 +374,28 @@ export function createBusinessOps(options: {
     if (i >= 0) list.splice(i, 1);
   }
 
+  /** Is `listingId` a live (unconsumed) listing owned by this provider? */
+  function consumableListing(providerKeyId: string, listingId: string): boolean {
+    const listing = listings.get(listingId);
+    return listing !== undefined && listing.providerKeyId === providerKeyId && !listing.consumed;
+  }
+
   /**
-   * The provider acted — every listing it owns is consumed (closed to new
-   * deliveries) and its pending deliveries are cleared from the inbox
-   * (N4B2B-CHANGES-2 §1: consumption happens only on a provider action).
+   * The provider acted on a delivery — THAT listing is consumed (closed to
+   * new deliveries) and its pending deliveries are cleared from the inbox
+   * (N4B2B-CHANGES-2 §1 + N4b-3 LOW: consumption happens only on a provider
+   * action, and only on the listing the delivery came through).
    */
-  function consumeProviderListings(providerKeyId: string): void {
-    for (const listing of listings.values()) {
-      if (listing.providerKeyId !== providerKeyId || listing.consumed) continue;
-      listing.consumed = true;
-      for (const message of listing.pending.values()) {
-        removeFromInbox(providerKeyId, message.messageId);
-      }
-      listing.pending.clear();
+  function consumeListing(providerKeyId: string, listingId: string): boolean {
+    const listing = listings.get(listingId);
+    if (listing === undefined || listing.providerKeyId !== providerKeyId) return false;
+    if (listing.consumed) return true; // already consumed — idempotent
+    listing.consumed = true;
+    for (const message of listing.pending.values()) {
+      removeFromInbox(providerKeyId, message.messageId);
     }
+    listing.pending.clear();
+    return true;
   }
 
   /** A listing matches a filter only if its terms don't contradict it. */
@@ -478,6 +508,8 @@ export function createBusinessOps(options: {
         const message: InboxMessage = {
           messageId: `msg-${canonicalDigest({ kind: "inbox", listingId: listing.listingId, receivedAt, seal: canonicalDigest(seal.data) }).slice(2, 14)}`,
           kind: "handshake_invitation",
+          senderKeyId: principal.keyId,
+          senderAgentId: principal.agentId,
           listingId: listing.listingId,
           sealedPayload: seal.data,
           receivedAt,
@@ -553,6 +585,7 @@ export function createBusinessOps(options: {
         // id reports the same generic MANDATE_INVALID — no policy leak.
         const claim = claimMandate(
           principals.get(principal.keyId)!, mandate.mandateId, liveRun.runId,
+          Date.parse(mandate.expiresAt),
         );
         if (claim === "used") return refuse("MANDATE_INVALID");
         if (claim === "unavailable") return refuse("CONTRACT_UNAVAILABLE");
@@ -998,5 +1031,5 @@ export function createBusinessOps(options: {
     }
   }
 
-  return { dispatch, consumeProviderListings };
+  return { dispatch, consumableListing, consumeListing };
 }

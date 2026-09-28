@@ -84,6 +84,10 @@ const terminalState = z.enum(CONTRACT_TERMINAL_STATES);
 const inboxMessage = z.object({
   messageId: z.string().min(4).max(64),
   kind: z.enum(["handshake_invitation", "business_message"]),
+  // LOW (N4b-3): the sender's token-pinned identity, so the provider's signer
+  // can check the delivered handshake names that buyer's agentId.
+  senderKeyId: z.string().min(1).max(64).optional(),
+  senderAgentId: z.string().min(1).max(32).optional(),
   listingId: listingId.optional(),
   sealedPayload: sealedBox.optional(),
   body: z.unknown().optional(),
@@ -184,6 +188,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       certificate: opaqueRecord,
       signerKey: registeredKey,
       approvalKey: registeredKey,
+      /** LOW (N4b-3): providers name the listing the handshake came through —
+       *  only that listing is consumed, not every listing they own. */
+      listingId: listingId.optional(),
     },
     outputSchema: z.object({
       runId: z.string().min(4).max(128),

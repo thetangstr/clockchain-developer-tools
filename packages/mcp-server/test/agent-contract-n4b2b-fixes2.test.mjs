@@ -262,21 +262,22 @@ async function callTool(token, name, args = {}) {
   return r.body.result?.structuredContent ?? {};
 }
 
-function bindArgs(certificate, role) {
+function bindArgs(certificate, role, extra = {}) {
   const signerKey = role === "buyer" ? keys.buyerSigner : keys.providerSigner;
   const approvalKey = role === "buyer" ? keys.buyerApproval : keys.providerApproval;
   return {
     certificate,
     signerKey: { keyId: signerKey.keyId, publicKeyHex: signerKey.publicKeyHex },
     approvalKey: { keyId: approvalKey.keyId, publicKeyHex: approvalKey.publicKeyHex },
+    ...extra,
   };
 }
 
-async function bindPair(sessionId, buyerToken, providerToken) {
+async function bindPair(sessionId, buyerToken, providerToken, listingId) {
   const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId });
   const b = await callTool(buyerToken, "contract_bind", bindArgs(cert, "buyer"));
   assert.equal(b.bound, true, `buyer bind: ${JSON.stringify(b)}`);
-  const p = await callTool(providerToken, "contract_bind", bindArgs(cert, "provider"));
+  const p = await callTool(providerToken, "contract_bind", bindArgs(cert, "provider", { listingId }));
   assert.equal(p.bound, true, `provider bind: ${JSON.stringify(p)}`);
   return { cert, runId: b.runId };
 }
@@ -366,9 +367,10 @@ test("a listing holds multiple pending deliveries; consumed only when the provid
   const cts2 = forListing2.map((m) => m.sealedPayload?.ct).sort();
   assert.deepEqual(cts2, [seal(0x22).ct, seal(0x33).ct].sort());
 
-  // The provider ACTS: it binds a handshake. The listing is now consumed —
-  // every other pending delivery is cleared, new ones are refused.
-  await bindPair(uuid(201), "tb3", "tp1");
+  // The provider ACTS on THIS listing: it binds a handshake naming the
+  // listingId the delivery came through (N4b-3 LOW). The listing is now
+  // consumed — every other pending delivery is cleared, new ones refused.
+  await bindPair(uuid(201), "tb3", "tp1", l.listingId);
   const late = await callTool("tb4", "rendezvous_send_invitation", { listingId: l.listingId, sealedInvitation: seal(0x44) });
   assert.equal(late.error, "LISTING_UNAVAILABLE", JSON.stringify(late));
   const inbox3 = await callTool("tp1", "rendezvous_inbox", {});

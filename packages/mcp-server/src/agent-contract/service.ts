@@ -162,7 +162,7 @@ export type BindOutcome =
 export interface ContractService {
   bind(
     principal: ContractPrincipal,
-    args: { certificate: unknown; signerKey: unknown; approvalKey: unknown },
+    args: { certificate: unknown; signerKey: unknown; approvalKey: unknown; listingId?: unknown },
     evidence: {
       argsDigest: string;
       serverNonce: string;
@@ -288,31 +288,75 @@ function persistUsedSessions(stateDir: string, used: ReadonlyMap<string, string>
 }
 
 /**
+ * LOW (N4b-3): a used-mandate record carries the mandate's expiry so entries
+ * can be pruned once `expiresAt + grace` has passed. `expiresAtMs: null`
+ * means "no expiry on record" (legacy string entries from the v1 file
+ * shape) — those are kept forever: pruning what you can't prove expired
+ * would silently re-open single-use.
+ */
+interface UsedMandate {
+  runId: string;
+  expiresAtMs: number | null;
+}
+
+/**
  * Used mandateIds per family principal — same durability contract as
  * used-sessions (N4B2B-CHANGES-2 §3): absent file = fresh dir; a corrupt or
  * unreadable record is a hard startup error, never silently "empty".
+ * LOW (N4b-3): entries past `expiresAt + grace` are pruned at load; the v1
+ * file shape (plain string values) is still accepted and never pruned.
  */
-function loadUsedMandates(stateDir: string): Map<string, string> {
+function loadUsedMandates(
+  stateDir: string,
+  nowMs: number,
+  graceMs: number,
+): Map<string, UsedMandate> {
   const file = path.join(stateDir, USED_MANDATES_FILE);
   if (!existsSync(file)) return new Map();
   const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
   if (!isPlainRecord(raw) || !isPlainRecord(raw.mandates)) {
     throw new Error(`corrupt ${USED_MANDATES_FILE}`);
   }
-  for (const v of Object.values(raw.mandates)) {
-    if (typeof v !== "string") throw new Error(`corrupt ${USED_MANDATES_FILE}`);
+  const out = new Map<string, UsedMandate>();
+  for (const [k, v] of Object.entries(raw.mandates)) {
+    let record: UsedMandate;
+    if (typeof v === "string") {
+      record = { runId: v, expiresAtMs: null }; // legacy v1 entry
+    } else if (
+      isPlainRecord(v) && typeof v.runId === "string" &&
+      (typeof v.expiresAt === "string" || v.expiresAt === null || v.expiresAt === undefined)
+    ) {
+      const expiresAtMs = typeof v.expiresAt === "string" ? Date.parse(v.expiresAt) : null;
+      if (expiresAtMs !== null && !Number.isFinite(expiresAtMs)) {
+        throw new Error(`corrupt ${USED_MANDATES_FILE}`);
+      }
+      record = { runId: v.runId, expiresAtMs };
+    } else {
+      throw new Error(`corrupt ${USED_MANDATES_FILE}`);
+    }
+    // Pruned at load ONLY when expiry is provable and past the grace window.
+    if (record.expiresAtMs !== null && nowMs > record.expiresAtMs + graceMs) continue;
+    out.set(k, record);
   }
-  return new Map(Object.entries(raw.mandates) as [string, string][]);
+  return out;
 }
 
 /** Durable write — identical fsync/rename discipline to used-sessions. */
-function persistUsedMandates(stateDir: string, used: ReadonlyMap<string, string>): void {
+function persistUsedMandates(stateDir: string, used: ReadonlyMap<string, UsedMandate>): void {
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, USED_MANDATES_FILE);
   const tmp = `${file}.${process.pid}.tmp`;
+  // v2 on-disk shape: {runId, expiresAt} — expiry rides as the original ISO
+  // timestamp (or null for legacy never-expire entries).
+  const mandates = Object.fromEntries(
+    [...used.entries()].map(([k, v]) => [
+      k,
+      { runId: v.runId, expiresAt: v.expiresAtMs === null ? null : new Date(v.expiresAtMs).toISOString() },
+    ]),
+  );
   const fd = openSync(tmp, "w");
   try {
-    writeFileSync(fd, JSON.stringify({ mandates: Object.fromEntries(used) }));
+    writeFileSync(fd, JSON.stringify({ mandates }));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -467,14 +511,17 @@ export function createContractService(options: {
   const preBindSalts = new Map<string, string>();
   let releaseLock: (() => void) | undefined;
   let usedSessions: Map<string, string> = new Map();
-  let usedMandates: Map<string, string> = new Map();
+  let usedMandates: Map<string, UsedMandate> = new Map();
+  // LOW (N4b-3): retention window for used-mandate entries = expiresAt +
+  // graceMs (the same clock-skew grace used elsewhere; default 10 min).
+  const mandateGraceMs = options.graceMs ?? 600_000;
   if (options.stateDir !== undefined) {
     // N1/N2: lock the dir first (a second process is refused outright), then
     // load — a corrupt/unreadable record is a startup failure, not "empty".
     releaseLock = acquireStateLock(options.stateDir);
     try {
       usedSessions = loadUsedSessions(options.stateDir);
-      usedMandates = loadUsedMandates(options.stateDir);
+      usedMandates = loadUsedMandates(options.stateDir, now(), mandateGraceMs);
     } catch (err) {
       releaseLock();
       throw err;
@@ -491,11 +538,20 @@ export function createContractService(options: {
     principalAddress: string,
     mandateId: string,
     runId: string,
+    expiresAtMs: number,
   ): "ok" | "used" | "unavailable" {
     const key = `${principalAddress.toLowerCase()}:${mandateId}`;
-    if (usedMandates.has(key)) return "used";
-    const next = new Map(usedMandates);
-    next.set(key, runId);
+    // LOW (N4b-3): keep the in-memory ledger pruned between loads — an entry
+    // whose retention window (expiresAt + grace) has passed no longer blocks.
+    const t = now();
+    const live = new Map<string, UsedMandate>();
+    for (const [k, v] of usedMandates) {
+      if (v.expiresAtMs !== null && t > v.expiresAtMs + mandateGraceMs) continue;
+      live.set(k, v);
+    }
+    if (live.has(key)) return "used";
+    const next = new Map(live);
+    next.set(key, { runId, expiresAtMs });
     if (options.stateDir !== undefined) {
       try {
         persistUsedMandates(options.stateDir, next);
@@ -554,7 +610,7 @@ export function createContractService(options: {
 
   function bind(
     principal: ContractPrincipal,
-    args: { certificate: unknown; signerKey: unknown; approvalKey: unknown },
+    args: { certificate: unknown; signerKey: unknown; approvalKey: unknown; listingId?: unknown },
     evidence: {
       argsDigest: string;
       serverNonce: string;
@@ -569,6 +625,18 @@ export function createContractService(options: {
     // (startup error) AND again here at bind.
     if ((principal.role === "buyer") !== (principal.side === "initiator")) {
       return { ok: false, code: "ROLE_REFUSED" };
+    }
+
+    // LOW (N4b-3): a provider bind may name the listing the handshake came
+    // through; ONLY that listing is consumed (at the commit point below).
+    // If one is named it must be a live listing the provider owns — a foreign
+    // or spent listingId refuses before any state is claimed or mutated.
+    const bindListingId = typeof args.listingId === "string" ? args.listingId : undefined;
+    if (
+      principal.role === "provider" && bindListingId !== undefined &&
+      !business.consumableListing(principal.keyId, bindListingId)
+    ) {
+      return { ok: false, code: "LISTING_UNAVAILABLE" };
     }
 
     const signerKey = boundKeySchema.safeParse(args.signerKey);
@@ -743,9 +811,11 @@ export function createContractService(options: {
     if (run.bound.buyer !== undefined && run.bound.provider !== undefined) run.stage = "bound";
     if (existing === undefined) runs.set(runId, run);
     principalRuns.set(principal.keyId, runId);
-    // The provider just acted on a handshake — every listing it owns is
-    // consumed and its pending deliveries cleared (N4B2B-CHANGES-2 §1).
-    if (principal.role === "provider") business.consumeProviderListings(principal.keyId);
+    // LOW (N4b-3): commit-time consumption — the provider's successful bind
+    // consumes ONLY the named listing (ownership probed above).
+    if (principal.role === "provider" && bindListingId !== undefined) {
+      business.consumeListing(principal.keyId, bindListingId);
+    }
     return { ok: true, runId, role: principal.role, boundAt, result: resultBody, receipt, run };
   }
 
