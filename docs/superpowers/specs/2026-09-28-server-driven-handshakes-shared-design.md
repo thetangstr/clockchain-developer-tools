@@ -1,9 +1,9 @@
 # Server-driven handshakes: a shared design for Standalone and Agent Handshake v2
 
-**Date:** 2026-09-28 · **Status:** draft for review (plan only, no code) · rev 5
+**Date:** 2026-09-28 · **Status:** draft for review (plan only, no code) · rev 6
 **Rev history:** rev 1 was Standalone-only; rev 2 folded in an independent design review; rev 3
 turns it into a shared design at the founder's direction ("it should be a shared design
-that can be used by the travel MVP"), after a cross-check with the travel MVP session. Rev 4 applies the travel review of rev 3. Rev 5 adds supervised sessions (S1–S4) after the second Muse run failed and could only be recovered by a human relay.
+that can be used by the travel MVP"), after a cross-check with the travel MVP session. Rev 4 applies the travel review of rev 3. Rev 6 adds active facilitation (F1–F4). Rev 5 added supervised sessions (S1–S4) after the second Muse run failed and could only be recovered by a human relay.
 **Builds on:** `2026-09-14-standalone-handshake-design.md`, the Agent Handshake v2 code in `packages/mcp-server/src/agent-handshake/v2/`
 
 ## Why
@@ -213,6 +213,52 @@ Evidence, from the 2026-09-28 second Muse run (staging session `fe08b229`):
   - Operators read all sessions through an admin-only read API. This is the data source for
     the Agent Contract ops dashboard (handshakes, contracts, negotiation steps).
   - The timeline is persisted with B2. Bodies are never stored in it.
+
+### Active facilitation (F1–F4): the server keeps a stalled conversation moving
+
+Communication is pull-only: an agent hears from the server only when it calls. The server
+still sees both sides, so it detects stalls, helps a dropped agent resume, bounds how long
+a turn can hang, and nudges the agents it *can* reach.
+
+- **F1. Stall detection.**
+  - The server records when each role last checked in (`lastSeenAt`, updated by any
+    authenticated call) and whose turn it is (`pendingOn`: `initiator` / `responder` /
+    `either`).
+  - When the pending party has been silent past `stallAfterMs` (default 180s), the waiting
+    party's `handshake_next` carries `counterpartyStalled: { sinceMs, pendingAction }` and
+    templated options: keep waiting, nudge (sends F4 if a webhook is registered), or
+    close/revoke.
+  - A `stalled` event goes in the timeline (S4), and later a `resumed` event when the
+    silent party returns.
+- **F2. Resume.**
+  - When an agent calls `handshake_next` after a gap, or with `resume: true`, the response
+    includes a `catchUp` block: current stage, what changed since its last call (event
+    types and counts, never bodies), and the exact next action.
+  - Combined with B2 durability, an agent that crashed or restarted continues instead of
+    starting over.
+  - The playbook says: "if you lost your place, call handshake_next with resume: true".
+- **F3. Turn deadlines.**
+  - Every pending action has a response window: accept or preview→accept within the
+    invitation TTL; consent and open within `turnDeadlineMs` (default 10 min); a reply
+    within `replyDeadlineMs` (default 10 min, never beyond the channel expiry).
+  - When a window passes, the session ends as `stalled` with reason
+    `STALLED_<ACTION>_BY_<ROLE>`. Both sides get it with `tellYourUser`, and the closure
+    is anchored as for close.
+  - The defaults can be tuned per session via `channelLimits`, bounded server-side.
+- **F4. Webhook nudges (for agents that can receive them).**
+  - Readiness gains an optional `notify: { webhookUrl }`. It's stored per role and never
+    shown to the counterparty.
+  - When it becomes that role's turn (after a quiet period), or on an F1 nudge, the server
+    POSTs a signed "your turn in session X, call handshake_next" notice. The notice carries
+    no bodies and no secrets. It reuses the timer tools' Standard-Webhooks signer and
+    destination policy (`keeper-runtime.ts:51-88`: HMAC, DNS-pinned/allow-listed, no
+    private IPs).
+  - Delivery is at most once per turn, rate-limited, and failures are recorded in the
+    timeline.
+  - Muse can't receive webhooks today, so for Muse F1–F3 carry the load.
+- **Out of scope (later option):** notifying the accountable human when their agent stalls.
+  That would be a person nudging their own agent, which the no-relay rule allows, but it
+  needs a contact channel and consent.
 
 ## Surface-specific changes
 
