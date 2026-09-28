@@ -21,6 +21,9 @@ function stateDirEnv() {
   return { CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "contract-cfg-")) };
 }
 
+// N4b-3 LOW: a ready config requires the pinned key-validity window.
+const KEY_WINDOW = { CONTRACT_SERVER_KEY_VALID_FROM: "2026-09-01T00:00:00.000Z" };
+
 test("unset CONTRACT_MCP_ENABLED → disabled", () => {
   assert.equal(loadContractConfig({}).kind, "disabled");
   assert.equal(loadContractConfig({ CONTRACT_AUTH_TOKENS: TOKENS, CONTRACT_SERVER_ED25519_SEED: SEED_B64 }).kind, "disabled");
@@ -32,6 +35,7 @@ test("enabled + valid tokens + seed → ready with published host roots", () => 
     CONTRACT_AUTH_TOKENS: TOKENS,
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    ...KEY_WINDOW,
     ...stateDirEnv(),
   });
   assert.equal(cfg.kind, "ready");
@@ -78,6 +82,7 @@ test("missing or malformed CONTRACT_POLICY_DIGESTS is misconfigured (fail closed
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: TOKENS,
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    ...KEY_WINDOW,
   };
   for (const raw of [
     undefined,                                    // absent entirely
@@ -112,6 +117,7 @@ test("a corrupt used-sessions record makes the route misconfigured (fail closed)
     CONTRACT_AUTH_TOKENS: TOKENS,
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    ...KEY_WINDOW,
     CONTRACT_STATE_DIR: dir,
   });
   assert.equal(cfg.kind, "misconfigured");
@@ -125,6 +131,7 @@ test("a state dir locked by a live service is misconfigured for a second", () =>
     CONTRACT_AUTH_TOKENS: TOKENS,
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    ...KEY_WINDOW,
     CONTRACT_STATE_DIR: dir,
   };
   const first = loadContractConfig(env);

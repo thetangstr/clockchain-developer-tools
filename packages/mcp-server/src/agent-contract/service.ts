@@ -9,7 +9,7 @@ import { z } from "zod";
 
 import { canonicalDigest } from "./canonical.js";
 import { verifyCertificateEnvelope, type HostRootPin } from "./certificate.js";
-import { makeReceipt, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
+import { makeReceipt, checkReceiptDraft, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
 import type { ContractSigner } from "./envelope.js";
 import type { ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
@@ -179,8 +179,19 @@ export interface ContractService {
    */
   recordReceipt(
     run: ContractRun,
-    fields: Omit<Parameters<typeof makeReceipt>[1], "runId">,
-  ): { ok: true; receipt: ServerReceipt } | { ok: false; code: "RATE_LIMITED" };
+    fields: Omit<ReceiptFields, "runId">,
+  ): { ok: true; receipt: ServerReceipt } | { ok: false; code: ContractRefusalCode };
+  /**
+   * N4b-3 receipts-first gate: true iff the receipt for THIS call could be
+   * built and appended right now — budget AND schema — checked by the caller
+   * BEFORE any dispatch so a consequential action can never run unevidenced.
+   * `run === undefined` checks the pre-bind chain instead.
+   */
+  checkReceiptEvidence(
+    run: ContractRun | undefined,
+    principal: ContractPrincipal,
+    fields: Omit<ReceiptFields, "runId" | "outcome" | "responseDigest" | "principal">,
+  ): { ok: true } | { ok: false; code: ContractRefusalCode };
   /**
    * Reserve-before-dispatch (N4b-2b fix): true iff a receipt COULD be appended
    * for this principal right now. The caller checks this BEFORE dispatching —
@@ -195,33 +206,44 @@ export interface ContractService {
    */
   endRun(run: ContractRun, terminalState: string): void;
   /**
-   * M1: append to a principal's PRE-BIND chain — a signed, hash-chained
-   * receipt log for calls made before any run exists (rendezvous, status,
-   * refused binds). Never throws; at the per-principal cap it refuses.
+   * M1/N4b-3: append to the principal's active PRE-BIND segment — segments
+   * seal at each bind and roll by count, so polling can never lock a
+   * principal out of the evidence chain.
    */
   recordPreBind(
     principal: ContractPrincipal,
-    fields: Omit<Parameters<typeof makeReceipt>[1], "runId" | "principal">,
-  ): { ok: true; receipt: ServerReceipt } | { ok: false; code: "RATE_LIMITED" };
-  /** A principal's pre-bind chain for the observer feed (undefined if none). */
-  preBindFeed(keyId: string): { principalKeyId: string; head: string; receipts: ServerReceipt[] } | undefined;
+    fields: Omit<ReceiptFields, "runId" | "principal">,
+  ): { ok: true; receipt: ServerReceipt } | { ok: false; code: ContractRefusalCode };
+  /** Seal the active pre-bind segment at a successful bind (N4b-3). */
+  sealPreBindSegment(keyId: string): void;
+  /** A principal's segmented pre-bind chain for the observer feed. */
+  preBindFeed(keyId: string): {
+    principalKeyId: string;
+    head: string;
+    /** prevHash the oldest RETAINED receipt links to — genesis unless rolled. */
+    anchor: string;
+    /** True when older segments have rolled off (truncated prefix). */
+    truncated: boolean;
+    receipts: ServerReceipt[];
+    segments: { anchor: string; receipts: ServerReceipt[] }[];
+  } | undefined;
   /** Read-only receipt feed for the observer endpoint (N4b-2b): head + chain. */
   receiptFeed(runId: string): {
     runId: string;
     head: string;
     receipts: ServerReceipt[];
     /** M1: each bound principal's pre-bind chain, served beside the run's. */
-    preBind: { principalKeyId: string; role: ContractRole; head: string; receipts: ServerReceipt[] }[];
+    preBind: (NonNullable<ReturnType<ContractService["preBindFeed"]>> & { role: ContractRole })[];
   } | undefined;
   /**
    * M4: the per-scope argsDigest salt — `{ runId }` for a run's salt,
-   * `{ keyId }` for a principal's pre-bind salt. undefined when no such
-   * scope exists. Disclosed ONLY through the verifier-scoped endpoint —
-   * never through the observer feed.
+   * `{ keyId }` for a principal's pre-bind salts (one PER SEGMENT — `salt`
+   * is the active segment's, `salts` covers every retained segment).
+   * Disclosed ONLY through the verifier-scoped endpoint.
    */
   saltFor(query: { runId?: string; keyId?: string }):
-    { scope: "run" | "pre-bind"; id: string; salt: string } | undefined;
-  /** M4: a principal's pre-bind salt (lazily created — server-side use). */
+    { scope: "run" | "pre-bind"; id: string; salt: string; salts?: string[] } | undefined;
+  /** M4: a principal's ACTIVE pre-bind segment salt (lazily created). */
   preBindSaltFor(keyId: string): string;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
@@ -239,8 +261,21 @@ const boundKeySchema = z.object({
 const DEFAULT_MAX_RUNS = 1024;
 const DEFAULT_MAX_RECEIPTS_PER_RUN = 4096;
 const DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL = 512;
-/** M1: cap on a principal's pre-bind receipt chain (evidence, not state). */
-const MAX_PREBIND_RECEIPTS = 256;
+/**
+ * N4b-3 review fix: the pre-bind chain is SEGMENTED, never a single capped
+ * array — a segment seals at each bind and rolls at `preBindSegmentMax`
+ * receipts; the oldest segments roll off past `preBindMaxSegments`. Each new
+ * segment's first receipt's `prevHash` is the prior segment's head (the
+ * anchor is carried forward, so the retained window stays verifiable), and
+ * each segment carries its OWN argsDigest salt (LOW: salts rotate).
+ */
+interface PreBindSegment {
+  salt: string;
+  receipts: ServerReceipt[];
+  sealed: boolean;
+}
+const DEFAULT_PREBIND_SEGMENT_MAX = 256;
+const DEFAULT_PREBIND_MAX_SEGMENTS = 8;
 /** The runId sentinel pre-bind receipts are scoped under (no run exists yet). */
 const PRE_BIND_SCOPE = "pre-bind";
 const RUN_TTL_MS = 24 * 3600_000; // LLD §3: run-scoped state TTL is 24h
@@ -476,6 +511,10 @@ export function createContractService(options: {
   expectedErc8004?: { chainId: string; registryAddress: string };
   /** Closed sim world (ticketing + payment rail); one is created if absent. */
   sim?: SimWorld;
+  /** N4b-3: receipts per pre-bind chain segment before it rolls (default 256). */
+  preBindSegmentMax?: number;
+  /** N4b-3: retained pre-bind segments per principal (default 8). */
+  preBindMaxSegments?: number;
   /**
    * §13 policy pins, REQUIRED (N4b-2b fix): `CONTRACT_POLICY_DIGESTS` —
    * `buyer:0x…,provider:0x…`. Approval records must carry exactly the role's
@@ -502,13 +541,12 @@ export function createContractService(options: {
   }
   const runs = new Map<string, ContractRun>();
   const principalRuns = new Map<string, string>();
-  /** M1: per-principal signed receipt chains for calls made before a run
-   *  exists — rendezvous, pre-bind status, refused binds. The run genesis
-   *  links each side's head (`preBindHead`). */
-  const preBindChains = new Map<string, ServerReceipt[]>();
-  /** M4: per-principal salt for cap-bearing PRE-BIND receipts — same
-   *  disclosure rules as runSalt (verifier endpoint only). */
-  const preBindSalts = new Map<string, string>();
+  /** M1/N4b-3: per-principal SEGMENTED pre-bind chains — the run genesis
+   *  links each side's head (`preBindHead`); each bind seals the active
+   *  segment and the oldest segments roll off past `preBindMaxSegments`. */
+  const preBindChains = new Map<string, PreBindSegment[]>();
+  const preBindSegmentMax = options.preBindSegmentMax ?? DEFAULT_PREBIND_SEGMENT_MAX;
+  const preBindMaxSegments = options.preBindMaxSegments ?? DEFAULT_PREBIND_MAX_SEGMENTS;
   let releaseLock: (() => void) | undefined;
   let usedSessions: Map<string, string> = new Map();
   let usedMandates: Map<string, UsedMandate> = new Map();
@@ -567,21 +605,55 @@ export function createContractService(options: {
     return run.terminalState !== null || now() >= run.createdAtMs + runTtlMs;
   }
 
-  /** M4: the principal's pre-bind salt — created lazily on first need. */
-  function preBindSaltFor(keyId: string): string {
-    let salt = preBindSalts.get(keyId);
-    if (salt === undefined) {
-      salt = randomBytes(32).toString("hex");
-      preBindSalts.set(keyId, salt);
+  /**
+   * The ACTIVE pre-bind segment — the last one if it has room and isn't
+   * sealed by a bind; otherwise a fresh segment with a fresh salt. Segments
+   * roll off oldest-first once `preBindMaxSegments` is exceeded.
+   */
+  function activePreBindSegment(keyId: string): PreBindSegment {
+    let segments = preBindChains.get(keyId);
+    if (segments === undefined) {
+      segments = [];
+      preBindChains.set(keyId, segments);
     }
-    return salt;
+    const last = segments.at(-1);
+    if (last === undefined || last.sealed || last.receipts.length >= preBindSegmentMax) {
+      segments.push({ salt: randomBytes(32).toString("hex"), receipts: [], sealed: false });
+      while (segments.length > preBindMaxSegments) segments.shift();
+    }
+    return segments.at(-1)!;
+  }
+
+  /** The last receipt across all retained segments — a new segment's `prev`. */
+  function preBindTailFor(keyId: string): ServerReceipt | null {
+    const segments = preBindChains.get(keyId);
+    if (segments === undefined) return null;
+    for (let i = segments.length - 1; i >= 0; i--) {
+      const tail = segments[i]!.receipts.at(-1);
+      if (tail !== undefined) return tail;
+    }
+    return null;
+  }
+
+  /**
+   * Seal the principal's active pre-bind segment — called at a successful
+   * bind so subsequent pre-bind evidence starts a fresh segment with a
+   * rotated salt (N4b-3). A no-op when the chain is empty.
+   */
+  function sealPreBindSegment(keyId: string): void {
+    const last = preBindChains.get(keyId)?.at(-1);
+    if (last !== undefined && last.receipts.length > 0) last.sealed = true;
+  }
+
+  /** M4: the ACTIVE segment's pre-bind salt — created lazily on first need. */
+  function preBindSaltFor(keyId: string): string {
+    return activePreBindSegment(keyId).salt;
   }
 
   /** The head of a principal's pre-bind chain, or undefined if it has none. */
   function preBindHeadFor(keyId: string): string | undefined {
-    const chain = preBindChains.get(keyId);
-    if (chain === undefined || chain.length === 0) return undefined;
-    return canonicalDigest(chain[chain.length - 1]!);
+    const tail = preBindTailFor(keyId);
+    return tail === null ? undefined : canonicalDigest(tail);
   }
 
   function dropRun(runId: string): void {
@@ -764,23 +836,30 @@ export function createContractService(options: {
       return { ok: false, code: "RATE_LIMITED" };
     }
 
-    const receipt = makeReceipt(prevReceipt, {
-      runId,
-      tool: evidence.tool,
-      argsDigest: evidence.argsDigest,
-      principal: { role: principal.role, keyId: principal.keyId },
-      outcome: "ok",
-      responseDigest: canonicalDigest(resultBody),
-      serverNonce: evidence.serverNonce,
-      sourceIp: evidence.sourceIp,
-      mcpSessionId: evidence.mcpSessionId,
-      clientInfo: evidence.clientInfo,
-      bindAssurance: "agentId-pinned-token",
-      // M1: the bind receipt carries THIS principal's pre-bind chain head —
-      // the run chain's link back to the evidence that preceded it.
-      preBindHead: preBindHeadFor(principal.keyId),
-      ts: now(),
-    }, options.signer);
+    // N4b-3: the receipt is built (and schema-validated) BEFORE any state
+    // mutation — a receipt that can't be built means the bind can't commit.
+    let receipt: ServerReceipt;
+    try {
+      receipt = makeReceipt(prevReceipt, {
+        runId,
+        tool: evidence.tool,
+        argsDigest: evidence.argsDigest,
+        principal: { role: principal.role, keyId: principal.keyId },
+        outcome: "ok",
+        responseDigest: canonicalDigest(resultBody),
+        serverNonce: evidence.serverNonce,
+        sourceIp: evidence.sourceIp,
+        mcpSessionId: evidence.mcpSessionId,
+        clientInfo: evidence.clientInfo,
+        bindAssurance: "agentId-pinned-token",
+        // M1: the bind receipt carries THIS principal's pre-bind chain head —
+        // the run chain's link back to the evidence that preceded it.
+        preBindHead: preBindHeadFor(principal.keyId),
+        ts: now(),
+      }, options.signer);
+    } catch {
+      return { ok: false, code: "CONTRACT_UNAVAILABLE" };
+    }
 
     // N1: for a NEW run the used-session record is persisted BEFORE any
     // in-memory state changes. If the write fails the bind fails with no
@@ -816,6 +895,10 @@ export function createContractService(options: {
     if (principal.role === "provider" && bindListingId !== undefined) {
       business.consumeListing(principal.keyId, bindListingId);
     }
+    // N4b-3: a successful bind SEALS this principal's pre-bind segment — the
+    // next pre-bind call starts a fresh segment (fresh salt) anchored on the
+    // sealed head, so the lifetime cap can never lock a principal out.
+    sealPreBindSegment(principal.keyId);
     return { ok: true, runId, role: principal.role, boundAt, result: resultBody, receipt, run };
   }
 
@@ -872,14 +955,46 @@ export function createContractService(options: {
       if (run.receipts.length >= maxReceiptsPerRun || count >= maxReceiptsPerPrincipal) {
         return { ok: false, code: "RATE_LIMITED" };
       }
-      const receipt = makeReceipt(
-        run.receipts.at(-1) ?? null,
-        { ...fields, runId: run.runId, ts: now() },
-        options.signer,
-      );
+      // N4b-3: a receipt that can't be built is a refusal, never a throw —
+      // the caller already ran this validation pre-dispatch, so this branch
+      // should be unreachable; it exists so a post-dispatch surprise can
+      // never become a 500.
+      let receipt: ServerReceipt;
+      try {
+        receipt = makeReceipt(
+          run.receipts.at(-1) ?? null,
+          { ...fields, runId: run.runId, ts: now() },
+          options.signer,
+        );
+      } catch {
+        return { ok: false, code: "CONTRACT_UNAVAILABLE" };
+      }
       run.receipts.push(receipt);
       run.receiptsByPrincipal.set(fields.principal.keyId, count + 1);
       return { ok: true, receipt };
+    },
+    checkReceiptEvidence(run, principal, fields) {
+      evictEnded(); // same hygiene as the old canReceipt gate
+      if (run !== undefined) {
+        // Budget AND buildability, before any dispatch (N4b-3).
+        const count = run.receiptsByPrincipal.get(principal.keyId) ?? 0;
+        if (run.receipts.length >= maxReceiptsPerRun || count >= maxReceiptsPerPrincipal) {
+          return { ok: false, code: "RATE_LIMITED" };
+        }
+        const ok = checkReceiptDraft(run.receipts.at(-1) ?? null, {
+          ...fields,
+          runId: run.runId,
+          principal: { role: principal.role, keyId: principal.keyId },
+        });
+        return ok ? { ok: true } : { ok: false, code: "CONTRACT_UNAVAILABLE" };
+      }
+      const prev = preBindTailFor(principal.keyId);
+      const ok = checkReceiptDraft(prev, {
+        ...fields,
+        runId: PRE_BIND_SCOPE,
+        principal: { role: principal.role, keyId: principal.keyId },
+      });
+      return ok ? { ok: true } : { ok: false, code: "CONTRACT_UNAVAILABLE" };
     },
     canReceipt(run, principalKeyId) {
       evictEnded();
@@ -891,25 +1006,42 @@ export function createContractService(options: {
       return runs.get(runId);
     },
     recordPreBind(principal, fields) {
-      const chain = preBindChains.get(principal.keyId) ?? [];
-      if (chain.length >= MAX_PREBIND_RECEIPTS) return { ok: false, code: "RATE_LIMITED" };
-      const receipt = makeReceipt(chain.at(-1) ?? null, {
-        ...fields,
-        runId: PRE_BIND_SCOPE,
-        principal: { role: principal.role, keyId: principal.keyId },
-        ts: now(),
-      }, options.signer);
-      if (chain.length === 0) preBindChains.set(principal.keyId, chain);
-      chain.push(receipt);
+      // N4b-3: segments roll by count — capacity is never the reason a poll
+      // is refused; a build failure (unreachable after the pre-dispatch
+      // check) is a refusal, never a throw.
+      const segment = activePreBindSegment(principal.keyId);
+      let receipt: ServerReceipt;
+      try {
+        receipt = makeReceipt(preBindTailFor(principal.keyId), {
+          ...fields,
+          runId: PRE_BIND_SCOPE,
+          principal: { role: principal.role, keyId: principal.keyId },
+          ts: now(),
+        }, options.signer);
+      } catch {
+        return { ok: false, code: "CONTRACT_UNAVAILABLE" };
+      }
+      segment.receipts.push(receipt);
       return { ok: true, receipt };
     },
+    sealPreBindSegment,
     preBindFeed(keyId) {
-      const chain = preBindChains.get(keyId);
-      if (chain === undefined || chain.length === 0) return undefined;
+      const segments = preBindChains.get(keyId);
+      if (segments === undefined) return undefined;
+      const nonEmpty = segments.filter((s) => s.receipts.length > 0);
+      if (nonEmpty.length === 0) return undefined;
+      const first = nonEmpty[0]!.receipts[0]!;
+      const receipts = nonEmpty.flatMap((s) => s.receipts.map((r) => structuredClone(r)));
       return {
         principalKeyId: keyId,
-        head: canonicalDigest(chain[chain.length - 1]!),
-        receipts: chain.map((r) => structuredClone(r)),
+        head: canonicalDigest(nonEmpty.at(-1)!.receipts.at(-1)!),
+        anchor: first.prevHash,
+        truncated: first.prevHash !== RECEIPT_CHAIN_GENESIS,
+        receipts,
+        segments: nonEmpty.map((s) => ({
+          anchor: s.receipts[0]!.prevHash,
+          receipts: s.receipts.map((r) => structuredClone(r)),
+        })),
       };
     },
     receiptFeed(runId) {
@@ -919,9 +1051,9 @@ export function createContractService(options: {
       const head = run.receipts.length === 0
         ? RECEIPT_CHAIN_GENESIS
         : canonicalDigest(run.receipts[run.receipts.length - 1]!);
-      // M1: the bound principals' pre-bind chains ride the feed so the
-      // observer can audit the evidence that preceded the run.
-      const preBind: { principalKeyId: string; role: ContractRole; head: string; receipts: ServerReceipt[] }[] = [];
+      // M1/N4b-3: the bound principals' pre-bind chain SEGMENTS ride the feed
+      // so the observer can audit the evidence that preceded the run.
+      const preBind: (NonNullable<ReturnType<ContractService["preBindFeed"]>> & { role: ContractRole })[] = [];
       for (const role of ["buyer", "provider"] as const) {
         const bound = run.bound[role];
         if (bound === undefined) continue;
@@ -938,12 +1070,18 @@ export function createContractService(options: {
           : { scope: "run" as const, id: query.runId, salt: run.runSalt };
       }
       if (query.keyId !== undefined) {
-        // Only a principal that HAS a pre-bind salt gets one — never
-        // materialize a salt for an unknown keyId.
-        const salt = preBindSalts.get(query.keyId);
-        return salt === undefined
-          ? undefined
-          : { scope: "pre-bind" as const, id: query.keyId, salt };
+        // Only a principal that HAS pre-bind receipts gets a salt — never
+        // materialize salts for an unknown keyId. `salt` is the ACTIVE
+        // segment's; `salts` covers every retained segment (N4b-3 LOW:
+        // salts rotate per segment).
+        const segments = (preBindChains.get(query.keyId) ?? []).filter((s) => s.receipts.length > 0);
+        if (segments.length === 0) return undefined;
+        return {
+          scope: "pre-bind" as const,
+          id: query.keyId,
+          salt: segments.at(-1)!.salt,
+          salts: segments.map((s) => s.salt),
+        };
       }
       return undefined;
     },

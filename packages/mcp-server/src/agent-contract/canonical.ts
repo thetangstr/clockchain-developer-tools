@@ -67,14 +67,20 @@ export function saltedCanonicalDigest(saltHex: string, value: unknown): string {
  * verifier endpoint, never to the observer feed.
  */
 const AMOUNT_KEY = /^(?:.*_)?(?:cap|price|fare|amount|fee|total|cost)(?:minor|usd|cents|decimal)?$/i;
+/**
+ * True when a value (args OR a response body) carries an amount-like key
+ * (`*Minor`, `price`, `cap`, `amount`, `fare`, `fee`, `total`, `cost` —
+ * case-insensitive, at any depth). N4b-3 review: responses that carry money
+ * get the same salted digest treatment as cap-bearing args.
+ */
+export function containsAmountField(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(containsAmountField);
+  return Object.keys(value as Record<string, unknown>).some(
+    (k) => AMOUNT_KEY.test(k) || containsAmountField((value as Record<string, unknown>)[k]),
+  );
+}
 export function isCapBearingCall(toolName: string, args: unknown): boolean {
   if (toolName.startsWith("mandate_")) return true;
-  const scan = (v: unknown): boolean => {
-    if (v === null || typeof v !== "object") return false;
-    if (Array.isArray(v)) return v.some(scan);
-    return Object.keys(v as Record<string, unknown>).some(
-      (k) => AMOUNT_KEY.test(k) || scan((v as Record<string, unknown>)[k]),
-    );
-  };
-  return scan(args);
+  return containsAmountField(args);
 }

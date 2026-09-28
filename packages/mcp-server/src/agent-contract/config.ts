@@ -127,14 +127,20 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     );
   }
 
-  // M3: the signing key is published with rotation metadata — agents pin it
-  // before any run so receipt chains verify offline. The validity window is
-  // env-pinned (`CONTRACT_SERVER_KEY_VALID_*`, ISO-8601); an ephemeral dev
-  // signer is always flagged `ephemeral: true` so it can never pass as a
-  // durable production key.
+  // M3 + LOW (N4b-3): the signing key is published with rotation metadata —
+  // agents pin it before any run so receipt chains verify offline. The
+  // validity window MUST come from pinned config — never boot time (a
+  // boot-derived validFrom would look like a fresh key on every restart):
+  // CONTRACT_SERVER_KEY_VALID_FROM is required whenever the surface is on;
+  // CONTRACT_SERVER_KEY_VALID_UNTIL stays optional (null = no expiry).
   const keyValidFromRaw = (env.CONTRACT_SERVER_KEY_VALID_FROM ?? "").trim();
   const keyValidUntilRaw = (env.CONTRACT_SERVER_KEY_VALID_UNTIL ?? "").trim();
-  const keyValidFrom = keyValidFromRaw === "" ? new Date().toISOString() : keyValidFromRaw;
+  if (keyValidFromRaw === "") {
+    return misconfigured(
+      "CONTRACT_SERVER_KEY_VALID_FROM is required (pinned ISO-8601 — never boot time)",
+    );
+  }
+  const keyValidFrom = keyValidFromRaw;
   if (Number.isNaN(Date.parse(keyValidFrom))) {
     return misconfigured("CONTRACT_SERVER_KEY_VALID_FROM is not an ISO-8601 timestamp");
   }
@@ -195,6 +201,15 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     return misconfigured((err as Error).message);
   }
 
+  // LOW (N4b-3): the verifier and observer credentials must differ — the
+  // observer feed is salt-free by design, and a shared token would let one
+  // credential both read the feed AND disclose the salts that unlock it.
+  const observerTokenRaw = (env.CONTRACT_OBSERVER_TOKEN ?? "").trim();
+  const verifierTokenRaw = (env.CONTRACT_VERIFIER_TOKEN ?? "").trim();
+  if (observerTokenRaw !== "" && verifierTokenRaw !== "" && observerTokenRaw === verifierTokenRaw) {
+    return misconfigured("CONTRACT_VERIFIER_TOKEN must differ from CONTRACT_OBSERVER_TOKEN");
+  }
+
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "4096");
@@ -248,12 +263,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
     certGraceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
     sessionTtlMs: Number.isFinite(sessionTtlMs) ? sessionTtlMs : 30 * 60_000,
-    ...(env.CONTRACT_OBSERVER_TOKEN !== undefined && env.CONTRACT_OBSERVER_TOKEN !== ""
-      ? { observerToken: env.CONTRACT_OBSERVER_TOKEN }
-      : {}),
-    ...(env.CONTRACT_VERIFIER_TOKEN !== undefined && env.CONTRACT_VERIFIER_TOKEN !== ""
-      ? { verifierToken: env.CONTRACT_VERIFIER_TOKEN }
-      : {}),
+    ...(observerTokenRaw !== "" ? { observerToken: observerTokenRaw } : {}),
+    ...(verifierTokenRaw !== "" ? { verifierToken: verifierTokenRaw } : {}),
     policyDigests: policyDigests as { buyer: string; provider: string },
     principals,
     serverKeys,

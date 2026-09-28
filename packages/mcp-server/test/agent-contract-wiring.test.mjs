@@ -28,6 +28,9 @@ const ENV_KEYS = [
 const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
 // Required §13 policy pins — a "ready" config is impossible without them.
 const POLICIES = `buyer:0x${"77".repeat(32)},provider:0x${"88".repeat(32)}`;
+// N4b-3 LOW: the published key's validity window is pinned config — never
+// boot time — so every ready-expecting env carries it.
+const KEY_VALID_FROM = "2026-09-01T00:00:00.000Z";
 const ACCEPT = "application/json, text/event-stream";
 
 async function boot(env) {
@@ -113,6 +116,7 @@ test("H3: ephemeral key requires explicit opt-in and is forced to ephemeral-dev-
     CONTRACT_ALLOW_EPHEMERAL_KEY: "1",
     CONTRACT_SERVER_KEY_ID: "attacker-supplied", // must NOT be honored
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
   });
   assert.equal(cfg.kind, "ready");
   assert.equal(cfg.signerEphemeral, true);
@@ -131,6 +135,7 @@ test("C1: no tokens configured — prototype keys and constructor get 401 on eve
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
     // CONTRACT_AUTH_TOKENS intentionally unset
   });
   try {
@@ -168,6 +173,7 @@ test("H3: enabled + seeded + tokens → route serves; disabled env → not mount
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
   });
   try {
     const noTok = await post(app.url, "tools/list");
@@ -186,6 +192,7 @@ test("N1: a corrupt used-sessions record closes the route (503, no binds)", asyn
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
     CONTRACT_STATE_DIR: dir,
   });
   try {
@@ -202,6 +209,7 @@ test("N2: a second process on the same state dir is refused (exclusive lock)", a
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
     CONTRACT_STATE_DIR: dir,
   };
   const app = await boot(env);
@@ -291,6 +299,7 @@ test("observer feed: /contract/receipts is token-gated and serves a bound run's 
     CONTRACT_HOST_ROOTS: `root-test:${fingerprint}`,
     CONTRACT_OBSERVER_TOKEN: "observer-secret",
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
   };
 
   // Off without the observer token even when the route is ready.
@@ -406,6 +415,7 @@ test("M3: an ephemeral dev key is published flagged ephemeral:true", async () =>
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator",
     CONTRACT_ALLOW_EPHEMERAL_KEY: "1",
     CONTRACT_POLICY_DIGESTS: POLICIES,
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
   });
   try {
     const keysRes = await fetch(`${app.url}/contract/keys`);
@@ -437,6 +447,7 @@ test("M4: mandate argsDigest is HMAC-salted; the salt is disclosed only to the v
     CONTRACT_POLICY_DIGESTS: POLICIES,
     CONTRACT_OBSERVER_TOKEN: "observer-secret",
     CONTRACT_VERIFIER_TOKEN: "verifier-secret",
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
   });
   try {
     // A cap-bearing call — mandate_prepare carries mandate.capMinor.
@@ -503,6 +514,7 @@ test("M4: no verifier token configured → the run-salt endpoint is closed", asy
     CONTRACT_SERVER_ED25519_SEED: SEED_B64,
     CONTRACT_POLICY_DIGESTS: POLICIES,
     CONTRACT_OBSERVER_TOKEN: "observer-secret",
+    CONTRACT_SERVER_KEY_VALID_FROM: KEY_VALID_FROM,
     // CONTRACT_VERIFIER_TOKEN intentionally unset
   });
   try {

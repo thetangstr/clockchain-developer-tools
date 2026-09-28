@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
 import { buildContractServer } from "./server.js";
+import { receiptClientInfoSchema } from "./receipts.js";
 import type { ContractPrincipal, ContractService, ContractSide } from "./service.js";
 import type { ContractSigner } from "./envelope.js";
 import type { HostRootPin } from "./certificate.js";
@@ -171,17 +172,37 @@ export function createContractHttpHandler(options: {
   signer: ContractSigner;
   service: ContractService;
   callsPerMinute?: number;
+  /** N4b-3: per-principal polling-tool rate limit (rendezvous_inbox, contract_status). */
+  pollsPerMinute?: number;
   trustProxy?: boolean;
   /** Idle-session TTL (M2); default 30 min. */
   sessionTtlMs?: number;
+  /** N4b-3: live sessions per principal (default 4) and globally (512). */
+  maxSessionsPerPrincipal?: number;
+  maxSessions?: number;
   now?: () => number;
   onRateLimited?: () => void;
 }) {
   const now = options.now ?? Date.now;
   const service = options.service;
   const sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  const maxSessionsPerPrincipal = options.maxSessionsPerPrincipal ?? 4;
+  const maxSessions = options.maxSessions ?? 512;
   const allowCall = keyedWindowLimiter(options.callsPerMinute ?? 120, 60_000, now);
   const sessions = new Map<string, ContractSession>();
+
+  /**
+   * N4b-3: idle sessions are swept on EVERY request AND on a background
+   * timer — a swept session frees its per-principal and global slots.
+   */
+  function sweepIdleSessions(): void {
+    const t = now();
+    for (const [id, sess] of sessions) {
+      if (t - sess.lastSeenMs > sessionTtlMs) dropSession(id, sess);
+    }
+  }
+  const sweepTimer = setInterval(sweepIdleSessions, Math.max(1_000, Math.min(sessionTtlMs, 60_000)));
+  sweepTimer.unref?.();
 
   /** Drop a session — closed transport, forgotten record. */
   function dropSession(sessionId: string, sess: ContractSession): void {
@@ -206,6 +227,7 @@ export function createContractHttpHandler(options: {
       return;
     }
 
+    sweepIdleSessions(); // N4b-3: idle sessions free slots on every request
     const sessionId = firstHeader(req.headers["mcp-session-id"]).trim();
     if (sessionId.length > 0) {
       const sess = sessions.get(sessionId);
@@ -251,24 +273,43 @@ export function createContractHttpHandler(options: {
       return;
     }
 
-    const ctx: ContractSession["ctx"] = {};
+    // N4b-3 receipts-first: a `clientInfo` the receipt schema would reject is
+    // REFUSED at initialize — it could otherwise poison every receipt for
+    // the session (probe N4b3-3: settlement committed with no receipt).
     const clientInfo = (body as { params?: { clientInfo?: unknown } }).params?.clientInfo;
-    if (
-      typeof clientInfo === "object" && clientInfo !== null &&
-      typeof (clientInfo as { name?: unknown }).name === "string" &&
-      typeof (clientInfo as { version?: unknown }).version === "string"
-    ) {
-      const ci = clientInfo as { name: string; version: string };
-      ctx.clientInfo = {
-        name: ci.name.slice(0, 128),
-        version: ci.version.slice(0, 64),
-      };
+    if (clientInfo !== undefined && !receiptClientInfoSchema.safeParse(clientInfo).success) {
+      writeJson(res, 400, jsonRpcError(-32602, "Invalid params"));
+      return;
+    }
+
+    // N4b-3 session caps: per-principal and global, after the sweep — the
+    // 5th concurrent session for one principal is refused.
+    if (sessions.size >= maxSessions) {
+      options.onRateLimited?.();
+      writeJson(res, 429, { error: "rate_limited" });
+      return;
+    }
+    let principalSessions = 0;
+    for (const s of sessions.values()) {
+      if (s.principalKeyId === principal.keyId) principalSessions += 1;
+    }
+    if (principalSessions >= maxSessionsPerPrincipal) {
+      options.onRateLimited?.();
+      writeJson(res, 429, { error: "rate_limited" });
+      return;
+    }
+
+    const ctx: ContractSession["ctx"] = {};
+    if (clientInfo !== undefined) {
+      ctx.clientInfo = clientInfo as { name: string; version: string };
     }
 
     const server = buildContractServer({
       principal,
       service,
       session: ctx,
+      pollsPerMinute: options.pollsPerMinute,
+      now,
     });
     ctx.sourceIp = clientIp(req.headers, req.socket.remoteAddress, options.trustProxy === true);
     const transport = new StreamableHTTPServerTransport({

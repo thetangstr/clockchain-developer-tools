@@ -3,7 +3,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { z } from "zod";
 
-import { canonicalDigest, isCapBearingCall, saltedCanonicalDigest } from "./canonical.js";
+import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
+import { canonicalDigest, containsAmountField, isCapBearingCall, saltedCanonicalDigest } from "./canonical.js";
 import { toolsListForRole, CONTRACT_SERVER_INSTRUCTIONS } from "./tools-list.js";
 import { contractToolDef, toolDefsForRole } from "./schemas.js";
 import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
@@ -50,6 +51,13 @@ export function buildContractServer(options: {
   service: ContractService;
   sourceIp?: string;
   /**
+   * N4b-3: polling tools (`rendezvous_inbox`, `contract_status`) get their
+   * own per-principal rate limit — the evidence cap is never the reason a
+   * poll is refused (default 60/min; injectable for tests).
+   */
+  pollsPerMinute?: number;
+  now?: () => number;
+  /**
    * Live MCP session evidence (M2): `id` is filled on
    * `onsessioninitialized`, `clientInfo` from `initialize`. Every receipt
    * carries them as EVIDENCE (LLD §9 R9), never proof.
@@ -62,6 +70,8 @@ export function buildContractServer(options: {
   };
 }): Server {
   const { principal, service } = options;
+  const POLL_TOOLS = new Set(["rendezvous_inbox", "contract_status"]);
+  const allowPoll = keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
   const sessionFields = () => ({
     mcpSessionId: options.session?.id,
     clientInfo: options.session?.clientInfo,
@@ -97,6 +107,21 @@ export function buildContractServer(options: {
     const argsDigest = argsScheme === "hmac-sha256"
       ? saltedCanonicalDigest(run?.runSalt ?? service.preBindSaltFor(principal.keyId), callArgs)
       : canonicalDigest(callArgs);
+
+    // N4b-3 receipts-first: the receipt is built AND schema-validated BEFORE
+    // any dispatch — if it can't be built (bad session evidence, exhausted
+    // budget) the action never runs. The refusal carries a generic code +
+    // the serverNonce; internals never reach the agent.
+    const preflight = service.checkReceiptEvidence(run, principal, {
+      tool: name,
+      argsDigest,
+      argsDigestScheme: argsScheme,
+      serverNonce,
+      ...sessionFields(),
+    });
+    if (!preflight.ok) {
+      return asResult(refusal(preflight.code, serverNonce));
+    }
 
     const def = contractToolDef(name);
     if (def === undefined) {
@@ -159,10 +184,11 @@ export function buildContractServer(options: {
       return asResult(outcome);
     }
 
-    // Reserve-before-dispatch: any run-scoped call is receipted — if no
-    // receipt slot is available, the action must not happen at all.
-    if (run !== undefined && !service.canReceipt(run, principal.keyId)) {
-      return asResult(refusal("RATE_LIMITED", serverNonce));
+    // N4b-3: polling gets its own limiter — never the evidence cap. A poll
+    // that exceeds it is refused RATE_LIMITED (still receipted — the refusal
+    // is evidence too).
+    if (POLL_TOOLS.has(name) && !allowPoll(principal.keyId)) {
+      return asResult(recordAny(run, name, argsDigest, refusal("RATE_LIMITED", serverNonce), serverNonce, argsScheme));
     }
 
     if (name === "contract_status") {
@@ -201,15 +227,33 @@ export function buildContractServer(options: {
       : recordCall(run, tool, argsDigest, outcome, serverNonce, scheme);
   }
 
-  // M1: pre-bind receipt — capped per principal; at the cap the outcome
-  // becomes RATE_LIMITED (nothing appended), never a throw.
+  /**
+   * N4b-3: a response carrying an amount (`*Minor`, price/fare/total…) gets a
+   * salted `responseDigest` under the SAME scope salt as a cap-bearing
+   * argsDigest — the observer feed can't brute-force agreed money values;
+   * the verifier endpoint discloses the salt.
+   */
+  function responseEvidence(run: ContractRun | undefined, body: Record<string, unknown>) {
+    const responseDigestScheme = containsAmountField(body) ? "hmac-sha256" as const : "canonical" as const;
+    const salt = run === undefined ? service.preBindSaltFor(principal.keyId) : run.runSalt;
+    return {
+      responseDigestScheme,
+      responseDigest: responseDigestScheme === "hmac-sha256"
+        ? saltedCanonicalDigest(salt, body)
+        : canonicalDigest(body),
+    };
+  }
+
+  // M1/N4b-3: pre-bind receipt — appends to the principal's ACTIVE segment;
+  // segments roll by count so capacity never refuses a call, and a build
+  // failure is a refusal (unreachable after the pre-dispatch gate).
   function recordPreBindCall(tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical"): CallOutcome {
     const recorded = service.recordPreBind(principal, {
       tool,
       argsDigest,
       argsDigestScheme: scheme,
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
-      responseDigest: canonicalDigest(outcome.body),
+      ...responseEvidence(undefined, outcome.body),
       serverNonce,
       ...sessionFields(),
     });
@@ -226,7 +270,7 @@ export function buildContractServer(options: {
       argsDigestScheme: scheme,
       principal: { role: principal.role, keyId: principal.keyId },
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
-      responseDigest: canonicalDigest(outcome.body),
+      ...responseEvidence(run, outcome.body),
       serverNonce,
       ...sessionFields(),
     });
