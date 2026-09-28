@@ -213,9 +213,18 @@ and runs in the same container, so the step-3 durability test also asserts its
   The unit's `ExecStop` is `docker compose down` (`infra/clockchain-mcp/clockchain-mcp.service:12`)
   and `ExecStart` runs `compose-up.sh` (`up -d --build --wait`). So every code deploy
   recreates **every** service in that compose: `mcp`, `host` (the v2 host, ~121s
-  invitation cycle by design) and `caddy`. Add a code-only path
-  (`docker compose up -d --no-deps --wait mcp`) for deploys that change only the `mcp`
-  image. Keep the full unit restart for infra/config changes.
+  invitation cycle by design) and `caddy`. Because Caddy is recreated too, `/acm4/*`
+  (the frozen 2.1.6 path behind the ACM4 cart) and `/mcp` anchoring also drop briefly on
+  every deploy, not only v2.
+  - **Default** `deploy-box.sh` to a code-only path (`docker compose up -d --no-deps --wait mcp`).
+    A full unit restart requires an explicit flag (e.g. `--full-restart`) and is used only
+    for infra/config changes.
+  - Any full-unit restart gets the same notice/freeze rule, and the notice also goes to
+    the ACM4 production owner (the travel orchestrator routes it).
+  - `--no-deps mcp` still recreates the `mcp` container, so in-memory `ccra_`/`csha_`
+    handles are still lost on every code deploy. **The notice/freeze rule stays in force
+    until step 3 is deployed and its restart test is green**, not merely once the code-only
+    path exists.
 
 ## Risks and open questions
 
@@ -254,6 +263,7 @@ and runs in the same container, so the step-3 durability test also asserts its
 
 | Step | Work | Surfaces | Verification |
 |---|---|---|---|
+| 0b | Ops: `deploy-box.sh` defaults to the code-only `mcp` recreate; `--full-restart` flag for the full unit | ops | a deploy leaves `caddy`, `host` and `/acm4/*` up (container start times unchanged); full restart only with the flag |
 | 0 | **Spike, half a day:** staging build with a Standalone `handshake_next` and `readiness_prepare`; one natural prompt to Muse | Standalone | Does Muse keep its key, loop unprompted and tolerate 12s holds? Which egress IPs? |
 | 1 | `handshake-core`: B1 schema and long-poll helper, B3 local recovery, B2 store and handle broker | shared | unit tests; recovery vectors match the RPC path |
 | 2 | Standalone adopts B1–B3: `handshake_next`, `readiness_prepare`, cursor, lowercase canonical, playbook | Standalone | a unit test per action; e2e with two agents and no human input |
@@ -263,6 +273,6 @@ and runs in the same container, so the step-3 durability test also asserts its
 | 6 | Autonomous Claude Code listener, then a live Muse run on video | Standalone | anchors present; transcript shows no human input after message 1 |
 
 Rough size: step 0 is half a day; steps 1–2 about 3 days; step 3 about 1.5 days; step 4
-about 1 day; step 5 about 1.5 days; step 6 half a day. Each step is its own PR. Order: 0 → 1 → (2 ∥ 4) → 3 → 5 → 6.
+about 1 day; step 5 about 1.5 days; step 6 half a day. Each step is its own PR. Order: 0b and 0 first (independent), then 1 → (2 ∥ 4) → 3 → 5 → 6.
 Every v2-touching PR is reviewed by the travel session, carries travel's staging
 conformance run, and is deployed under the notice/freeze rule.
