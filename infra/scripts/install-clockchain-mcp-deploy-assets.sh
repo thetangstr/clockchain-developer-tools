@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Default: install the out-of-checkout wrapper + unit, then restart the whole stack (full restart).
+# --no-restart: install + daemon-reload + enable only, so the installed copies match the checkout
+# without touching running containers (used by the code-only deploy in scripts/deploy-box.sh).
+RESTART=1
+case "${1:-}" in
+  "") ;;
+  --no-restart) RESTART=0 ;;
+  *) printf 'usage: %s [--no-restart]\n' "$0" >&2; exit 64 ;;
+esac
+
 APP_ROOT="${CLOCKCHAIN_MCP_APP_ROOT:-/opt/clockchain-mcp/app}"
 INSTALL_ROOT="${CLOCKCHAIN_MCP_INSTALL_ROOT:-/opt/clockchain-mcp}"
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,4 +27,8 @@ install -m 0644 "${ASSET_ROOT}/clockchain-mcp.service" /etc/systemd/system/clock
 
 systemctl daemon-reload
 systemctl enable clockchain-mcp.service
-systemctl restart clockchain-mcp.service
+if [[ "$RESTART" == 1 ]]; then
+  systemctl restart clockchain-mcp.service
+else
+  printf 'deploy assets installed; clockchain-mcp.service NOT restarted (--no-restart)\n'
+fi

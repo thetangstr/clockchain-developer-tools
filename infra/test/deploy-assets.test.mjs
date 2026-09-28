@@ -15,6 +15,7 @@ const caddyFile = path.join(deployDir, "Caddyfile");
 const systemdUnit = path.join(deployDir, "clockchain-mcp.service");
 const runbook = path.join(deployDir, "RUNBOOK.md");
 const installScript = path.join(repoRoot, "infra", "scripts", "install-clockchain-mcp-deploy-assets.sh");
+const deployBoxScript = path.join(repoRoot, "scripts", "deploy-box.sh");
 const rootPackageJson = path.join(repoRoot, "package.json");
 
 const expectedSecretNames = [
@@ -124,6 +125,7 @@ async function createWrapperFixture(options = {}) {
   const callsFile = path.join(temp, "aws-calls.txt");
   const dockerInvokedFile = path.join(temp, "docker-invoked.txt");
   const dockerOkFile = path.join(temp, "docker-ok.txt");
+  const dockerArgsFile = path.join(temp, "docker-args.txt");
   const envJson = JSON.stringify(expectedEnv);
   const hostSecretsJson = JSON.stringify(expectedHostSecrets);
 
@@ -151,14 +153,20 @@ assert.equal(process.env.HANDSHAKE_ALLOW_DEGRADED, process.env.EXPECTED_HANDSHAK
 assert.equal(process.env.EVM_RPC_URL, process.env.EXPECTED_EVM_RPC_URL);
 assert.equal(process.env.HANDSHAKE_KIT_REPO, "https://github.com/thetangstr/clockchain-handshake-v2.git");
 assert.equal(process.env.HANDSHAKE_SHA, "${expectedHandshakeSha}");
-assert.equal(process.env.CLOCKCHAIN_FUNDING_PASSWORD_FILE, "/app/keys/funding.password");
 assert.equal(process.env.CLOCKCHAIN_HOST_ROOT_KEY_ID, "root-2026-08");
 assert.equal(process.env.CLOCKCHAIN_HOST_SECRET_DIR, process.env.EXPECTED_HOST_SECRET_DIR);
-assert.deepEqual((await readdir(process.env.CLOCKCHAIN_HOST_SECRET_DIR)).sort(), Object.keys(expectedHostSecrets).sort());
-for (const [file, value] of Object.entries(expectedHostSecrets)) {
-  const secretPath = path.join(process.env.CLOCKCHAIN_HOST_SECRET_DIR, file);
-  assert.equal(await readFile(secretPath, "utf8"), value, file);
-  assert.equal((await stat(secretPath)).mode & 0o777, 0o600, file);
+if (process.env.EXPECT_MCP_ONLY === "1") {
+  // Code-only deploy: the host container is untouched, so its private files are not (re)written.
+  assert.equal(process.env.CLOCKCHAIN_FUNDING_PASSWORD_FILE, undefined);
+  await assert.rejects(readdir(process.env.CLOCKCHAIN_HOST_SECRET_DIR), { code: "ENOENT" });
+} else {
+  assert.equal(process.env.CLOCKCHAIN_FUNDING_PASSWORD_FILE, "/app/keys/funding.password");
+  assert.deepEqual((await readdir(process.env.CLOCKCHAIN_HOST_SECRET_DIR)).sort(), Object.keys(expectedHostSecrets).sort());
+  for (const [file, value] of Object.entries(expectedHostSecrets)) {
+    const secretPath = path.join(process.env.CLOCKCHAIN_HOST_SECRET_DIR, file);
+    assert.equal(await readFile(secretPath, "utf8"), value, file);
+    assert.equal((await stat(secretPath)).mode & 0o777, 0o600, file);
+  }
 }
 assert.equal(process.env.PORT, "8080");
 assert.equal(process.env.MCP_TRANSPORT, "http");
@@ -278,6 +286,7 @@ set -euo pipefail
 [[ "$1" == "compose" ]]
 shift
 printf 'invoked\\n' > "$DOCKER_INVOKED_FILE"
+printf '%s\\n' "$*" > "$DOCKER_ARGS_FILE"
 has_wait=0
 has_wait_timeout=0
 while [[ $# -gt 0 ]]; do
@@ -308,6 +317,7 @@ printf 'docker compose invoked\\n'
     AWS_CALLS_FILE: callsFile,
     DOCKER_INVOKED_FILE: dockerInvokedFile,
     DOCKER_OK_FILE: dockerOkFile,
+    DOCKER_ARGS_FILE: dockerArgsFile,
     ENV_CHECK_FILE: path.join(temp, "env-check.mjs"),
     // Absolute node path so the fixture's own checks still work when a test
     // strips node from PATH to simulate the systemd unit environment.
@@ -326,7 +336,7 @@ printf 'docker compose invoked\\n'
     ...options.env,
   };
 
-  return { temp, callsFile, dockerInvokedFile, dockerOkFile, env };
+  return { temp, callsFile, dockerInvokedFile, dockerOkFile, dockerArgsFile, env };
 }
 
 async function resolvedComposeConfig() {
@@ -638,6 +648,75 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
 
     const mode = (await stat(wrapper)).mode & 0o777;
     assert.equal(mode & 0o111, 0o111, "wrapper is executable");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper without arguments brings up the whole stack (systemd full restart path)", async () => {
+  const { temp, dockerArgsFile, env } = await createWrapperFixture();
+  try {
+    const result = await run(wrapper, [], { cwd: temp, env });
+    assert.equal(result.code, 0, result.stderr);
+    const args = (await readFile(dockerArgsFile, "utf8")).trim();
+    assert.match(args, /^-f \S+docker-compose\.yml up -d --build --wait --wait-timeout 180$/);
+    assert.doesNotMatch(args, /--no-deps/);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+for (const onlyArgs of [["--only", "mcp"], ["--only=mcp"]]) {
+  test(`compose wrapper ${onlyArgs.join(" ")} recreates only mcp with the same mcp environment and leaves host files alone`, async () => {
+    const { temp, callsFile, dockerOkFile, dockerArgsFile, env } = await createWrapperFixture({
+      env: { EXPECT_MCP_ONLY: "1" },
+    });
+    try {
+      const result = await run(wrapper, onlyArgs, { cwd: temp, env });
+      assert.equal(result.code, 0, result.stderr);
+      // env-check.mjs asserted the full mcp env (every secret byte-for-byte + nonsecret config).
+      assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+      const args = (await readFile(dockerArgsFile, "utf8")).trim();
+      assert.match(
+        args,
+        /^-f \S+docker-compose\.yml up -d --no-deps --build --wait --wait-timeout 180 mcp$/,
+        "only the mcp service is recreated; caddy and host are not touched",
+      );
+      const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
+      assert.deepEqual(
+        calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
+        [...expectedSecretNames, ...expectedOptionalSecretNames],
+        "mcp-only fetches the mcp secrets and no host secrets",
+      );
+      assert.equal(await pathExists(env.EXPECTED_HOST_SECRET_DIR), false, "host secret files are not rewritten");
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  });
+}
+
+test("compose wrapper rejects unknown arguments before any secret fetch or docker", async () => {
+  for (const args of [["--only"], ["--only", "caddy"], ["--only", "host"], ["mcp"]]) {
+    const { temp, callsFile, dockerInvokedFile, env } = await createWrapperFixture();
+    try {
+      const result = await run(wrapper, args, { cwd: temp, env });
+      assert.equal(result.code, 64, args.join(" "));
+      assert.equal(await pathExists(callsFile), false, "no SSM call");
+      assert.equal(await pathExists(dockerInvokedFile), false, "docker not invoked");
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("compose wrapper --only mcp still fails closed on a bad secret before docker", async () => {
+  const { temp, dockerInvokedFile, env } = await createWrapperFixture({
+    env: { EXPECT_MCP_ONLY: "1", AWS_DENY_PARAMETER: "/clockchain/mcp/MCP_AUTH_TOKENS" },
+  });
+  try {
+    const result = await run(wrapper, ["--only", "mcp"], { cwd: temp, env });
+    assert.notEqual(result.code, 0);
+    assert.equal(await pathExists(dockerInvokedFile), false, "docker not invoked");
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -983,6 +1062,71 @@ test("installer enables and restarts the systemd unit", async () => {
   assert.match(install, /systemctl enable clockchain-mcp\.service/);
   assert.match(install, /systemctl restart clockchain-mcp\.service/);
 });
+
+test("installer --no-restart refreshes the installed assets without restarting the unit", async () => {
+  const install = await readFile(installScript, "utf8");
+  assert.match(install, /--no-restart\) RESTART=0/);
+  assert.match(install, /if \[\[ "\$RESTART" == 1 \]\]; then\n\s+systemctl restart clockchain-mcp\.service\n/);
+});
+
+async function deployBoxParse(args) {
+  return run("bash", [deployBoxScript, ...args], {
+    cwd: repoRoot,
+    env: { ...process.env, DEPLOY_BOX_PARSE_ONLY: "1" },
+  });
+}
+
+test("deploy-box.sh defaults to the code-only mode and accepts flags in any order", async () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const plain = await deployBoxParse([sha]);
+  assert.equal(plain.code, 0, plain.stderr);
+  assert.match(plain.stdout, /MODE: CODE-ONLY \(default\)/);
+  assert.match(plain.stdout, new RegExp(`mode=code-only sha=${sha} confirm=0`));
+  assert.doesNotMatch(plain.stdout, /FULL RESTART/);
+
+  for (const args of [[sha, "--yes"], ["--yes", sha]]) {
+    const r = await deployBoxParse(args);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`mode=code-only sha=${sha} confirm=1`));
+  }
+  for (const args of [[sha, "--full-restart"], ["--full-restart", sha, "--yes"], ["--yes", "--full-restart", sha]]) {
+    const r = await deployBoxParse(args);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /MODE: FULL RESTART \(--full-restart\)/);
+    assert.match(r.stdout, /travel_mvp orchestrator AND the ACM4 production owner/);
+    assert.match(r.stdout, new RegExp(`mode=full-restart sha=${sha} confirm=${args.includes("--yes") ? 1 : 0}`));
+  }
+  for (const args of [[], ["abc"], [sha, "--bogus"], [sha, sha], ["--yes"]]) {
+    const r = await deployBoxParse(args);
+    assert.equal(r.code, 64, `rejects ${JSON.stringify(args)}`);
+  }
+});
+
+test("deploy-box.sh code-only path recreates only mcp; the unit restart is behind --full-restart", async () => {
+  const src = await readFile(deployBoxScript, "utf8");
+  const remote = src.slice(src.indexOf("REMOTE_SCRIPT=$(cat <<EOF"), src.indexOf("PARAMS=$("));
+  assert.ok(remote.length > 0, "remote script found");
+  // Guard rails kept in both modes.
+  assert.match(remote, /REFUSING: the box checkout has local changes/);
+  assert.match(remote, /checkout --quiet --detach "\$SHA"/);
+  assert.match(remote, /\$DC build mcp/);
+  // The installer's restarting form runs only in the full-restart branch.
+  const fullBranch = remote.slice(remote.indexOf('if [[ "\\$MODE" == "full-restart" ]]; then'), remote.indexOf("else"));
+  const codeBranch = remote.slice(remote.indexOf("else"), remote.indexOf("\nfi\n", remote.indexOf("else")));
+  assert.match(fullBranch, /infra\/scripts\/install-clockchain-mcp-deploy-assets\.sh\n/);
+  assert.doesNotMatch(codeBranch, /install-clockchain-mcp-deploy-assets\.sh\n/);
+  assert.match(codeBranch, /install-clockchain-mcp-deploy-assets\.sh --no-restart/);
+  assert.match(codeBranch, /infra\/clockchain-mcp\/compose-up\.sh --only mcp/);
+  assert.doesNotMatch(remote, /^\s*systemctl (restart|stop)/m, "deploy-box never restarts the unit itself; only the installer does");
+  // Operator can see caddy and host were not recreated.
+  assert.match(remote, /ps -aq caddy host mcp/);
+  assert.match(remote, /\{\{\.Created\}\}.*\{\{\.State\.StartedAt\}\}/);
+  assert.match(codeBranch, /container times BEFORE[\s\S]*compose-up\.sh --only mcp[\s\S]*container times AFTER/);
+  // Canaries unchanged.
+  assert.match(src, /\/next\/handshake\/mcp/);
+  assert.match(src, /mcp without creds \$A \(expect 401\)/);
+});
+
 
 test("release runbook reinstalls deploy assets before every MCP restart", async () => {
   const runbook = await readFile(path.join(deployDir, "RUNBOOK.md"), "utf8");

@@ -85,13 +85,39 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
    clean, load the active host-root private key from SSM, and record its public
    fingerprint in the release pin.
 3. Install the matching MCP commit and rotate the active/previous role-access
-   key pair if required. From that exact checkout, run
-   `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`. The installer
-   first refreshes the out-of-checkout `compose-up.sh` and systemd unit, then
-   restarts the service. The refreshed wrapper verifies the exact Handshake SHA
-   before Docker starts and atomically replaces the private host files. Never
-   restart the service directly after changing the checkout: systemd deliberately
-   executes `/opt/clockchain-mcp/compose-up.sh`, not the copy inside the repo.
+   key pair if required. `scripts/deploy-box.sh <sha> [--yes] [--full-restart]`
+   does this step over SSM in one of two modes (flags in any order):
+
+   - **Code-only (default).** Recreates only the `mcp` container; `caddy`
+     (so `/acm4/*`, `/mcp` anchoring and TLS) and the v2 `host` keep running.
+     From the exact checkout it runs
+     `infra/scripts/install-clockchain-mcp-deploy-assets.sh --no-restart`
+     (refreshes the out-of-checkout `compose-up.sh` and systemd unit, reloads
+     systemd, does not restart), then the checked-out
+     `infra/clockchain-mcp/compose-up.sh --only mcp`. That mode does the same
+     SSM secret, release-pin and nonsecret environment preparation as the unit,
+     verifies the Handshake SHA read-only, does not rewrite the private host
+     files, and ends in
+     `docker compose up -d --no-deps --build --wait --wait-timeout 180 mcp`.
+     It prints the created/started times of the `caddy`, `host` and `mcp`
+     containers before and after; `caddy` and `host` `created=` must not change
+     (`host` restarts itself every ~121s by design, so its `started=` moves).
+     In-memory `mcp` state is still lost, so the notice/freeze rule still applies.
+     It warns, and does not apply to caddy/host, when the deploy diff touches the
+     Caddyfile, `docker-compose.yml`, the unit or the installer: use a full
+     restart for those.
+   - **Full restart (`--full-restart`).** For infra/config changes only. Notify
+     the travel_mvp orchestrator and the ACM4 production owner first. From that
+     exact checkout it runs `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`.
+     The installer first refreshes the out-of-checkout `compose-up.sh` and
+     systemd unit, then restarts the service; the unit's `ExecStop` is
+     `docker compose down`, so `mcp`, `host` and `caddy` are all recreated. The
+     refreshed wrapper verifies the exact Handshake SHA before Docker starts and
+     atomically replaces the private host files.
+
+   Never restart the service directly after changing the checkout: systemd
+   deliberately executes `/opt/clockchain-mcp/compose-up.sh`, not the copy
+   inside the repo, so reinstall the deploy assets first (both modes do).
 4. Deploy Research only after the production MCP manifest reports the same
    helper digest and host-root ring that Research pins.
 

@@ -5,16 +5,36 @@
 # learned on 2026-09-11: the box is the AWS EC2 instance running Caddy + docker-compose; the GitHub
 # "Deploy MCP to Cloud Run" workflow is NOT production.
 #
-#   scripts/deploy-box.sh <commit-sha> [--yes]
+#   scripts/deploy-box.sh <commit-sha> [--yes] [--full-restart]      (flags in any order)
+#
+# Two modes. The DEFAULT is CODE-ONLY; the full-unit restart needs --full-restart.
+#
+#   code-only (default): recreates ONLY the mcp container. caddy (so /acm4/*, /mcp anchoring and
+#     TLS) and the v2 host keep running. On the box it runs the checked-out repo copy
+#     `infra/clockchain-mcp/compose-up.sh --only mcp`, which does the same SSM/env preparation the
+#     systemd unit does and then `docker compose up -d --no-deps --build --wait --wait-timeout 180 mcp`.
+#     Beforehand it refreshes the installed wrapper + unit WITHOUT restarting
+#     (install-clockchain-mcp-deploy-assets.sh --no-restart), so a later reboot or full restart runs
+#     the same compose-up.sh that just deployed mcp. In-memory mcp state (ccra_/csha_ handles) is
+#     still lost: the notice/freeze rule still applies (spec, "Deploy blast radius").
+#     Changes to the Caddyfile, docker-compose.yml, the unit or the installer are NOT applied to
+#     caddy/host by this mode; it warns when the deploy diff touches them.
+#
+#   --full-restart: the previous behaviour, for infra/config changes. The installer refreshes the
+#     wrapper + unit and `systemctl restart clockchain-mcp`, whose ExecStop is `docker compose down`:
+#     mcp, host AND caddy are recreated (/mcp, /acm4/*, the handshake surface and anchoring drop
+#     for ~seconds). Notify the travel_mvp orchestrator and the ACM4 production owner first.
 #
 # What it does, on the box, as root via SSM Run Command:
 #   1. refuses to run if the checkout at /opt/clockchain-mcp/app has local changes (prints them) —
 #      a blind checkout once nearly reverted production's gateway wiring; commit the box's edits to
 #      the repo instead (they are in git since PR "D8")
 #   2. git fetch + checkout --detach <sha> as the checkout owner
-#   3. pre-builds the mcp image (no downtime), then runs the installer which refreshes the systemd
-#      wrapper + unit and restarts the stack (~seconds of downtime for /mcp and the handshake surface)
-#   4. prints container status
+#   3. pre-builds the mcp image (no downtime), then either (code-only) installs the deploy assets
+#      without restart and recreates mcp alone, or (--full-restart) runs the installer, which
+#      restarts the whole unit
+#   4. prints container status, and in code-only mode the caddy/host/mcp container created/started
+#      times before and after, so you can see caddy and host were not recreated
 # Then, from this machine: the runbook canaries and the read-only clock gates G0.1–G0.5
 # (needs CC_MCP_TOKEN for the gates; skipped if unset).
 #
@@ -25,29 +45,70 @@ INSTANCE_ID="${CLOCKCHAIN_BOX_INSTANCE_ID:-i-0d6765d143da7e1ea}"
 AWS_REGION="${AWS_REGION:-us-west-2}"
 APP_ROOT="${CLOCKCHAIN_MCP_APP_ROOT:-/opt/clockchain-mcp/app}"
 BASE_URL="${CLOCKCHAIN_MCP_URL:-https://mcp.clockchain.network}"
-SHA="${1:-}"
-CONFIRM="${2:-}"
 
-usage() { echo "usage: $0 <full-commit-sha> [--yes]" >&2; exit 64; }
+usage() { echo "usage: $0 <full-commit-sha> [--yes] [--full-restart]   (flags in any order)" >&2; exit 64; }
+
+SHA=""
+CONFIRM=0
+MODE=code-only
+for arg in "$@"; do
+  case "$arg" in
+    --yes) CONFIRM=1 ;;
+    --full-restart) MODE=full-restart ;;
+    -*) usage ;;
+    *) [[ -z "$SHA" ]] || usage; SHA="$arg" ;;
+  esac
+done
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || usage
+
+# Print the mode loudly (also used by the tests: `DEPLOY_BOX_PARSE_ONLY=1` stops here).
+if [[ "$MODE" == "full-restart" ]]; then
+  cat <<'BANNER'
+==============================================================================
+ MODE: FULL RESTART (--full-restart)
+ systemctl restart clockchain-mcp => docker compose down + up: mcp, host AND caddy are
+ recreated. /mcp, /acm4/* (frozen ACM4 path), the handshake surface and anchoring all drop.
+ REMINDER: the travel_mvp orchestrator AND the ACM4 production owner must have been
+ notified (notice/freeze rule) before you continue.
+==============================================================================
+BANNER
+else
+  cat <<'BANNER'
+==============================================================================
+ MODE: CODE-ONLY (default)
+ Recreates ONLY the mcp container (compose up --no-deps mcp). caddy and host keep running.
+ mcp in-memory state (ccra_/csha_ handles) is still lost: the notice/freeze rule still applies.
+ Infra/config changes (Caddyfile, compose file, unit) need --full-restart.
+==============================================================================
+BANNER
+fi
+[[ "${DEPLOY_BOX_PARSE_ONLY:-0}" == "1" ]] && { echo "mode=$MODE sha=$SHA confirm=$CONFIRM"; exit 0; }
+
 command -v aws >/dev/null || { echo "aws CLI required" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq required" >&2; exit 1; }
 
 # The commit must exist on origin/main (deploy what was reviewed, not a local branch).
 git fetch -q origin main
 git merge-base --is-ancestor "$SHA" origin/main || { echo "$SHA is not on origin/main — merge it first." >&2; exit 1; }
-echo "deploying $(git log -1 --format='%h %s' "$SHA") to $INSTANCE_ID ($BASE_URL)"
-if [[ "$CONFIRM" != "--yes" ]]; then
-  read -r -p "This restarts production (/mcp + handshake surface, ~seconds). Continue? [y/N] " ans
+echo "deploying $(git log -1 --format='%h %s' "$SHA") to $INSTANCE_ID ($BASE_URL), mode=$MODE"
+if [[ "$CONFIRM" != 1 ]]; then
+  if [[ "$MODE" == "full-restart" ]]; then
+    read -r -p "FULL RESTART of production (mcp + host + caddy; /mcp, /acm4/*, handshake down ~seconds). travel_mvp orchestrator and ACM4 owner notified? Continue? [y/N] " ans
+  else
+    read -r -p "CODE-ONLY deploy: recreates the mcp container (/mcp + handshake surface blip; caddy and host untouched). Continue? [y/N] " ans
+  fi
   [[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "aborted"; exit 1; }
 fi
 
 REMOTE_SCRIPT=$(cat <<EOF
 set -euo pipefail
+MODE="$MODE"
 cd "$APP_ROOT"
 OWNER=\$(stat -c %U .)
 G="sudo -u \$OWNER git -c safe.directory=$APP_ROOT"
-echo "box: before=\$(\$G rev-parse --short HEAD) \$(date -u +%FT%TZ)"
+DC="docker compose -f infra/clockchain-mcp/docker-compose.yml"
+BEFORE=\$(\$G rev-parse HEAD)
+echo "box: mode=\$MODE before=\$(\$G rev-parse --short HEAD) \$(date -u +%FT%TZ)"
 DIRTY=\$(\$G status --short)
 if [[ -n "\$DIRTY" ]]; then
   echo "REFUSING: the box checkout has local changes. Commit them to the repo (or preserve them on a local branch) first:"
@@ -58,10 +119,32 @@ fi
 \$G checkout --quiet --detach "$SHA"
 echo "box: after=\$(\$G rev-parse --short HEAD)"
 echo "box: pre-build \$(date -u +%FT%TZ)"
-docker compose -f infra/clockchain-mcp/docker-compose.yml build mcp 2>&1 | tail -1
-echo "box: install + restart \$(date -u +%FT%TZ)"
-infra/scripts/install-clockchain-mcp-deploy-assets.sh
-echo "box: up \$(date -u +%FT%TZ) systemd=\$(systemctl is-active clockchain-mcp)"
+\$DC build mcp 2>&1 | tail -1
+container_times() {
+  local id
+  for id in \$(\$DC ps -aq caddy host mcp); do
+    docker inspect -f '{{.Name}} created={{.Created}} started={{.State.StartedAt}}' "\$id"
+  done
+}
+if [[ "\$MODE" == "full-restart" ]]; then
+  echo "box: FULL RESTART: install + systemctl restart (mcp, host, caddy recreated) \$(date -u +%FT%TZ)"
+  infra/scripts/install-clockchain-mcp-deploy-assets.sh
+else
+  INFRA=\$(\$G diff --name-only "\$BEFORE" HEAD -- infra/clockchain-mcp/Caddyfile infra/clockchain-mcp/docker-compose.yml infra/clockchain-mcp/clockchain-mcp.service infra/scripts/install-clockchain-mcp-deploy-assets.sh)
+  if [[ -n "\$INFRA" ]]; then
+    echo "WARNING: this deploy changes infra files that CODE-ONLY mode does NOT apply to caddy/host:"
+    echo "\$INFRA"
+    echo "WARNING: run a --full-restart (after the notices) to apply them."
+  fi
+  echo "box: container times BEFORE (code-only):"
+  container_times
+  echo "box: CODE-ONLY: install deploy assets without restart, then compose-up.sh --only mcp \$(date -u +%FT%TZ)"
+  infra/scripts/install-clockchain-mcp-deploy-assets.sh --no-restart
+  infra/clockchain-mcp/compose-up.sh --only mcp
+  echo "box: container times AFTER (code-only; caddy and host created= must be unchanged):"
+  container_times
+fi
+echo "box: up \$(date -u +%FT%TZ) mode=\$MODE systemd=\$(systemctl is-active clockchain-mcp)"
 docker ps --format '{{.Names}} {{.Status}}'
 EOF
 )
@@ -71,7 +154,7 @@ $REMOTE_SCRIPT
 EOS
 " '{commands: [$s], executionTimeout: ["1800"]}')
 CMD_ID=$(aws --region "$AWS_REGION" ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-  --comment "deploy clockchain-mcp $SHA (scripts/deploy-box.sh)" --parameters "$PARAMS" --query 'Command.CommandId' --output text)
+  --comment "deploy clockchain-mcp $SHA $MODE (scripts/deploy-box.sh)" --parameters "$PARAMS" --query 'Command.CommandId' --output text)
 echo "ssm command $CMD_ID"
 STATUS=InProgress
 while [[ "$STATUS" == "InProgress" || "$STATUS" == "Pending" || "$STATUS" == "Delayed" ]]; do
@@ -100,4 +183,4 @@ if [[ -n "${CC_MCP_TOKEN:-}" ]]; then
 else
   echo "(set CC_MCP_TOKEN to also run the G0 clock gates; full suite: CC_LIVE_GATES=1 node --test packages/clock-sdk/test/gates-live.test.mjs)"
 fi
-echo "deployed $SHA"
+echo "deployed $SHA (mode=$MODE)"

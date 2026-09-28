@@ -45,8 +45,11 @@ Each created doc's URL is printed.
 
 # scripts/deploy-box.sh - deploy to production (AWS box)
 
-`scripts/deploy-box.sh <full-sha> [--yes]` deploys a merged `main` commit to the production MCP
-box over AWS SSM: runbook step 3 (`infra/clockchain-mcp/RUNBOOK.md`) as one command, then the
-runbook canaries and, with `CC_MCP_TOKEN` set, the read-only clock gates `G0.*`. It refuses to
+`scripts/deploy-box.sh <full-sha> [--yes] [--full-restart]` deploys a merged `main` commit to the
+production MCP box over AWS SSM: runbook step 3 (`infra/clockchain-mcp/RUNBOOK.md`) as one command,
+then the runbook canaries and, with `CC_MCP_TOKEN` set, the read-only clock gates `G0.*`. By default
+it is a code-only deploy that recreates only the `mcp` container (`caddy` and the v2 `host` keep
+running); `--full-restart` restarts the whole systemd unit (mcp, host and caddy) and is for
+infra/config changes only, after notifying the travel_mvp orchestrator and the ACM4 production owner. It refuses to
 run if the box checkout has local changes — production configuration lives in git, not on the
 box. The anchoring gateway container is deployed separately (RUNBOOK, "The anchoring gateway").
