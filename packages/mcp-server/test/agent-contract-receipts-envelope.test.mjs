@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { canonicalDigest, canonicalJson } from "../dist/agent-contract/canonical.js";
+import { contractRefusalSchema } from "../dist/agent-contract/refusals.js";
 import {
   signEnvelope,
   verifyEnvelope,
@@ -108,6 +109,28 @@ test("chain fails on tamper, drop, reorder, wrong key", () => {
   assert.equal(verifyChain([forgedId], publicKeys).code, "RECEIPT_ID");
 });
 
+test("a receipt chain cannot span runIds", () => {
+  const base = {
+    tool: "offer_submit",
+    argsDigest: "0x" + "a".repeat(64),
+    principal: { role: "buyer", keyId: "buyer-signer-1" },
+    outcome: "ok",
+    responseDigest: "0x" + "b".repeat(64),
+  };
+  const r1 = makeReceipt(null, { ...base, runId: "run-test-1" }, signer);
+  // makeReceipt refuses a foreign-run prev outright.
+  assert.throws(
+    () => makeReceipt(r1, { ...base, runId: "run-test-2" }, signer),
+    /runId/,
+  );
+  // And a chain whose second receipt carries a different runId is rejected,
+  // even though its own signature and genesis link are internally consistent.
+  const foreign = makeReceipt(null, { ...base, runId: "run-test-2" }, signer);
+  const mixed = verifyChain([r1, foreign], publicKeys);
+  assert.equal(mixed.ok, false);
+  assert.equal(mixed.code, "RUN_MISMATCH");
+});
+
 test("signed envelope roundtrips; expiry, nonce reuse, bad signature refuse", () => {
   const now = Date.parse("2029-06-01T00:00:00.000Z");
   const env = signEnvelope(
@@ -135,8 +158,51 @@ test("signed envelope roundtrips; expiry, nonce reuse, bad signature refuse", ()
   const tampered = { ...env, tool: "booking_execute" };
   assert.equal(verifyEnvelope(tampered, publicKeys, { nowMs: now + 1_000 }).code, "ENVELOPE_INVALID");
   const badDigest = { ...env, payloadDigest: "0x" + "0".repeat(64) };
-  assert.equal(verifyEnvelope(badDigest, publicKeys, { nowMs: now + 1_000 }).code, "PAYLOAD_DIGEST");
+  assert.equal(verifyEnvelope(badDigest, publicKeys, { nowMs: now + 1_000 }).code, "ENVELOPE_INVALID");
   const unknownKey = { ...env, serverSig: { ...env.serverSig, keyId: "nobody" } };
   assert.equal(verifyEnvelope(unknownKey, { ...publicKeys, nobody: wrongKey.publicKey }, { nowMs: now + 1_000 }).code, "ENVELOPE_INVALID");
+  // serverKeyId === serverSig.keyId but the key is not pinned → KEY_UNKNOWN.
+  const stranger = signEnvelope(
+    { payload: { kind: "x" }, runId: "run-test-1", tool: "offer_prepare", role: "buyer", nowMs: now },
+    { keyId: "nobody", privateKey: wrongKey.privateKey },
+  );
+  assert.equal(verifyEnvelope(stranger, publicKeys, { nowMs: now + 1_000 }).code, "KEY_UNKNOWN");
   assert.equal(verifyEnvelope({ not: "an envelope" }, publicKeys).code, "ENVELOPE_INVALID");
+});
+
+test("every code verifyEnvelope can return parses under contractRefusalSchema", () => {
+  const now = Date.parse("2029-06-01T00:00:00.000Z");
+  const env = signEnvelope(
+    { payload: { kind: "x" }, runId: "run-test-1", tool: "offer_prepare", role: "buyer", nowMs: now },
+    signer,
+  );
+  const stranger = signEnvelope(
+    { payload: { kind: "x" }, runId: "run-test-1", tool: "offer_prepare", role: "buyer", nowMs: now },
+    { keyId: "nobody", privateKey: wrongKey.privateKey },
+  );
+  const codes = [
+    verifyEnvelope({ nope: 1 }, publicKeys),
+    verifyEnvelope({ ...env, payloadDigest: "0x" + "0".repeat(64) }, publicKeys, { nowMs: now }),
+    verifyEnvelope(env, publicKeys, { nowMs: Date.parse(env.expiresAt) + 1 }),
+    verifyEnvelope(env, publicKeys, { nowMs: now, nonceSeen: () => true }),
+    verifyEnvelope(stranger, publicKeys, { nowMs: now }),
+    verifyEnvelope({ ...env, serverSig: { ...env.serverSig, sig: `0x${"0".repeat(128)}` } }, publicKeys, { nowMs: now }),
+    verifyEnvelope({ ...env, serverKeyId: "other-key" }, publicKeys, { nowMs: now }),
+  ];
+  const seen = new Set();
+  for (const verdict of codes) {
+    assert.equal(verdict.ok, false);
+    seen.add(verdict.code);
+    assert.equal(
+      contractRefusalSchema.safeParse({ error: verdict.code, retryable: false }).success,
+      true,
+      `code ${verdict.code} is not a legal refusal`,
+    );
+  }
+  assert.deepEqual([...seen].sort(), [
+    "ENVELOPE_EXPIRED",
+    "ENVELOPE_INVALID",
+    "KEY_UNKNOWN",
+    "NONCE_REUSED",
+  ].sort());
 });

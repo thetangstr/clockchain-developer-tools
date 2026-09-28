@@ -115,7 +115,8 @@ export function verifyEnvelope(
     return { ok: false, code: "ENVELOPE_INVALID" };
   }
   if (envelope.payloadDigest !== canonicalDigest(envelope.payload)) {
-    return { ok: false, code: "PAYLOAD_DIGEST" };
+    // Generic refusal — the wire must not leak which field mismatched.
+    return { ok: false, code: "ENVELOPE_INVALID" };
   }
   if (Date.parse(envelope.expiresAt) <= (options.nowMs ?? Date.now())) {
     return { ok: false, code: "ENVELOPE_EXPIRED" };

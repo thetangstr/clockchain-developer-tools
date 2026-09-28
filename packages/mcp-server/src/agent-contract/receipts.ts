@@ -58,7 +58,8 @@ function receiptPayload(receipt: Omit<ServerReceipt, "receiptId" | "serverSignat
 
 /**
  * Append a receipt to the chain. `prev` is the previous receipt (null for the
- * genesis call). `fields` carries the call's evidence; the caller computes
+ * genesis call); a `prev` from another runId is refused — a chain is scoped
+ * to exactly one run. `fields` carries the call's evidence; the caller computes
  * `argsDigest` and `responseDigest` from the canonical wire values. The
  * `receiptId` is the canonical digest of the unsigned core — deterministic,
  * content-addressed, and inside the signature's coverage.
@@ -81,6 +82,9 @@ export function makeReceipt(
   },
   signer: ContractSigner,
 ): ServerReceipt {
+  if (prev !== null && prev.runId !== fields.runId) {
+    throw new Error("makeReceipt: prev receipt belongs to a different runId");
+  }
   const core = serverReceiptSchema.omit({ receiptId: true, serverSignature: true }).parse({
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     runId: fields.runId,
@@ -116,10 +120,14 @@ export type ChainVerdict =
  */
 export function verifyChain(receipts: readonly unknown[], publicKeys: ContractPublicKeys): ChainVerdict {
   let prev: ServerReceipt | null = null;
+  let runId: string | null = null;
   for (let i = 0; i < receipts.length; i++) {
     const parsed = serverReceiptSchema.safeParse(receipts[i]);
     if (!parsed.success) return { ok: false, code: "RECEIPT_MALFORMED", index: i };
     const receipt = parsed.data;
+    // A chain is scoped to exactly one run; the head it yields is per-run.
+    if (runId === null) runId = receipt.runId;
+    else if (receipt.runId !== runId) return { ok: false, code: "RUN_MISMATCH", index: i };
     const expectedPrev = prev === null ? RECEIPT_CHAIN_GENESIS : canonicalDigest(prev);
     if (receipt.prevHash !== expectedPrev) return { ok: false, code: "CHAIN_LINK", index: i };
     const publicKey = publicKeys[receipt.serverSignature.keyId];
