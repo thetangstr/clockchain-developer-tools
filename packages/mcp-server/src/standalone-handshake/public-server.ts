@@ -127,7 +127,7 @@ class StandaloneRoleAccessError extends Error {
 
 // Handles live in a HandleMap (handshake-core/handle-map.ts): durable when a state
 // directory is configured, with neither handle nor token stored in the clear.
-function createRoleAccessBroker(invoke: (name: string, args: Record<string, unknown>) => Promise<unknown>, now: () => number, stateDir: string | undefined) {
+function createRoleAccessBroker(invoke: (name: string, args: Record<string, unknown>) => Promise<unknown>, now: () => number, stateDir: string | undefined, onHandles?: (handles: { discard(): void; close(): void }) => void) {
   const handles = createHandleMap({
     label: "standalone/csha",
     prefix: "csha_",
@@ -135,6 +135,7 @@ function createRoleAccessBroker(invoke: (name: string, args: Record<string, unkn
     now,
     ...(stateDir === undefined ? {} : { path: join(stateDir, "role-handles.json") }),
   });
+  onHandles?.(handles);
 
   // One live handle per access token: a client that keeps passing the raw sat_ token gets
   // the same handle back (TTL refreshed) instead of minting a new one each call.
@@ -195,8 +196,9 @@ export function createStandaloneHttpHandler(options: {
   const env = options.env ?? process.env;
   const allowInvite = limiter(options.invitesPerHour ?? 5, 60 * 60_000, now);
   const allowCall = limiter(options.callsPerMinute ?? 120, 60_000, now);
-  const invoke = createRoleAccessBroker(options.invoke, now, options.stateDir ?? handshakeStateDir("standalone-handshake", env));
-  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+  let handles: { discard(): void; close(): void } | undefined;
+  const invoke = createRoleAccessBroker(options.invoke, now, options.stateDir ?? handshakeStateDir("standalone-handshake", env), (map) => { handles = map; });
+  const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if ((req.url ?? "").split("?")[0] !== "/connect/mcp") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "not_found" }));
@@ -234,4 +236,9 @@ export function createStandaloneHttpHandler(options: {
       }
     }
   };
+  // close(): flush the handle map; discard(): drop pending writes as a crash would (tests).
+  return Object.assign(handler, {
+    close: () => handles?.close(),
+    discard: () => handles?.discard(),
+  });
 }

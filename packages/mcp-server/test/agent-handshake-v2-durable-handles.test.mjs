@@ -1,7 +1,7 @@
 // Spec B2 / plan step 3, v2 side: only the ccra_ handle map becomes durable. Everything a
 // v2 client sees (tool names, arguments, fields, bytes) is unchanged.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -117,4 +117,28 @@ test("tools/list on /handshake/mcp is byte-identical with and without durable ha
   const memory = await list(undefined);
   assert.equal(durable, memory);
   assert.ok(JSON.parse(durable.split("\n").find((line) => line.startsWith("data:")).slice(5)).result.tools.length > 0);
+});
+
+test("a corrupt ccra_ handle map never takes /handshake/mcp down: non-handle calls and new handles work", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const dir = mkdtempSync(join(tmpdir(), "v2-corrupt-"));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(dir, "role-handles.json"), "garbage", { mode: 0o600 });
+  const seen = [];
+  const server = await serve(dir, seen);
+  try {
+    const listed = await server.raw("tools/list");
+    assert.ok(JSON.parse(listed.split("\n").find((line) => line.startsWith("data:")).slice(5)).result.tools.length > 0);
+    // A raw role token (no handle involved) still works.
+    assert.equal(payload(await server.call("agent_handshake_status", { access: initiatorAccess })).stage, "invited");
+    // New handles are issued and resolve from memory.
+    const handle = payload(await server.call("agent_handshake_invite", { reference: "NS-1847", statement: "test", validForSeconds: "90", identityPolicy: { erc8004: "required_fresh", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } })).roleAccess;
+    assert.equal(payload(await server.call("agent_handshake_status", { access: handle })).roleAccess, handle);
+    // Only a handle lost with the file is refused.
+    assert.equal(typeof payload(await server.call("agent_handshake_status", { access: `ccra_${"z".repeat(22)}` })).error, "string");
+  } finally {
+    await server.stop();
+  }
+  assert.equal(readFileSync(join(dir, "role-handles.json"), "utf8"), "garbage", "the corrupt file is left for an operator");
+  assert.ok(errors.mock.calls.some((call) => { try { return JSON.parse(call.arguments[0]).event === "handshake_handles_memory_only"; } catch { return false; } }));
 });

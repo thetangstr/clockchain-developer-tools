@@ -193,13 +193,17 @@ lives on the `mcp_state` volume mounted at `/app/state`:
 
 | Path | Contents |
 |---|---|
-| `/app/state/standalone-handshake/sessions/<sessionId>.json` | One Standalone session: stage, terms, readiness, checklist attempts, consents, turn and deadline state, timeline, messages, anchors, closure pin, its unclaimed invitation (secret digest only), access-token digests |
+| `/app/state/standalone-handshake/sessions/<sessionId>.json` | One Standalone session's snapshot: stage, terms, readiness, checklist attempts, consents, turn and deadline state, timeline, anchors, closure pin, its unclaimed invitation (secret digest only), access-token digests. No message bodies |
+| `/app/state/standalone-handshake/sessions/<sessionId>.messages.jsonl` | That session's messages: an append-only log, one fsync'd line per message (bounded at 256 MiB; a send beyond it is refused with `STORAGE_FULL`) |
 | `/app/state/standalone-handshake/role-handles.json` | `csha_` handle map, sealed (see below) |
 | `/app/state/standalone-handshake/ended-tokens.json` | Digests of evicted sessions' tokens, so late callers get `SESSION_ENDED` |
 | `/app/state/agent-handshake-v2/role-handles.json` | `ccra_` handle map, sealed. v2 session state is unchanged at `/app/state/agent-handshake-v2-state.json` |
 
 Every file is `0600` in a `0700` directory, written tmp -> fsync -> rename -> fsync(dir), with the
-previous version kept as `<file>.bak`. Nothing secret is stored in the clear: tokens and invitation
+previous version kept as `<file>.bak`. Every change a client is told about is on disk before the call
+returns (one commit per operation); only last-seen times and timeline notes are coalesced (at most
+one write a second), and those are flushed on SIGTERM/SIGINT. A snapshot that would exceed its bound
+is an error for that call, never a silent loss. Nothing secret is stored in the clear: tokens and invitation
 secrets are digests; each handle record holds the token sealed under a key derived from the handle
 and the handle sealed under a key derived from the token, so the files are useless without the
 credentials clients already hold. There is no server key to back up or rotate for them. Message
@@ -214,16 +218,33 @@ is a consistent per-file snapshot):
 **Restore.** Stop `mcp`, extract into the volume keeping ownership and modes (`tar xzpf`), start
 `mcp`. Files readable by group/other are refused.
 
-**Corruption.** A file that does not parse is copied to `<file>.corrupt-<ms>`, logged as
-`handshake_state_corrupt`, and the `.bak` is used (`handshake_state_restored_from_backup`). A
-Standalone session with no valid copy is skipped and logged (`handshake_state_session_unreadable`)
-while the others load. An unreadable handle map with no valid backup makes that surface answer 503
-until an operator acts; it is never silently replaced with an empty map.
+**Boot.** Sessions are restored oldest first, bounded (20,000 sessions / 1 GiB, logged as
+`handshake_state_restore_bounded` if exceeded), and `handshake_state_restored` logs the count and
+time. Leftover `*.tmp` files are removed and `*.corrupt-*` copies older than 7 days are deleted. A
+readiness check interrupted by the restart is rolled back and its invitation returned. Deadlines are
+judged on consensus time only: until the consensus clock syncs after boot, no session is ended by a
+clock and open-channel calls answer a retryable `HANDSHAKE_TEMPORARILY_UNAVAILABLE`.
+
+**Corruption.** A file that does not parse (or a `.bak` readable by others) is copied to
+`<file>.corrupt-<ms>`, logged as `handshake_state_corrupt`, and the `.bak` is used
+(`handshake_state_restored_from_backup`). A Standalone session with no valid copy is skipped and
+logged (`handshake_state_session_unreadable`) while the others load. An unreadable handle map is
+never overwritten: that surface logs `handshake_handles_memory_only` and keeps serving from memory,
+so only clients presenting a handle lost with the file are refused; everything else, including new
+handles, keeps working. Restore or wipe the file, then restart.
 
 **Wipe safely.** Only when every in-flight handshake may be abandoned: stop `mcp`, then remove
 `/app/state/standalone-handshake/` and/or `/app/state/agent-handshake-v2/role-handles.json*`, then
 start `mcp`. Clients holding old handles get an access error and must start a new handshake. Never
 delete `agent-handshake-v2-state.json`, the invitation files or the funding ledger as part of this.
+
+**Webhook secret rotation.** Webhook signing secrets for Standalone `notify` registrations are
+derived from `STANDALONE_WEBHOOK_SECRET` and never stored. Rotating it changes the secret for every
+restored session: their receivers will reject the next notices until the party registers again in a
+new handshake. Rotate only when that is acceptable (or when no session with a webhook is in flight).
+
+Tool failures log `standalone_handshake_tool_failure` with `reason` (the refusal code) when there is
+one, so an admission loop in the logs names the exact refusal.
 
 **Staging.** The staging container (`/opt/clockchain-mcp/staging-compose.yml`, not in this repo)
 has no state volume. Test restarts there with `docker restart` (keeps the container filesystem),

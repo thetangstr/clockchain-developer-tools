@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { createDurableJsonFile, DurableStateError, type DurableJsonFile } from "../handshake-core/durable-store.js";
+import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableStateError, type DurableJsonFile } from "../handshake-core/durable-store.js";
 
 import { nextDeadline, pendingTurn } from "./turns.js";
 
@@ -48,8 +48,15 @@ export const MAX_TIMELINE_EVENTS = 500;
 export const MAX_PREVIEW_EVENTS = 20;
 // Message bodies of an ended session are deleted this long after it ended; digests stay.
 export const BODY_RETENTION_MS = 24 * 60 * 60_000;
-// Bound on one session's durable file (a full channel is 10,000 messages of up to 16 KiB).
-export const MAX_SESSION_FILE_BYTES = 192 * 1024 * 1024;
+// Bound on one session's snapshot. Messages are not in it (they go to an append-only log),
+// and the timeline is capped, so a snapshot stays small whatever the channel carries.
+export const MAX_SESSION_FILE_BYTES = 8 * 1024 * 1024;
+// Bound on one session's message log. A send that would pass it is refused (STORAGE_FULL).
+export const MAX_MESSAGE_LOG_BYTES = 256 * 1024 * 1024;
+// Boot bounds: at most this many session files, and this many snapshot bytes, are restored
+// (newest first); anything beyond is logged and left on disk.
+export const MAX_RESTORE_SESSIONS = 20_000;
+export const MAX_RESTORE_BYTES = 1024 * 1024 * 1024;
 const SESSION_FILE_SCHEMA = "clockchain.standalone-handshake-session/v1";
 const ENDED_TOKENS_SCHEMA = "clockchain.standalone-handshake-ended-tokens/v1";
 const SESSION_ID_FILE = /^([0-9a-f-]{1,64})\.json$/;
@@ -62,6 +69,14 @@ export class StandaloneIllegalTransitionError extends Error {
   constructor() {
     super("Standalone handshake illegal transition.");
     this.name = "StandaloneIllegalTransitionError";
+  }
+}
+
+// The protocol clock is not available yet (e.g. just after a restart): retry shortly.
+export class StandaloneTransientClockError extends Error {
+  constructor() {
+    super("Standalone handshake clock is not synced yet.");
+    this.name = "StandaloneTransientCoordinatorError";
   }
 }
 
@@ -144,9 +159,54 @@ export function createStandaloneSessionStore(options: {
 
   // "now": the change was (or is about to be) reported to a client, so it is on disk
   // before the call returns. "soon": bookkeeping, coalesced to at most one write a second.
+  // Inside batch(), writes are collected and made once at the end: one commit per operation.
+  let batchDepth = 0;
+  const batched = new Map<string, "now" | "soon">();
+
   function persist(session: any, kind: "now" | "soon" = "now"): void {
-    if (session === undefined || !sessions.has(session.sessionId)) return;
+    if (session === undefined || !sessions.has(session.sessionId) || sessionDir === undefined) return;
+    if (batchDepth > 0) {
+      if (batched.get(session.sessionId) !== "now") batched.set(session.sessionId, kind);
+      return;
+    }
     sessionFile(session.sessionId)?.save(kind);
+  }
+
+  function messageLogPath(sessionId: string): string | undefined {
+    return sessionDir === undefined ? undefined : join(sessionDir, `${sessionId}.messages.jsonl`);
+  }
+
+  // Rewrites a session's message log (only for body retention): tmp -> fsync -> rename.
+  function rewriteMessageLog(session: any): void {
+    const path = messageLogPath(session.sessionId);
+    if (path === undefined) return;
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, session.messages.map((message: any) => JSON.stringify(message)).join("\n") + (session.messages.length ? "\n" : ""), { mode: 0o600 });
+    const fd = openSync(temporary, "r");
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(temporary, path);
+  }
+
+  function loadMessageLog(sessionId: string): any[] {
+    const path = messageLogPath(sessionId);
+    if (path === undefined || !existsSync(path)) return [];
+    if ((statSync(path).mode & 0o077) !== 0) throw new DurableStateError(`${path} is readable by others`);
+    const messages: any[] = [];
+    const lines = readFileSync(path, "utf8").split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line === "") continue;
+      try {
+        const message = JSON.parse(line);
+        if (typeof message?.seq !== "number" || message.seq !== messages.length + 1) throw new Error("out of sequence");
+        messages.push(Object.freeze(message));
+      } catch {
+        // Only a torn final line (a crash mid-append) is tolerated; anything else is corruption.
+        if (index >= lines.length - 2) break;
+        throw new DurableStateError(`${path} is corrupt at line ${index + 1}`);
+      }
+    }
+    return messages;
   }
 
   const endedTokensFile: DurableJsonFile<string[]> | undefined = stateDir === undefined ? undefined : createDurableJsonFile({
@@ -163,10 +223,10 @@ export function createStandaloneSessionStore(options: {
 
   function forgetSessionFile(sessionId: string): void {
     const file = sessionFiles.get(sessionId);
-    file?.close();
+    file?.discard();
     sessionFiles.delete(sessionId);
     if (sessionDir === undefined) return;
-    for (const suffix of [".json", ".json.bak"]) {
+    for (const suffix of [".json", ".json.bak", ".messages.jsonl"]) {
       try { unlinkSync(join(sessionDir, `${sessionId}${suffix}`)); } catch { /* already gone */ }
     }
   }
@@ -187,17 +247,21 @@ export function createStandaloneSessionStore(options: {
       if (current >= invitation.expiresAtMs) invitations.delete(secret);
     }
     purgeEndedBodies(current);
-    for (const [sessionId, session] of sessions) {
-      if (!TERMINAL_STAGES.has(session.stage) && current - session.touchedAtMs > sessionTtlMs) dropSession(sessionId);
-    }
-    let terminal = 0;
-    for (const session of sessions.values()) if (TERMINAL_STAGES.has(session.stage)) terminal += 1;
-    for (const [sessionId, session] of sessions) {
-      if (terminal <= terminalRetention) return;
-      if (TERMINAL_STAGES.has(session.stage)) {
-        dropSession(sessionId);
-        terminal -= 1;
+    try {
+      for (const [sessionId, session] of sessions) {
+        if (!TERMINAL_STAGES.has(session.stage) && current - session.touchedAtMs > sessionTtlMs) dropSession(sessionId);
       }
+      let terminal = 0;
+      for (const session of sessions.values()) if (TERMINAL_STAGES.has(session.stage)) terminal += 1;
+      for (const [sessionId, session] of sessions) {
+        if (terminal <= terminalRetention) return;
+        if (TERMINAL_STAGES.has(session.stage)) {
+          dropSession(sessionId);
+          terminal -= 1;
+        }
+      }
+    } finally {
+      flushEndedTokens();
     }
   }
 
@@ -230,7 +294,16 @@ export function createStandaloneSessionStore(options: {
     sessions.delete(sessionId);
     pendingClosures.delete(sessionId);
     forgetSessionFile(sessionId);
-    endedTokensFile?.save("soon");
+    endedTokensDirty = true;
+  }
+
+  // Ended-token digests are what lets a late caller hear SESSION_ENDED: written as soon as the
+  // sessions they belonged to are gone from disk.
+  let endedTokensDirty = false;
+  function flushEndedTokens(): void {
+    if (!endedTokensDirty) return;
+    endedTokensDirty = false;
+    endedTokensFile?.save("now");
   }
 
   function markEnded(session: any): void {
@@ -244,6 +317,7 @@ export function createStandaloneSessionStore(options: {
       if (session.bodiesPurged || session.endedAtMs === undefined || current - session.endedAtMs < BODY_RETENTION_MS) continue;
       session.messages = session.messages.map((message: any) => Object.freeze({ ...message, body: null }));
       session.bodiesPurged = true;
+      rewriteMessageLog(session);
       persist(session, "now");
     }
   }
@@ -263,8 +337,16 @@ export function createStandaloneSessionStore(options: {
   function expireIfDueInner(session: any): void {
     const deadline = nextDeadline(session);
     if (deadline === undefined) return;
-    // Channel time is protocol time; pre-open deadlines are housekeeping time.
-    const current = session.stage === "open" ? now() : housekeepingNow();
+    // Ending a session is a protocol judgment: it is made on protocol (consensus) time only,
+    // never on the wall-clock fallback. After a restart the consensus clock is briefly
+    // unsynced; a drift between it and the wall clock must not end a restored session.
+    let current: number;
+    try {
+      current = now();
+    } catch {
+      if (session.stage === "open") throw new StandaloneTransientClockError();
+      return;
+    }
     if (current < deadline.atMs) return;
     // A closure pinned before the deadline wins: channel_close/revoke is mid-anchor, so the
     // session completes as closed/revoked and never also stalls (one closure anchor only).
@@ -313,7 +395,9 @@ export function createStandaloneSessionStore(options: {
   function serializeSession(session: any): any {
     if (session === undefined) return undefined;
     const notify = Object.fromEntries(Object.entries(session.notify ?? {}).map(([role, value]: [string, any]) => [role, { webhookUrl: value.webhookUrl }]));
-    return { ...session, prompted: [...session.prompted], noticeKeys: [...session.noticeKeys], notify };
+    // Messages live in the append-only log, not in the snapshot.
+    const { messages: _messages, ...rest } = session;
+    return { ...rest, prompted: [...session.prompted], noticeKeys: [...session.noticeKeys], notify };
   }
 
   function validateSessionRecord(value: unknown): any {
@@ -321,7 +405,7 @@ export function createStandaloneSessionStore(options: {
     if (record === null || typeof record !== "object" || typeof record.sessionId !== "string" || !(STAGES as readonly string[]).includes(record.stage)) {
       throw new Error("not a session record");
     }
-    for (const key of ["messages", "timeline", "attempts", "anchors", "prompted", "noticeKeys"]) {
+    for (const key of ["timeline", "attempts", "anchors", "prompted", "noticeKeys"]) {
       if (!Array.isArray(record[key])) throw new Error(`session.${key} must be an array`);
     }
     for (const key of ["terms", "consents", "auth", "lastSeenAtMs", "seenEventCount", "notify", "lastNoticeAtMs", "pendingNudge"]) {
@@ -331,9 +415,27 @@ export function createStandaloneSessionStore(options: {
   }
 
   const rolledBack = new Set<string>();
+  let bodySweep: NodeJS.Timeout | undefined;
+
+  function sweepBodies(): void {
+    try {
+      purgeEndedBodies(now());
+    } catch {
+      // Protocol clock not available yet; the next sweep or new session retries.
+    }
+  }
 
   function restoreSession(record: any): void {
-    const session = { ...record, prompted: new Set(record.prompted), noticeKeys: new Set(record.noticeKeys) };
+    const messages = loadMessageLog(record.sessionId);
+    const session = { ...record, messages, prompted: new Set(record.prompted), noticeKeys: new Set(record.noticeKeys) };
+    // A message appended just before a crash, whose snapshot update was lost, still counts:
+    // the log is written first and is the authority for the transcript.
+    if (messages.length > session.seq) {
+      session.seq = messages.length;
+      session.turnStartedAtMs = messages[messages.length - 1].sentAtMs;
+      session.turnSeq += 1;
+      rolledBack.add(session.sessionId);
+    }
     // A readiness attempt that was evaluating when the process stopped never completed:
     // roll it back and give back the invitation it claimed, so the retry just works.
     if (session.stage === "readiness_pending" && session.attemptInFlight !== undefined && session.attemptInFlight !== null) {
@@ -352,6 +454,8 @@ export function createStandaloneSessionStore(options: {
   }
 
   if (sessionDir !== undefined) {
+    cleanStaleFiles(sessionDir);
+    if (stateDir !== undefined) cleanStaleFiles(stateDir);
     const ids = new Set<string>();
     if (existsSync(sessionDir)) {
       for (const name of readdirSync(sessionDir)) {
@@ -359,34 +463,80 @@ export function createStandaloneSessionStore(options: {
         if (match) ids.add(match[1]);
       }
     }
+    const records: any[] = [];
+    let restoredBytes = 0;
+    const started = Date.now();
     for (const sessionId of ids) {
       try {
+        const main = join(sessionDir, `${sessionId}.json`);
+        restoredBytes += existsSync(main) ? statSync(main).size : 0;
         const record = sessionFile(sessionId)!.load();
-        if (record !== undefined && record.sessionId === sessionId) restoreSession(record);
+        if (record !== undefined && record.sessionId === sessionId) records.push(record);
       } catch (error) {
         // One unreadable session never takes the others down; it stays on disk for an operator.
         if (!(error instanceof DurableStateError)) throw error;
-        sessionFiles.get(sessionId)?.close();
+        sessionFiles.get(sessionId)?.discard();
         sessionFiles.delete(sessionId);
         console.error(JSON.stringify({ event: "handshake_state_session_unreadable", sessionId }));
       }
     }
+    // Oldest first, so the map's insertion order (used by terminal-retention eviction) is the
+    // order the sessions were created in, whatever order the directory listed them.
+    records.sort((a, b) => (a.createdAtMs ?? 0) - (b.createdAtMs ?? 0));
+    const kept = records.slice(Math.max(0, records.length - MAX_RESTORE_SESSIONS));
+    if (kept.length < records.length || restoredBytes > MAX_RESTORE_BYTES) {
+      console.error(JSON.stringify({ event: "handshake_state_restore_bounded", sessions: records.length, kept: kept.length, bytes: restoredBytes }));
+    }
+    for (const record of kept) {
+      try {
+        restoreSession(record);
+      } catch (error) {
+        if (!(error instanceof DurableStateError)) throw error;
+        console.error(JSON.stringify({ event: "handshake_state_session_unreadable", sessionId: record.sessionId }));
+      }
+    }
     for (const digest of endedTokensFile?.load() ?? []) endedTokens.add(digest);
-    // Sessions rolled back at boot are written back at once; eviction and body retention
-    // run as they would on the next new session.
     for (const sessionId of rolledBack) persist(sessions.get(sessionId));
-    evictStaleSessions();
+    // Idle eviction waits for the next new session: at boot the protocol clock is usually not
+    // synced yet, and the wall-clock fallback must never be what ends a restored session.
+    // Body retention runs now (and hourly) whenever protocol time is available.
+    sweepBodies();
+    bodySweep = setInterval(sweepBodies, 60 * 60_000);
+    bodySweep.unref();
+    console.error(JSON.stringify({ event: "handshake_state_restored", sessions: sessions.size, ms: Date.now() - started }));
   }
 
   return {
     /** Writes coalesced changes now and stops timers (tests, shutdown). */
     close(): void {
-      for (const file of sessionFiles.values()) {
-        file.flush();
-        file.close();
-      }
-      endedTokensFile?.flush();
+      if (bodySweep) clearInterval(bodySweep);
+      for (const file of sessionFiles.values()) file.close();
       endedTokensFile?.close();
+    },
+
+    /** Stops every timer without writing: what a crash looks like (tests only). */
+    discard(): void {
+      if (bodySweep) clearInterval(bodySweep);
+      for (const file of sessionFiles.values()) file.discard();
+      endedTokensFile?.discard();
+    },
+
+    /**
+     * Runs `operation` as one commit: every change it makes is written in a single durable
+     * write per session at the end, so a crash can never leave half of it on disk.
+     */
+    batch<T>(operation: () => T): T {
+      batchDepth += 1;
+      try {
+        return operation();
+      } finally {
+        batchDepth -= 1;
+        if (batchDepth === 0) {
+          const pending = [...batched];
+          batched.clear();
+          for (const [sessionId, kind] of pending) persist(sessions.get(sessionId), kind);
+        }
+      }
     },
 
     createSession(input: { sessionId: string; terms: any; termsDigest: string; initiatorReadiness: any }): void {
@@ -415,6 +565,7 @@ export function createStandaloneSessionStore(options: {
         invitationExpiresAtMs: createdAtMs + invitationTtlMs,
         openDeadlineMs: createdAtMs + invitationTtlMs,
         touchedAtMs: createdAtMs,
+        createdAtMs,
         // Active facilitation (F1-F4).
         turnStartedAtMs: createdAtMs,
         turnSeq: 0,
@@ -661,10 +812,9 @@ export function createStandaloneSessionStore(options: {
         throw new StandaloneAdmissionError("TOO_LARGE");
       }
       if (session.messages.length >= maxMessagesPerSession) throw new StandaloneAdmissionError("CHANNEL_FULL");
-      session.seq += 1;
       const message = {
         sessionId,
-        seq: session.seq,
+        seq: session.seq + 1,
         kind,
         fromRole: role,
         toRole: other(role),
@@ -672,6 +822,18 @@ export function createStandaloneSessionStore(options: {
         sentAtMs: Math.floor(now()),
         body,
       };
+      // Durable first, O(1): one fsync'd line in the append-only log. Nothing in memory has
+      // changed if it fails, and a full log is a hard, visible refusal.
+      const log = messageLogPath(sessionId);
+      if (log !== undefined) {
+        try {
+          appendDurableLine(log, JSON.stringify(message), MAX_MESSAGE_LOG_BYTES);
+        } catch (error) {
+          if (error instanceof DurableStateError && /size bound/.test(error.message)) throw new StandaloneAdmissionError("STORAGE_FULL");
+          throw error;
+        }
+      }
+      session.seq = message.seq;
       session.messages.push(message);
       startTurn(session);
       pushEvent(session, { type: "message", seq: message.seq, kind, fromRole: role, bodyDigest: message.bodyDigest });
@@ -741,7 +903,7 @@ export function createStandaloneSessionStore(options: {
       if (session.lastNoticeAtMs[role] !== undefined && current - session.lastNoticeAtMs[role] < minIntervalMs) return false;
       session.noticeKeys.add(key);
       session.lastNoticeAtMs[role] = current;
-      persist(session, "soon");
+      persist(session, "now");
       return true;
     },
 
@@ -751,13 +913,13 @@ export function createStandaloneSessionStore(options: {
       const key = `nudge:${byRole}:${session.turnSeq}`;
       if (session.noticeKeys.has(key)) return false;
       session.noticeKeys.add(key);
-      persist(session, "soon");
+      persist(session, "now");
       return true;
     },
 
     setPendingNudge(sessionId: string, toRole: string, fromRole: string): void {
       requireSession(sessionId).pendingNudge[toRole] = fromRole;
-      persist(requireSession(sessionId), "soon");
+      persist(requireSession(sessionId), "now");
     },
 
     takePendingNudge(sessionId: string, role: string): string | undefined {
@@ -765,7 +927,7 @@ export function createStandaloneSessionStore(options: {
       const from = session.pendingNudge[role];
       if (from !== undefined) {
         delete session.pendingNudge[role];
-        persist(session, "soon");
+        persist(session, "now");
       }
       return from;
     },
@@ -774,7 +936,7 @@ export function createStandaloneSessionStore(options: {
     // attempt) has been delivered once; handshake_next holds repeats of it.
     markPrompted(sessionId: string, key: string): void {
       requireSession(sessionId).prompted.add(key);
-      persist(requireSession(sessionId), "soon");
+      persist(requireSession(sessionId), "now");
     },
 
     wasPrompted(sessionId: string, key: string): boolean {

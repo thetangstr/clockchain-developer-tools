@@ -66,8 +66,20 @@ export interface HandleMap {
   resolve(handle: string, slideTo?: number): string | undefined;
   size(): number;
   close(): void;
+  /** Stop without writing (a simulated crash in tests). */
+  discard(): void;
 }
 
+function log(event: string, fields: Record<string, unknown>): void {
+  console.error(JSON.stringify({ event, ...fields }));
+}
+
+/**
+ * Durability never costs availability here: the file is loaded lazily on first use, and if
+ * it cannot be read (no valid copy) or written (disk full, EACCES), the map logs loudly and
+ * keeps serving from memory, exactly as before durability existed. Only a caller presenting
+ * a handle that was lost with the file is refused. An unreadable file is never overwritten.
+ */
 export function createHandleMap(options: {
   /** Domain label, e.g. "standalone/csha" or "v2/ccra". */
   label: string;
@@ -97,15 +109,49 @@ export function createHandleMap(options: {
       return value as Record<string, SealedRecord>;
     },
   });
+  // "pending" until first use; "durable" once loaded; "memory" when the file is unusable.
+  let mode: "pending" | "durable" | "memory" = file === undefined ? "memory" : "pending";
 
-  const loaded = file?.load();
-  if (loaded) {
-    const current = now();
-    for (const [key, record] of Object.entries(loaded)) {
-      if (current >= record.expiresAt) continue;
-      records.set(key, record);
-      byToken.set(record.t, key);
+  function ensureLoaded(): void {
+    if (mode !== "pending") return;
+    try {
+      const loaded = file!.load();
+      const current = now();
+      for (const [key, record] of Object.entries(loaded ?? {})) {
+        if (current >= record.expiresAt) continue;
+        records.set(key, record);
+        byToken.set(record.t, key);
+      }
+      mode = "durable";
+    } catch {
+      mode = "memory";
+      file!.discard();
+      log("handshake_handles_memory_only", { path: options.path, reason: "unreadable" });
     }
+  }
+
+  function save(kind: "now" | "soon"): void {
+    if (mode !== "durable") return;
+    try {
+      file!.save(kind);
+    } catch {
+      // Already logged by the writer. Serving from memory is never worse than before.
+      log("handshake_handles_write_failed", { path: options.path });
+    }
+  }
+
+  // The expiry is bound into the AAD, so a record's lifetime cannot be extended on disk.
+  function aad(key: string, expiresAt: number): string {
+    return `${key}|${expiresAt}`;
+  }
+
+  function sealRecord(key: string, handle: string, token: string, expiresAt: number): SealedRecord {
+    return {
+      t: digest(label, token),
+      tokenSealed: seal(keyFrom(label, "token", handle), token, aad(key, expiresAt)),
+      handleSealed: seal(keyFrom(label, "handle", token), handle, aad(key, expiresAt)),
+      expiresAt,
+    };
   }
 
   function prune(current: number): boolean {
@@ -121,23 +167,24 @@ export function createHandleMap(options: {
 
   return {
     issue(token: string, expiresAt: number): string | undefined {
+      ensureLoaded();
       const current = now();
       const pruned = prune(current);
       const tokenDigest = digest(label, token);
       const existingKey = byToken.get(tokenDigest);
       const existing = existingKey === undefined ? undefined : records.get(existingKey);
       if (existingKey !== undefined && existing !== undefined) {
-        const handle = open(keyFrom(label, "handle", token), existing.handleSealed, existingKey);
+        const handle = open(keyFrom(label, "handle", token), existing.handleSealed, aad(existingKey, existing.expiresAt));
         if (handle !== undefined && digest(label, handle) === existingKey) {
           if (expiresAt > existing.expiresAt) {
-            existing.expiresAt = expiresAt;
-            file?.save("soon");
+            records.set(existingKey, sealRecord(existingKey, handle, token, expiresAt));
+            save("soon");
           }
           return handle;
         }
       }
       if (records.size >= limit) {
-        if (pruned) file?.save("soon");
+        if (pruned) save("soon");
         return undefined;
       }
       let handle: string;
@@ -146,40 +193,43 @@ export function createHandleMap(options: {
         handle = `${prefix}${randomBytes(16).toString("base64url")}`;
         key = digest(label, handle);
       } while (records.has(key));
-      records.set(key, {
-        t: tokenDigest,
-        tokenSealed: seal(keyFrom(label, "token", handle), token, key),
-        handleSealed: seal(keyFrom(label, "handle", token), handle, key),
-        expiresAt,
-      });
+      records.set(key, sealRecord(key, handle, token, expiresAt));
       byToken.set(tokenDigest, key);
-      // A client may use the handle the moment it has it, so it is durable before it is returned.
-      file?.save("now");
+      // A client may use the handle the moment it has it, so it is durable before it is
+      // returned; if the write fails the handle still works from memory.
+      save("now");
       return handle;
     },
 
     resolve(handle: string, slideTo?: number): string | undefined {
+      ensureLoaded();
       const current = now();
-      if (prune(current)) file?.save("soon");
+      if (prune(current)) save("soon");
       const key = digest(label, handle);
       const record = records.get(key);
       if (record === undefined) return undefined;
-      const token = open(keyFrom(label, "token", handle), record.tokenSealed, key);
+      const token = open(keyFrom(label, "token", handle), record.tokenSealed, aad(key, record.expiresAt));
       if (token === undefined || digest(label, token) !== record.t) return undefined;
       if (slideTo !== undefined && slideTo > record.expiresAt) {
-        record.expiresAt = slideTo;
-        file?.save("soon");
+        records.set(key, sealRecord(key, handle, token, slideTo));
+        save("soon");
       }
       return token;
     },
 
     size(): number {
+      ensureLoaded();
       return records.size;
     },
 
     close(): void {
-      file?.flush();
-      file?.close();
+      if (mode === "durable") {
+        try { file!.close(); } catch { /* logged */ }
+      } else file?.discard();
+    },
+
+    discard(): void {
+      file?.discard();
     },
   };
 }

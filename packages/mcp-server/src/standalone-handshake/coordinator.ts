@@ -228,6 +228,11 @@ export function createStandaloneCoordinator(options: {
       store.close();
     },
 
+    /** Drops every pending write and timer without writing: a simulated crash (tests only). */
+    discard(): void {
+      store.discard();
+    },
+
     /** Waits for in-flight webhook notices (tests, graceful shutdown). */
     async drainNotices(): Promise<void> {
       while (notices.size > 0) await Promise.all([...notices]);
@@ -289,8 +294,10 @@ export function createStandaloneCoordinator(options: {
           externalBusinessActionPerformed: false,
         });
         const anchor = await anchorStandalone(client, record, `standalone-handshake-v1:${session.sessionId}:closure-stalled`, true);
-        store.addAnchors(session.sessionId, [{ kind: "stall-closure", ...anchor }]);
-        store.appendEvent(session.sessionId, { type: "close", outcome: "stalled", byRole: stalled.role, anchor: anchorSummary({ kind: "stall-closure", ...anchor }) });
+        store.batch(() => {
+          store.addAnchors(session.sessionId, [{ kind: "stall-closure", ...anchor }]);
+          store.appendEvent(session.sessionId, { type: "close", outcome: "stalled", byRole: stalled.role, anchor: anchorSummary({ kind: "stall-closure", ...anchor }) });
+        });
       })();
       stallAnchoring.set(session.sessionId, inFlight);
       void inFlight.finally(() => stallAnchoring.delete(session.sessionId)).catch(() => undefined);
@@ -343,12 +350,15 @@ export function createStandaloneCoordinator(options: {
       const termsDigest = standaloneCanonicalRecord(terms).digest;
       const sessionId = randomUUID();
       const notify = split.webhookUrl === undefined ? undefined : notifier.register({ sessionId, role: "initiator", webhookUrl: split.webhookUrl });
-      store.createSession({ sessionId, terms, termsDigest, initiatorReadiness: readiness });
-      if (notify !== undefined) store.setNotify(sessionId, "initiator", notify);
       const secret = randomBytes(24).toString("base64url");
-      store.putInvitation({ secret, sessionId, expiresAtMs: store.requireSession(sessionId).invitationExpiresAtMs });
       const initiatorAccess = `sat_${randomBytes(32).toString("base64url")}`;
-      store.setAccessToken(sessionId, "initiator", initiatorAccess);
+      // One commit: the session, its invitation and the initiator's token digest land together.
+      store.batch(() => {
+        store.createSession({ sessionId, terms, termsDigest, initiatorReadiness: readiness });
+        if (notify !== undefined) store.setNotify(sessionId, "initiator", notify);
+        store.putInvitation({ secret, sessionId, expiresAtMs: store.requireSession(sessionId).invitationExpiresAtMs });
+        store.setAccessToken(sessionId, "initiator", initiatorAccess);
+      });
       const endpoint = standaloneRequestContext.getStore()?.endpoint ?? options.publicEndpoint ?? STANDALONE_DEFAULT_ENDPOINT;
       const invitation = encodeStandaloneInvitation({ sessionId, secret, endpoint });
       return {
@@ -386,15 +396,18 @@ export function createStandaloneCoordinator(options: {
       // The first claim burns the invitation. A failed checklist does not end the session:
       // the same Responder corrects its readiness through handshake_retry_readiness, which
       // is bound to the responder access issued here, so nobody else can take over.
+      const responderAccess = `sat_${randomBytes(32).toString("base64url")}`;
       const outcome = await readinessAttempt(session, readiness, {
         previousStage: "invited",
         invitationSecret: decoded.secret,
         onRollback: () => store.putInvitation({ secret: decoded.secret, sessionId, expiresAtMs: session.invitationExpiresAtMs }),
+        // Committed in the same write as the checklist outcome and the stage (never apart).
+        commit: () => {
+          store.setAccessToken(sessionId, "responder", responderAccess);
+          store.markSeen(sessionId, "responder");
+          if (notify !== undefined) store.setNotify(sessionId, "responder", notify);
+        },
       });
-      const responderAccess = `sat_${randomBytes(32).toString("base64url")}`;
-      store.setAccessToken(sessionId, "responder", responderAccess);
-      store.markSeen(sessionId, "responder");
-      if (notify !== undefined) store.setNotify(sessionId, "responder", notify);
       return { ...outcome, responderAccess, ...(notify === undefined ? {} : { notify: { registered: true, webhookSecret: notify.secret } }) };
     }
 
@@ -417,12 +430,15 @@ export function createStandaloneCoordinator(options: {
       const current = store.getSession(session.sessionId);
       const turn = current === undefined ? undefined : pendingTurn(current);
       if (turn === undefined || (turn.pendingOn !== target && turn.pendingOn !== "both")) throw new StandaloneAdmissionError("NOT_THEIR_TURN");
-      if (!store.claimNudge(session.sessionId, role)) throw new StandaloneAdmissionError("NUDGE_RATE_LIMITED");
-      store.setPendingNudge(session.sessionId, target, role);
       const push = notifyTarget(session.sessionId, target);
-      const canPush = push !== undefined && notifier.enabled() && store.claimNotice(session.sessionId, target, "nudge", NOTICE_MIN_INTERVAL_MS);
-      store.appendEvent(session.sessionId, { type: "nudged", byRole: role, toRole: target, pendingAction: turn.action, pushed: canPush });
-      const delivery = canPush ? await sendNotice(session.sessionId, target, push, turn.action, "nudge") : undefined;
+      const canPush = store.batch(() => {
+        if (!store.claimNudge(session.sessionId, role)) throw new StandaloneAdmissionError("NUDGE_RATE_LIMITED");
+        store.setPendingNudge(session.sessionId, target, role);
+        const claimed = push !== undefined && notifier.enabled() && store.claimNotice(session.sessionId, target, "nudge", NOTICE_MIN_INTERVAL_MS);
+        store.appendEvent(session.sessionId, { type: "nudged", byRole: role, toRole: target, pendingAction: turn.action, pushed: claimed });
+        return claimed;
+      });
+      const delivery = canPush ? await sendNotice(session.sessionId, target, push!, turn.action, "nudge") : undefined;
       return {
         sessionId: session.sessionId,
         nudged: true,
@@ -471,10 +487,12 @@ export function createStandaloneCoordinator(options: {
       // await before the stage writes below, so the refusal is a clean ABANDONED rather than
       // an illegal-transition error from setStage.
       refuseIfAbandoned(session.sessionId);
-      if (session.stage === "ready") store.setStage(session.sessionId, "consent_pending");
-      store.setConsent(session.sessionId, role, standaloneCanonicalRecord(consentRecord).digest);
-      store.appendEvent(session.sessionId, { type: "consent", role, consentDigest: standaloneCanonicalRecord(consentRecord).digest });
-      const stage = store.bothConsented(session.sessionId) ? (store.setStage(session.sessionId, "consented"), "consented") : "consent_pending";
+      const stage = store.batch(() => {
+        if (session.stage === "ready") store.setStage(session.sessionId, "consent_pending");
+        store.setConsent(session.sessionId, role, standaloneCanonicalRecord(consentRecord).digest);
+        store.appendEvent(session.sessionId, { type: "consent", role, consentDigest: standaloneCanonicalRecord(consentRecord).digest });
+        return store.bothConsented(session.sessionId) ? (store.setStage(session.sessionId, "consented"), "consented") : "consent_pending";
+      });
       return { sessionId: session.sessionId, role, stage, consentDigest: standaloneCanonicalRecord(consentRecord).digest };
     }
 
@@ -533,10 +551,12 @@ export function createStandaloneCoordinator(options: {
       });
       store.setPendingClosure(session.sessionId, closureRecord);
       const anchor = await anchorStandalone(client, closureRecord, `standalone-handshake-v1:${session.sessionId}:closure`, true);
-      (outcome === "closed" ? store.closeChannel : store.revokeChannel).call(store, session.sessionId, role);
-      store.addAnchors(session.sessionId, [{ kind: outcome === "closed" ? "closure" : "revocation", ...anchor }]);
-      store.appendEvent(session.sessionId, { type: outcome === "closed" ? "close" : "revoke", byRole: role, anchor: anchorSummary({ kind: outcome === "closed" ? "closure" : "revocation", ...anchor }) });
-      store.clearPendingClosure(session.sessionId);
+      store.batch(() => {
+        (outcome === "closed" ? store.closeChannel : store.revokeChannel).call(store, session.sessionId, role);
+        store.addAnchors(session.sessionId, [{ kind: outcome === "closed" ? "closure" : "revocation", ...anchor }]);
+        store.appendEvent(session.sessionId, { type: outcome === "closed" ? "close" : "revoke", byRole: role, anchor: anchorSummary({ kind: outcome === "closed" ? "closure" : "revocation", ...anchor }) });
+        store.clearPendingClosure(session.sessionId);
+      });
       return { sessionId: session.sessionId, outcome, byRole: role, closureAnchor: anchor };
     }
 
@@ -681,10 +701,12 @@ export function createStandaloneCoordinator(options: {
     // from the stage write below, so the outcome is deterministic.
     refuseIfAbandoned(session.sessionId);
     const expiresAtMs = openedAtMs + Number(session.terms.channelLimits.durationSeconds) * 1000;
-    store.setStage(session.sessionId, "open");
-    store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
-    store.addAnchors(session.sessionId, anchors);
-    store.appendEvent(session.sessionId, { type: "open", anchors: anchors.map(anchorSummary) });
+    store.batch(() => {
+      store.setStage(session.sessionId, "open");
+      store.openChannel(session.sessionId, { openedAtMs, expiresAtMs });
+      store.addAnchors(session.sessionId, anchors);
+      store.appendEvent(session.sessionId, { type: "open", anchors: anchors.map(anchorSummary) });
+    });
     return {
       schema: "clockchain.standalone-handshake-opening/v1",
       protocol: STANDALONE_HANDSHAKE_PROTOCOL,
@@ -710,13 +732,15 @@ export function createStandaloneCoordinator(options: {
     return stored.secret ? stored : { webhookUrl: stored.webhookUrl, secret: notifier.secretFor(sessionId, role, stored.webhookUrl) };
   }
 
-  async function readinessAttempt(session: any, readiness: Readonly<Record<string, any>>, options: { previousStage: "invited" | "readiness_retry"; onRollback?: () => void; invitationSecret?: string }): Promise<Record<string, unknown>> {
+  async function readinessAttempt(session: any, readiness: Readonly<Record<string, any>>, options: { previousStage: "invited" | "readiness_retry"; onRollback?: () => void; invitationSecret?: string; commit?: () => void }): Promise<Record<string, unknown>> {
     const sessionId = session.sessionId;
     const previousReadiness = session.responderReadiness;
     // Durable before evaluation starts: a restart mid-evaluation rolls this attempt back.
-    store.beginAttempt(sessionId, { previousStage: options.previousStage, invitationSecret: options.invitationSecret });
-    store.setResponderReadiness(sessionId, readiness);
-    store.setStage(sessionId, "readiness_pending");
+    store.batch(() => {
+      store.beginAttempt(sessionId, { previousStage: options.previousStage, invitationSecret: options.invitationSecret });
+      store.setResponderReadiness(sessionId, readiness);
+      store.setStage(sessionId, "readiness_pending");
+    });
     let checklist;
     try {
       checklist = await evaluateStandaloneReadiness({
@@ -739,23 +763,29 @@ export function createStandaloneCoordinator(options: {
       if (error instanceof StandaloneCoordinatorError || error instanceof StandaloneTransientCoordinatorError) throw error;
       throw new StandaloneTransientCoordinatorError();
     }
-    store.setChecklist(sessionId, checklist);
     const codes = [...new Set(checklist.failures.map((failure) => failure.code))];
-    const attempt = store.recordAttempt(sessionId, { passed: checklist.passed, codes });
     const responderCanFix = checklist.failures.every((failure) => failure.party === "responder");
-    let stage: string;
-    if (checklist.passed) {
-      stage = "ready";
-      store.setStage(sessionId, stage);
-      store.appendEvent(sessionId, { type: "accepted", attempt });
-    } else if (responderCanFix && attempt < READINESS_MAX_ATTEMPTS) {
-      stage = "readiness_retry";
-      store.setStage(sessionId, stage);
-    } else {
-      stage = "ready_failed";
-      store.setStage(sessionId, stage);
-      store.appendEvent(sessionId, { type: "ready_failed", reason: codes.join(","), attempts: attempt });
-    }
+    let stage = "";
+    let attempt = 0;
+    // One commit: the checklist result, the attempt, the new stage and (on accept) the
+    // responder's token digest are written together, so a crash never strands the session.
+    store.batch(() => {
+      store.setChecklist(sessionId, checklist);
+      attempt = store.recordAttempt(sessionId, { passed: checklist.passed, codes });
+      if (checklist.passed) {
+        stage = "ready";
+        store.setStage(sessionId, stage);
+        store.appendEvent(sessionId, { type: "accepted", attempt });
+      } else if (responderCanFix && attempt < READINESS_MAX_ATTEMPTS) {
+        stage = "readiness_retry";
+        store.setStage(sessionId, stage);
+      } else {
+        stage = "ready_failed";
+        store.setStage(sessionId, stage);
+        store.appendEvent(sessionId, { type: "ready_failed", reason: codes.join(","), attempts: attempt });
+      }
+      options.commit?.();
+    });
     const retry = stage === "readiness_retry";
     // A failed check is recoverable by the agent alone: say so where it will be read, so it
     // acts on `required` instead of asking its user (who cannot reach the counterparty).

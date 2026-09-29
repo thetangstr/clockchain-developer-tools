@@ -161,7 +161,9 @@ export function registerStandaloneTools(server: any, invoke: (name: string, args
       } catch (error) {
         const observedName = (error as Error)?.name;
         const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName) ? observedName : "Error";
-        console.warn(JSON.stringify({ event: "standalone_handshake_tool_failure", tool: definition.name, errorName }));
+        // The reason code is a server constant, safe to log, and says exactly which refusal it was.
+        const reason = error instanceof StandaloneAdmissionError && SAFE_ERROR_NAME.test(error.reason.replace(/_/g, "")) ? error.reason : undefined;
+        console.warn(JSON.stringify({ event: "standalone_handshake_tool_failure", tool: definition.name, errorName, ...(reason === undefined ? {} : { reason }) }));
         const retryable = typeof observedName === "string" && RETRYABLE_ERROR_NAMES.has(observedName);
         // Unauthenticated clients see reason codes and constants only — never raw error messages.
         const body = error instanceof StandaloneAdmissionError

@@ -16,6 +16,7 @@
 // answers 503 for it) until an operator restores or wipes it (see the RUNBOOK). A garbage
 // file is never overwritten with an empty state by accident.
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   copyFileSync,
@@ -25,6 +26,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -41,6 +43,79 @@ export class DurableStateError extends Error {
 }
 
 export const DEFAULT_COALESCE_MS = 1_000;
+// Quarantined copies of corrupt files are kept this long for forensics, then removed at boot.
+export const CORRUPT_RETENTION_MS = 7 * 24 * 60 * 60_000;
+
+// ---- Flush on shutdown -----------------------------------------------------------
+// The process has no shutdown hook of its own, so a deploy (SIGTERM) would drop coalesced
+// writes. Every durable file registers here; on SIGTERM/SIGINT all of them are written
+// synchronously, then the signal's default action (termination) is restored and re-raised.
+const flushers = new Set<() => void>();
+let signalsInstalled = false;
+
+function flushAll(): void {
+  for (const flush of flushers) {
+    try {
+      flush();
+    } catch {
+      // Logged by the writer; keep flushing the others.
+    }
+  }
+}
+
+function installSignalFlush(): void {
+  if (signalsInstalled) return;
+  signalsInstalled = true;
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    const onSignal = () => {
+      flushAll();
+      process.removeListener(signal, onSignal);
+      // Other listeners (if any) decide the process's fate; otherwise terminate as by default.
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    };
+    process.on(signal, onSignal);
+  }
+  process.on("exit", flushAll);
+}
+
+/** Registers a synchronous flush to run on SIGTERM/SIGINT/exit; returns the unregister function. */
+export function flushOnShutdown(flush: () => void): () => void {
+  installSignalFlush();
+  flushers.add(flush);
+  return () => flushers.delete(flush);
+}
+
+/** Removes leftovers in `directory`: temp files (always stale at boot) and old quarantined copies. */
+export function cleanStaleFiles(directory: string, nowMs: number = Date.now()): void {
+  if (!existsSync(directory)) return;
+  for (const name of readdirSync(directory)) {
+    const path = join(directory, name);
+    const corrupt = /\.corrupt-(\d+)$/.exec(name);
+    try {
+      if (name.endsWith(".tmp")) unlinkSync(path);
+      else if (corrupt && nowMs - Number(corrupt[1]) > CORRUPT_RETENTION_MS) unlinkSync(path);
+    } catch {
+      // Best effort.
+    }
+  }
+}
+
+/** Appends one line durably (fsync) to a private append-only log; refuses past `maxBytes`. */
+export function appendDurableLine(path: string, line: string, maxBytes: number): void {
+  const bytes = Buffer.byteLength(line) + 1;
+  const current = existsSync(path) ? statSync(path).size : 0;
+  if (current + bytes > maxBytes) throw new DurableStateError(`${path} would exceed its size bound`);
+  ensurePrivateDirectory(dirname(path));
+  const fresh = current === 0;
+  const fd = openSync(path, "a", 0o600);
+  try {
+    appendFileSync(fd, `${line}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  if (fresh) fsyncPath(dirname(path));
+}
 
 /** Where a surface keeps its files: `<root>/<surface>/`, or undefined for memory-only. */
 export function handshakeStateDir(surface: "standalone-handshake" | "agent-handshake-v2", env: Record<string, string | undefined> = process.env): string | undefined {
@@ -75,8 +150,10 @@ export interface DurableJsonFile<T> {
   save(kind: "now" | "soon"): void;
   /** Write any coalesced change immediately. */
   flush(): void;
-  /** Stop the coalescing timer (tests). */
+  /** Flush, then stop the timer and the shutdown hook. */
   close(): void;
+  /** Stop without writing anything (a simulated crash in tests). */
+  discard(): void;
 }
 
 export function createDurableJsonFile<T>(options: {
@@ -96,10 +173,12 @@ export function createDurableJsonFile<T>(options: {
   let timer: NodeJS.Timeout | undefined;
   // Set when the main file failed validation: it must never be rotated over the good `.bak`.
   let mainCorrupt = false;
+  let unregister: (() => void) | undefined;
 
   function readValid(file: string): T {
     const link = lstatSync(file);
     if (!link.isFile() || link.isSymbolicLink()) throw new Error("not a regular file");
+    if ((link.mode & 0o077) !== 0) throw new Error("file is readable by others");
     if (link.size > maxBytes) throw new Error("file exceeds the size bound");
     const parsed = JSON.parse(readFileSync(file, "utf8")) as { schema?: unknown; value?: unknown };
     if (parsed === null || typeof parsed !== "object" || parsed.schema !== schema) throw new Error("unknown schema");
@@ -113,9 +192,10 @@ export function createDurableJsonFile<T>(options: {
     }
     const body = `${JSON.stringify({ schema, value: options.snapshot() })}\n`;
     if (Buffer.byteLength(body) > maxBytes) {
-      // Keep serving from memory; the previous file stays the durable copy.
+      // A hard error for the caller, never a silent loss of durability. The previous file
+      // stays the durable copy.
       log("handshake_state_oversize", { path, bytes: Buffer.byteLength(body), maxBytes });
-      return;
+      throw new DurableStateError(`${path} would exceed its size bound`);
     }
     const parent = dirname(path);
     ensurePrivateDirectory(parent);
@@ -140,8 +220,6 @@ export function createDurableJsonFile<T>(options: {
       if (!existsSync(path) && !existsSync(backup)) return undefined;
       if (existsSync(path)) {
         try {
-          const stat = statSync(path);
-          if ((stat.mode & 0o077) !== 0) throw new Error("file is readable by others");
           return readValid(path);
         } catch (error) {
           const quarantine = `${path}.corrupt-${Date.now()}`;
@@ -167,6 +245,7 @@ export function createDurableJsonFile<T>(options: {
         write();
         return;
       }
+      unregister ??= flushOnShutdown(() => this.flush());
       if (timer) return;
       timer = setTimeout(() => {
         timer = undefined;
@@ -184,8 +263,16 @@ export function createDurableJsonFile<T>(options: {
     },
 
     close(): void {
+      if (timer) write();
+      unregister?.();
+      unregister = undefined;
+    },
+
+    discard(): void {
       if (timer) clearTimeout(timer);
       timer = undefined;
+      unregister?.();
+      unregister = undefined;
     },
   };
 }

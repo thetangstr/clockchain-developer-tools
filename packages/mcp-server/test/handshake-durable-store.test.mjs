@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createDurableJsonFile, DurableStateError, handshakeStateDir } from "../dist/handshake-core/durable-store.js";
+import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableStateError, handshakeStateDir } from "../dist/handshake-core/durable-store.js";
 import { createHandleMap } from "../dist/handshake-core/handle-map.js";
 
 const scratch = () => mkdtempSync(join(tmpdir(), "handshake-durable-"));
@@ -81,16 +81,36 @@ test("garbage with no valid backup refuses to load (loudly) and is left in place
   assert.throws(() => fileFor(loose, state).load(), DurableStateError);
 });
 
-test("an oversized snapshot is not written and is logged; the previous file stays", (t) => {
+test("an oversized snapshot is a hard error for the caller (never a silent loss); the previous file stays", (t) => {
   const errors = quietly(t);
   const dir = scratch();
   const state = { value: { n: 1 } };
   const file = fileFor(dir, state);
   file.save("now");
   state.value = { n: 2, pad: "x".repeat(8192) };
-  file.save("now");
+  assert.throws(() => file.save("now"), DurableStateError);
   assert.deepEqual(fileFor(dir, { value: undefined }).load(), { n: 1 });
   assert.ok(errors.mock.calls.some((call) => JSON.parse(call.arguments[0]).event === "handshake_state_oversize"));
+});
+
+test("the append-only log fsyncs one line per append and refuses past its bound", () => {
+  const dir = scratch();
+  const path = join(dir, "log", "messages.jsonl");
+  appendDurableLine(path, JSON.stringify({ seq: 1 }), 64);
+  appendDurableLine(path, JSON.stringify({ seq: 2 }), 64);
+  assert.equal(readFileSync(path, "utf8"), '{"seq":1}\n{"seq":2}\n');
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assert.throws(() => appendDurableLine(path, "x".repeat(64), 64), DurableStateError);
+  assert.equal(readFileSync(path, "utf8").split("\n").length, 3, "nothing partial was appended");
+});
+
+test("stale temp files are removed at boot and old quarantined copies expire", () => {
+  const dir = scratch();
+  writeFileSync(join(dir, "a.json.1.x.tmp"), "", { mode: 0o600 });
+  writeFileSync(join(dir, `a.json.corrupt-${Date.now() - 8 * 24 * 60 * 60_000}`), "", { mode: 0o600 });
+  writeFileSync(join(dir, `a.json.corrupt-${Date.now()}`), "", { mode: 0o600 });
+  cleanStaleFiles(dir);
+  assert.deepEqual(readdirSync(dir).map((name) => name.replace(/\d+$/, "N")), ["a.json.corrupt-N"]);
 });
 
 test("'soon' writes coalesce into one delayed write; flush writes immediately", async () => {
@@ -144,6 +164,41 @@ test("handle map: handles survive a restart, issue stays idempotent per token, a
   now += 100_000;
   assert.equal(open().resolve(handle), undefined);
   assert.equal(open().size(), 0);
+});
+
+test("handle map: an unreadable file degrades to memory (logged), is never overwritten, and new handles still work", (t) => {
+  const errors = quietly(t);
+  const dir = scratch();
+  const path = join(dir, "handles.json");
+  writeFileSync(path, "garbage", { mode: 0o600 });
+  const map = createHandleMap({ label: "test/h", prefix: "tsth_", limit: 5, now: () => 1_000, path });
+  const handle = map.issue("sat_" + "a".repeat(40), 60_000);
+  assert.equal(map.resolve(handle), "sat_" + "a".repeat(40));
+  assert.equal(readFileSync(path, "utf8"), "garbage");
+  assert.ok(errors.mock.calls.some((call) => JSON.parse(call.arguments[0]).event === "handshake_handles_memory_only"));
+});
+
+test("handle map: a failed write after issue keeps the handle usable from memory", (t) => {
+  quietly(t);
+  const dir = scratch();
+  const blocked = join(dir, "not-a-dir");
+  writeFileSync(blocked, "a file where the directory should be", { mode: 0o600 });
+  const map = createHandleMap({ label: "test/h", prefix: "tsth_", limit: 5, now: () => 1_000, path: join(blocked, "handles.json") });
+  const handle = map.issue("sat_" + "b".repeat(40), 60_000);
+  assert.match(handle, /^tsth_/);
+  assert.equal(map.resolve(handle), "sat_" + "b".repeat(40));
+});
+
+test("handle map: a record's expiry cannot be extended on disk (expiresAt is authenticated)", () => {
+  const dir = scratch();
+  const path = join(dir, "handles.json");
+  const map = createHandleMap({ label: "test/h", prefix: "tsth_", limit: 5, now: () => 1_000, path });
+  const handle = map.issue("sat_" + "c".repeat(40), 60_000);
+  map.close();
+  const file = JSON.parse(readFileSync(path, "utf8"));
+  for (const record of Object.values(file.value)) record.expiresAt += 10_000_000;
+  writeFileSync(path, JSON.stringify(file), { mode: 0o600 });
+  assert.equal(createHandleMap({ label: "test/h", prefix: "tsth_", limit: 5, now: () => 1_000, path }).resolve(handle), undefined);
 });
 
 test("handle map: the cap holds, and a tampered record never resolves", () => {

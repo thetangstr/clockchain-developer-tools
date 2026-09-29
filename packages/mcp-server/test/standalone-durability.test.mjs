@@ -1,16 +1,18 @@
-// Spec B2 for Standalone: sessions and csha_ handles survive a restart. Each "restart"
-// throws the coordinator and public server away and builds new ones from the same state
-// directory, sharing only the ledger (which is external) and the clock.
+// Spec B2 for Standalone: sessions and csha_ handles survive a restart. Every "restart" here
+// is a CRASH: the old coordinator and public server are dropped without close(), with their
+// pending coalesced writes and timers discarded (never flushed), and new ones are built from
+// the same state directory, sharing only the ledger (external) and the clock. After boot the
+// consensus clock can stay unsynced for a while, as in production.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { getAddress } from "viem";
 
-import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordinator.js";
+import { createStandaloneCoordinator, StandaloneTransientCoordinatorError } from "../dist/standalone-handshake/coordinator.js";
 import { createStandaloneHttpHandler } from "../dist/standalone-handshake/public-server.js";
 import { BODY_RETENTION_MS } from "../dist/standalone-handshake/session-store.js";
 import { validTerms } from "./helpers/standalone-fixtures.mjs";
@@ -35,15 +37,21 @@ function world() {
   async function boot(overrides = {}) {
     if (live) await live.stop();
     live = undefined;
+    // Until "synced", the protocol clock throws like an unsynced ClockchainClock.
+    let synced = !(overrides.unsyncedMs > 0);
+    if (!synced) setTimeout(() => { synced = true; }, overrides.unsyncedMs).unref();
     const coordinator = createStandaloneCoordinator({
       client: overrides.client ?? ledger,
-      now: () => clock.now,
+      now: () => {
+        if (!synced) throw new StandaloneTransientCoordinatorError();
+        return clock.now;
+      },
       recoverEip191Address: overrides.recover ?? recoverLocally,
       nextPollMs: 5,
       stateDir: dir,
       coalesceMs: 20,
     });
-    const handler = createStandaloneHttpHandler({ invoke: (name, args) => coordinator.invoke(name, args), stateDir: dir, env: {} });
+    const handler = createStandaloneHttpHandler({ invoke: (name, args) => coordinator.invoke(name, args), stateDir: dir, env: {}, callsPerMinute: 100_000 });
     const server = createServer((req, res) => { void handler(req, res); });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
@@ -59,14 +67,15 @@ function world() {
     };
     live = {
       coordinator,
+      handler,
       call,
-      // A deploy: in-flight requests die with the process; nothing is flushed on purpose
-      // beyond what the store already wrote synchronously.
+      // A crash: in-flight requests die, and nothing pending is flushed.
       async stop() {
+        coordinator.discard();
+        handler.discard();
         const closed = new Promise((resolve) => server.close(resolve));
         server.closeAllConnections();
         await closed;
-        coordinator.close();
       },
     };
     return live;
@@ -250,7 +259,7 @@ test("message bodies are deleted 24 hours after the session ends; digests and se
   await call("channel_open", { access: a });
   await call("channel_send", { access: a, kind: "question", body: "The PELICAN plan?" });
   await call("channel_close", { access: a });
-  const file = join(w.dir, "sessions", `${invite.sessionId}.json`);
+  const file = join(w.dir, "sessions", `${invite.sessionId}.messages.jsonl`);
   assert.ok(readFileSync(file, "utf8").includes("PELICAN"), "kept while the session is fresh");
 
   w.clock.now += BODY_RETENTION_MS - 1;
@@ -260,7 +269,7 @@ test("message bodies are deleted 24 hours after the session ends; digests and se
   ({ call } = await w.boot());
   const stored = readFileSync(file, "utf8");
   assert.equal(stored.includes("PELICAN"), false);
-  const message = JSON.parse(stored).value.messages[0];
+  const message = JSON.parse(stored.trim().split("\n")[0]);
   assert.equal(message.body, null);
   assert.match(message.bodyDigest, /^[0-9a-f]{64}$/);
   assert.equal(message.seq, 1);
@@ -280,4 +289,103 @@ test("one unreadable session file is logged and skipped; the others still load",
   const events = errors.mock.calls.map((c) => { try { return JSON.parse(c.arguments[0]).event; } catch { return ""; } });
   assert.ok(events.includes("handshake_state_session_unreadable"));
   assert.ok(readdirSync(join(w.dir, "sessions")).includes(`${bad.sessionId}.json`), "left in place for an operator");
+});
+
+
+test("crash after both consents, before open (the live staging failure): both sides open and continue, anchored once", async () => {
+  const w = world();
+  let { call } = await w.boot();
+  const pairs = [];
+  for (let i = 0; i < 3; i += 1) {
+    const invite = await call("handshake_invite", { ...validTerms(), readiness: await w.readiness(call, "initiator") });
+    const accept = await call("handshake_accept_invitation", { invitation: invite.invitation, readiness: await w.readiness(call, "responder") });
+    await w.consent(call, "initiator", invite.roleAccess);
+    await w.consent(call, "responder", accept.roleAccess);
+    pairs.push({ sessionId: invite.sessionId, a: invite.roleAccess, b: accept.roleAccess });
+  }
+  // Crash, and come back with the consensus clock unsynced for a moment.
+  ({ call } = await w.boot({ unsyncedMs: 150 }));
+  // Both roles of every pair loop on handshake_next and do what it says, concurrently.
+  async function drive(access) {
+    for (let step = 0; step < 40; step += 1) {
+      const next = await call("handshake_next", { access, waitMs: 0 });
+      if (next.retryable) { await new Promise((resolve) => setTimeout(resolve, 20)); continue; }
+      if (next.action === "open") {
+        const opened = await call("channel_open", { access });
+        assert.ok(opened.error === undefined || opened.error === "ALREADY_OPEN" || opened.retryable === true, JSON.stringify(opened));
+        continue;
+      }
+      return next.action;
+    }
+    throw new Error(`${access} looped without progress`);
+  }
+  const outcomes = await Promise.all(pairs.flatMap(({ a, b }) => [drive(a), drive(b)]));
+  for (const action of outcomes) assert.ok(action === "respond" || action === "wait", action);
+  for (const { sessionId } of pairs) {
+    const opening = [...w.ledger.entries.values()].filter((entry) => entry.assetReferenceId.startsWith(`standalone-handshake-v1:${sessionId}:`));
+    assert.equal(opening.length, 3, "terms-readiness, consent, open: each once");
+  }
+});
+
+test("crash after a nudge: the nudged party is still told, and a second nudge in the turn is still refused", async () => {
+  const w = world();
+  let { call } = await w.boot();
+  const invite = await call("handshake_invite", { ...validTerms(), readiness: await w.readiness(call, "initiator") });
+  const accept = await call("handshake_accept_invitation", { invitation: invite.invitation, readiness: await w.readiness(call, "responder") });
+  await w.consent(call, "initiator", invite.roleAccess);
+  assert.equal((await call("handshake_nudge", { access: invite.roleAccess })).nudged, true);
+  ({ call } = await w.boot());
+  assert.equal((await call("handshake_nudge", { access: invite.roleAccess })).error, "NUDGE_RATE_LIMITED");
+  assert.equal((await call("handshake_next", { access: accept.roleAccess, waitMs: 0 })).nudged.byRole, "initiator");
+});
+
+test("message volume: each message is one appended log line; the session snapshot never carries the transcript", async () => {
+  const w = world();
+  const { call } = await w.boot();
+  const invite = await call("handshake_invite", { ...validTerms(), readiness: await w.readiness(call, "initiator") });
+  const accept = await call("handshake_accept_invitation", { invitation: invite.invitation, readiness: await w.readiness(call, "responder") });
+  await w.consent(call, "initiator", invite.roleAccess);
+  await w.consent(call, "responder", accept.roleAccess);
+  await call("channel_open", { access: invite.roleAccess });
+  const snapshot = join(w.dir, "sessions", `${invite.sessionId}.json`);
+  const log = join(w.dir, "sessions", `${invite.sessionId}.messages.jsonl`);
+  const body = (i) => `${i}:${"x".repeat(4000)}`;
+  const sizes = [];
+  for (let i = 0; i < 300; i += 1) {
+    await call("channel_send", { access: i % 2 ? accept.roleAccess : invite.roleAccess, kind: "question", body: body(i) });
+    if (i === 9 || i === 299) sizes.push({ snapshot: statSync(snapshot).size, log: statSync(log).size });
+  }
+  // The log grows linearly with what was sent; the snapshot stays small (no bodies).
+  assert.ok(sizes[1].log > 300 * 4000, "every body is in the log");
+  assert.ok(sizes[1].snapshot < 256 * 1024, `snapshot stayed small: ${sizes[1].snapshot}`);
+  assert.equal(readFileSync(snapshot, "utf8").includes("x".repeat(4000)), false);
+  assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 300);
+  // And the transcript is whole after a crash.
+  const { call: after } = await w.boot();
+  const read = await after("handshake_next", { access: accept.roleAccess, waitMs: 0, cursor: 296 });
+  assert.deepEqual(read.messages.map((message) => message.seq), [297, 299]);
+  assert.equal(read.messages[0].body, body(296));
+});
+
+test("boot restores sessions in creation order, removes stale temp files, and rejects a world-readable backup", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const w = world();
+  let { call, coordinator } = await w.boot();
+  const ids = [];
+  for (let i = 0; i < 4; i += 1) {
+    w.clock.now += 1_000;
+    ids.push((await call("handshake_invite", { ...validTerms(), readiness: await w.readiness(call, "initiator") })).sessionId);
+  }
+  writeFileSync(join(w.dir, "sessions", "leftover.json.123.abc.tmp"), "partial", { mode: 0o600 });
+  ({ call, coordinator } = await w.boot());
+  assert.deepEqual(coordinator.store.sessionIds(), ids);
+  assert.equal(readdirSync(join(w.dir, "sessions")).some((name) => name.endsWith(".tmp")), false);
+
+  // A corrupt main file whose (otherwise valid) .bak is readable by others is not trusted.
+  const main = join(w.dir, "sessions", `${ids[0]}.json`);
+  copyFileSync(main, `${main}.bak`);
+  chmodSync(`${main}.bak`, 0o644);
+  writeFileSync(main, "garbage", { mode: 0o600 });
+  ({ coordinator } = await w.boot());
+  assert.equal(coordinator.store.sessionIds().includes(ids[0]), false);
 });
