@@ -284,7 +284,7 @@ test("an expired channel refuses closure with EXPIRED before any ledger write", 
   const ledger = fakeLedger();
   const counting = { ...ledger, log: async (args) => { if (String(args.assetReferenceId).endsWith(":closure")) closureLogs += 1; return ledger.log(args); } };
   const instance = coordinator(counting);
-  const session = await openSession(instance);
+  const session = await openSession(instance, { channelLimits: { ...validTerms().channelLimits, replyDeadlineSeconds: "3600" } });
   const receipt = await consentAndOpen(instance, session);
   instance.advance(Number(receipt.expiresAtMs) + 1 - instance.peek()); // past the channel clock
   for (const name of ["channel_close", "channel_revoke"]) {
@@ -376,7 +376,7 @@ test("revocation mid-conversation stops admission and anchors the revocation", a
 
 test("expiry: the channel clock starts at the open anchor's consensus block time", async () => {
   const instance = coordinator();
-  const session = await openSession(instance);
+  const session = await openSession(instance, { channelLimits: { ...validTerms().channelLimits, replyDeadlineSeconds: "3600" } });
   const receipt = await consentAndOpen(instance, session);
   assert.equal(receipt.openedAtMs, String(Date.parse(FAKE_BLOCK_TIME)));
   assert.equal(receipt.expiresAtMs, String(Date.parse(FAKE_BLOCK_TIME) + 3_600_000));
@@ -431,9 +431,10 @@ test("a tampered or foreign invitation is refused", async () => {
   });
   const a = await invite();
   const b = await invite();
-  const decoded = JSON.parse(Buffer.from(a.invitation, "base64url").toString("utf8"));
+  assert.ok(a.invitation.startsWith("chs2."));
+  const decoded = JSON.parse(Buffer.from(a.invitation.slice("chs2.".length), "base64url").toString("utf8"));
   // Genuine unclaimed secret for session A, but the embedded sessionId points at B.
-  const tampered = Buffer.from(JSON.stringify({ ...decoded, sessionId: b.sessionId })).toString("base64url");
+  const tampered = "chs2." + Buffer.from(JSON.stringify({ ...decoded, sessionId: b.sessionId })).toString("base64url");
   await assert.rejects(
     () => instance.invoke("handshake_accept_invitation", { invitation: tampered, readiness: validReadiness({ sessionKeyAddress: ADDR_RESPONDER, authoritySignatureHex: SIG_RESPONDER }) }),
     StandaloneCoordinatorErrorNamed(),

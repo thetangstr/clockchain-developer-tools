@@ -83,7 +83,8 @@ test("malformed bodies are refused with MALFORMED, distinct from an oversize TOO
 });
 
 test("expiry at exactly expiresAtMs refuses with EXPIRED and flips the stage", () => {
-  const context = storeWithSession();
+  // A reply window as long as the channel: expiry, not a turn stall, ends it (F3).
+  const context = storeWithSession({ terms: { channelLimits: { ...validTerms().channelLimits, replyDeadlineSeconds: "3600" } } });
   toOpen(context);
   const { store, advance } = context;
   advance(3_600_000); // exactly to expiresAtMs

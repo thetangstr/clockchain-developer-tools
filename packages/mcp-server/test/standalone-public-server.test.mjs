@@ -14,10 +14,16 @@ import { StandaloneAdmissionError } from "../dist/standalone-handshake/session-s
 
 const ACCEPT = "application/json, text/event-stream";
 
-test("the tool surface is exactly the ten designed tools", () => {
+test("the tool surface is exactly the sixteen designed tools", () => {
   assert.deepEqual([...STANDALONE_TOOL_NAMES], [
+    "readiness_prepare",
+    "handshake_preview_invitation",
     "handshake_invite",
     "handshake_accept_invitation",
+    "handshake_retry_readiness",
+    "handshake_next",
+    "handshake_nudge",
+    "handshake_timeline",
     "handshake_status",
     "consent_sign",
     "channel_open",
@@ -34,6 +40,23 @@ test("instructions lead with the local-signing boundary", () => {
   assert.match(text, /never holds a private key/);
   assert.match(text, /clockchain\.standalone-handshake\/v1/);
   assert.match(text, /external business action/i);
+});
+
+test("instructions are a playbook of at most 25 lines built on readiness_prepare and handshake_next", () => {
+  const text = buildStandaloneInstructions();
+  assert.ok(text.split("\n").length <= 25, `${text.split("\n").length} lines`);
+  for (const step of [/readiness_prepare/, /personal_sign/, /handshake_invite/, /handshake_accept_invitation/, /handshake_next/, /consent_sign/, /channel_open/, /channel_send/, /channel_close/, /untrusted/]) {
+    assert.match(text, step);
+  }
+  assert.match(text, /Never ask your user to relay anything to the counterparty/);
+  assert.match(text, /handshake_preview_invitation/);
+  assert.match(text, /handshake_retry_readiness/);
+  assert.match(text, /tellYourUser/);
+  assert.match(text, /resume: true/);
+  assert.match(text, /handshake_nudge/);
+  for (const action of ["wait", "fix_readiness", "sign", "open", "respond", "closed", "expired", "revoked", "ready_failed", "abandoned", "stalled"]) assert.match(text, new RegExp(`\\b${action}\\b`));
+  // The old text claimed handshake_status returns the consent bytes; it never did.
+  assert.doesNotMatch(text, /bytes returned in handshake_status/);
 });
 
 test("discovery manifest names the endpoint and every tool", () => {
@@ -174,7 +197,7 @@ test("the HTTP handler serves /connect/mcp and rate-limits invites per IP", asyn
     assert.equal(second.status, 200);
     assert.equal(second.body.result.isError, true);
     const secondText = JSON.parse(second.body.result.content[0].text);
-    assert.deepEqual(secondText, { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+    assert.deepEqual(secondText, { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 4 });
     assert.deepEqual(calls, ["handshake_invite"]);
 
     const wrong = await fetch(`http://127.0.0.1:${server.address().port}/other/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: ACCEPT }, body: "{}" });
@@ -254,7 +277,7 @@ test("role-access handles slide their TTL on use and role-scoped results never c
     t += 61 * 60_000;
     const stale = await statusViaHandle();
     assert.equal(stale.result.isError, true);
-    assert.deepEqual(JSON.parse(stale.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+    assert.deepEqual(JSON.parse(stale.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 4 });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -293,16 +316,16 @@ test("tool failures surface reason codes and constants only, and log structured 
 
     const admission = await rpc("tools/call", { name: "handshake_status", arguments: access });
     assert.equal(admission.result.isError, true);
-    assert.deepEqual(JSON.parse(admission.result.content[0].text), { error: "SCOPE_VIOLATION", retryable: false });
+    assert.deepEqual(JSON.parse(admission.result.content[0].text), { error: "SCOPE_VIOLATION", retryable: false, playbookVersion: 4 });
 
     const generic = await rpc("tools/call", { name: "consent_sign", arguments: { ...access, signatureHex: `0x${"1".repeat(130)}` } });
     assert.equal(generic.result.isError, true);
-    assert.deepEqual(JSON.parse(generic.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false });
+    assert.deepEqual(JSON.parse(generic.result.content[0].text), { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, playbookVersion: 4 });
     assert.equal(JSON.stringify(generic.result).includes("secret internal detail"), false);
 
     const retryable = await rpc("tools/call", { name: "channel_send", arguments: { ...access, kind: "note", body: "x" } });
     assert.equal(retryable.result.isError, undefined);
-    assert.deepEqual(retryable.result.structuredContent, { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000 });
+    assert.deepEqual(retryable.result.structuredContent, { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000, playbookVersion: 4 });
 
     assert.equal(warnings.length, 3);
     assert.deepEqual(
@@ -315,6 +338,91 @@ test("tool failures surface reason codes and constants only, and log structured 
     );
   } finally {
     console.warn = originalWarn;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("handshake_next resolves csha_ handles like every role-scoped tool, and readiness_prepare needs none", async () => {
+  const calls = [];
+  const handler = createStandaloneHttpHandler({
+    invoke: async (name, args) => {
+      calls.push({ name, args });
+      if (name === "handshake_invite") return { sessionId: "s", initiatorAccess: `sat_${"i".repeat(40)}` };
+      if (name === "readiness_prepare") return { record: {}, bytes: "{}", bytesSha256: "0".repeat(64) };
+      return { action: "wait", stage: "invited", guidance: "g", retryAfterMs: 1000 };
+    },
+  });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
+  const call = async (name, args) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data:"));
+    return JSON.parse(data ? data.slice(5) : text).result;
+  };
+  try {
+    const prepared = await call("readiness_prepare", { sessionKeyAddress: `0x${"ab".repeat(20)}`, accountableParty: "party", statement: "statement" });
+    assert.equal(prepared.isError, undefined);
+    assert.equal("roleAccess" in prepared.structuredContent, false);
+    assert.deepEqual(calls.at(-1).args, { sessionKeyAddress: `0x${"ab".repeat(20)}`, accountableParty: "party", statement: "statement" });
+
+    const invite = await call("handshake_invite", {
+      reference: "r",
+      purpose: "p",
+      channelLimits: { durationSeconds: "600", messageKinds: ["note"], maxMessageBytes: "4096" },
+      identityPolicy: { erc8004: "not_required", chainId: null, registryAddress: null },
+      readiness: {
+        sessionKeyAddress: `0x${"1".repeat(40)}`,
+        identity: null,
+        authorityStatement: { accountableParty: "party", statement: "statement" },
+        authoritySignatureHex: `0x${"2".repeat(130)}`,
+        capabilityManifest: { dataHandlingClass: "public", purpose: "p" },
+      },
+    });
+    const handle = invite.structuredContent.roleAccess;
+    assert.match(handle, /^csha_/);
+    const next = await call("handshake_next", { access: handle, waitMs: 0, cursor: 0 });
+    assert.equal(next.structuredContent.action, "wait");
+    assert.equal(next.structuredContent.roleAccess, handle);
+    // The coordinator sees the underlying signed access, never the public handle.
+    assert.deepEqual(calls.at(-1), { name: "handshake_next", args: { access: `sat_${"i".repeat(40)}`, waitMs: 0, cursor: 0 } });
+    const unknown = await call("handshake_next", { access: `csha_${"z".repeat(22)}` });
+    assert.equal(unknown.isError, true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("a client passing its raw sat_ token keeps getting the same csha_ handle instead of minting new ones", async () => {
+  const raw = `sat_${"q".repeat(40)}`;
+  const handler = createStandaloneHttpHandler({ invoke: async () => ({ action: "wait" }), callsPerMinute: 1_000 });
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const call = async (access) => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/connect/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "handshake_next", arguments: { access, waitMs: 0 } } }),
+    });
+    const text = await response.text();
+    const data = text.split("\n").find((line) => line.startsWith("data:"));
+    return JSON.parse(data ? data.slice(5) : text).result.structuredContent.roleAccess;
+  };
+  try {
+    const handles = new Set();
+    for (let i = 0; i < 25; i += 1) handles.add(await call(raw));
+    assert.equal(handles.size, 1);
+    const [handle] = handles;
+    assert.match(handle, /^csha_/);
+    assert.equal(await call(handle), handle);
+    // A different token still gets its own handle.
+    assert.notEqual(await call(`sat_${"w".repeat(40)}`), handle);
+  } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 });
