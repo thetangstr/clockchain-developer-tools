@@ -184,3 +184,47 @@ host-root public ring. If any readiness or canary check fails:
 
 Do not delete the prior host-root public key until every certificate issued under
 it is outside the supported verification window.
+
+## Handshake state (durability, spec B2)
+
+With `HANDSHAKE_STATE_DIR=/app/state` (set in `docker-compose.yml`), in-flight Standalone
+handshakes and both surfaces' role-access handles survive an `mcp` restart or deploy. Everything
+lives on the `mcp_state` volume mounted at `/app/state`:
+
+| Path | Contents |
+|---|---|
+| `/app/state/standalone-handshake/sessions/<sessionId>.json` | One Standalone session: stage, terms, readiness, checklist attempts, consents, turn and deadline state, timeline, messages, anchors, closure pin, its unclaimed invitation (secret digest only), access-token digests |
+| `/app/state/standalone-handshake/role-handles.json` | `csha_` handle map, sealed (see below) |
+| `/app/state/standalone-handshake/ended-tokens.json` | Digests of evicted sessions' tokens, so late callers get `SESSION_ENDED` |
+| `/app/state/agent-handshake-v2/role-handles.json` | `ccra_` handle map, sealed. v2 session state is unchanged at `/app/state/agent-handshake-v2-state.json` |
+
+Every file is `0600` in a `0700` directory, written tmp -> fsync -> rename -> fsync(dir), with the
+previous version kept as `<file>.bak`. Nothing secret is stored in the clear: tokens and invitation
+secrets are digests; each handle record holds the token sealed under a key derived from the handle
+and the handle sealed under a key derived from the token, so the files are useless without the
+credentials clients already hold. There is no server key to back up or rotate for them. Message
+bodies are deleted 24 hours after a session ends (digests stay).
+
+Holds (long-polls) are not persisted: clients simply call `handshake_next` again.
+
+**Backup.** Copy the directories while the stack runs (each file is replaced atomically, so any copy
+is a consistent per-file snapshot):
+`docker run --rm -v mcp_state:/s -v "$PWD":/b alpine tar czf /b/handshake-state.tgz -C /s standalone-handshake agent-handshake-v2`.
+
+**Restore.** Stop `mcp`, extract into the volume keeping ownership and modes (`tar xzpf`), start
+`mcp`. Files readable by group/other are refused.
+
+**Corruption.** A file that does not parse is copied to `<file>.corrupt-<ms>`, logged as
+`handshake_state_corrupt`, and the `.bak` is used (`handshake_state_restored_from_backup`). A
+Standalone session with no valid copy is skipped and logged (`handshake_state_session_unreadable`)
+while the others load. An unreadable handle map with no valid backup makes that surface answer 503
+until an operator acts; it is never silently replaced with an empty map.
+
+**Wipe safely.** Only when every in-flight handshake may be abandoned: stop `mcp`, then remove
+`/app/state/standalone-handshake/` and/or `/app/state/agent-handshake-v2/role-handles.json*`, then
+start `mcp`. Clients holding old handles get an access error and must start a new handshake. Never
+delete `agent-handshake-v2-state.json`, the invitation files or the funding ledger as part of this.
+
+**Staging.** The staging container (`/opt/clockchain-mcp/staging-compose.yml`, not in this repo)
+has no state volume. Test restarts there with `docker restart` (keeps the container filesystem),
+not by recreating the container, and set `HANDSHAKE_STATE_DIR` to a path inside it.
