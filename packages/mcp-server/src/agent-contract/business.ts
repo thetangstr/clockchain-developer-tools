@@ -43,8 +43,21 @@ import type { SimWorld } from "./sim/index.js";
  *    payment rail — every sim-derived output carries `simulated: true`.
  */
 
+/**
+ * D8: how a delivered invitation's senderAgentId was established at
+ * delivery time — the static token's pin, the certificate party resolved
+ * by a late bind, or nothing (the rendezvous precedes the handshake, so
+ * an unbound `*` sender is authenticated only by what comes later).
+ */
+export type SenderProof = "token-pinned" | "certificate-bound" | "unproven-pre-bind";
+
 export type BusinessOutcome =
-  | { ok: true; result: Record<string, unknown> }
+  | {
+      ok: true;
+      result: Record<string, unknown>;
+      /** Extra server-derived fields the call's receipt must carry. */
+      receiptFields?: { senderProof?: SenderProof };
+    }
   | { ok: false; code: ContractRefusalCode };
 
 interface Listing {
@@ -73,10 +86,13 @@ interface InboxMessage {
   /**
    * LOW (N4b-3): the sender's token-pinned identity — the provider's signer
    * can check the delivered handshake names THIS agentId, not just any
-   * caller who could deliver a sealed blob.
+   * caller who could deliver a sealed blob. D8: `null` when the sender
+   * hadn't proven an agentId yet (unbound `*` token, pre-handshake).
    */
   senderKeyId: string;
-  senderAgentId: string;
+  senderAgentId: string | null;
+  /** D8: how senderAgentId was established — see SenderProof. */
+  senderProof: SenderProof;
   listingId?: string;
   sealedPayload?: Record<string, unknown>;
   body?: unknown;
@@ -543,14 +559,19 @@ export function createBusinessOps(options: {
 
       case "rendezvous_send_invitation": {
         purgeListings();
-        // N4b-7 (MEDIUM-3): a `*` principal has no agentId until a late bind
-        // proves one — an invitation carrying senderAgentId "*" would claim
-        // an identity that was never established. Resolve the bound role's
-        // agentId or refuse.
-        const senderAgentId = principal.agentId === "*"
-          ? run?.bound[principal.role]?.agentId
+        // D8 (N4b-7): the rendezvous PRECEDES the handshake — an unbound `*`
+        // buyer must be able to deliver. The delivery is stamped
+        // senderAgentId: null / senderProof: "unproven-pre-bind" so the
+        // provider knows this sender is authenticated only by the later
+        // handshake + bind. A bound `*` stamps the certificate-resolved
+        // agentId; a static token keeps its pin.
+        const boundAgentId = run?.bound[principal.role]?.agentId;
+        const senderAgentId: string | null = principal.agentId === "*"
+          ? (boundAgentId ?? null)
           : principal.agentId;
-        if (senderAgentId === undefined) return refuse("STATE_REFUSED");
+        const senderProof: SenderProof = principal.agentId === "*"
+          ? (boundAgentId !== undefined ? "certificate-bound" : "unproven-pre-bind")
+          : "token-pinned";
         // A delivery that doesn't parse as the real v2 seal is refused
         // WITHOUT burning the listing.
         const seal = sealedBoxV2Schema.safeParse(args.sealedInvitation);
@@ -580,6 +601,7 @@ export function createBusinessOps(options: {
           kind: "handshake_invitation",
           senderKeyId: principal.keyId,
           senderAgentId,
+          senderProof,
           listingId: listing.listingId,
           sealedPayload: seal.data,
           receivedAt,
@@ -589,7 +611,12 @@ export function createBusinessOps(options: {
         list.push(message);
         if (list.length > MAX_INBOX_MESSAGES) list.splice(0, list.length - MAX_INBOX_MESSAGES);
         inbox.set(listing.providerKeyId, list);
-        return ok({ delivered: true, deliveredAt: receivedAt, serverNonce });
+        return {
+          ok: true,
+          result: { delivered: true, deliveredAt: receivedAt, senderAgentId, senderProof, serverNonce },
+          // D8: the delivery's receipt discloses the same sender proof.
+          receiptFields: { senderProof },
+        };
       }
 
       case "rendezvous_inbox": {

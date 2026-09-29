@@ -601,7 +601,7 @@ test("LOW-5: the statement signature requires low-s and v in {27,28}", async () 
   } finally { await env.close(); }
 });
 
-test("MEDIUM-3: an unbound `*` principal cannot send rendezvous invitations", async () => {
+test("D8: an unbound `*` principal CAN invite pre-bind — disclosed as unproven", async () => {
   const env = await boot();
   try {
     const listing = await env.rpc("tp1", "rendezvous_publish_listing", {
@@ -611,12 +611,23 @@ test("MEDIUM-3: an unbound `*` principal cannot send rendezvous invitations", as
       v: 2, epk: `0x${"ab".repeat(32)}`, iv: `0x${"cd".repeat(12)}`,
       ct: `0x${"ef".repeat(32)}`, tag: `0x${"01".repeat(16)}`,
     };
-    // Unbound: the token has no proven agentId — nothing honest to disclose.
-    const refused = await env.rpc("tlb1", "rendezvous_send_invitation", {
+    // The rendezvous precedes the handshake — an unbound `*` buyer MUST be
+    // able to deliver, but nothing claims an identity it hasn't proven.
+    const unbound = await env.rpc("tlb1", "rendezvous_send_invitation", {
       listingId: listing.listingId, sealedInvitation: seal,
     });
-    assert.equal(refused.error, "STATE_REFUSED");
-    // After binding, the invitation carries the CERTIFICATE-resolved agentId.
+    assert.equal(unbound.delivered, true);
+    assert.equal(unbound.senderAgentId, null);
+    assert.equal(unbound.senderProof, "unproven-pre-bind");
+    let inbox = await env.rpc("tp1", "rendezvous_inbox", {});
+    let msg = inbox.messages.find((m) => m.listingId === listing.listingId && m.senderKeyId === "klb1");
+    assert.equal(msg.senderAgentId, null);
+    assert.equal(msg.senderProof, "unproven-pre-bind");
+    // The pre-bind receipt carries the same disclosure.
+    const preBindReceipt = env.service.preBindFeed("klb1").receipts.at(-1);
+    assert.equal(preBindReceipt.tool, "rendezvous_send_invitation");
+    assert.equal(preBindReceipt.senderProof, "unproven-pre-bind");
+    // After binding, the invitation stamps the CERTIFICATE-resolved agentId.
     const c = cert(22);
     await bindLate(env.rpc, "tlb1", {
       keyId: "klb1", role: "buyer", side: "initiator", certificate: c, runId: uuid(22),
@@ -625,7 +636,24 @@ test("MEDIUM-3: an unbound `*` principal cannot send rendezvous invitations", as
       listingId: listing.listingId, sealedInvitation: seal,
     });
     assert.equal(delivered.delivered, true);
-    const inbox = await env.rpc("tp1", "rendezvous_inbox", {});
-    assert.ok(inbox.messages.some((m) => m.senderAgentId === "9501" && m.listingId === listing.listingId));
+    assert.equal(delivered.senderAgentId, "9501");
+    assert.equal(delivered.senderProof, "certificate-bound");
+    inbox = await env.rpc("tp1", "rendezvous_inbox", {});
+    msg = inbox.messages.find((m) => m.listingId === listing.listingId && m.senderKeyId === "klb1");
+    assert.equal(msg.senderAgentId, "9501");
+    assert.equal(msg.senderProof, "certificate-bound");
+    // A static token stamps its pinned agentId — senderProof "token-pinned".
+    const listing2 = await env.rpc("tp1", "rendezvous_publish_listing", {
+      title: "SFO-FCO again", summary: "desk", sealedBoxPublicKeyHex: `0x${"ab".repeat(32)}`,
+    });
+    const staticDelivered = await env.rpc("tb1", "rendezvous_send_invitation", {
+      listingId: listing2.listingId, sealedInvitation: seal,
+    });
+    assert.equal(staticDelivered.senderAgentId, "9452");
+    assert.equal(staticDelivered.senderProof, "token-pinned");
+    inbox = await env.rpc("tp1", "rendezvous_inbox", {});
+    msg = inbox.messages.find((m) => m.listingId === listing2.listingId && m.senderKeyId === "kb1");
+    assert.equal(msg.senderAgentId, "9452");
+    assert.equal(msg.senderProof, "token-pinned");
   } finally { await env.close(); }
 });

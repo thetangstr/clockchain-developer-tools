@@ -104,7 +104,9 @@ const inboxMessage = z.object({
   // LOW (N4b-3): the sender's token-pinned identity, so the provider's signer
   // can check the delivered handshake names that buyer's agentId.
   senderKeyId: z.string().min(1).max(64).optional(),
-  senderAgentId: z.string().min(1).max(32).optional(),
+  // D8: null when the sender hadn't proven an agentId yet (unbound `*`).
+  senderAgentId: z.string().min(1).max(32).nullable().optional(),
+  senderProof: z.enum(["token-pinned", "certificate-bound", "unproven-pre-bind"]).optional(),
   listingId: listingId.optional(),
   sealedPayload: sealedBox.optional(),
   body: z.unknown().optional(),
@@ -178,6 +180,10 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     outputSchema: z.object({
       delivered: z.literal(true),
       deliveredAt: isoDateTime,
+      // D8: the stamped identity and how it was proven — null/unproven when
+      // an unbound `*` principal delivered pre-handshake.
+      senderAgentId: z.string().min(1).max(32).nullable(),
+      senderProof: z.enum(["token-pinned", "certificate-bound", "unproven-pre-bind"]),
       invitationExpiresAt: isoDateTime.optional(),
       serverNonce,
     }).strict(),

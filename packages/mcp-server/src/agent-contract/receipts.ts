@@ -70,6 +70,11 @@ export const serverReceiptSchema = z.object({
     "session-key-possession",
   ]).optional(),
   /**
+   * D8 (N4b-7): rendezvous_send_invitation receipts disclose how the
+   * stamped senderAgentId was established — or that nothing was proven.
+   */
+  senderProof: z.enum(["token-pinned", "certificate-bound", "unproven-pre-bind"]).optional(),
+  /**
    * N4b-7: bind receipts record HOW the agentId was established — pinned in
    * the token at config time, or taken from the certificate's party on the
    * token's side at bind time (write-once) — and whether the session-key
@@ -135,6 +140,8 @@ export interface ReceiptFields {
   clientInfo?: { name: string; version: string };
   sourceIp?: string;
   bindAssurance?: "agentId-pinned-token" | "late-certificate-party" | "session-key-possession";
+  /** D8: rendezvous_send_invitation receipts only — sender proof kind. */
+  senderProof?: "token-pinned" | "certificate-bound" | "unproven-pre-bind";
   /** N4b-7: bind receipts only — how the agentId was established. */
   bindMode?: "static" | "late";
   /** N4b-7: bind receipts only — whether the possession statement verified. */
@@ -166,6 +173,7 @@ function draftCore(prev: ServerReceipt | null, fields: ReceiptFields): ReceiptCo
     clientInfo: fields.clientInfo,
     sourceIp: fields.sourceIp,
     bindAssurance: fields.bindAssurance,
+    ...(fields.senderProof !== undefined ? { senderProof: fields.senderProof } : {}),
     ...(fields.bindMode !== undefined ? { bindMode: fields.bindMode } : {}),
     ...(fields.bindStatement !== undefined ? { bindStatement: fields.bindStatement } : {}),
     serverNonce: fields.serverNonce ?? newServerNonce(),

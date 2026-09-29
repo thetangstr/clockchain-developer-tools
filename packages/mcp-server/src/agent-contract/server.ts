@@ -8,7 +8,7 @@ import { canonicalDigest, containsAmountField, isCapBearingCall, saltedCanonical
 import { toolsListForRole, CONTRACT_SERVER_INSTRUCTIONS } from "./tools-list.js";
 import { contractToolDef, toolDefsForRole } from "./schemas.js";
 import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
-import { newServerNonce, type ServerReceipt } from "./receipts.js";
+import { newServerNonce, type ReceiptFields, type ServerReceipt } from "./receipts.js";
 import type { ContractService, ContractPrincipal, ContractRun } from "./service.js";
 
 /**
@@ -235,7 +235,10 @@ export function buildContractServer(options: {
       principal, run, name, parsed.data, serverNonce,
     );
     outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
-    return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
+    // D8: the dispatch may carry extra server-derived receipt fields (e.g.
+    // an invitation's senderProof disclosure).
+    return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme,
+      dispatched.ok ? dispatched.receiptFields : undefined));
   });
 
   function withReceipt(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme?: "canonical" | "hmac-sha256"): CallOutcome {
@@ -247,10 +250,14 @@ export function buildContractServer(options: {
    * else on the principal's PRE-BIND chain (M1 — rendezvous, pre-bind status
    * and refused binds are still evidence).
    */
-  function recordAny(run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical"): CallOutcome {
+  function recordAny(
+    run: ContractRun | undefined, tool: string, argsDigest: string, outcome: CallOutcome,
+    serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical",
+    extra?: Pick<ReceiptFields, "senderProof">,
+  ): CallOutcome {
     return run === undefined
-      ? recordPreBindCall(tool, argsDigest, outcome, serverNonce, scheme)
-      : recordCall(run, tool, argsDigest, outcome, serverNonce, scheme);
+      ? recordPreBindCall(tool, argsDigest, outcome, serverNonce, scheme, extra)
+      : recordCall(run, tool, argsDigest, outcome, serverNonce, scheme, extra);
   }
 
   /**
@@ -273,13 +280,18 @@ export function buildContractServer(options: {
   // M1/N4b-3: pre-bind receipt — appends to the principal's ACTIVE segment;
   // segments roll by count so capacity never refuses a call, and a build
   // failure is a refusal (unreachable after the pre-dispatch gate).
-  function recordPreBindCall(tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical"): CallOutcome {
+  function recordPreBindCall(
+    tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string,
+    scheme: "canonical" | "hmac-sha256" = "canonical",
+    extra?: Pick<ReceiptFields, "senderProof">,
+  ): CallOutcome {
     const recorded = service.recordPreBind(principal, {
       tool,
       argsDigest,
       argsDigestScheme: scheme,
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
       ...responseEvidence(undefined, outcome.body),
+      ...extra,
       serverNonce,
       ...sessionFields(),
     });
@@ -289,7 +301,11 @@ export function buildContractServer(options: {
   // N3: receipt recording can REFUSE at the per-principal budget — the call's
   // outcome then becomes the RATE_LIMITED refusal (nothing is appended), so
   // one principal can never fill the chain to brick the other.
-  function recordCall(run: ContractRun, tool: string, argsDigest: string, outcome: CallOutcome, serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical"): CallOutcome {
+  function recordCall(
+    run: ContractRun, tool: string, argsDigest: string, outcome: CallOutcome,
+    serverNonce: string, scheme: "canonical" | "hmac-sha256" = "canonical",
+    extra?: Pick<ReceiptFields, "senderProof">,
+  ): CallOutcome {
     const recorded = service.recordReceipt(run, {
       tool,
       argsDigest,
@@ -297,6 +313,7 @@ export function buildContractServer(options: {
       principal: { role: principal.role, keyId: principal.keyId },
       outcome: outcome.isError ? String((outcome.body as { error?: string }).error) : "ok",
       ...responseEvidence(run, outcome.body),
+      ...extra,
       serverNonce,
       ...sessionFields(),
     });
