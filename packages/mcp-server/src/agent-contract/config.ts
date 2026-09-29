@@ -270,6 +270,15 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
   if ((levelRaw === "S" || levelRaw === "P") && !requireBindStatement) {
     return misconfigured(`CONTRACT_LEVEL=${levelRaw} requires CONTRACT_REQUIRE_BIND_STATEMENT=1`);
   }
+  // HIGH-1 (N4b-7 review): a late-binding `*` token without the statement
+  // gate can claim ANY certificate party's agentId on first bind — an
+  // identity takeover. Fail closed at startup at every level.
+  if (!requireBindStatement && tokens.some((t) => t.principal.agentId === "*")) {
+    return misconfigured(
+      "CONTRACT_AUTH_TOKENS carries a late-binding (*) entry — CONTRACT_REQUIRE_BIND_STATEMENT=1 is required " +
+      "(the certificate party's session-key signature is the only agentId proof)",
+    );
+  }
 
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");

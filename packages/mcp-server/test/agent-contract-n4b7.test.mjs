@@ -238,26 +238,45 @@ function bindReceipt(service, runId) {
   return service.receiptFeed(runId).receipts.find((r) => r.tool === "contract_bind");
 }
 
+/**
+ * A late (`*`) bind always needs a verified statement — take a fresh
+ * challenge, build the statement for this exact bind, sign with the
+ * certificate side's session key (or an override for adversarial tests).
+ */
+async function bindLate(rpc, token, { keyId, role, side, certificate, runId, priv }) {
+  const { challenge } = await rpc(token, "contract_bind_challenge", {});
+  const st = makeStatement({ runId, side, tokenKeyId: keyId, challenge });
+  return rpc(token, "contract_bind", bindArgs(certificate, role, {
+    bindStatement: st,
+    bindStatementSignature: signStatement(priv ?? sessionEvm[side].priv, st),
+  }));
+}
+
 // --- piece 1: late agentId ---------------------------------------------------
 
 test("late token binds the certificate's agentId on the token's own side", async () => {
   const env = await boot();
   try {
     const c = cert(1);
-    const buyer = await env.rpc("tlb1", "contract_bind", bindArgs(c, "buyer"));
+    // N4b-7 HIGH-1: a late bind ALWAYS carries a verified statement.
+    const buyer = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: c, runId: uuid(1),
+    });
     assert.equal(buyer.bound, true);
     assert.equal(buyer.runId, uuid(1));
     // The agentId came from the cert's INITIATOR party, not the token.
     const run = env.service.runFor(buyer.runId);
     assert.equal(run.bound.buyer.agentId, "9501");
     // ... and the responder seat picks the responder's agentId.
-    const provider = await env.rpc("tlp1", "contract_bind", bindArgs(c, "provider"));
+    const provider = await bindLate(env.rpc, "tlp1", {
+      keyId: "klp1", role: "provider", side: "responder", certificate: c, runId: uuid(1),
+    });
     assert.equal(provider.bound, true);
     assert.equal(env.service.runFor(buyer.runId).bound.provider.agentId, "9502");
-    // Receipts disclose the mode.
+    // Receipts disclose the mode + the verified statement.
     const receipt = bindReceipt(env.service, buyer.runId);
     assert.equal(receipt.bindMode, "late");
-    assert.equal(receipt.bindStatement, "absent");
+    assert.equal(receipt.bindStatement, "verified");
   } finally { await env.close(); }
 });
 
@@ -282,22 +301,60 @@ test("late binding is write-once — a different agentId or run refuses, durably
   const stateDir = mkdtempSync(path.join(tmpdir(), "contract-n4b7-"));
   const env = await boot({ stateDir });
   try {
-    const bound = await env.rpc("tlb1", "contract_bind", bindArgs(cert(4), "buyer"));
+    const bound = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(4), runId: uuid(4),
+    });
     assert.equal(bound.bound, true);
-    // Same token, a DIFFERENT handshake certificate (different run): refused.
-    const other = await env.rpc("tlb1", "contract_bind", bindArgs(cert(5, { initiator: { agentId: "9601" } }), "buyer"));
+    // Same token, a DIFFERENT handshake certificate (different run): a valid
+    // statement reaches the write-once gate → STATE_REFUSED.
+    const other = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(5, { initiator: { agentId: "9601" } }), runId: uuid(5),
+    });
     assert.equal(other.error, "STATE_REFUSED");
     // End the first run — the seat frees but the write-once record holds.
     env.service.endRun(env.service.runFor(bound.runId), "cancelled");
-    const afterEnd = await env.rpc("tlb1", "contract_bind", bindArgs(cert(6, { initiator: { agentId: "9601" } }), "buyer"));
+    const afterEnd = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(6, { initiator: { agentId: "9601" } }), runId: uuid(6),
+    });
     assert.equal(afterEnd.error, "STATE_REFUSED");
   } finally { await env.close(); }
   // Across a restart the record survives — same stateDir, fresh service.
   const env2 = await boot({ stateDir });
   try {
-    const replayed = await env2.rpc("tlb1", "contract_bind", bindArgs(cert(7, { initiator: { agentId: "9701" } }), "buyer"));
+    const replayed = await bindLate(env2.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(7, { initiator: { agentId: "9701" } }), runId: uuid(7),
+    });
     assert.equal(replayed.error, "STATE_REFUSED");
   } finally { await env2.close(); }
+});
+
+test("a late token cannot bind a certificate for someone else's agentId (HIGH-1)", async () => {
+  const env = await boot(); // no requireBindStatement — the late bind must still demand it
+  try {
+    // The cert names agentId 9999 on the initiator side — NOT this token
+    // holder's claim. Without a statement the bind is an identity takeover.
+    const c = cert(40, { initiator: { agentId: "9999" } });
+    const statementless = await env.rpc("tlb1", "contract_bind", bindArgs(c, "buyer"));
+    assert.equal(statementless.error, "BIND_STATEMENT_INVALID");
+    // A statement signed by the ATTACKER's key (not the cert party's session
+    // key) refuses too — possession of the certificate is not possession of
+    // the identity.
+    const { challenge } = await env.rpc("tlb1", "contract_bind_challenge", {});
+    const st = makeStatement({ runId: uuid(40), side: "initiator", tokenKeyId: "klb1", challenge });
+    const forged = await env.rpc("tlb1", "contract_bind",
+      bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.stranger.priv, st) }));
+    assert.equal(forged.error, "BIND_STATEMENT_INVALID");
+    // The real cert party's session key binds — legitimately, even though the
+    // token was provisioned without an agentId.
+    const honest = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: c, runId: uuid(40),
+    });
+    assert.equal(honest.bound, true);
+    assert.equal(env.service.runFor(uuid(40)).bound.buyer.agentId, "9999");
+  } finally { await env.close(); }
 });
 
 // --- piece 2: bind statement (the P-GAP, DRAFT schema) ----------------------
@@ -393,10 +450,14 @@ test("CONTRACT_REQUIRE_BIND_STATEMENT: absent refuses when required; optional at
       bindArgs(cert(16), "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
     assert.equal(bound.bound, true);
     assert.equal(bindReceipt(optional.service, bound.runId).bindStatement, "verified");
-    // ... and absence stays legal.
-    const plain = await optional.rpc("tlb3", "contract_bind", bindArgs(cert(17), "buyer"));
+    // Absence stays legal at L — but only for STATIC tokens (the token's own
+    // pin is the assurance). A late `*` token must always prove possession.
+    const plain = await optional.rpc("tb1", "contract_bind",
+      bindArgs(cert(17, { initiator: { agentId: "9452" } }), "buyer"));
     assert.equal(plain.bound, true);
     assert.equal(bindReceipt(optional.service, plain.runId).bindStatement, "absent");
+    const lateAbsent = await optional.rpc("tlb3", "contract_bind", bindArgs(cert(18), "buyer"));
+    assert.equal(lateAbsent.error, "BIND_STATEMENT_INVALID");
   } finally { await optional.close(); }
 });
 
@@ -446,3 +507,21 @@ test("CONTRACT_LEVEL S|P refuse to start without CONTRACT_REQUIRE_BIND_STATEMENT
   const bad = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: "X", CONTRACT_STATE_DIR: dir() });
   assert.equal(bad.kind, "misconfigured");
 });
+
+test("startup refuses a `*` token without CONTRACT_REQUIRE_BIND_STATEMENT=1 (HIGH-1)", () => {
+  const dir = () => mkdtempSync(path.join(tmpdir(), "contract-n4b7-cfg-"));
+  const LATE_TOKENS = "tlb1:buyer:klb1:*:initiator,tp1:provider:kp1:9453:responder";
+  // Even at L — a late-binding token with no statement gate is a takeover.
+  const refused = loadContractConfig({ ...READY_ENV, CONTRACT_AUTH_TOKENS: LATE_TOKENS, CONTRACT_STATE_DIR: dir() });
+  assert.equal(refused.kind, "misconfigured");
+  assert.match(refused.reason, /BIND_STATEMENT/i);
+  const allowed = loadContractConfig({
+    ...READY_ENV, CONTRACT_AUTH_TOKENS: LATE_TOKENS,
+    CONTRACT_REQUIRE_BIND_STATEMENT: "1", CONTRACT_STATE_DIR: dir(),
+  });
+  assert.equal(allowed.kind, "ready");
+  allowed.service.close();
+});
+
+// --- review fixes (LOW-4 / LOW-5 / MEDIUM-3) ---------------------------------
+

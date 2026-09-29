@@ -948,6 +948,19 @@ export function createContractService(options: {
     }
     const boundAgentId = lateBinding ? erc8004.agentId as string : principal.agentId;
 
+    // N4b-7 P-GAP hook (DRAFT schema): a presented statement must verify;
+    // when the deployment requires it, absence refuses too. HIGH-1 (review):
+    // a LATE (`*`) bind ALWAYS requires one, at every level — the agentId
+    // comes from the certificate, so only session-key possession proves the
+    // caller is that party; without it any verified certificate is an
+    // identity takeover. The challenge is consumed at COMMIT, not here — a
+    // refused bind leaves the nonce usable.
+    const statementPresent =
+      args.bindStatement !== undefined || args.bindStatementSignature !== undefined;
+    if ((lateBinding || options.requireBindStatement === true) && !statementPresent) {
+      return { ok: false, code: "BIND_STATEMENT_INVALID" };
+    }
+
     // N4b-7 write-once: the token keyId's first bind records {agentId, runId}
     // durably. A second bind to a different agentId or a different run is
     // refused — including a replay of another handshake's certificate.
@@ -961,17 +974,7 @@ export function createContractService(options: {
       }
     }
 
-    // N4b-7 P-GAP hook (DRAFT schema): a presented statement must verify;
-    // when the deployment requires it, absence refuses too. Every check
-    // lives in verifyBindStatement so the final schema is a one-place
-    // change. The challenge is consumed at COMMIT, not here — a refused
-    // bind leaves the nonce usable.
-    const statementPresent =
-      args.bindStatement !== undefined || args.bindStatementSignature !== undefined;
     let consumedChallenge: BindChallenge | undefined;
-    if (options.requireBindStatement === true && !statementPresent) {
-      return { ok: false, code: "BIND_STATEMENT_INVALID" };
-    }
     if (statementPresent) {
       const statement = args.bindStatement;
       const challenge = isPlainRecord(statement) && typeof statement.challenge === "string"
