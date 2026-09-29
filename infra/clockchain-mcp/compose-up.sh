@@ -325,6 +325,9 @@ read_secret CLOCKCHAIN_SIGNING_SECRET /clockchain/mcp/GATEWAY_SIGNING_SECRET
 # Timer/alarm webhook delivery: Standard-Webhooks server secret (per-owner secrets are derived
 # from it and shown to each owner at registration; this value is never disclosed).
 read_secret KEEPER_WEBHOOK_SECRET /clockchain/mcp/KEEPER_WEBHOOK_SECRET
+# Standalone Handshake webhook nudges (F4): a dedicated server secret, so its derived per-registration
+# secrets are independent of the timer/alarm keeper's. Never disclosed.
+read_secret STANDALONE_WEBHOOK_SECRET /clockchain/mcp/STANDALONE_WEBHOOK_SECRET
 read_secret AGENT_HANDSHAKE_RELEASE_PIN "$AGENT_HANDSHAKE_RELEASE_PIN_PARAM"
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE "$AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE_PARAM"
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS "$AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM"
@@ -361,6 +364,9 @@ export KEEPER_STORE_PATH=/app/state/keeper-store.json
 export KEEPER_WEBHOOK_ALLOWLIST=hooks.slack.com,webhook.site
 # Receipts and the page name the substrate honestly: this box anchors on the owned gateway.
 export CLOCKCHAIN_SUBSTRATE=anchoring-gateway
+# The endpoint written into Standalone invitations and the discovery manifest. Pinned here so it never
+# derives from a client-supplied Host / X-Forwarded-Host header.
+export STANDALONE_PUBLIC_ENDPOINT=https://mcp.clockchain.network/connect/mcp
 export ERC8004_REGISTRY_ADDRESS=0x8004A818BFB912233c491871b3d84c89A494BD9e
 
 cd "$DEPLOY_DIR"

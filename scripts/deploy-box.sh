@@ -142,7 +142,9 @@ echo "box: pre-build $(date -u +%FT%TZ)"
 "${DC[@]}" build mcp </dev/null 2>&1 | tail -1
 container_times() {
   local id
-  for id in $("${DC[@]}" ps -aq caddy host mcp </dev/null); do
+  # compose warns about every unset interpolation variable here (this shell has no compose env);
+  # the listing does not need them, so its stderr is dropped.
+  for id in $("${DC[@]}" ps -aq caddy host mcp </dev/null 2>/dev/null); do
     docker inspect -f '{{.Name}} created={{.Created}} started={{.State.StartedAt}}' "$id" </dev/null
   done
 }

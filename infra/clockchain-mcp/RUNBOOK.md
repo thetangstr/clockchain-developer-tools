@@ -27,6 +27,9 @@ Provisioning does not report success until the exact new instance is SSM
 - `/clockchain/mcp/KEEPER_WEBHOOK_SECRET` — Standard-Webhooks server secret for timer/alarm
   deliveries; per-owner secrets are derived from it and shown to each owner at registration,
   the value itself is never disclosed
+- `/clockchain/mcp/STANDALONE_WEBHOOK_SECRET` — Standard-Webhooks server secret for Standalone Handshake
+  webhook nudges (F4). Separate from the keeper's; per-registration secrets are derived from it. Never disclosed.
+  The Standalone public endpoint is pinned in compose-up.sh (`STANDALONE_PUBLIC_ENDPOINT`), not derived from Host.
 - `/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS`
