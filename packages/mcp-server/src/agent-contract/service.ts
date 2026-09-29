@@ -14,7 +14,7 @@ import type { ContractSigner } from "./envelope.js";
 import type { ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import { createBusinessOps, type BusinessOps } from "./business.js";
-import { createSimWorld, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
+import { createSimWorld, type SimFaults, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
 
 /**
  * Run-scoped contract state and the `contract_bind` decision logic
@@ -107,6 +107,8 @@ export interface ContractRun {
   readonly receiptsByPrincipal: Map<string, number>;
   /** This run's closed sim world (ticketing + payment rail). */
   simRun?: SimRun;
+  /** Config-seeded sim fault active on this run, if any (A2 evidence). */
+  simFault?: SimFaults;
   /** Signed-envelope nonces already consumed, per run (§13 rev 6.1). */
   readonly claimedNonces: Set<string>;
   mandate?: {
@@ -513,6 +515,12 @@ export function createContractService(options: {
   expectedErc8004?: { chainId: string; registryAddress: string };
   /** Closed sim world (ticketing + payment rail); one is created if absent. */
   sim?: SimWorld;
+  /**
+   * N4b-5: config-only sim fault seeds keyed by runId (A2 adverse cases).
+   * Applied only when the service creates the world (`sim` absent); an
+   * injected world carries its own seeds. Never reachable via tool args.
+   */
+  simFaults?: Readonly<Record<string, SimFaults>>;
   /** N4b-3: receipts per pre-bind chain segment before it rolls (default 256). */
   preBindSegmentMax?: number;
   /** N4b-3: retained pre-bind segments per principal (default 8). */
@@ -533,7 +541,11 @@ export function createContractService(options: {
   principals?: ReadonlyMap<string, string>;
 }): ContractService {
   const now = options.now ?? Date.now;
-  const sim = options.sim ?? createSimWorld({ now, ttlMs: options.runTtlMs ?? RUN_TTL_MS });
+  const sim = options.sim ?? createSimWorld({
+    now,
+    ttlMs: options.runTtlMs ?? RUN_TTL_MS,
+    faults: options.simFaults,
+  });
   const maxRuns = options.maxRuns ?? DEFAULT_MAX_RUNS;
   const maxReceiptsPerRun = options.maxReceiptsPerRun ?? DEFAULT_MAX_RECEIPTS_PER_RUN;
   const maxReceiptsPerPrincipal = options.maxReceiptsPerPrincipal ?? DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL;
@@ -845,6 +857,8 @@ export function createContractService(options: {
       stage: "handshake",
       runSalt: randomBytes(32).toString("hex"),
     };
+    // N4b-5: record the config-seeded sim fault on the run for evidence.
+    if (run.simRun?.faults !== undefined) run.simFault = run.simRun.faults;
     // N3: refuse (never throw) at the run cap or this principal's own budget.
     const principalReceipts = run.receiptsByPrincipal.get(principal.keyId) ?? 0;
     if (run.receipts.length >= maxReceiptsPerRun || principalReceipts >= maxReceiptsPerPrincipal) {

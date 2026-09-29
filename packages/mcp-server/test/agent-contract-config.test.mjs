@@ -145,3 +145,34 @@ test("a state dir locked by a live service is misconfigured for a second", () =>
   assert.equal(third.kind, "ready");
   third.service.close();
 });
+
+test("N4b-5: CONTRACT_SIM_FAULTS is config-only JSON keyed by runId", () => {
+  const base = {
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: TOKENS,
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
+    ...KEY_WINDOW,
+    ...stateDirEnv(),
+  };
+  // Malformed shapes → misconfigured, never a throw.
+  for (const raw of [
+    "not-json",
+    '["fare"]',
+    '{"run-x": {"issueMismatch": "seats"}}',
+    '{"run-x": {"issueMismatch": "fare", "extra": true}}',
+    '{"run-x": "fare"}',
+  ]) {
+    const cfg = loadContractConfig({ ...base, CONTRACT_SIM_FAULTS: raw });
+    assert.equal(cfg.kind, "misconfigured", raw);
+    assert.match(cfg.reason, /CONTRACT_SIM_FAULTS/);
+  }
+  // A valid seed boots ready.
+  const ok = loadContractConfig({
+    ...base,
+    ...stateDirEnv(),
+    CONTRACT_SIM_FAULTS: '{"run-a2": {"issueMismatch": "fare"}}',
+  });
+  assert.equal(ok.kind, "ready");
+  ok.service.close();
+});

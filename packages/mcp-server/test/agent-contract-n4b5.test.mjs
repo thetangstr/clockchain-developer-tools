@@ -145,3 +145,103 @@ test("the ZRH→JFK board is unchanged by the Rome rows", () => {
   // No Rome row leaks into the ZRH→JFK quote.
   assert.ok(quote.itineraries.every((i) => i.origin === "ZRH" && i.destination === "JFK"));
 });
+
+// --- Item 2: run-scoped, config-only sim fault (adverse case A2) -------------
+
+function bookPaired(run, agreementId = "agr-a2-1") {
+  const result = run.bookOrder({
+    agreementId,
+    itineraryId: "IT-QW-ONESTOP",
+    feeMinor: 10000,
+    totalMinor: 439000,
+    travelerCount: 2,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  return result;
+}
+
+test("A2 'fare' fault: issueTickets drifts the order fare; lookup exposes it", () => {
+  const { world } = makeWorld({ faults: { "run-a2-fare": { issueMismatch: "fare" } } });
+  const run = world.forRun("run-a2-fare");
+  // The applied fault is recorded on the run's sim state.
+  assert.deepEqual(run.faults, { issueMismatch: "fare" });
+
+  const booked = bookPaired(run);
+  const issued = run.issueTickets({ orderRef: booked.orderRef });
+  assert.equal(issued.ok, true);
+  assert.equal(issued.simulated, true);
+  assert.equal(issued.tickets.length, 2); // the fare fault doesn't touch travellers
+
+  const lookup = run.lookupOrder({ orderRef: booked.orderRef });
+  assert.equal(lookup.simulated, true);
+  assert.equal(lookup.status, "ISSUED");
+  // The issued order deviates from the booked total — buyer verification sees it.
+  assert.equal(lookup.totalMinor, booked.totalMinor + 9600);
+  assert.notEqual(lookup.totalMinor, booked.totalMinor);
+
+  // Deterministic: replayed issuance and re-lookup report the same deviation.
+  assert.deepEqual(run.issueTickets({ orderRef: booked.orderRef }), issued);
+  assert.equal(run.lookupOrder({ orderRef: booked.orderRef }).totalMinor, lookup.totalMinor);
+});
+
+test("A2 'travellers' fault: issueTickets emits a deviating ticket count", () => {
+  const { world } = makeWorld({ faults: { "run-a2-pax": { issueMismatch: "travellers" } } });
+  const run = world.forRun("run-a2-pax");
+  assert.deepEqual(run.faults, { issueMismatch: "travellers" });
+
+  const booked = bookPaired(run); // travelerCount 2
+  const issued = run.issueTickets({ orderRef: booked.orderRef });
+  assert.equal(issued.ok, true);
+  assert.equal(issued.simulated, true);
+  assert.equal(issued.tickets.length, 3); // one more ticket than the order booked
+
+  const lookup = run.lookupOrder({ orderRef: booked.orderRef });
+  assert.equal(lookup.simulated, true);
+  assert.equal(lookup.ticketCount, 3);
+  // The fare itself is untouched by this fault.
+  assert.equal(lookup.totalMinor, booked.totalMinor);
+});
+
+test("the fault is run-scoped: sibling runs on the same world are unaffected", () => {
+  const { world } = makeWorld({ faults: { "run-a2-only": { issueMismatch: "fare" } } });
+  const clean = world.forRun("run-clean");
+  assert.equal(clean.faults, undefined);
+
+  const booked = bookPaired(clean);
+  const issued = clean.issueTickets({ orderRef: booked.orderRef });
+  assert.equal(issued.tickets.length, 2);
+  const lookup = clean.lookupOrder({ orderRef: booked.orderRef });
+  assert.equal(lookup.totalMinor, booked.totalMinor);
+  assert.equal(lookup.ticketCount, 2);
+});
+
+test("a fault can never be enabled by a tool/agent argument", () => {
+  const { world } = makeWorld(); // no faults configured at all
+  const run = world.forRun("run-no-fault");
+  assert.equal(run.faults, undefined);
+
+  // Strict input schemas reject any injected fault key — nothing is smuggled in.
+  const badBook = run.bookOrder({
+    agreementId: "agr-evil",
+    itineraryId: "IT-QW-ONESTOP",
+    feeMinor: 10000,
+    totalMinor: 439000,
+    travelerCount: 2,
+    faults: { issueMismatch: "fare" },
+  });
+  assert.deepEqual(badBook, { ok: false, code: "REQUEST_INVALID" });
+
+  const booked = bookPaired(run);
+  const badIssue = run.issueTickets({ orderRef: booked.orderRef, issueMismatch: "fare" });
+  assert.deepEqual(badIssue, { ok: false, code: "REQUEST_INVALID" });
+  const badLookup = run.lookupOrder({ orderRef: booked.orderRef, issueMismatch: "fare" });
+  assert.equal(badLookup.status, "NOT_FOUND"); // invalid input → unknown-order observation
+
+  // The order issued normally — no deviation leaked in through the arguments.
+  const issued = run.issueTickets({ orderRef: booked.orderRef });
+  assert.equal(issued.tickets.length, 2);
+  const lookup = run.lookupOrder({ orderRef: booked.orderRef });
+  assert.equal(lookup.totalMinor, booked.totalMinor);
+  assert.equal(lookup.ticketCount, 2);
+  assert.equal(run.faults, undefined);
+});

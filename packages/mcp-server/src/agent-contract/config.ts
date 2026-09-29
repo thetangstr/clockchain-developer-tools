@@ -4,6 +4,7 @@ import path from "node:path";
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
 import { createContractService, type ContractService } from "./service.js";
+import type { SimFaults } from "./sim/index.js";
 import type { ContractSigner } from "./envelope.js";
 import type { IncomingHttpHeaders } from "node:http";
 import type { ContractPrincipal } from "./service.js";
@@ -215,6 +216,38 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     return misconfigured("CONTRACT_VERIFIER_TOKEN must differ from CONTRACT_OBSERVER_TOKEN");
   }
 
+  // N4b-5: config-only sim fault seeds (A2 adverse cases) — JSON object
+  // `{"<runId>": {"issueMismatch": "fare"|"travellers"}}`. This env is the
+  // ONLY way a fault can be seeded over the served surface; there is no
+  // tool/agent path by design.
+  const simFaultsRaw = (env.CONTRACT_SIM_FAULTS ?? "").trim();
+  let simFaults: Record<string, SimFaults> | undefined;
+  if (simFaultsRaw !== "") {
+    try {
+      const parsed: unknown = JSON.parse(simFaultsRaw);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("want an object keyed by runId");
+      }
+      simFaults = {};
+      for (const [runId, fault] of Object.entries(parsed)) {
+        if (typeof runId !== "string" || runId.length === 0 || runId.length > 128) {
+          throw new Error("runId keys must be 1..128 chars");
+        }
+        const issueMismatch = (fault as { issueMismatch?: unknown }).issueMismatch;
+        if (
+          typeof fault !== "object" || fault === null || Array.isArray(fault) ||
+          !Object.keys(fault).every((k) => k === "issueMismatch") ||
+          (issueMismatch !== undefined && issueMismatch !== "fare" && issueMismatch !== "travellers")
+        ) {
+          throw new Error('want {"issueMismatch": "fare"|"travellers"} per runId');
+        }
+        simFaults[runId] = fault as SimFaults;
+      }
+    } catch (err) {
+      return misconfigured(`CONTRACT_SIM_FAULTS: ${(err as Error).message}`);
+    }
+  }
+
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "4096");
@@ -250,6 +283,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       principals,
       // N4b-4: the service refuses to sign once the published window closes.
       signerValidUntilMs: keyValidUntilMs,
+      // N4b-5: config-only sim fault seeds (A2) — never settable by a tool.
+      ...(simFaults !== undefined ? { simFaults } : {}),
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);

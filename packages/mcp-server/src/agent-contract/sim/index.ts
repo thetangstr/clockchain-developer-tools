@@ -12,6 +12,8 @@ export {
   type SimOrderStatus,
   type SimFailureCode,
   type SimRefusal,
+  type SimFaults,
+  ISSUE_MISMATCH_FARE_DELTA_MINOR,
 } from "./ticketing-sim.js";
 export {
   createSimPaymentRail,

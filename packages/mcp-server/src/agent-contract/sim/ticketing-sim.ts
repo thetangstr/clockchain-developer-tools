@@ -110,6 +110,23 @@ export interface SimCancelResult {
   simulated: true;
 }
 
+/**
+ * Adverse-case injection (A2), seeded per runId by server config or the
+ * l-stack — never by a tool call (every input schema is `.strict()`, so an
+ * injected key is just REQUEST_INVALID). `issueMismatch` makes
+ * `issueTickets` deviate from the booked order; `lookupOrder` then exposes
+ * the deviation so buyer verification can detect it:
+ *   "fare"       → the issued order's fareMinor/totalMinor drift by
+ *                  ISSUE_MISMATCH_FARE_DELTA_MINOR
+ *   "travellers" → one more ticket is issued than the order's travelerCount
+ */
+export interface SimFaults {
+  issueMismatch?: "fare" | "travellers";
+}
+
+/** Deterministic fare drift applied by `issueMismatch: "fare"` (minor units). */
+export const ISSUE_MISMATCH_FARE_DELTA_MINOR = 9_600;
+
 export interface SimRun {
   quote(input: unknown): SimQuoteResult;
   bookOrder(input: unknown): SimBookResult | SimRefusal;
@@ -118,6 +135,8 @@ export interface SimRun {
   cancelOrder(input: unknown): SimCancelResult | SimRefusal;
   /** The deterministic offer board — canonical rows plus quoted generated ones. */
   itinerary(itineraryId: string): SimItinerary | undefined;
+  /** Config-seeded fault active on this run (undefined when none). */
+  readonly faults: SimFaults | undefined;
   readonly payments: SimPaymentRail;
 }
 
@@ -272,7 +291,7 @@ interface RunEntry {
 
 function createSimRun(
   runId: string,
-  deps: { now: () => number },
+  deps: { now: () => number; faults?: SimFaults },
 ): SimRun {
   const now = deps.now;
   const draw = mulberry32(seedFromName(`agent-contract-sim:${runId}`));
@@ -390,7 +409,17 @@ function createSimRun(
       if (order === undefined) return { ok: false, code: "ORDER_NOT_FOUND" };
       if (order.status !== "PENDING") return { ok: false, code: "ORDER_NOT_PENDING" };
 
-      const tickets: SimTicket[] = Array.from({ length: order.travelerCount }, (_, i) => ({
+      // A2 fault: the issued record deviates from the booked order. The
+      // mutation lands on the order record so `lookupOrder` exposes it to
+      // buyer verification.
+      if (deps.faults?.issueMismatch === "fare") {
+        order.fareMinor += ISSUE_MISMATCH_FARE_DELTA_MINOR;
+        order.totalMinor += ISSUE_MISMATCH_FARE_DELTA_MINOR;
+      }
+      const ticketCount =
+        deps.faults?.issueMismatch === "travellers" ? order.travelerCount + 1 : order.travelerCount;
+
+      const tickets: SimTicket[] = Array.from({ length: ticketCount }, (_, i) => ({
         travelerId: `PAX-${i + 1}`,
         ticketNumber: `TKT${Array.from({ length: 13 }, () => Math.floor(draw() * 10)).join("")}`,
       }));
@@ -455,6 +484,7 @@ function createSimRun(
     itinerary(itineraryId) {
       return knownItineraries.get(itineraryId);
     },
+    faults: deps.faults,
     payments: createSimPaymentRail({ runId, now }),
   };
 }
@@ -463,9 +493,15 @@ export function createSimWorld(options: {
   now?: () => number;
   /** Post-terminal-state retention (LLD §3: 24 h). */
   ttlMs?: number;
+  /**
+   * Config-only fault seeds keyed by runId (A2 adverse cases). Supplied by
+   * server config or the l-stack — there is deliberately no tool/agent path.
+   */
+  faults?: Readonly<Record<string, SimFaults>>;
 }): SimWorld {
   const now = options.now ?? Date.now;
   const ttlMs = options.ttlMs ?? 24 * 60 * 60 * 1000;
+  const faults = options.faults ?? {};
   const entries = new Map<string, RunEntry>();
   const runIdSchema = z.string().min(1).max(128);
 
@@ -487,7 +523,7 @@ export function createSimWorld(options: {
       runIdSchema.parse(runId);
       const existing = getRun(runId);
       if (existing !== undefined) return existing;
-      const entry: RunEntry = { sim: createSimRun(runId, { now }), terminalAtMs: null };
+      const entry: RunEntry = { sim: createSimRun(runId, { now, faults: faults[runId] }), terminalAtMs: null };
       entries.set(runId, entry);
       return entry.sim;
     },
