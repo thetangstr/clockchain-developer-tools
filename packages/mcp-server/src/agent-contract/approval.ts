@@ -62,14 +62,38 @@ export function verifyApprovalRecord(fields: {
   expectedPolicyDigest: string;
   nowMs?: number;
 }): boolean {
+  return checkApprovalRecord(fields) === "allow";
+}
+
+/**
+ * N4b-8 (gap 5): like {@link verifyApprovalRecord} but returns the signed
+ * DECISION — `"allow"`, `"deny"`, or `null` when any check fails. A `deny`
+ * is a fully valid, cryptographically bound policy verdict (the sig digest
+ * covers `decision`); the caller turns it into the terminal
+ * `blocked_by_policy`, not into APPROVAL_INVALID.
+ */
+export function checkApprovalRecord(fields: {
+  approval: ApprovalRecord;
+  runId: string;
+  role: "buyer" | "provider";
+  tool: string;
+  action: string;
+  nonce: string;
+  envelopeDigest: string;
+  expiresAt: string;
+  approvalKey: { keyId: string; publicKeyHex: string };
+  expectedPolicyDigest: string;
+  nowMs?: number;
+}): "allow" | "deny" | null {
   const a = fields.approval;
-  if (a.role !== fields.role || a.action !== fields.action || a.decision !== "allow") return false;
-  if (a.approverKeyId !== fields.approvalKey.keyId) return false;
+  if (a.role !== fields.role || a.action !== fields.action) return null;
+  if (a.decision !== "allow" && a.decision !== "deny") return null;
+  if (a.approverKeyId !== fields.approvalKey.keyId) return null;
   const expiresAtMs = Date.parse(fields.expiresAt);
   const nowMs = fields.nowMs ?? Date.now();
   // `ts` must fall within the envelope's validity: not after it expires and
   // not in the future relative to the server's own clock.
-  if (!Number.isFinite(expiresAtMs) || a.ts > expiresAtMs || a.ts > nowMs) return false;
+  if (!Number.isFinite(expiresAtMs) || a.ts > expiresAtMs || a.ts > nowMs) return null;
   if (
     a.digest !== computeApprovalDigest({
       runId: fields.runId,
@@ -78,15 +102,16 @@ export function verifyApprovalRecord(fields: {
       envelopeDigest: fields.envelopeDigest,
       expiresAt: fields.expiresAt,
     })
-  ) return false;
-  if (a.policyDigest !== fields.expectedPolicyDigest) return false;
+  ) return null;
+  if (a.policyDigest !== fields.expectedPolicyDigest) return null;
   const sigDigest = computeApprovalSigDigest({
     runId: fields.runId,
     role: fields.role,
     record: { role: a.role, action: a.action, digest: a.digest, policyDigest: a.policyDigest, decision: a.decision, ts: a.ts, approverKeyId: a.approverKeyId },
   });
   const recovered = eip191RecoverPublicKey(Buffer.from(sigDigest.slice(2), "hex"), a.signature);
-  if (recovered === null) return false;
+  if (recovered === null) return null;
   const expected = normalizePublicKeyHex(fields.approvalKey.publicKeyHex);
-  return expected !== null && "0x" + Buffer.from(recovered).toString("hex") === expected;
+  if (expected === null || "0x" + Buffer.from(recovered).toString("hex") !== expected) return null;
+  return a.decision;
 }

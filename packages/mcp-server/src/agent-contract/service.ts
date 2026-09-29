@@ -79,6 +79,23 @@ export type ContractStage =
   | "rendezvous" | "handshake" | "bound" | "mandated" | "negotiating"
   | "agreed" | "booked" | "verified" | "settled" | "terminal";
 
+/**
+ * N4b-8 (gap 4): the outcome of anchoring one subject (the agreement digest
+ * or the terminal receipt-chain head) via the tsa_issue-backed anchor.
+ * "anchoring" while in flight; a failure is recorded here and surfaced in
+ * contract_status — never silent.
+ */
+export interface AnchorRunState {
+  status: "anchoring" | "anchored" | "failed";
+  /** The anchored subject — agreementDigest or the terminal chain head. */
+  digest: string;
+  /** `tsa:<commitmentId>` when anchored. */
+  anchorId?: string;
+  eventHash?: string;
+  ledger?: { ledgerId: string; blockHeight: string | null; time: string | null; status: string };
+  error?: string;
+}
+
 export interface OfferRecord {
   offerId: string;
   payload: Record<string, unknown>;
@@ -1374,39 +1391,53 @@ export function createContractService(options: {
     claimMandate,
     endRun,
     allowLegacySealV2: options.allowLegacySealV2 === true,
+    // N4b-8 (gap 4): business fires the anchor at agreement formation;
+    // the service owns the async call + the outcome receipt.
+    ...(options.anchor !== undefined ? { anchorRun: fireAnchor } : {}),
   });
+
+  /**
+   * The shared receipt-append used by the public recordReceipt AND by async
+   * server-side evidence writers (telemetry_close outcome, anchor outcome).
+   * Same rules: refuse at caps or when signing is closed — never throw.
+   */
+  const recordRunReceipt = (
+    run: ContractRun,
+    fields: Omit<ReceiptFields, "runId">,
+  ): { ok: true; receipt: ServerReceipt } | { ok: false; code: ContractRefusalCode } => {
+    evictEnded();
+    if (!signingOpen()) return { ok: false, code: "CONTRACT_UNAVAILABLE" };
+    const count = run.receiptsByPrincipal.get(fields.principal.keyId) ?? 0;
+    if (run.receipts.length >= maxReceiptsPerRun || count >= maxReceiptsPerPrincipal) {
+      return { ok: false, code: "RATE_LIMITED" };
+    }
+    // N4b-3: a receipt that can't be built is a refusal, never a throw —
+    // the caller already ran this validation pre-dispatch, so this branch
+    // should be unreachable; it exists so a post-dispatch surprise can
+    // never become a 500.
+    let receipt: ServerReceipt;
+    try {
+      receipt = makeReceipt(
+        run.receipts.at(-1) ?? null,
+        // N4b-6: every receipt on a fault-seeded run carries the marker —
+        // server-derived evidence, never caller-supplied.
+        { ...fields, runId: run.runId, simFault: run.simFault, ts: now() },
+        options.signer,
+      );
+    } catch {
+      return { ok: false, code: "CONTRACT_UNAVAILABLE" };
+    }
+    run.receipts.push(receipt);
+    run.receiptsByPrincipal.set(fields.principal.keyId, count + 1);
+    return { ok: true, receipt };
+  };
 
   return {
     bind,
     issueBindChallenge,
     business,
-    recordReceipt(run, fields) {
-      evictEnded();
-      if (!signingOpen()) return { ok: false, code: "CONTRACT_UNAVAILABLE" };
-      const count = run.receiptsByPrincipal.get(fields.principal.keyId) ?? 0;
-      if (run.receipts.length >= maxReceiptsPerRun || count >= maxReceiptsPerPrincipal) {
-        return { ok: false, code: "RATE_LIMITED" };
-      }
-      // N4b-3: a receipt that can't be built is a refusal, never a throw —
-      // the caller already ran this validation pre-dispatch, so this branch
-      // should be unreachable; it exists so a post-dispatch surprise can
-      // never become a 500.
-      let receipt: ServerReceipt;
-      try {
-        receipt = makeReceipt(
-          run.receipts.at(-1) ?? null,
-          // N4b-6: every receipt on a fault-seeded run carries the marker —
-          // server-derived evidence, never caller-supplied.
-          { ...fields, runId: run.runId, simFault: run.simFault, ts: now() },
-          options.signer,
-        );
-      } catch {
-        return { ok: false, code: "CONTRACT_UNAVAILABLE" };
-      }
-      run.receipts.push(receipt);
-      run.receiptsByPrincipal.set(fields.principal.keyId, count + 1);
-      return { ok: true, receipt };
-    },
+    anchorConfigured: options.anchor !== undefined,
+    recordReceipt: recordRunReceipt,
     checkReceiptEvidence(run, principal, fields) {
       evictEnded(); // same hygiene as the old canReceipt gate
       // N4b-4: past the key's validUntil nothing can be signed — no receipt,

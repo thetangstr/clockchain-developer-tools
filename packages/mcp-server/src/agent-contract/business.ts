@@ -9,7 +9,7 @@ import {
 import {
   eip191RecoverPublicKey, publicKeyToAddress, verifyRoleSignature,
 } from "./eip191.js";
-import { verifyApprovalRecord } from "./approval.js";
+import { checkApprovalRecord, verifyApprovalRecord } from "./approval.js";
 import { sealedBoxSchema, type ApprovalRecord, type ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import type {
@@ -936,29 +936,52 @@ export function createBusinessOps(options: {
       case "booking_execute": {
         const agreement = liveRun.agreement;
         if (agreement === undefined) return refuse("STATE_REFUSED");
-        if (liveRun.booking !== undefined) return refuse("STATE_REFUSED");
+        if (liveRun.booking !== undefined) {
+          // N4b-8 (gap 6): idempotent replay — the SAME call (same envelope,
+          // signature and approval, digested as one request) returns the
+          // recorded result verbatim, like booking_cancel_submit: never a
+          // nonce error, never a second booking. A different approval or
+          // args is refused.
+          const replayDigest = canonicalDigest({
+            envelope: args.envelope,
+            signatureHex: args.signatureHex,
+            approval: args.approval,
+          });
+          if (replayDigest !== liveRun.booking.requestDigest) return refuse("STATE_REFUSED");
+          return ok({
+            orderRef: liveRun.booking.orderRef,
+            pnr: liveRun.booking.pnr,
+            tickets: liveRun.booking.tickets,
+            simulated: true,
+            serverNonce,
+          });
+        }
         const submitted = verifySubmission(liveRun, "provider", "booking_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
         if (!samePayload(submitted.envelope.payload, bookingPayload(agreement))) {
           return refuse("ENVELOPE_INVALID");
         }
         const approvalKey = liveRun.bound.provider!.approvalKey;
-        if (
-          !verifyApprovalRecord({
-            approval: args.approval as ApprovalRecord,
-            runId: liveRun.runId,
-            role: "provider",
-            tool: "booking_execute",
-            action: "booking",
-            nonce: submitted.envelope.nonce,
-            envelopeDigest: canonicalDigest(submitted.envelope),
-            expiresAt: submitted.envelope.expiresAt,
-            approvalKey,
-            expectedPolicyDigest: options.policyDigests.provider,
-            nowMs: now(),
-          })
-        ) {
-          return refuse("APPROVAL_INVALID");
+        const decision = checkApprovalRecord({
+          approval: args.approval as ApprovalRecord,
+          runId: liveRun.runId,
+          role: "provider",
+          tool: "booking_execute",
+          action: "booking",
+          nonce: submitted.envelope.nonce,
+          envelopeDigest: canonicalDigest(submitted.envelope),
+          expiresAt: submitted.envelope.expiresAt,
+          approvalKey,
+          expectedPolicyDigest: options.policyDigests.provider,
+          nowMs: now(),
+        });
+        if (decision === null) return refuse("APPROVAL_INVALID");
+        if (decision === "deny") {
+          // N4b-8 (gap 5): a cryptographically VALID deny is a policy verdict —
+          // the run ends blocked_by_policy: terminal, receipted, and (wired)
+          // it fires the close emitter. No booking is attempted.
+          options.endRun(liveRun, "blocked_by_policy", principal);
+          return refuse("POLICY_DENIED");
         }
         const booked = liveRun.simRun!.bookOrder({
           agreementId: agreement.agreementId,
@@ -974,6 +997,12 @@ export function createBusinessOps(options: {
           pnr: issued.pnr,
           tickets: issued.tickets,
           bookedAt: iso(now()),
+          // N4b-8 (gap 6): the request digest a replay must reproduce.
+          requestDigest: canonicalDigest({
+            envelope: args.envelope,
+            signatureHex: args.signatureHex,
+            approval: args.approval,
+          }),
         };
         liveRun.stage = "booked";
         return ok({
@@ -1045,22 +1074,25 @@ export function createBusinessOps(options: {
         ) {
           return refuse("ENVELOPE_INVALID");
         }
-        if (
-          !verifyApprovalRecord({
-            approval: args.approval as ApprovalRecord,
-            runId: liveRun.runId,
-            role: "provider",
-            tool: "booking_cancel_submit",
-            action: "booking",
-            nonce: submitted.envelope.nonce,
-            envelopeDigest: canonicalDigest(submitted.envelope),
-            expiresAt: submitted.envelope.expiresAt,
-            approvalKey: liveRun.bound.provider!.approvalKey,
-            expectedPolicyDigest: options.policyDigests.provider,
-            nowMs: now(),
-          })
-        ) {
-          return refuse("APPROVAL_INVALID");
+        const cancelDecision = checkApprovalRecord({
+          approval: args.approval as ApprovalRecord,
+          runId: liveRun.runId,
+          role: "provider",
+          tool: "booking_cancel_submit",
+          action: "booking",
+          nonce: submitted.envelope.nonce,
+          envelopeDigest: canonicalDigest(submitted.envelope),
+          expiresAt: submitted.envelope.expiresAt,
+          approvalKey: liveRun.bound.provider!.approvalKey,
+          expectedPolicyDigest: options.policyDigests.provider,
+          nowMs: now(),
+        });
+        if (cancelDecision === null) return refuse("APPROVAL_INVALID");
+        if (cancelDecision === "deny") {
+          // N4b-8 (gap 5): a signed deny on the cancel gate refuses the cancel
+          // but does NOT end the run — cancel can fire post-terminal
+          // (verification_failed), and a second endRun would double-close.
+          return refuse("POLICY_DENIED");
         }
         // The order ref comes from the server's own booking record — nothing
         // consequential is agent-selected.
@@ -1196,22 +1228,25 @@ export function createBusinessOps(options: {
         const cap = capCheck(liveRun, expected.amountMinor as number, expected.currency as string, liveRun.agreement!.itineraryId);
         if (cap !== null) return cap;
         const approvalKey = liveRun.bound.buyer!.approvalKey;
-        if (
-          !verifyApprovalRecord({
-            approval: args.approval as ApprovalRecord,
-            runId: liveRun.runId,
-            role: "buyer",
-            tool: "settlement_authorize",
-            action: "settlement",
-            nonce: submitted.envelope.nonce,
-            envelopeDigest: canonicalDigest(submitted.envelope),
-            expiresAt: submitted.envelope.expiresAt,
-            approvalKey,
-            expectedPolicyDigest: options.policyDigests.buyer,
-            nowMs: now(),
-          })
-        ) {
-          return refuse("APPROVAL_INVALID");
+        const settleDecision = checkApprovalRecord({
+          approval: args.approval as ApprovalRecord,
+          runId: liveRun.runId,
+          role: "buyer",
+          tool: "settlement_authorize",
+          action: "settlement",
+          nonce: submitted.envelope.nonce,
+          envelopeDigest: canonicalDigest(submitted.envelope),
+          expiresAt: submitted.envelope.expiresAt,
+          approvalKey,
+          expectedPolicyDigest: options.policyDigests.buyer,
+          nowMs: now(),
+        });
+        if (settleDecision === null) return refuse("APPROVAL_INVALID");
+        if (settleDecision === "deny") {
+          // N4b-8 (gap 5): a signed deny on the settlement gate is the same
+          // policy verdict — the run ends blocked_by_policy.
+          options.endRun(liveRun, "blocked_by_policy", principal);
+          return refuse("POLICY_DENIED");
         }
         const transfer = liveRun.simRun!.payments.execute({
           agreementId: expected.agreementId,

@@ -20,6 +20,9 @@ export const CONTRACT_REFUSAL_CODES = Object.freeze([
   "NONCE_REUSED",
   "SIGNATURE_INVALID",
   "APPROVAL_INVALID",
+  // N4b-8 (gap 5): a VALID signed approval carrying decision:"deny" — the
+  // policy refused; the run ends blocked_by_policy (terminal).
+  "POLICY_DENIED",
   "LISTING_UNAVAILABLE",
   "SEAT_TAKEN",
   "ALREADY_TERMINAL",

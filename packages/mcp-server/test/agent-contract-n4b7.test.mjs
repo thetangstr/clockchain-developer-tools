@@ -514,7 +514,11 @@ test("CONTRACT_LEVEL S|P refuse to start without CONTRACT_REQUIRE_BIND_STATEMENT
   for (const level of ["S", "P"]) {
     const missing = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: level, CONTRACT_STATE_DIR: dir() });
     assert.equal(missing.kind, "misconfigured", `level ${level} without the flag`);
-    const set = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: level, CONTRACT_REQUIRE_BIND_STATEMENT: "1", CONTRACT_STATE_DIR: dir() });
+    // N4b-8 gap 3: S|P also require TELEMETRY_CLOSE_URL (terminal close sink).
+    const set = loadContractConfig({
+      ...READY_ENV, CONTRACT_LEVEL: level, CONTRACT_REQUIRE_BIND_STATEMENT: "1",
+      TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083", CONTRACT_STATE_DIR: dir(),
+    });
     assert.equal(set.kind, "ready", `level ${level} with the flag`);
     set.service.close();
   }
