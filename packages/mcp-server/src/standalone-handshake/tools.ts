@@ -169,7 +169,22 @@ export function registerStandaloneTools(server: any, invoke: (name: string, args
         const body = error instanceof StandaloneAdmissionError
           ? { error: error.reason, retryable: false, ...stamp }
           : retryable
-            ? { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000, ...stamp }
+            ? definition.name === "handshake_next"
+              // An agent loops on `action`: a temporary outage of handshake_next itself (e.g. the
+              // clock syncing just after a restart) is answered as an ordinary wait, never as an
+              // error body without an action that would stop the loop.
+              ? {
+                action: "wait",
+                reason: "HANDSHAKE_TEMPORARILY_UNAVAILABLE",
+                retryable: true,
+                retryAfterMs: 5000,
+                status: "server restarting; retry shortly",
+                guidance: "The server is briefly unavailable (for example just after a restart). Call handshake_next again with the same access after retryAfterMs.",
+                nextStep: "Call handshake_next again after retryAfterMs.",
+                tellYourUser: "The handshake server is briefly unavailable; I will keep checking. Nothing is needed from you.",
+                ...stamp,
+              }
+              : { error: "HANDSHAKE_TEMPORARILY_UNAVAILABLE", retryable: true, retryAfterMs: 5000, ...stamp }
             : { error: "STANDALONE_HANDSHAKE_UNAVAILABLE", retryable: false, ...stamp };
         return retryable
           ? { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body }

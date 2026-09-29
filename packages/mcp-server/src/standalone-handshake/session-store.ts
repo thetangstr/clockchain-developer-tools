@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, ftruncateSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableStateError, type DurableJsonFile } from "../handshake-core/durable-store.js";
@@ -187,12 +187,28 @@ export function createStandaloneSessionStore(options: {
     renameSync(temporary, path);
   }
 
+  // Reads a session's message log. Every appended line ends in "\n" and is fsync'd before the
+  // send is acknowledged, so anything after the last newline is a torn, never-acknowledged
+  // append from a crash: it is cut off (and the cut fsync'd) so the next append starts on a
+  // fresh line. Any bad line before that is corruption.
   function loadMessageLog(sessionId: string): any[] {
     const path = messageLogPath(sessionId);
     if (path === undefined || !existsSync(path)) return [];
     if ((statSync(path).mode & 0o077) !== 0) throw new DurableStateError(`${path} is readable by others`);
+    const raw = readFileSync(path);
+    const complete = raw.lastIndexOf(0x0a) + 1;
+    if (complete < raw.length) {
+      const fd = openSync(path, "r+");
+      try {
+        ftruncateSync(fd, complete);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      console.error(JSON.stringify({ event: "handshake_state_log_truncated", sessionId, droppedBytes: raw.length - complete }));
+    }
     const messages: any[] = [];
-    const lines = readFileSync(path, "utf8").split("\n");
+    const lines = raw.subarray(0, complete).toString("utf8").split("\n");
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
       if (line === "") continue;
@@ -201,8 +217,6 @@ export function createStandaloneSessionStore(options: {
         if (typeof message?.seq !== "number" || message.seq !== messages.length + 1) throw new Error("out of sequence");
         messages.push(Object.freeze(message));
       } catch {
-        // Only a torn final line (a crash mid-append) is tolerated; anything else is corruption.
-        if (index >= lines.length - 2) break;
         throw new DurableStateError(`${path} is corrupt at line ${index + 1}`);
       }
     }
@@ -837,7 +851,15 @@ export function createStandaloneSessionStore(options: {
       session.messages.push(message);
       startTurn(session);
       pushEvent(session, { type: "message", seq: message.seq, kind, fromRole: role, bodyDigest: message.bodyDigest });
-      persist(session);
+      // The fsync'd log line IS the commit: the send succeeds even if the snapshot write fails
+      // (a retry would duplicate the message). The snapshot is retried on the coalesced timer
+      // and by the next change; at boot the log is authoritative for seq and the transcript.
+      try {
+        persist(session);
+      } catch {
+        console.error(JSON.stringify({ event: "handshake_state_snapshot_deferred", sessionId }));
+        try { persist(session, "soon"); } catch { /* retried by the next change */ }
+      }
       return message;
     },
 

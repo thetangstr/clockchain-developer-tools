@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { chmodSync, copyFileSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -388,4 +388,76 @@ test("boot restores sessions in creation order, removes stale temp files, and re
   writeFileSync(main, "garbage", { mode: 0o600 });
   ({ coordinator } = await w.boot());
   assert.equal(coordinator.store.sessionIds().includes(ids[0]), false);
+});
+
+test("while the clock syncs after a crash, handshake_next answers an ordinary wait (other tools keep their retryable error)", async () => {
+  const w = world();
+  let { call } = await w.boot();
+  const invite = await call("handshake_invite", { ...validTerms(), readiness: await w.readiness(call, "initiator") });
+  const accept = await call("handshake_accept_invitation", { invitation: invite.invitation, readiness: await w.readiness(call, "responder") });
+  await w.consent(call, "initiator", invite.roleAccess);
+  await w.consent(call, "responder", accept.roleAccess);
+  await call("channel_open", { access: invite.roleAccess });
+  ({ call } = await w.boot({ unsyncedMs: 60_000 }));
+  const next = await call("handshake_next", { access: accept.roleAccess, waitMs: 0 });
+  assert.equal(next.action, "wait");
+  assert.equal(next.reason, "HANDSHAKE_TEMPORARILY_UNAVAILABLE");
+  assert.equal(next.retryAfterMs, 5000);
+  assert.equal(next.status, "server restarting; retry shortly");
+  assert.equal(next.nextStep, "Call handshake_next again after retryAfterMs.");
+  assert.equal(typeof next.tellYourUser, "string");
+  assert.equal(next.error, undefined);
+  const send = await call("channel_send", { access: invite.roleAccess, kind: "question", body: "hello?" });
+  assert.deepEqual([send.error, send.retryable], ["HANDSHAKE_TEMPORARILY_UNAVAILABLE", true]);
+});
+
+async function openChannel(w, call) {
+  const invite = await call("handshake_invite", { ...validTerms(), readiness: await w.readiness(call, "initiator") });
+  const accept = await call("handshake_accept_invitation", { invitation: invite.invitation, readiness: await w.readiness(call, "responder") });
+  await w.consent(call, "initiator", invite.roleAccess);
+  await w.consent(call, "responder", accept.roleAccess);
+  await call("channel_open", { access: invite.roleAccess });
+  return { sessionId: invite.sessionId, a: invite.roleAccess, b: accept.roleAccess };
+}
+
+test("a torn final log line is cut at restore, so later appends and reboots keep every good message", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const w = world();
+  let { call } = await w.boot();
+  const { sessionId, a, b } = await openChannel(w, call);
+  await call("channel_send", { access: a, kind: "question", body: "one" });
+  await call("channel_send", { access: b, kind: "proposal", body: "two" });
+  const log = join(w.dir, "sessions", `${sessionId}.messages.jsonl`);
+  appendFileSync(log, '{"sessionId":"torn","seq":3,"kin'); // a crash mid-append
+  ({ call } = await w.boot());
+  assert.ok(errors.mock.calls.some((c) => { try { return JSON.parse(c.arguments[0]).event === "handshake_state_log_truncated"; } catch { return false; } }));
+  assert.ok(readFileSync(log, "utf8").endsWith("\n"));
+  assert.equal((await call("channel_send", { access: a, kind: "question", body: "three" })).seq, 3);
+  ({ call } = await w.boot());
+  const read = await call("handshake_next", { access: b, waitMs: 0 });
+  assert.deepEqual(read.messages.map((message) => [message.seq, message.body]), [[1, "one"], [3, "three"]]);
+});
+
+test("a snapshot failure after the log append still commits the send: success, no duplicate, correct after reboot", async (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const w = world();
+  let { call } = await w.boot();
+  const { sessionId, a, b } = await openChannel(w, call);
+  await call("channel_send", { access: a, kind: "question", body: "one" });
+  // Make the next snapshot write fail: its backup path is occupied by a directory.
+  const blocker = join(w.dir, "sessions", `${sessionId}.json.bak`);
+  rmSync(blocker, { force: true });
+  mkdirSync(join(blocker, "x"), { recursive: true });
+  const sent = await call("channel_send", { access: b, kind: "proposal", body: "two" });
+  assert.equal(sent.error, undefined, JSON.stringify(sent));
+  assert.equal(sent.seq, 2);
+  assert.ok(errors.mock.calls.some((c) => { try { return JSON.parse(c.arguments[0]).event === "handshake_state_snapshot_deferred"; } catch { return false; } }), "the snapshot write really failed");
+  rmSync(blocker, { recursive: true, force: true });
+  const log = join(w.dir, "sessions", `${sessionId}.messages.jsonl`);
+  assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 2, "committed once");
+  ({ call } = await w.boot()); // crash before any snapshot retry
+  const read = await call("handshake_next", { access: a, waitMs: 0 });
+  assert.deepEqual(read.messages.map((message) => [message.seq, message.body]), [[2, "two"]]);
+  assert.equal((await call("channel_send", { access: a, kind: "question", body: "three" })).seq, 3);
+  assert.equal(readFileSync(log, "utf8").trim().split("\n").length, 3);
 });
