@@ -331,7 +331,7 @@ test("tool failures surface reason codes and constants only, and log structured 
     assert.deepEqual(
       warnings.map((line) => JSON.parse(line)),
       [
-        { event: "standalone_handshake_tool_failure", tool: "handshake_status", errorName: "StandaloneAdmissionError" },
+        { event: "standalone_handshake_tool_failure", tool: "handshake_status", errorName: "StandaloneAdmissionError", reason: "SCOPE_VIOLATION" },
         { event: "standalone_handshake_tool_failure", tool: "consent_sign", errorName: "Error" },
         { event: "standalone_handshake_tool_failure", tool: "channel_send", errorName: "TimeoutError" },
       ],

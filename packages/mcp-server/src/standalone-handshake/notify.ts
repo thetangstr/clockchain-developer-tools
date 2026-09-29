@@ -67,7 +67,12 @@ export function createStandaloneNotifier(options: StandaloneNotifierOptions) {
       } catch {
         throw new StandaloneAdmissionError("WEBHOOK_REFUSED");
       }
-      return { webhookUrl: url, secret: deriveOwnerSecret(serverSecret, `standalone-handshake:${input.sessionId}:${input.role}:${url}`) };
+      return { webhookUrl: url, secret: this.secretFor(input.sessionId, input.role, url) };
+    },
+
+    /** The per-registration signing secret: derived, so it is never stored at rest. */
+    secretFor(sessionId: string, role: string, webhookUrl: string): string {
+      return deriveOwnerSecret(serverSecret, `standalone-handshake:${sessionId}:${role}:${webhookUrl}`);
     },
 
     /** One signed POST; never throws. The notice carries no bodies, secrets or URLs. */
