@@ -221,9 +221,22 @@ export function buildContractServer(options: {
       if (run === undefined) {
         // No run yet — the caller is still in discovery/handshake. The call
         // lands on the principal's pre-bind chain (M1).
-        outcome = ok({ stage: "rendezvous", terminalState: null, telemetryClose: null, serverNonce });
+        outcome = ok({ stage: "rendezvous", terminalState: null, telemetryClose: null, anchor: null, anchors: null, serverNonce });
         return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
       }
+      // N4b-8 (gap 4): anchor visibility — "disabled" when no anchor is
+      // configured, "failed" when any subject's anchor recorded a failure
+      // (surfaced as `anchor: "failed"` per the brief), "pending" while a
+      // delivery is in flight, "ok" once every fired anchor resolved.
+      const anchorStates = run.anchors;
+      const anchorVals = anchorStates === undefined
+        ? []
+        : [anchorStates.agreement, anchorStates.terminal].filter((s) => s !== undefined);
+      const anchorSummary =
+        anchorStates === undefined && !service.anchorConfigured ? "disabled"
+        : anchorVals.some((s) => s!.status === "failed") ? "failed"
+        : anchorVals.some((s) => s!.status === "anchoring") ? "pending"
+        : "ok";
       outcome = ok({
         stage: run.stage,
         terminalState: run.terminalState,
@@ -234,6 +247,25 @@ export function buildContractServer(options: {
           lastError: run.telemetryClose.lastError ?? null,
           deliveredAt: run.telemetryClose.deliveredAt ?? null,
           receiptDigest: run.telemetryClose.receiptDigest,
+        },
+        anchor: anchorSummary,
+        anchors: anchorStates === undefined ? null : {
+          agreement: anchorStates.agreement === undefined ? null : {
+            status: anchorStates.agreement.status,
+            digest: anchorStates.agreement.digest,
+            anchorId: anchorStates.agreement.anchorId ?? null,
+            eventHash: anchorStates.agreement.eventHash ?? null,
+            ledger: anchorStates.agreement.ledger ?? null,
+            error: anchorStates.agreement.error ?? null,
+          },
+          terminal: anchorStates.terminal === undefined ? null : {
+            status: anchorStates.terminal.status,
+            digest: anchorStates.terminal.digest,
+            anchorId: anchorStates.terminal.anchorId ?? null,
+            eventHash: anchorStates.terminal.eventHash ?? null,
+            ledger: anchorStates.terminal.ledger ?? null,
+            error: anchorStates.terminal.error ?? null,
+          },
         },
         serverNonce,
       });

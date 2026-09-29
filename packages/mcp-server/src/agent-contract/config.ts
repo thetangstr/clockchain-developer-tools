@@ -1,6 +1,9 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import path from "node:path";
 
+import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
+
+import { createTsaContractAnchor, type ContractAnchor } from "./anchor.js";
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
 import { canonicalDigest } from "./canonical.js";
@@ -70,6 +73,8 @@ export type ContractRouteConfig =
        * mandatory at S|P, optional at L (undefined = no close delivery).
        */
       readonly telemetryCloseUrl?: string;
+      /** N4b-8 (gap 4): CONTRACT_ANCHOR_ENABLED=1 — tsa_issue-backed run anchoring. */
+      readonly anchorEnabled: boolean;
       readonly service: ContractService;
     };
 
@@ -330,6 +335,21 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       ? { chainId: env.CONTRACT_ERC8004_CHAIN_ID ?? "", registryAddress: env.CONTRACT_ERC8004_REGISTRY_ADDRESS ?? "" }
       : undefined;
 
+  // N4b-8 (gap 4): the run anchor. CONTRACT_ANCHOR_ENABLED=1 backs it with
+  // the in-process tsa_issue path (createTsaContractAnchor over the env-
+  // configured ClockchainClient). Off by default: contract_status then reads
+  // anchor:"disabled" — an unconfigured anchor is visible, never silent.
+  // A failed anchor call lands on run.anchors as status:"failed".
+  const anchorEnabled = env.CONTRACT_ANCHOR_ENABLED === "1";
+  let anchor: ContractAnchor | undefined;
+  if (anchorEnabled) {
+    try {
+      anchor = createTsaContractAnchor(new ClockchainClient(readConfigFromEnv(env)));
+    } catch (err) {
+      return misconfigured(`CONTRACT_ANCHOR: ${(err as Error).message}`);
+    }
+  }
+
   // N1/N2: construction can fail closed — corrupt/unreadable used-sessions or
   // a state dir already locked by a live process are misconfiguration, not a
   // mid-request exception.
@@ -402,6 +422,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       requireBindStatement,
       // N4b-8 (gap 2): the unbound v:2 seal wire exists only at level L.
       allowLegacySealV2: levelRaw === "L",
+      // N4b-8 (gap 4): the tsa_issue-backed anchor (injected fake in tests).
+      ...(anchor !== undefined ? { anchor } : {}),
       // N4b-8 (gap 3): POST the signed terminal receipt to the sink.
       ...(closeEmitter !== undefined
         ? {
@@ -445,6 +467,7 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     simFaultsEnabled: simFaultsAllowed,
     requireBindStatement,
     ...(telemetryCloseUrl !== undefined ? { telemetryCloseUrl } : {}),
+    anchorEnabled,
     service,
   };
 }

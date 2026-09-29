@@ -178,6 +178,12 @@ export function createBusinessOps(options: {
   claimMandate?(principalAddress: string, mandateId: string, runId: string, expiresAtMs: number): "ok" | "used" | "unavailable";
   endRun: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => void;
   /**
+   * N4b-8 (gap 4): anchor a run subject — called with "agreement" right
+   * after the agreement record commits. The service owns the async anchor
+   * and the outcome receipt; business only fires it.
+   */
+  anchorRun?: (run: ContractRun, kind: "agreement" | "terminal") => void;
+  /**
    * N4b-8 (gap 2): CONTRACT_LEVEL=L only — legacy unbound v:2 boxes still
    * deliver. At S|P only the listing-bound v:4 wire is accepted; the server
    * carries every box opaque either way.
@@ -874,6 +880,9 @@ export function createBusinessOps(options: {
           formedAt: iso(now()),
         };
         liveRun.stage = "agreed";
+        // N4b-8 (gap 4): anchor the agreement digest — async, outcome
+        // receipted; a failure lands on run.anchors, never silently.
+        try { options.anchorRun?.(liveRun, "agreement"); } catch { /* anchor dispatch must not break formation */ }
         return ok({ agreementFormed: true, agreementId, serverNonce });
       }
 
@@ -895,12 +904,20 @@ export function createBusinessOps(options: {
 
       case "agreement_get": {
         const agreement = liveRun.agreement;
+        const a = liveRun.anchors?.agreement;
         return ok({
           agreement: agreement === undefined ? null : structuredClone(agreement),
           anchor: agreement === undefined ? null : {
             runId: liveRun.runId,
             agreementDigest: agreement.agreementDigest,
             formedAt: agreement.formedAt,
+            // N4b-8 (gap 4): the tsa anchor record for this agreement digest
+            // (anchorId = tsa:<commitmentId>); a failure is carried openly.
+            status: a?.status ?? (options.anchorRun === undefined ? "disabled" : "unanchored"),
+            anchorId: a?.anchorId ?? null,
+            eventHash: a?.eventHash ?? null,
+            ledger: a?.ledger ?? null,
+            error: a?.error ?? null,
           },
           serverNonce,
         });

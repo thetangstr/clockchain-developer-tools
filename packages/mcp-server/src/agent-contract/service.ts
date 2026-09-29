@@ -9,7 +9,8 @@ import { z } from "zod";
 
 import { canonicalDigest } from "./canonical.js";
 import { verifyCertificateEnvelope, type HostRootPin } from "./certificate.js";
-import { makeReceipt, checkReceiptDraft, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
+import type { ContractAnchor } from "./anchor.js";
+import { makeReceipt, checkReceiptDraft, chainHead, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
 import type { ContractSigner } from "./envelope.js";
 import type { ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
@@ -158,6 +159,13 @@ export interface ContractRun {
   };
   settlement?: { transferId: string; status: "authorized" | "released" };
   settlementPrepared?: boolean;
+  /**
+   * The principal signature verified at `mandate_prepare`, pinned to that
+   * envelope's nonce. `mandate_submit` replays it against the envelope's
+   * flat-mandate payload (CONTRACT-PAYLOADS-v2 §Mandate) — the signature
+   * itself never rides inside the signed payload.
+   */
+  mandatePrepared?: { nonce: string; mandateSignature: string };
   terminalState: string | null;
   /**
    * N4b-8 (gap 3): the terminal close delivery to the telemetry sink —
@@ -171,6 +179,12 @@ export interface ContractRun {
     deliveredAt?: string;
     receiptDigest: string;
   };
+  /**
+   * N4b-8 (gap 4): anchor outcomes per subject — "agreement" is anchored at
+   * formation, "terminal" at the terminal transition (the chain head at that
+   * moment; post-terminal evidence receipts still chain on top).
+   */
+  anchors?: { agreement?: AnchorRunState; terminal?: AnchorRunState };
   stage: ContractStage;
   /**
    * M4: per-run HMAC salt for cap-bearing call argsDigests — generated at
@@ -248,6 +262,8 @@ export interface ContractService {
   canReceipt(run: ContractRun, principalKeyId: string): boolean;
   runFor(runId: string): ContractRun | undefined;
   runIdForPrincipal(keyId: string): string | undefined;
+  /** N4b-8 (gap 4): whether a run anchor is configured (contract_status uses it for the "disabled" summary). */
+  readonly anchorConfigured: boolean;
   /**
    * Move a run to its terminal state and retire the sim world entry
    * (post-terminal retention lives in the world itself). The triggering
@@ -725,6 +741,14 @@ export function createContractService(options: {
    * delivery outcome can be receipted on the run chain.
    */
   onTerminalRun?: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => void;
+  /**
+   * N4b-8 (gap 4): the run anchor — production wiring is
+   * `createTsaContractAnchor` (tsa_issue over the in-process Clockchain
+   * client); tests inject a fake. Anchors the agreement digest at formation
+   * and the receipt-chain head at terminal; outcomes land on run.anchors
+   * and are receipted (anchored AND failed).
+   */
+  anchor?: ContractAnchor;
 }): ContractService {
   const now = options.now ?? Date.now;
   const sim = options.sim ?? createSimWorld({
@@ -1271,12 +1295,69 @@ export function createContractService(options: {
     };
   }
 
+  /**
+   * N4b-8 (gap 4): fire an async anchor for `kind` and record the outcome —
+   * anchored AND failed — as a run receipt. The digest is captured
+   * synchronously (agreement: the agreementDigest; terminal: the chain head
+   * AT the terminal transition) so post-terminal evidence receipts never
+   * retroactively change what was anchored.
+   */
+  const fireAnchor = (run: ContractRun, kind: "agreement" | "terminal"): void => {
+    const anchor = options.anchor;
+    if (anchor === undefined) return;
+    const digest = kind === "agreement" ? run.agreement?.agreementDigest : chainHead(run.receipts);
+    if (digest === null || digest === undefined) return;
+    const anchors = (run.anchors ??= {});
+    anchors[kind] = { status: "anchoring", digest };
+    const receiptOutcome = (outcome: "anchor_anchored" | "anchor_failed", response: unknown): void => {
+      const p =
+        run.bound.buyer !== undefined
+          ? { role: "buyer" as const, keyId: run.bound.buyer.principalKeyId }
+          : run.bound.provider !== undefined
+            ? { role: "provider" as const, keyId: run.bound.provider.principalKeyId }
+            : undefined;
+      if (p === undefined) return;
+      try {
+        recordRunReceipt(run, {
+          tool: "anchor",
+          surface: "anchoring",
+          argsDigest: canonicalDigest({ runId: run.runId, kind, digest }),
+          argsDigestScheme: "canonical",
+          principal: p,
+          outcome,
+          responseDigest: canonicalDigest(response),
+          responseDigestScheme: "canonical",
+        });
+      } catch { /* a recording failure must not fault the async path */ }
+    };
+    Promise.resolve()
+      .then(() => anchor.anchor({ kind, runId: run.runId, digestHex: digest }))
+      .then((write) => {
+        anchors[kind] = {
+          status: "anchored", digest,
+          anchorId: write.anchorId, eventHash: write.eventHash, ledger: write.anchor,
+        };
+        receiptOutcome("anchor_anchored", write);
+      })
+      .catch((err) => {
+        const error = err instanceof Error ? err.message : String(err);
+        anchors[kind] = { status: "failed", digest, error };
+        receiptOutcome("anchor_failed", { error });
+      });
+  };
+
   const endRun = (run: ContractRun, terminalState: string, principal?: ContractPrincipal): void => {
     // "settled" is itself a named terminal stage; every other terminal reason
     // reads stage:"terminal" with terminalState carrying the why.
     run.stage = terminalState === "settled" ? "settled" : "terminal";
     run.terminalState = terminalState;
     sim.markTerminal(run.runId);
+    // N4b-8 (gap 4): anchor the receipt-chain head at the terminal
+    // transition BEFORE the close emitter runs — the anchored head is the
+    // head at terminality; close/anchor evidence receipts chain on after it.
+    try {
+      fireAnchor(run, "terminal");
+    } catch { /* an anchor bug must never break the terminal transition */ }
     // N4b-8 (gap 3): the close emitter POSTs the signed terminal receipt to
     // the telemetry sink — async, retried, outcome receipted onto the run.
     try {

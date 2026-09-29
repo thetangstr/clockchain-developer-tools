@@ -587,6 +587,37 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         deliveredAt: z.string().nullable(),
         receiptDigest: digestHex,
       }).strict().nullable(),
+      // N4b-8 (gap 4): anchor summary — "failed" surfaces an anchoring
+      // failure (never silent), "disabled" when no anchor is configured.
+      anchor: z.enum(["disabled", "ok", "pending", "failed"]).nullable(),
+      anchors: z.object({
+        agreement: z.object({
+          status: z.enum(["anchoring", "anchored", "failed"]),
+          digest: digestHex,
+          anchorId: z.string().min(1).max(160).nullable(),
+          eventHash: digestHex.nullable(),
+          ledger: z.object({
+            ledgerId: z.string(),
+            blockHeight: z.string().nullable(),
+            time: z.string().nullable(),
+            status: z.string(),
+          }).strict().nullable(),
+          error: z.string().nullable(),
+        }).strict().nullable(),
+        terminal: z.object({
+          status: z.enum(["anchoring", "anchored", "failed"]),
+          digest: digestHex,
+          anchorId: z.string().min(1).max(160).nullable(),
+          eventHash: digestHex.nullable(),
+          ledger: z.object({
+            ledgerId: z.string(),
+            blockHeight: z.string().nullable(),
+            time: z.string().nullable(),
+            status: z.string(),
+          }).strict().nullable(),
+          error: z.string().nullable(),
+        }).strict().nullable(),
+      }).strict().nullable(),
       serverNonce,
     }).strict(),
     readOnly: true,
