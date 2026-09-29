@@ -549,6 +549,27 @@ test("startup refuses a `*` token without CONTRACT_REQUIRE_BIND_STATEMENT=1 (HIG
 
 // --- review fixes (LOW-4 / LOW-5 / MEDIUM-3) ---------------------------------
 
+test("LOW-4: statement issuedAt is bounded to the challenge TTL", async () => {
+  let now = Date.now();
+  const env = await boot({ serviceOptions: { requireBindStatement: true, bindChallengeTtlMs: 5_000, now: () => now } });
+  try {
+    const { challenge } = await env.rpc("tlb1", "contract_bind_challenge", {});
+    const c = cert(20);
+    for (const [label, issuedAt] of [
+      ["predates the challenge", new Date(now - 1_000)],
+      ["past the challenge TTL", new Date(now + 6_000)],
+    ]) {
+      const st = makeStatement({
+        runId: uuid(20), side: "initiator", tokenKeyId: "klb1", challenge,
+        issuedAt: issuedAt.toISOString(),
+      });
+      const out = await env.rpc("tlb1", "contract_bind",
+        bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
+      assert.equal(out.error, "BIND_STATEMENT_INVALID", label);
+    }
+  } finally { await env.close(); }
+});
+
 test("MEDIUM-3: an unbound `*` principal cannot send rendezvous invitations", async () => {
   const env = await boot();
   try {

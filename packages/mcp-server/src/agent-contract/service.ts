@@ -351,6 +351,9 @@ interface AgentBinding {
  */
 interface BindChallenge {
   keyId: string;
+  /** LOW-4: issue time — the statement's issuedAt must sit within
+   *  [issuedAtMs, issuedAtMs + TTL], not merely before server expiry. */
+  issuedAtMs: number;
   expiresAtMs: number;
   used: boolean;
 }
@@ -410,6 +413,7 @@ function verifyBindStatement(fields: {
   serverKeyId: string;
   expectedSessionKeyAddress: string;
   challenge: BindChallenge | undefined;
+  challengeTtlMs: number;
   nowMs: number;
 }): boolean {
   const st = fields.statement;
@@ -427,6 +431,15 @@ function verifyBindStatement(fields: {
   if (ch === undefined || ch.used || ch.expiresAtMs <= fields.nowMs || ch.keyId !== fields.principal.keyId) {
     return false;
   }
+  // LOW-4: issuedAt is bounded to the challenge's own window — a statement
+  // predating the challenge (or outliving its TTL) proves nothing about
+  // this nonce.
+  const issuedAtMs = Date.parse(st.issuedAt);
+  if (
+    !Number.isFinite(issuedAtMs) ||
+    issuedAtMs < ch.issuedAtMs ||
+    issuedAtMs > ch.issuedAtMs + fields.challengeTtlMs
+  ) return false;
   if (typeof fields.signatureHex !== "string") return false;
   const recovered = eip191RecoverPublicKey(Buffer.from(canonicalDigest(st).slice(2), "hex"), fields.signatureHex);
   if (recovered === null) return false;
@@ -865,7 +878,7 @@ export function createContractService(options: {
     if (outstanding >= MAX_BIND_CHALLENGES_PER_PRINCIPAL) return { ok: false, code: "RATE_LIMITED" };
     const challenge = randomBytes(32).toString("hex");
     const expiresAtMs = nowMs + bindChallengeTtlMs;
-    bindChallenges.set(challenge, { keyId: principal.keyId, expiresAtMs, used: false });
+    bindChallenges.set(challenge, { keyId: principal.keyId, issuedAtMs: nowMs, expiresAtMs, used: false });
     return { ok: true, challenge, expiresAt: new Date(expiresAtMs).toISOString() };
   }
 
@@ -996,6 +1009,7 @@ export function createContractService(options: {
           serverKeyId: options.signer.keyId,
           expectedSessionKeyAddress: sessionKeyAddress,
           challenge,
+          challengeTtlMs: bindChallengeTtlMs,
           nowMs: now(),
         })
       ) {
