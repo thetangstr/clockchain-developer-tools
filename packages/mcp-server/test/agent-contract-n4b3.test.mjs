@@ -138,6 +138,7 @@ test.before(async () => {
     hostRoots: HOST_ROOTS, signer: SIGNER,
     policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
     stateDir,
+    allowLegacySealV2: true, // test posture = CONTRACT_LEVEL=L
   });
   const handler = createContractHttpHandler({
     authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service,

@@ -692,6 +692,11 @@ export function createContractService(options: {
   requireBindStatement?: boolean;
   /** N4b-7: `contract_bind_challenge` nonce TTL (default 60s). */
   bindChallengeTtlMs?: number;
+  /**
+   * N4b-8 (gap 2): accept legacy unbound v:2 seals — CONTRACT_LEVEL=L only.
+   * Absent/false: only the listing-bound v:4 wire delivers.
+   */
+  allowLegacySealV2?: boolean;
 }): ContractService {
   const now = options.now ?? Date.now;
   const sim = options.sim ?? createSimWorld({
@@ -1254,6 +1259,7 @@ export function createContractService(options: {
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
     claimMandate,
     endRun,
+    allowLegacySealV2: options.allowLegacySealV2 === true,
   });
 
   return {

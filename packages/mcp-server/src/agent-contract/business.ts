@@ -10,7 +10,7 @@ import {
   eip191RecoverPublicKey, publicKeyToAddress, verifyRoleSignature,
 } from "./eip191.js";
 import { verifyApprovalRecord } from "./approval.js";
-import { sealedBoxV2Schema, type ApprovalRecord, type ContractRole } from "./schemas.js";
+import { sealedBoxSchema, type ApprovalRecord, type ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import type {
   AgreementRecord, ContractPrincipal, ContractRun, OfferRecord,
@@ -177,6 +177,12 @@ export function createBusinessOps(options: {
    */
   claimMandate?(principalAddress: string, mandateId: string, runId: string, expiresAtMs: number): "ok" | "used" | "unavailable";
   endRun: (run: ContractRun, terminalState: string) => void;
+  /**
+   * N4b-8 (gap 2): CONTRACT_LEVEL=L only — legacy unbound v:2 boxes still
+   * deliver. At S|P only the listing-bound v:4 wire is accepted; the server
+   * carries every box opaque either way.
+   */
+  allowLegacySealV2?: boolean;
 }): BusinessOps {
   const now = options.now ?? Date.now;
   const sim = options.sim;
@@ -572,10 +578,14 @@ export function createBusinessOps(options: {
         const senderProof: SenderProof = principal.agentId === "*"
           ? (boundAgentId !== undefined ? "certificate-bound" : "unproven-pre-bind")
           : "token-pinned";
-        // A delivery that doesn't parse as the real v2 seal is refused
-        // WITHOUT burning the listing.
-        const seal = sealedBoxV2Schema.safeParse(args.sealedInvitation);
+        // A delivery that doesn't parse as a real seal is refused WITHOUT
+        // burning the listing. v:4 is the listing-bound wire; v:2 (legacy,
+        // unbound) is accepted only where CONTRACT_LEVEL=L still allows it.
+        const seal = sealedBoxSchema.safeParse(args.sealedInvitation);
         if (!seal.success) return refuse("PAYLOAD_INVALID");
+        if (seal.data.v === 2 && options.allowLegacySealV2 !== true) {
+          return refuse("PAYLOAD_INVALID");
+        }
         // Per-sender delivery rate limit.
         const t = now();
         const sent = (deliveries.get(principal.keyId) ?? []).filter((x) => t - x < 60_000);

@@ -319,6 +319,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       ...(simFaults !== undefined ? { simFaults } : {}),
       // N4b-7: session-key possession proof at bind (mandatory at S|P).
       requireBindStatement,
+      // N4b-8 (gap 2): the unbound v:2 seal wire exists only at level L.
+      allowLegacySealV2: levelRaw === "L",
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);

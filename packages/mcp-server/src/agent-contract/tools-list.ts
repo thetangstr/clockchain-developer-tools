@@ -75,6 +75,9 @@ export function toWireSchema(t: z.ZodTypeAny): Record<string, unknown> {
       out.additionalProperties = false;
       return out;
     }
+    case "ZodUnion":
+    case "ZodDiscriminatedUnion":
+      return { anyOf: (def.options as z.ZodTypeAny[]).map((o) => toWireSchema(o)) };
     case "ZodUnknown":
     case "ZodAny":
       return {};

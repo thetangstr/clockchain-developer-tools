@@ -205,6 +205,7 @@ function serviceOpts(extra = {}) {
   return {
     hostRoots: HOST_ROOTS, signer: SIGNER,
     policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
+    allowLegacySealV2: true, // test posture = CONTRACT_LEVEL=L
     ...extra,
   };
 }

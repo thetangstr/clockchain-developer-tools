@@ -202,6 +202,7 @@ test.before(async () => {
     hostRoots: HOST_ROOTS, signer: SIGNER,
     policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
     stateDir,
+    allowLegacySealV2: true, // test posture = CONTRACT_LEVEL=L
   });
   const handler = createContractHttpHandler({
     authenticate, hostRoots: HOST_ROOTS, signer: SIGNER, service,
@@ -386,6 +387,7 @@ test("a listing holds at most 16 pending deliveries; listing caps are per-provid
   const ops = createBusinessOps({
     signer: SIGNER, sim: createSimWorld({ now: Date.now }),
     policyDigests: POLICY_DIGESTS, endRun() {},
+    allowLegacySealV2: true,
   });
   const providerA = { keyId: "kpA", role: "provider", agentId: "9453", side: "responder" };
   const providerB = { keyId: "kpB", role: "provider", agentId: "9453", side: "responder" };

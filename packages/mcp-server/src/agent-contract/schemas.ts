@@ -37,19 +37,24 @@ const registeredKey = z.object({
 }).strict();
 
 /**
- * The real v2 rendezvous seal (N5 `sealTo`, CONTRACT-PAYLOADS-v2 §Seal):
+ * The rendezvous seal (N5 `sealTo`, CONTRACT-PAYLOADS-v2 §Seal wire):
  * ephemeral-x25519 → HKDF → AES-256-GCM, all fields 0x-hex — epk 32B,
- * iv 12B, tag 16B. Anything else refuses at the schema, so a malformed
- * delivery can never reach — let alone burn — a listing.
+ * iv 12B, tag 16B. The server carries the box OPAQUE — it cannot open it.
+ * v:2 is the legacy unbound profile; v:4 binds the box to the listingId
+ * (HKDF info + GCM AAD, signer side). Malformed anything refuses at the
+ * schema, so a bad delivery can never reach — let alone burn — a listing.
+ * v:2 wire acceptance is additionally gated at dispatch by CONTRACT_LEVEL.
  */
-const sealedBox = z.object({
-  v: z.literal(2),
+const sealBoxFields = {
   epk: z.string().regex(/^0x[0-9a-f]{64}$/),
   iv: z.string().regex(/^0x[0-9a-f]{24}$/),
   ct: z.string().regex(/^0x(?:[0-9a-f]{2}){1,8192}$/),
   tag: z.string().regex(/^0x[0-9a-f]{32}$/),
-}).strict();
-export const sealedBoxV2Schema = sealedBox;
+} as const;
+export const sealedBoxV2Schema = z.object({ v: z.literal(2), ...sealBoxFields }).strict();
+export const sealedBoxV4Schema = z.object({ v: z.literal(4), ...sealBoxFields }).strict();
+const sealedBox = z.discriminatedUnion("v", [sealedBoxV2Schema, sealedBoxV4Schema]);
+export const sealedBoxSchema = sealedBox;
 
 /**
  * DRAFT (N4b-7): the bind-statement wire shape. The audit agent owns the

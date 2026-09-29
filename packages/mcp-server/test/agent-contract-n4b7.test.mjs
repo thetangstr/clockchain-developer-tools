@@ -190,6 +190,7 @@ async function boot({ serviceOptions = {}, stateDir, tokens } = {}) {
   const service = createContractService({
     hostRoots: HOST_ROOTS, signer: SIGNER,
     policyDigests: POLICY_DIGESTS,
+    allowLegacySealV2: true, // test posture = CONTRACT_LEVEL=L
     ...(stateDir !== undefined ? { stateDir } : {}),
     ...serviceOptions,
   });

@@ -192,7 +192,7 @@ let service;
 const authenticate = tokenAuthenticator(parseContractTokens(TOKENS_RAW));
 
 test.before(async () => {
-  service = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir, policyDigests: POLICY, principals: PRINCIPALS });
+  service = createContractService({ hostRoots: HOST_ROOTS, signer: SIGNER, stateDir, policyDigests: POLICY, principals: PRINCIPALS, allowLegacySealV2: true });
   const handler = createContractHttpHandler({
     authenticate,
     hostRoots: HOST_ROOTS,
