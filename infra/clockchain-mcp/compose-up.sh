@@ -1,5 +1,35 @@
 #!/usr/bin/env bash
+# Prepare the production environment (SSM secrets, pins, nonsecret config) and bring the
+# clockchain-mcp compose stack up.
+#
+#   compose-up.sh              full stack (mcp, host, caddy). This is what the systemd unit's
+#                              ExecStart runs, via the installed copy /opt/clockchain-mcp/compose-up.sh.
+#   compose-up.sh --only mcp   code-only deploy: identical mcp environment, but recreates ONLY the
+#                              mcp service (`up --no-deps ... mcp`). host and caddy keep running, and
+#                              the host's private secret files are not re-materialized.
+# deploy-box: supports --only mcp (scripts/deploy-box.sh checks for this line before a code-only deploy)
 set -euo pipefail
+
+usage() {
+  printf 'usage: %s [--only mcp]\n' "$0" >&2
+  exit 64
+}
+
+COMPOSE_UP_MODE=full
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --only)
+      [[ "${2:-}" == "mcp" ]] || usage
+      COMPOSE_UP_MODE=mcp-only
+      shift 2
+      ;;
+    --only=mcp)
+      COMPOSE_UP_MODE=mcp-only
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
 
 AWS_REGION="${AWS_REGION:-us-west-2}"
 APP_ROOT="${CLOCKCHAIN_MCP_APP_ROOT:-/opt/clockchain-mcp/app}"
@@ -301,8 +331,16 @@ read_secret AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS "$AGENT_HANDSHAKE_ROLE_ACCESS_P
 read_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM"
 read_optional_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM"
 validate_v2_server_config
+# Read-only; exports the HANDSHAKE_* values compose interpolates, so the resolved compose
+# config is the same in both modes.
 validate_handshake_checkout
-materialize_host_secrets
+if [[ "$COMPOSE_UP_MODE" == "full" ]]; then
+  materialize_host_secrets
+else
+  # The host container is not touched in mcp-only mode: leave its private files exactly as the
+  # last full start wrote them (the mcp service does not mount or read them).
+  export CLOCKCHAIN_HOST_SECRET_DIR
+fi
 
 export PORT=8080
 export MCP_TRANSPORT=http
@@ -326,4 +364,8 @@ export CLOCKCHAIN_SUBSTRATE=anchoring-gateway
 export ERC8004_REGISTRY_ADDRESS=0x8004A818BFB912233c491871b3d84c89A494BD9e
 
 cd "$DEPLOY_DIR"
+if [[ "$COMPOSE_UP_MODE" == "mcp-only" ]]; then
+  # --no-deps: do not start/recreate caddy (depends_on mcp) or anything else; only mcp.
+  exec docker compose -f "$COMPOSE_FILE" up -d --no-deps --build --wait --wait-timeout 180 mcp
+fi
 exec docker compose -f "$COMPOSE_FILE" up -d --build --wait --wait-timeout 180
