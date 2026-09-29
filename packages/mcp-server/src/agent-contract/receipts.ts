@@ -65,6 +65,14 @@ export const serverReceiptSchema = z.object({
   clientInfo: receiptClientInfoSchema.optional(),
   sourceIp: z.string().min(1).max(64).optional(),
   bindAssurance: z.literal("agentId-pinned-token").optional(),
+  /**
+   * N4b-7: bind receipts record HOW the agentId was established — pinned in
+   * the token at config time, or taken from the certificate's party on the
+   * token's side at bind time (write-once) — and whether the session-key
+   * possession statement was verified (the P-GAP hook, DRAFT schema).
+   */
+  bindMode: z.enum(["static", "late"]).optional(),
+  bindStatement: z.enum(["verified", "absent"]).optional(),
   serverNonce: z.string().regex(/^0x[0-9a-f]{32}$/),
   responseDigest: digestHex,
   /**
@@ -123,6 +131,10 @@ export interface ReceiptFields {
   clientInfo?: { name: string; version: string };
   sourceIp?: string;
   bindAssurance?: "agentId-pinned-token";
+  /** N4b-7: bind receipts only — how the agentId was established. */
+  bindMode?: "static" | "late";
+  /** N4b-7: bind receipts only — whether the possession statement verified. */
+  bindStatement?: "verified" | "absent";
   /** N4b-6: sim fault marker copied from the run — server-derived. */
   simFault?: { issueMismatch?: "fare" | "travellers" };
   serverNonce?: string;
@@ -150,6 +162,8 @@ function draftCore(prev: ServerReceipt | null, fields: ReceiptFields): ReceiptCo
     clientInfo: fields.clientInfo,
     sourceIp: fields.sourceIp,
     bindAssurance: fields.bindAssurance,
+    ...(fields.bindMode !== undefined ? { bindMode: fields.bindMode } : {}),
+    ...(fields.bindStatement !== undefined ? { bindStatement: fields.bindStatement } : {}),
     serverNonce: fields.serverNonce ?? newServerNonce(),
     responseDigest: fields.responseDigest,
     responseDigestScheme: fields.responseDigestScheme,

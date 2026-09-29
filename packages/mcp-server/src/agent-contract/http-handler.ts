@@ -48,8 +48,11 @@ export interface ContractTokenEntry {
 
 /**
  * Parse `CONTRACT_AUTH_TOKENS`: comma-separated `token:role:keyId:agentId:side`
- * entries. Throws on malformed entries, duplicate tokens, or tokens containing
- * `:` — bad config must fail loudly at startup, not lazily on traffic.
+ * entries. `agentId` may be `*` (N4b-7 late binding): the principal's agentId
+ * is then taken from the certificate's party on its side at contract_bind and
+ * pinned write-once, instead of being provisioned in the token. Throws on
+ * malformed entries, duplicate tokens, or tokens containing `:` — bad config
+ * must fail loudly at startup, not lazily on traffic.
  */
 export function parseContractTokens(raw: string | undefined): ContractTokenEntry[] {
   const out: ContractTokenEntry[] = [];
@@ -71,8 +74,8 @@ export function parseContractTokens(raw: string | undefined): ContractTokenEntry
     if ((role === "buyer") !== (side === "initiator")) {
       throw new Error(`CONTRACT_AUTH_TOKENS: role "${role}" cannot be pinned to side "${side}"`);
     }
-    if (!DECIMAL.test(agentId)) {
-      throw new Error(`CONTRACT_AUTH_TOKENS: agentId "${agentId}" is not a decimal ERC-8004 id`);
+    if (agentId !== "*" && !DECIMAL.test(agentId)) {
+      throw new Error(`CONTRACT_AUTH_TOKENS: agentId "${agentId}" is not a decimal ERC-8004 id (or "*" for late binding)`);
     }
     if (seen.has(token)) {
       throw new Error(`CONTRACT_AUTH_TOKENS: duplicate token`);

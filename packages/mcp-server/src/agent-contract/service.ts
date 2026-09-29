@@ -49,7 +49,11 @@ export type ContractSide = "initiator" | "responder";
 export interface ContractPrincipal {
   readonly keyId: string;
   readonly role: ContractRole;
-  /** ERC-8004 agent id this principal claims (from its provisioned token). */
+  /**
+   * ERC-8004 agent id this principal claims (from its provisioned token).
+   * `"*"` (N4b-7 late binding): the id is taken from the certificate's party
+   * on this principal's side at contract_bind and pinned write-once.
+   */
   readonly agentId: string;
   /** The handshake side the token pins this principal to. */
   readonly side: ContractSide;
@@ -285,6 +289,7 @@ const PRE_BIND_SCOPE = "pre-bind";
 const RUN_TTL_MS = 24 * 3600_000; // LLD §3: run-scoped state TTL is 24h
 const USED_SESSIONS_FILE = "used-sessions.json";
 const USED_MANDATES_FILE = "used-mandates.json";
+const AGENT_BINDINGS_FILE = "agent-bindings.json";
 const LOCK_FILE = "used-sessions.lock";
 
 /**
@@ -303,6 +308,53 @@ function loadUsedSessions(stateDir: string): Map<string, string> {
     if (typeof v !== "string") throw new Error(`corrupt ${USED_SESSIONS_FILE}`);
   }
   return new Map(Object.entries(raw.sessions) as [string, string][]);
+}
+
+/**
+ * N4b-7 late binding: the agentId a `*`-token keyId was bound to, write-once
+ * and durable — `{keyId: {agentId, runId}}`. A second bind of the same token
+ * to a different agentId or a different run refuses STATE_REFUSED.
+ */
+interface AgentBinding {
+  agentId: string;
+  runId: string;
+}
+
+/** Same fail-closed rule as used-sessions: corrupt ≠ empty (N1). */
+function loadAgentBindings(stateDir: string): Map<string, AgentBinding> {
+  const file = path.join(stateDir, AGENT_BINDINGS_FILE);
+  if (!existsSync(file)) return new Map();
+  const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
+  if (!isPlainRecord(raw) || !isPlainRecord(raw.bindings)) {
+    throw new Error(`corrupt ${AGENT_BINDINGS_FILE}`);
+  }
+  for (const v of Object.values(raw.bindings)) {
+    if (!isPlainRecord(v) || typeof v.agentId !== "string" || typeof v.runId !== "string") {
+      throw new Error(`corrupt ${AGENT_BINDINGS_FILE}`);
+    }
+  }
+  return new Map(Object.entries(raw.bindings) as [string, AgentBinding][]);
+}
+
+/** Same durable-write discipline as persistUsedSessions (N1). */
+function persistAgentBindings(stateDir: string, bindings: ReadonlyMap<string, AgentBinding>): void {
+  mkdirSync(stateDir, { recursive: true });
+  const file = path.join(stateDir, AGENT_BINDINGS_FILE);
+  const tmp = `${file}.${process.pid}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeFileSync(fd, JSON.stringify({ bindings: Object.fromEntries(bindings) }));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, file);
+  const dirFd = openSync(stateDir, "r");
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
 }
 
 /** Durable write: tmp file → fsync → rename → fsync the directory (N1). */
@@ -577,6 +629,8 @@ export function createContractService(options: {
   let releaseLock: (() => void) | undefined;
   let usedSessions: Map<string, string> = new Map();
   let usedMandates: Map<string, UsedMandate> = new Map();
+  // N4b-7: write-once {keyId → {agentId, runId}} for late-bound (*) tokens.
+  let agentBindings: Map<string, AgentBinding> = new Map();
   // LOW (N4b-3): retention window for used-mandate entries = expiresAt +
   // graceMs (the same clock-skew grace used elsewhere; default 10 min).
   const mandateGraceMs = options.graceMs ?? 600_000;
@@ -587,6 +641,7 @@ export function createContractService(options: {
     try {
       usedSessions = loadUsedSessions(options.stateDir);
       usedMandates = loadUsedMandates(options.stateDir, now(), mandateGraceMs);
+      agentBindings = loadAgentBindings(options.stateDir);
     } catch (err) {
       releaseLock();
       throw err;
@@ -768,15 +823,33 @@ export function createContractService(options: {
     const erc8004 = isPlainRecord(party?.erc8004) ? party.erc8004 : null;
     const policy = isPlainRecord(verdict.result.identityPolicy) ? verdict.result.identityPolicy : null;
     const pinned = options.expectedErc8004;
+    // N4b-7: a `*`-token binds the agentId LATE — taken from the certificate's
+    // party on the token's side, pinned write-once below. Static tokens keep
+    // the exact provisioned-agentId equality check.
+    const lateBinding = principal.agentId === "*";
     if (
       erc8004 === null || policy === null ||
-      erc8004.agentId !== principal.agentId ||
+      (!lateBinding && erc8004.agentId !== principal.agentId) ||
       erc8004.chainId !== policy.chainId ||
       erc8004.registryAddress !== policy.registryAddress ||
       (pinned !== undefined &&
         (policy.chainId !== pinned.chainId || policy.registryAddress !== pinned.registryAddress))
     ) {
       return { ok: false, code: "CERTIFICATE_INVALID" };
+    }
+    const boundAgentId = lateBinding ? erc8004.agentId as string : principal.agentId;
+
+    // N4b-7 write-once: the token keyId's first bind records {agentId, runId}
+    // durably. A second bind to a different agentId or a different run is
+    // refused — including a replay of another handshake's certificate.
+    if (lateBinding) {
+      const recorded = agentBindings.get(principal.keyId);
+      if (
+        recorded !== undefined &&
+        (recorded.agentId !== boundAgentId || recorded.runId !== verdict.sessionId)
+      ) {
+        return { ok: false, code: "STATE_REFUSED" };
+      }
     }
 
     const priorRunId = principalRuns.get(principal.keyId);
@@ -882,6 +955,10 @@ export function createContractService(options: {
         mcpSessionId: evidence.mcpSessionId,
         clientInfo: evidence.clientInfo,
         bindAssurance: "agentId-pinned-token",
+        // N4b-7: evidence records how the agentId was established and whether
+        // the session-key-possession statement was verified (P-GAP).
+        bindMode: lateBinding ? "late" : "static",
+        bindStatement: "absent",
         // M1: the bind receipt carries THIS principal's pre-bind chain head —
         // the run chain's link back to the evidence that preceded it.
         preBindHead: preBindHeadFor(principal.keyId),
@@ -896,22 +973,33 @@ export function createContractService(options: {
     // N1: for a NEW run the used-session record is persisted BEFORE any
     // in-memory state changes. If the write fails the bind fails with no
     // state change and no receipt — never a run the restart guard forgot.
-    if (existing === undefined && options.stateDir !== undefined) {
-      const next = new Map(usedSessions);
-      next.set(verdict.sessionId, runId);
+    // N4b-7: the late-binding record is written FIRST — a crash between the
+    // two writes then leaves an unused binding, not an unrecorded session.
+    const newBinding: AgentBinding | undefined =
+      lateBinding && !agentBindings.has(principal.keyId)
+        ? { agentId: boundAgentId, runId: verdict.sessionId }
+        : undefined;
+    if (options.stateDir !== undefined && (existing === undefined || newBinding !== undefined)) {
+      const nextBindings = new Map(agentBindings);
+      if (newBinding !== undefined) nextBindings.set(principal.keyId, newBinding);
+      const nextSessions = new Map(usedSessions);
+      if (existing === undefined) nextSessions.set(verdict.sessionId, runId);
       try {
-        persistUsedSessions(options.stateDir, next);
+        if (newBinding !== undefined) persistAgentBindings(options.stateDir, nextBindings);
+        if (existing === undefined) persistUsedSessions(options.stateDir, nextSessions);
       } catch {
         return { ok: false, code: "CONTRACT_UNAVAILABLE" };
       }
-      usedSessions = next;
-    } else if (existing === undefined) {
-      usedSessions.set(verdict.sessionId, runId);
+      if (newBinding !== undefined) agentBindings = nextBindings;
+      if (existing === undefined) usedSessions = nextSessions;
+    } else {
+      if (newBinding !== undefined) agentBindings.set(principal.keyId, newBinding);
+      if (existing === undefined) usedSessions.set(verdict.sessionId, runId);
     }
 
     run.bound[principal.role] = {
       principalKeyId: principal.keyId,
-      agentId: principal.agentId,
+      agentId: boundAgentId,
       side: principal.side,
       signerKey: signerKey.data,
       approvalKey: approvalKey.data,
