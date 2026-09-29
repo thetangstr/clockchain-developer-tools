@@ -12,7 +12,7 @@ import { recoverEip191Address, resolveOwnedAgentRegistration } from "../handshak
 import { evaluateStandaloneReadiness } from "./checklist.js";
 import { createHoldRegistry, standaloneRequestContext } from "./long-poll.js";
 import { StandaloneAddressError, keyFingerprint, listenRecord, parseAddress, FINGERPRINT_HEX_LENGTH } from "./address.js";
-import { createMailboxStore, MAILBOX_IDLE_TTL_MS, type MailboxInvitation } from "./mailbox-store.js";
+import { createMailboxStore, MailboxRefusal, MAILBOX_IDLE_TTL_MS, type MailboxInvitation } from "./mailbox-store.js";
 import { NOTICE_MIN_INTERVAL_MS, NOTICE_QUIET_MS, createStandaloneNotifier, type StandaloneNotifierOptions } from "./notify.js";
 import { STALL_AFTER_MS, pendingTurn } from "./turns.js";
 import {
@@ -210,6 +210,11 @@ export function createStandaloneCoordinator(options: {
   function publicEndpoint(): string {
     return standaloneRequestContext.getStore()?.endpoint ?? options.publicEndpoint ?? STANDALONE_DEFAULT_ENDPOINT;
   }
+  // What a listen record must name: the configured public endpoint when there is one (never
+  // a Host-derived value), else the endpoint this request arrived on.
+  function listenEndpoint(): string {
+    return options.publicEndpoint ?? publicEndpoint();
+  }
   function authedMailbox(args: Record<string, unknown>) {
     const access = args.access;
     if (typeof access !== "string" || !access.startsWith("slt_")) throw new StandaloneCoordinatorError();
@@ -381,6 +386,14 @@ export function createStandaloneCoordinator(options: {
 
     if (name === "handshake_invite") {
       const to = args.to === undefined || args.to === null ? undefined : address(args.to);
+      // Optional: the listener's full session key, if the Initiator knows it. Delivery then
+      // also requires the mailbox to be that key's (silently, like every other refusal).
+      let toKey: string | undefined;
+      if (args.toKey !== undefined && args.toKey !== null) {
+        if (to === undefined || typeof args.toKey !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(args.toKey)) throw new StandaloneAdmissionError("BAD_TO_KEY");
+        if (keyFingerprint(args.toKey) !== to.fingerprint) throw new StandaloneAdmissionError("TO_KEY_NOT_ADDRESS");
+        toKey = args.toKey.toLowerCase();
+      }
       const terms = normalizeStandaloneTerms({ reference: args.reference, purpose: args.purpose, channelLimits: args.channelLimits, identityPolicy: args.identityPolicy });
       const split = splitNotify(args.readiness);
       const readiness = normalizeStandaloneReadiness(split.readiness, terms.identityPolicy.erc8004);
@@ -411,6 +424,8 @@ export function createStandaloneCoordinator(options: {
           sessionId,
           initiatorFingerprint: keyFingerprint(readiness.sessionKeyAddress),
           expiresAtMs: store.requireSession(sessionId).invitationExpiresAtMs,
+          client: standaloneRequestContext.getStore()?.clientKey ?? "local",
+          ...(toKey === undefined ? {} : { pinnedKey: toKey }),
         });
         if (delivered) holds.notify(mailboxHoldKey(to.address));
         return {
@@ -521,7 +536,7 @@ export function createStandaloneCoordinator(options: {
 
     if (name === "listen_challenge") {
       const target = address(args.address);
-      const endpoint = publicEndpoint();
+      const endpoint = listenEndpoint();
       const challenge = mailboxes.issueChallenge(target.address, endpoint);
       // Optional convenience: with the key, the exact bytes to sign (the agent re-derives them).
       let sign: Record<string, unknown> | undefined;
@@ -547,6 +562,10 @@ export function createStandaloneCoordinator(options: {
       // Consumed before anything is checked: a replayed or guessed nonce never works twice.
       const challenge = mailboxes.takeChallenge(nonce);
       if (challenge === undefined || challenge.address !== target.address) throw new StandaloneAdmissionError("CHALLENGE_INVALID");
+      // The signed endpoint must be this server's public endpoint (the configured one when set),
+      // not merely whatever the challenge recorded: a signature for another deployment or
+      // mount never claims an address here.
+      if (challenge.endpoint !== listenEndpoint()) throw new StandaloneAdmissionError("ENDPOINT_MISMATCH");
       const sessionKeyAddress = args.sessionKeyAddress;
       if (typeof sessionKeyAddress !== "string" || keyFingerprint(sessionKeyAddress) !== target.fingerprint) throw new StandaloneAdmissionError("NOT_ADDRESS_KEY");
       const signatureHex = args.signatureHex;
@@ -561,10 +580,15 @@ export function createStandaloneCoordinator(options: {
       if (recovered !== sessionKeyAddress.toLowerCase()) throw new StandaloneAdmissionError("SIGNATURE_INVALID");
       let claimed;
       try {
-        claimed = mailboxes.claim({ address: target.address, ownerKey: sessionKeyAddress.toLowerCase(), allow: fingerprints(args.allowInitiators), block: fingerprints(args.blockInitiators) ?? [] });
+        claimed = mailboxes.claim({
+          address: target.address,
+          ownerKey: sessionKeyAddress.toLowerCase(),
+          allow: fingerprints(args.allowInitiators),
+          block: fingerprints(args.blockInitiators) ?? [],
+          client: standaloneRequestContext.getStore()?.clientKey ?? "local",
+        });
       } catch (error) {
-        const reason = (error as Error).message;
-        if (reason === "ADDRESS_TAKEN" || reason === "MAILBOXES_FULL") throw new StandaloneAdmissionError(reason);
+        if (error instanceof MailboxRefusal) throw new StandaloneAdmissionError(error.reason);
         throw error;
       }
       return {
@@ -613,14 +637,20 @@ export function createStandaloneCoordinator(options: {
       const invitationId = typeof args.invitationId === "string" ? args.invitationId : "";
       const item = mailboxes.find(box.address, invitationId);
       if (item === undefined || (item.status !== "pending" && item.status !== "reviewed")) throw new StandaloneAdmissionError("INVITATION_UNAVAILABLE");
-      store.declineInvitation(item.sessionId);
+      // An explicit decline tells the Initiator at once (INVITATION_DECLINED). A silent one
+      // tells it nothing: its session ends like any unanswered invitation, at the TTL.
+      const silent = args.silent === true;
+      if (!silent) store.declineInvitation(item.sessionId);
       mailboxes.setStatus(box.address, invitationId, "declined");
       return {
-        sessionId: item.sessionId,
+        ...(silent ? {} : { sessionId: item.sessionId }),
         address: box.address,
         invitationId,
         declined: true,
-        tellYourUser: "I declined a handshake invitation. The other agent is told it was declined; nothing was opened or recorded on the ledger.",
+        silent,
+        tellYourUser: silent
+          ? "I declined a handshake invitation without telling the other agent; its invitation will simply expire. Nothing was opened or recorded on the ledger."
+          : "I declined a handshake invitation. The other agent is told it was declined; nothing was opened or recorded on the ledger.",
         nextStep: "Call handshake_next with your listenAccess to keep listening.",
       };
     }
@@ -775,10 +805,9 @@ export function createStandaloneCoordinator(options: {
       };
     };
     const deliver = (result: Record<string, any>, fresh: boolean) => {
-      if (fresh && result.action === "review_invitation") {
-        mailboxes.setStatus(box.address, result.invitationId, "reviewed");
-        try { store.appendEvent(result.sessionId, { type: "reviewed", by: "listener" }); } catch { /* session gone */ }
-      }
+      // "reviewed" goes to the listener's mailbox timeline only: nothing the Initiator can
+      // see changes until the listener explicitly accepts or declines.
+      if (fresh && result.action === "review_invitation") mailboxes.setStatus(box.address, result.invitationId, "reviewed");
       return result;
     };
     let { result, fresh } = evaluate();
@@ -1162,6 +1191,7 @@ export function createRuntimeStandaloneCoordinator(env: Record<string, string | 
     ...resolveStandaloneHoldLimits(env),
     // B2: durable when HANDSHAKE_STATE_DIR is set (production: /app/state on the mcp_state volume).
     stateDir: handshakeStateDir("standalone-handshake", env),
+    ...(env.STANDALONE_PUBLIC_ENDPOINT?.trim() ? { publicEndpoint: env.STANDALONE_PUBLIC_ENDPOINT.trim() } : {}),
     // F4 reuses the timer tools' webhook secret and destination policy (allow-listed in HTTP mode).
     webhooks: { serverSecret: env.STANDALONE_WEBHOOK_SECRET || env.KEEPER_WEBHOOK_SECRET || "", ssrf: ssrfOptionsFromEnv(env) },
     resolveIdentity: async (identity, sessionKeyAddress) => {

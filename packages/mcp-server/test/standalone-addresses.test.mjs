@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,8 +11,9 @@ import { getAddress, keccak256 } from "viem";
 
 import { FINGERPRINT_HEX_LENGTH, addressFor, keyFingerprint, parseAddress } from "../dist/standalone-handshake/address.js";
 import { createStandaloneCoordinator } from "../dist/standalone-handshake/coordinator.js";
-import { createMailboxStore, MAX_PENDING_PER_MAILBOX } from "../dist/standalone-handshake/mailbox-store.js";
-import { createStandaloneHttpHandler } from "../dist/standalone-handshake/public-server.js";
+import { createMailboxStore, MAX_MAILBOXES_PER_CLIENT, MAX_MAILBOXES_PER_KEY, MAX_MAILBOX_EVENTS, MAX_PENDING_PER_MAILBOX, MAX_PENDING_PER_SOURCE } from "../dist/standalone-handshake/mailbox-store.js";
+import { clientBucket, createStandaloneHttpHandler } from "../dist/standalone-handshake/public-server.js";
+import { createHandleMap } from "../dist/handshake-core/handle-map.js";
 import { validTerms } from "./helpers/standalone-fixtures.mjs";
 import { canonicalJson, fakeLedger, newSessionKey, recoverLocally, sha256Hex, verifyAndSign } from "./helpers/standalone-signer.mjs";
 
@@ -29,24 +30,25 @@ function world() {
   const ledger = fakeLedger();
   const clock = { now: T };
   let live;
-  async function boot() {
+  async function boot(overrides = {}) {
     if (live) await live.stop();
-    const coordinator = createStandaloneCoordinator({ client: ledger, now: () => clock.now, recoverEip191Address: recoverLocally, nextPollMs: 5, stateDir: dir, coalesceMs: 20 });
-    const handler = createStandaloneHttpHandler({ invoke: (name, args) => coordinator.invoke(name, args), stateDir: dir, env: {}, callsPerMinute: 100_000, invitesPerHour: 1_000, now: () => clock.now });
+    const coordinator = createStandaloneCoordinator({ client: ledger, now: () => clock.now, recoverEip191Address: recoverLocally, nextPollMs: 5, stateDir: dir, coalesceMs: 20, ...(overrides.coordinator ?? {}) });
+    const handler = createStandaloneHttpHandler({ invoke: (name, args) => coordinator.invoke(name, args), stateDir: dir, env: {}, callsPerMinute: 100_000, invitesPerHour: 1_000, listensPerHour: overrides.listensPerHour ?? 1_000, trustedProxy: "127.0.0.1", now: () => clock.now });
     const server = createServer((req, res) => { void handler(req, res); });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${server.address().port}/connect/mcp`;
-    const raw = async (name, args) => {
+    // `from` sets the client IP (X-Forwarded-For through the trusted local proxy); `headers` adds more.
+    const raw = async (name, args, from = "198.51.100.1", headers = {}) => {
       const response = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: ACCEPT },
+        headers: { "content-type": "application/json", accept: ACCEPT, "x-forwarded-for": from, ...headers },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
       });
       const text = await response.text();
       const data = text.split("\n").find((line) => line.startsWith("data:"));
       return JSON.parse(data ? data.slice(5) : text).result.content[0].text;
     };
-    const call = async (name, args) => JSON.parse(await raw(name, args));
+    const call = async (name, args, from, headers) => JSON.parse(await raw(name, args, from, headers));
     live = {
       coordinator, call, raw,
       // A crash: nothing closed or flushed.
@@ -87,8 +89,10 @@ async function listen(call, account, name, extra = {}) {
   return { address, listenAccess: listening.listenAccess };
 }
 
-async function inviteTo(call, account, to) {
-  return call("handshake_invite", { ...validTerms(), readiness: await readiness(call, account), to });
+let nextIp = 1;
+// Each Initiator from its own network unless told otherwise (per-source caps are tested apart).
+async function inviteTo(call, account, to, extra = {}, from = `203.0.113.${(nextIp++ % 250) + 1}`) {
+  return call("handshake_invite", { ...validTerms(), readiness: await readiness(call, account), to, ...extra }, from);
 }
 
 // ---------------------------------------------------------------------------
@@ -98,15 +102,15 @@ async function inviteTo(call, account, to) {
 test("addresses: name#fingerprint, where the fingerprint is keccak256 of the key's 20 bytes", () => {
   const account = newSessionKey();
   const expected = keccak256(account.address.toLowerCase()).slice(2, 2 + FINGERPRINT_HEX_LENGTH);
-  assert.equal(FINGERPRINT_HEX_LENGTH, 8);
+  assert.equal(FINGERPRINT_HEX_LENGTH, 20);
   assert.equal(keyFingerprint(account.address), expected);
   assert.equal(keyFingerprint(account.address.toLowerCase()), expected, "checksum casing does not matter");
   assert.equal(addressFor("claude-code.alex", account.address), `claude-code.alex#${expected}`);
   assert.deepEqual(parseAddress(` Claude-Code.Alex#${expected.toUpperCase()} `), { address: `claude-code.alex#${expected}`, name: "claude-code.alex", fingerprint: expected });
-  for (const bad of ["ab#3f9a1c07", "-alex#3f9a1c07", "alex-#3f9a1c07", "al..ex#3f9a1c07", "alex#3f9a", "alex#3f9a1c0g", "alex", "admin#3f9a1c07", "clockchain.team#3f9a1c07", `${"a".repeat(33)}#3f9a1c07`, "al ex#3f9a1c07", 42]) {
+  for (const bad of ["ab#3f9a1c07aa55bb66cc77", "-alex#3f9a1c07aa55bb66cc77", "alex-#3f9a1c07aa55bb66cc77", "al..ex#3f9a1c07aa55bb66cc77", "alex#3f9a", "alex#3f9a1c07", "alex#3f9a1c07aa55bb66cc7g", "alex", "admin#3f9a1c07aa55bb66cc77", "clockchain.team#3f9a1c07aa55bb66cc77", `${"a".repeat(33)}#3f9a1c07aa55bb66cc77`, "al ex#3f9a1c07aa55bb66cc77", 42]) {
     assert.throws(() => parseAddress(bad), { name: "StandaloneAddressError" }, String(bad));
   }
-  assert.doesNotThrow(() => parseAddress(`${"a".repeat(32)}#3f9a1c07`));
+  assert.doesNotThrow(() => parseAddress(`${"a".repeat(32)}#3f9a1c07aa55bb66cc77`));
 });
 
 // ---------------------------------------------------------------------------
@@ -157,9 +161,9 @@ test("listen: the wrong key is refused; re-claiming with the same key works and 
 
 test("mailbox store: a live address belongs to its first claimant; another key with the same fingerprint is refused", () => {
   const store = createMailboxStore({ now: () => T });
-  store.claim({ address: "alice.agent#3f9a1c07", ownerKey: "0x" + "11".repeat(20), allow: null, block: [] });
-  assert.throws(() => store.claim({ address: "alice.agent#3f9a1c07", ownerKey: "0x" + "22".repeat(20), allow: null, block: [] }), /ADDRESS_TAKEN/);
-  assert.doesNotThrow(() => store.claim({ address: "alice.agent#3f9a1c07", ownerKey: "0x" + "11".repeat(20), allow: null, block: [] }));
+  store.claim({ address: "alice.agent#3f9a1c07aa55bb66cc77", ownerKey: "0x" + "11".repeat(20), allow: null, block: [], client: "192.0.2.1" });
+  assert.throws(() => store.claim({ address: "alice.agent#3f9a1c07aa55bb66cc77", ownerKey: "0x" + "22".repeat(20), allow: null, block: [], client: "192.0.2.1" }), /ADDRESS_TAKEN/);
+  assert.doesNotThrow(() => store.claim({ address: "alice.agent#3f9a1c07aa55bb66cc77", ownerKey: "0x" + "11".repeat(20), allow: null, block: [], client: "192.0.2.1" }));
 });
 
 // ---------------------------------------------------------------------------
@@ -251,7 +255,7 @@ test("e2e: invite by address, then review -> accept -> consent -> open -> 2 mess
   assert.equal(/"invitation"\s*:/.test(everything), false);
   const timeline = await initiatorCall("handshake_timeline", { access: a });
   assert.ok(timeline.events.some((event) => event.type === "invitation_sent" && event.to === address));
-  assert.equal(timeline.events.some((event) => event.type === "invitation_delivered"), false, "delivery is only in the listener's mailbox timeline");
+  assert.equal(timeline.events.some((event) => event.type === "invitation_delivered" || event.type === "reviewed"), false, "delivery and review are only in the listener's mailbox timeline");
   const mailbox = await call("handshake_timeline", { access: listenAccess });
   assert.deepEqual(mailbox.events.map((event) => event.type), ["listening", "invitation_delivered", "reviewed", "accepted"]);
 });
@@ -340,11 +344,180 @@ test("crash-restart with a pending mailbox invitation: the listener's handle sti
   const initiator = newSessionKey();
   const { address, listenAccess } = await listen(call, listener, "listener.agent");
   const invite = await inviteTo(call, initiator, address);
-  ({ call } = await w.boot()); // crash: nothing closed or flushed
+  // Deliveries are coalesced writes (no synchronous write on the invite path, see fix 2):
+  // let it land, then crash with nothing closed or flushed.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  ({ call } = await w.boot());
   const review = await call("handshake_next", { access: listenAccess, waitMs: 0 });
   assert.equal(review.action, "review_invitation");
   assert.equal(review.sessionId, invite.sessionId);
   const accepted = await call("handshake_accept_from_mailbox", { access: listenAccess, invitationId: review.invitationId, readiness: await readiness(call, listener) });
   assert.equal(accepted.stage, "ready");
   assert.equal((await call("handshake_next", { access: invite.roleAccess, waitMs: 0 })).action, "sign");
+});
+
+
+// ---------------------------------------------------------------------------
+// Security review fixes (PR #165)
+// ---------------------------------------------------------------------------
+
+// Everything the Initiator can observe, with ids and times masked.
+async function initiatorView(call, access) {
+  const mask = (value) => JSON.stringify(value)
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<id>")
+    .replace(/"at":"[^"]+"/g, '"at":"<t>"')
+    .replace(/[a-z0-9.-]+#[0-9a-f]{20}/g, "<address>")
+    .replace(/csha_[A-Za-z0-9_-]{22}/g, "<handle>");
+  return [
+    mask(await call("handshake_next", { access, waitMs: 0 })),
+    mask(await call("handshake_status", { access })),
+    mask(await call("handshake_timeline", { access })),
+  ];
+}
+
+test("fix 1: before an explicit accept or decline, the Initiator cannot tell delivered-and-reviewed from undeliverable", async () => {
+  const w = world();
+  const { call } = await w.boot();
+  const listener = newSessionKey();
+  const { address, listenAccess } = await listen(call, listener, "listener.agent");
+  const delivered = await inviteTo(call, newSessionKey(), address);
+  assert.equal((await call("handshake_next", { access: listenAccess, waitMs: 0 })).action, "review_invitation");
+  await call("handshake_next", { access: listenAccess, waitMs: 0 }); // reviewed again
+  const undeliverable = await inviteTo(call, newSessionKey(), addressFor("nobody.home", newSessionKey().address));
+  assert.deepEqual(await initiatorView(call, delivered.roleAccess), await initiatorView(call, undeliverable.roleAccess));
+});
+
+test("fix 2: delivering an invitation does no synchronous durable write; a refusal writes nothing either", async () => {
+  const w = world();
+  // A long coalescing window so "not written synchronously" and "written soon after" are
+  // told apart deterministically, whatever the machine's load.
+  const { call } = await w.boot({ coordinator: { coalesceMs: 500 } });
+  const listener = newSessionKey();
+  const { address, listenAccess } = await listen(call, listener, "listener.agent");
+  const dir = join(w.dir, "mailboxes");
+  const [file] = readdirSync(dir).filter((name) => name.endsWith(".json"));
+  const before = readFileSync(join(dir, file), "utf8");
+  const invite = await inviteTo(call, newSessionKey(), address);
+  // The invite call has returned; the delivery has not been written synchronously.
+  assert.equal(readFileSync(join(dir, file), "utf8"), before);
+  await new Promise((resolve) => setTimeout(resolve, 800)); // the coalesced write
+  const after = readFileSync(join(dir, file), "utf8");
+  assert.notEqual(after, before);
+  assert.ok(after.includes("invitation_delivered"));
+  // Refused (duplicate sender key is irrelevant here: the address is absent): no mailbox file changes.
+  await inviteTo(call, newSessionKey(), addressFor("nobody.home", newSessionKey().address));
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.equal(readFileSync(join(dir, file), "utf8"), after);
+  assert.equal(readdirSync(dir).filter((name) => name.endsWith(".json")).length, 1);
+  void invite; void listenAccess;
+});
+
+test("fix 3: 80-bit fingerprints, and an Initiator can pin the listener's full key", async () => {
+  const w = world();
+  const { call } = await w.boot();
+  const listener = newSessionKey();
+  const { address, listenAccess } = await listen(call, listener, "pinned.agent");
+  assert.match(address, /^pinned\.agent#[0-9a-f]{20}$/);
+  const mismatched = await inviteTo(call, newSessionKey(), address, { toKey: getAddress(newSessionKey().address) });
+  assert.equal(mismatched.error, "TO_KEY_NOT_ADDRESS", "a pin must be a key with the address's fingerprint");
+  await inviteTo(call, newSessionKey(), address, { toKey: getAddress(listener.address) });
+  assert.equal((await call("handshake_next", { access: listenAccess, waitMs: 0 })).action, "review_invitation");
+  // The store refuses (silently) a pin that is not the mailbox owner's key.
+  const store = createMailboxStore({ now: () => T });
+  store.claim({ address: "x.agent#" + "a".repeat(20), ownerKey: "0x" + "11".repeat(20), allow: null, block: [], client: "c" });
+  assert.equal(store.deliver({ address: "x.agent#" + "a".repeat(20), invitationId: "mbi_1", sessionId: "s", initiatorFingerprint: "f".repeat(20), expiresAtMs: T + 1e6, client: "d", pinnedKey: "0x" + "22".repeat(20) }), false);
+  store.close();
+});
+
+test("fix 4: one live listen handle per mailbox; re-claim revokes the old one; a full map evicts instead of refusing", async () => {
+  const w = world();
+  const { call } = await w.boot();
+  const listener = newSessionKey();
+  const first = await listen(call, listener, "listener.agent");
+  const second = await listen(call, listener, "listener.agent");
+  assert.notEqual(second.listenAccess, first.listenAccess);
+  assert.equal(typeof (await call("handshake_next", { access: first.listenAccess, waitMs: 0 })).error, "string", "revoked");
+  assert.equal((await call("handshake_next", { access: second.listenAccess, waitMs: 0 })).action, "wait");
+
+  const map = createHandleMap({ label: "t/l", prefix: "csla_", limit: 2, now: () => 1_000, evictWhenFull: true });
+  const a1 = map.issue("slt_" + "a".repeat(40), 5_000, { group: "a" });
+  map.issue("slt_" + "b".repeat(40), 9_000, { group: "b" });
+  const a2 = map.issue("slt_" + "c".repeat(40), 9_000, { group: "a" });
+  assert.equal(map.resolve(a1), undefined, "same group: the previous handle is revoked");
+  assert.equal(map.size(), 2);
+  const d = map.issue("slt_" + "d".repeat(40), 9_000, { group: "d" });
+  assert.match(d, /^csla_/, "full: evicts rather than refusing");
+  assert.equal(map.size(), 2);
+  void a2;
+});
+
+test("fix 5: listen rate limit per client (IPv6 by /64), mailbox caps per key and per client, per-source pending cap, small event cap", async () => {
+  assert.equal(clientBucket("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::/64");
+  assert.equal(clientBucket("2001:db8:1:2::9"), "2001:db8:1:2::/64");
+  assert.equal(clientBucket("2001:0db8:0001:0002:ffff::1"), "2001:db8:1:2::/64");
+  assert.equal(clientBucket("198.51.100.7"), "198.51.100.7");
+
+  const w = world();
+  const { call } = await w.boot({ listensPerHour: 3 });
+  const probe = newSessionKey();
+  const address = addressFor("probe.agent", probe.address);
+  for (let i = 0; i < 3; i += 1) assert.equal((await call("listen_challenge", { address }, "2001:db8:5:6::1")).address, address);
+  assert.equal((await call("listen_challenge", { address }, "2001:db8:5:6::ffff")).error, "RATE_LIMITED", "same /64");
+  assert.equal((await call("listen_challenge", { address }, "2001:db8:5:7::1")).address, address, "another /64");
+
+  const store = createMailboxStore({ now: () => T });
+  const key = "0x" + "11".repeat(20);
+  for (let i = 0; i < MAX_MAILBOXES_PER_KEY; i += 1) store.claim({ address: `k${i}.agent#${"a".repeat(20)}`, ownerKey: key, allow: null, block: [], client: `c${i}` });
+  assert.throws(() => store.claim({ address: `kx.agent#${"a".repeat(20)}`, ownerKey: key, allow: null, block: [], client: "cx" }), /TOO_MANY_ADDRESSES_FOR_KEY/);
+  for (let i = 0; i < MAX_MAILBOXES_PER_CLIENT; i += 1) store.claim({ address: `c${i}.agent#${"b".repeat(20)}`, ownerKey: `0x${String(i).padStart(40, "0")}`, allow: null, block: [], client: "one-network" });
+  assert.throws(() => store.claim({ address: `cx.agent#${"b".repeat(20)}`, ownerKey: "0x" + "9".repeat(40), allow: null, block: [], client: "one-network" }), /TOO_MANY_ADDRESSES_FOR_CLIENT/);
+  store.close();
+
+  const { call: open } = await w.boot();
+  const listener = newSessionKey();
+  const box = await listen(open, listener, "fill.agent");
+  for (let i = 0; i < MAX_PENDING_PER_SOURCE + 2; i += 1) await inviteTo(open, newSessionKey(), box.address, {}, "192.0.2.50");
+  assert.equal((await open("handshake_next", { access: box.listenAccess, waitMs: 0 })).openInvitations, MAX_PENDING_PER_SOURCE, "one network fills at most MAX_PENDING_PER_SOURCE");
+  assert.ok(MAX_MAILBOX_EVENTS <= 30);
+});
+
+test("fix 6: a silent decline ends the Initiator's session exactly like an unanswered invitation", async () => {
+  const w = world();
+  const { call } = await w.boot();
+  const listener = newSessionKey();
+  const { address, listenAccess } = await listen(call, listener, "listener.agent");
+  const declined = await inviteTo(call, newSessionKey(), address);
+  const review = await call("handshake_next", { access: listenAccess, waitMs: 0 });
+  const answer = await call("handshake_decline", { access: listenAccess, invitationId: review.invitationId, silent: true });
+  assert.deepEqual([answer.declined, answer.silent, answer.sessionId], [true, true, undefined]);
+  const unanswered = await inviteTo(call, newSessionKey(), addressFor("nobody.home", newSessionKey().address));
+  assert.deepEqual(await initiatorView(call, declined.roleAccess), await initiatorView(call, unanswered.roleAccess));
+  // An Initiator keeps polling (which also keeps its handle alive) until the invitation TTL.
+  w.clock.now += 30 * 60_000;
+  for (const invite of [declined, unanswered]) assert.equal((await call("handshake_next", { access: invite.roleAccess, waitMs: 0 })).action, "wait");
+  w.clock.now += 30 * 60_000;
+  for (const invite of [declined, unanswered]) {
+    const ended = await call("handshake_next", { access: invite.roleAccess, waitMs: 0 });
+    assert.equal(ended.reason, "INVITATION_NOT_ACCEPTED", JSON.stringify(ended));
+  }
+});
+
+test("fix 7: the signed endpoint must be this server's public endpoint", async () => {
+  const w = world();
+  let { call } = await w.boot();
+  const listener = newSessionKey();
+  const address = addressFor("listener.agent", listener.address);
+  const key = getAddress(listener.address);
+  // Challenge asked on one mount, claim attempted through another.
+  const challenge = await call("listen_challenge", { address, sessionKeyAddress: key }, "198.51.100.1", { "x-forwarded-host": "mcp.example", "x-forwarded-prefix": "/staging" });
+  assert.equal(challenge.endpoint, "https://mcp.example/staging/connect/mcp");
+  const signatureHex = await verifyAndSign(listener, challenge.sign);
+  assert.equal((await call("handshake_listen", { address, sessionKeyAddress: key, nonce: challenge.nonce, signatureHex }, "198.51.100.1", { "x-forwarded-host": "mcp.example" })).error, "ENDPOINT_MISMATCH");
+
+  // With a configured public endpoint, that is what gets signed, whatever the Host header says.
+  ({ call } = await w.boot({ coordinator: { publicEndpoint: "https://mcp.clockchain.network/connect/mcp" } }));
+  const pinned = await call("listen_challenge", { address, sessionKeyAddress: key }, "198.51.100.1", { "x-forwarded-host": "evil.example" });
+  assert.equal(pinned.sign.record.endpoint, "https://mcp.clockchain.network/connect/mcp");
+  const ok = await call("handshake_listen", { address, sessionKeyAddress: key, nonce: pinned.nonce, signatureHex: await verifyAndSign(listener, pinned.sign) }, "198.51.100.1", { "x-forwarded-host": "evil.example" });
+  assert.match(ok.listenAccess, /^csla_/);
 });

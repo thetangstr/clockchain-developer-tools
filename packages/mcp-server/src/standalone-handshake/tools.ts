@@ -76,7 +76,7 @@ const readiness = z.object({
 const access = z.string().min(20).max(200);
 // name#fingerprint (see address.ts); validated precisely server-side.
 const handshakeAddress = z.string().min(5).max(64);
-const fingerprintList = z.array(z.string().regex(/^[0-9a-fA-F]{8}$/)).max(100);
+const fingerprintList = z.array(z.string().regex(/^[0-9a-fA-F]{20}$/)).max(100);
 const sessionKeyAddress = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
 
 export const STANDALONE_TOOL_DEFINITIONS = Object.freeze([
@@ -111,8 +111,8 @@ export const STANDALONE_TOOL_DEFINITIONS = Object.freeze([
   {
     name: "handshake_decline",
     title: "Decline an invitation from your mailbox",
-    description: "Decline a reviewed invitation. The Initiator is told it was declined; nothing is anchored.",
-    schema: { access, invitationId: z.string().min(8).max(64) },
+    description: "Decline a reviewed invitation; nothing is anchored. The Initiator is told it was declined, unless silent: true, in which case its invitation simply expires unanswered.",
+    schema: { access, invitationId: z.string().min(8).max(64), silent: z.boolean().optional() },
     readOnly: false,
   },
   {
@@ -125,8 +125,8 @@ export const STANDALONE_TOOL_DEFINITIONS = Object.freeze([
   {
     name: "handshake_invite",
     title: "Propose a standalone handshake",
-    description: "Propose bounded A2A communication: terms, channel limits, and your readiness package. With `to` (a handshake address like name#3f9a1c07) the server delivers it and returns only your role access: nothing to pass on. Without `to` you get an invitation (chs2.…): tell your user only that the invitation must reach the counterparty's agent; everything else comes from the server.",
-    schema: { reference: z.string().min(1).max(128), purpose: z.string().min(1).max(256), channelLimits, identityPolicy, readiness, to: handshakeAddress.optional() },
+    description: "Propose bounded A2A communication with your terms and readiness. With `to` (an address, name#<20 hex>; optional toKey pins its full key) the server delivers it: you get only your role access, nothing to pass on. Without `to` you get an invitation (chs2.…): tell your user only that the invitation must reach the counterparty's agent; everything else comes from the server.",
+    schema: { reference: z.string().min(1).max(128), purpose: z.string().min(1).max(256), channelLimits, identityPolicy, readiness, to: handshakeAddress.optional(), toKey: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional() },
     readOnly: false,
   },
   {

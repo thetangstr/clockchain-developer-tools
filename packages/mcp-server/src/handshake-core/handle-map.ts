@@ -25,6 +25,8 @@ interface SealedRecord {
   /** Handle sealed under a key derived from the token. */
   handleSealed: string;
   expiresAt: number;
+  /** Optional group digest: issuing into a group revokes the group's previous handle. */
+  g?: string;
 }
 
 const SCHEMA = "clockchain.handshake-handle-map/v1";
@@ -60,8 +62,12 @@ function open(key: Buffer, sealed: string, aad: string): string | undefined {
 }
 
 export interface HandleMap {
-  /** The live handle for `token`, reused if one exists (TTL refreshed), else a new one. Undefined when full. */
-  issue(token: string, expiresAt: number): string | undefined;
+  /**
+   * The live handle for `token`, reused if one exists (TTL refreshed), else a new one.
+   * With `group`, any other handle in that group is revoked first (one live handle per
+   * group). Undefined when full, unless the map evicts.
+   */
+  issue(token: string, expiresAt: number, options?: { group?: string }): string | undefined;
   /** The token behind `handle`, or undefined. With `slideTo`, the handle's expiry moves forward. */
   resolve(handle: string, slideTo?: number): string | undefined;
   size(): number;
@@ -89,6 +95,8 @@ export function createHandleMap(options: {
   /** Durable file; memory-only when omitted. */
   path?: string;
   coalesceMs?: number;
+  /** When full, evict the handle closest to expiry instead of refusing (issue never fails). */
+  evictWhenFull?: boolean;
 }): HandleMap {
   const { label, prefix, limit, now } = options;
   const records = new Map<string, SealedRecord>(); // sha256(handle) -> record
@@ -140,18 +148,27 @@ export function createHandleMap(options: {
     }
   }
 
-  // The expiry is bound into the AAD, so a record's lifetime cannot be extended on disk.
-  function aad(key: string, expiresAt: number): string {
-    return `${key}|${expiresAt}`;
+  // The expiry (and group, when present) is bound into the AAD, so a record's lifetime or
+  // group cannot be changed on disk.
+  function aad(key: string, expiresAt: number, group?: string): string {
+    return group === undefined ? `${key}|${expiresAt}` : `${key}|${expiresAt}|${group}`;
   }
 
-  function sealRecord(key: string, handle: string, token: string, expiresAt: number): SealedRecord {
+  function sealRecord(key: string, handle: string, token: string, expiresAt: number, group?: string): SealedRecord {
     return {
       t: digest(label, token),
-      tokenSealed: seal(keyFrom(label, "token", handle), token, aad(key, expiresAt)),
-      handleSealed: seal(keyFrom(label, "handle", token), handle, aad(key, expiresAt)),
+      tokenSealed: seal(keyFrom(label, "token", handle), token, aad(key, expiresAt, group)),
+      handleSealed: seal(keyFrom(label, "handle", token), handle, aad(key, expiresAt, group)),
       expiresAt,
+      ...(group === undefined ? {} : { g: group }),
     };
+  }
+
+  function remove(key: string): void {
+    const record = records.get(key);
+    if (record === undefined) return;
+    records.delete(key);
+    if (byToken.get(record.t) === key) byToken.delete(record.t);
   }
 
   function prune(current: number): boolean {
@@ -166,26 +183,34 @@ export function createHandleMap(options: {
   }
 
   return {
-    issue(token: string, expiresAt: number): string | undefined {
+    issue(token: string, expiresAt: number, issueOptions: { group?: string } = {}): string | undefined {
       ensureLoaded();
       const current = now();
       const pruned = prune(current);
       const tokenDigest = digest(label, token);
+      const group = issueOptions.group === undefined ? undefined : digest(`${label}/group`, issueOptions.group);
       const existingKey = byToken.get(tokenDigest);
       const existing = existingKey === undefined ? undefined : records.get(existingKey);
       if (existingKey !== undefined && existing !== undefined) {
-        const handle = open(keyFrom(label, "handle", token), existing.handleSealed, aad(existingKey, existing.expiresAt));
+        const handle = open(keyFrom(label, "handle", token), existing.handleSealed, aad(existingKey, existing.expiresAt, existing.g));
         if (handle !== undefined && digest(label, handle) === existingKey) {
           if (expiresAt > existing.expiresAt) {
-            records.set(existingKey, sealRecord(existingKey, handle, token, expiresAt));
+            records.set(existingKey, sealRecord(existingKey, handle, token, expiresAt, existing.g));
             save("soon");
           }
           return handle;
         }
       }
+      // One live handle per group: the group's previous handles are revoked.
+      if (group !== undefined) for (const [key, record] of [...records]) if (record.g === group) remove(key);
       if (records.size >= limit) {
-        if (pruned) save("soon");
-        return undefined;
+        if (!options.evictWhenFull) {
+          if (pruned) save("soon");
+          return undefined;
+        }
+        let oldest: string | undefined;
+        for (const [key, record] of records) if (oldest === undefined || record.expiresAt < records.get(oldest)!.expiresAt) oldest = key;
+        if (oldest !== undefined) remove(oldest);
       }
       let handle: string;
       let key: string;
@@ -193,7 +218,7 @@ export function createHandleMap(options: {
         handle = `${prefix}${randomBytes(16).toString("base64url")}`;
         key = digest(label, handle);
       } while (records.has(key));
-      records.set(key, sealRecord(key, handle, token, expiresAt));
+      records.set(key, sealRecord(key, handle, token, expiresAt, group));
       byToken.set(tokenDigest, key);
       // A client may use the handle the moment it has it, so it is durable before it is
       // returned; if the write fails the handle still works from memory.
@@ -208,10 +233,10 @@ export function createHandleMap(options: {
       const key = digest(label, handle);
       const record = records.get(key);
       if (record === undefined) return undefined;
-      const token = open(keyFrom(label, "token", handle), record.tokenSealed, aad(key, record.expiresAt));
+      const token = open(keyFrom(label, "token", handle), record.tokenSealed, aad(key, record.expiresAt, record.g));
       if (token === undefined || digest(label, token) !== record.t) return undefined;
       if (slideTo !== undefined && slideTo > record.expiresAt) {
-        records.set(key, sealRecord(key, handle, token, slideTo));
+        records.set(key, sealRecord(key, handle, token, slideTo, record.g));
         save("soon");
       }
       return token;

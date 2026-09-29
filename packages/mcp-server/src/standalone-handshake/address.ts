@@ -1,23 +1,22 @@
 // Handshake addresses (spec B4): `name#fingerprint`, bound to the listener's session key.
 //
 // The fingerprint is the first FINGERPRINT_HEX_LENGTH hex characters of
-// keccak256(lowercase session-key address, as its 20 bytes). It is not what secures the
-// address: the server delivers to a mailbox only after its claimant proves, with an EIP-191
-// signature over a single-use challenge, the key whose fingerprint is in the address, and the
-// listener must accept with that same key. The fingerprint's job is to make a copied address
-// self-checking (typos never reach a stranger) and to make squatting a specific address
-// expensive: claiming `alex#<fp>` first needs a key with that fingerprint.
+// keccak256(lowercase session-key address, as its 20 bytes). The server delivers to a
+// mailbox only after its claimant proves, with an EIP-191 signature over a single-use
+// challenge, the key whose fingerprint is in the address, and the listener must accept with
+// that same key. So whoever controls an address controls a key with its fingerprint: the
+// fingerprint length IS the cost of squatting a specific address.
 //
-// Length choice: 8 hex characters (32 bits). With 4 (16 bits) a squatter grinds a matching
-// key in well under a second; with 8 it takes about 4 billion key derivations for one
-// target, and a claimed mailbox is first-come for as long as its owner keeps it alive. 8
-// characters stays short enough for a person to read out or type ("claude-code.alex#3f9a1c07").
+// Length choice: 20 hex characters (80 bits). Vanity-address grinders reach ~1e9 keys/s on
+// one GPU, so 32 bits falls in seconds; 80 bits is ~1e24 derivations per target, out of
+// reach. The address is longer ("claude-code.alex#6dd06dce1a9f0b3c47e2") but it is copied,
+// not memorized. An Initiator that knows the listener's full key can pin it (`toKey`).
 import { keccak_256 } from "@noble/hashes/sha3";
 
 import { canonicalBytes } from "../handshake/protocol.js";
 import { standaloneSigningPayload, type StandaloneSigningPayload } from "./protocol.js";
 
-export const FINGERPRINT_HEX_LENGTH = 8;
+export const FINGERPRINT_HEX_LENGTH = 20;
 export const LISTEN_SCHEMA = "clockchain.handshake-listen/v1";
 
 const NAME = /^[a-z0-9](?:[a-z0-9.-]{1,30})[a-z0-9]$/;
