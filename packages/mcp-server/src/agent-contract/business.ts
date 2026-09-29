@@ -664,12 +664,17 @@ export function createBusinessOps(options: {
         const mandate = verifyMandate(principal, args.mandate, args.mandateSignature);
         if (typeof mandate === "string") return refuse(mandate);
         const mandateDigest = canonicalDigest({ domain: MANDATE_DOMAIN, ...mandate });
-        const envelope = prepare(liveRun, "buyer", "mandate_prepare", {
-          kind: "mandate",
-          mandate,
-          mandateSignature: args.mandateSignature,
-          mandateDigest,
-        });
+        // CONTRACT-PAYLOADS-v2 §Mandate: the signed payload IS the flat
+        // mandate — the role signature (and the signer's policy check
+        // `canonicalDigest(payload) === policy mandate`) covers exactly the
+        // bytes the family principal signed. The principal signature rides
+        // run state pinned to this envelope's nonce, never inside the
+        // payload itself.
+        const envelope = prepare(liveRun, "buyer", "mandate_prepare", { ...mandate });
+        liveRun.mandatePrepared = {
+          nonce: envelope.nonce,
+          mandateSignature: args.mandateSignature as string,
+        };
         return ok({ envelope, mandateDigest, serverNonce });
       }
 
@@ -680,13 +685,19 @@ export function createBusinessOps(options: {
         const submitted = verifySubmission(liveRun, "buyer", "mandate_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
         if (liveRun.mandate !== undefined) return refuse("STATE_REFUSED"); // write-once
+        // The payload is the flat mandate; the principal signature verified
+        // at prepare rides run state, pinned to this exact envelope's nonce.
+        const prepared = liveRun.mandatePrepared;
         const payload = submitted.envelope.payload;
-        const mandate = verifyMandate(principal, payload.mandate, payload.mandateSignature);
+        const mandate =
+          prepared !== undefined && prepared.nonce === submitted.envelope.nonce
+            ? verifyMandate(principal, payload, prepared.mandateSignature)
+            : "MANDATE_INVALID";
         if (payload.kind !== "mandate" || typeof mandate === "string") {
           return refuse("MANDATE_INVALID");
         }
+        delete liveRun.mandatePrepared;
         const mandateDigest = canonicalDigest({ domain: MANDATE_DOMAIN, ...mandate });
-        if (payload.mandateDigest !== mandateDigest) return refuse("ENVELOPE_INVALID");
         // Single-use per family principal (N4B2B-CHANGES-2 §3): the ledger
         // claim persists BEFORE the run's mandate record commits. A reused
         // id reports the same generic MANDATE_INVALID — no policy leak.

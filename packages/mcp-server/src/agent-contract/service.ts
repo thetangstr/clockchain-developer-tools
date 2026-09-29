@@ -135,7 +135,14 @@ export interface ContractRun {
   readonly offers: Map<string, OfferRecord>;
   offerSeq: number;
   agreement?: AgreementRecord;
-  booking?: { orderRef: string; pnr: string; tickets: SimTicket[]; bookedAt: string };
+  booking?: {
+    orderRef: string;
+    pnr: string;
+    tickets: SimTicket[];
+    bookedAt: string;
+    /** N4b-8 (gap 6): digest of {envelope, signatureHex, approval} — a byte-identical replay returns this record's result. */
+    requestDigest: string;
+  };
   /** N4b-4: the provider-side simulated cancel result (terminal "cancelled"). */
   cancellation?: { orderRef: string; cancelledAt: string };
   verification?: {

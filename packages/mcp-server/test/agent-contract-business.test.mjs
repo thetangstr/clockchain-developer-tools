@@ -341,7 +341,13 @@ test("N4b-2: rendezvous → bind → mandate → negotiate → agree → book �
 
   // mandate (buyer) — the family principal's signed statement
   const prepM = await callTool("tb1", "mandate_prepare", signMandate());
-  assert.ok(prepM.envelope.payload.mandateDigest === prepM.mandateDigest);
+  // CONTRACT-PAYLOADS-v2 §Mandate: the signed payload IS the flat mandate —
+  // the digest recomputes from the payload verbatim.
+  assert.equal(prepM.envelope.payload.kind, "mandate");
+  assert.equal(
+    canonicalDigest({ domain: "agent-contract.mandate/v1", ...prepM.envelope.payload }),
+    prepM.mandateDigest,
+  );
   const mandated = await signedSubmit({ token: "tb1", role: "buyer", prepared: prepM, submitTool: "mandate_submit" });
   assert.match(mandated.mandateDigest, /^0x[0-9a-f]{64}$/, JSON.stringify(mandated));
 
