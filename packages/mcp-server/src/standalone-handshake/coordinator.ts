@@ -358,6 +358,12 @@ export function createStandaloneCoordinator(options: {
       // Validate the optional webhook before claiming, so a refused URL never burns the invitation.
       const split = splitNotify(args.readiness);
       const notify = split.webhookUrl === undefined ? undefined : notifier.register({ sessionId: decoded.sessionId, role: "responder", webhookUrl: split.webhookUrl });
+      // Likewise the readiness shape (e.g. identity vs the policy) is validated against the
+      // peeked, still-unclaimed invitation, so a malformed readiness never burns it.
+      const peeked = store.peekInvitation(decoded.secret);
+      const peekedSession = peeked === undefined ? undefined : store.getSession(peeked.sessionId);
+      if (peekedSession === undefined) throw new StandaloneCoordinatorError();
+      const readiness = normalizeStandaloneReadiness(split.readiness, peekedSession.terms.identityPolicy.erc8004);
       const sessionId = store.claimInvitation(decoded.secret);
       if (sessionId === undefined || sessionId !== decoded.sessionId) {
         // A claimed-but-mismatched envelope restores the claim so that tampering
@@ -367,7 +373,6 @@ export function createStandaloneCoordinator(options: {
       }
       const session = store.requireSession(sessionId);
       if (session.stage !== "invited") throw new StandaloneCoordinatorError();
-      const readiness = normalizeStandaloneReadiness(split.readiness, session.terms.identityPolicy.erc8004);
       // The first claim burns the invitation. A failed checklist does not end the session:
       // the same Responder corrects its readiness through handshake_retry_readiness, which
       // is bound to the responder access issued here, so nobody else can take over.
@@ -752,8 +757,12 @@ export function createStandaloneCoordinator(options: {
     };
   }
 
+  // Settles the session's clocks and refuses if a deadline ended it (abandoned, or stalled by
+  // an F3 turn deadline), so nothing is ever recorded on a terminal session.
   function refuseIfAbandoned(sessionId: string): void {
-    if (store.getSession(sessionId)?.stage === "abandoned") throw new StandaloneAdmissionError("ABANDONED");
+    const stage = store.getSession(sessionId)?.stage;
+    if (stage === "abandoned") throw new StandaloneAdmissionError("ABANDONED");
+    if (stage === "stalled") throw new StandaloneAdmissionError("STALLED");
   }
 
   function requiredIdentity(session: any): boolean {

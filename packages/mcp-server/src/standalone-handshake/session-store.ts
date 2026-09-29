@@ -168,6 +168,9 @@ export function createStandaloneSessionStore(options: {
     // Channel time is protocol time; pre-open deadlines are housekeeping time.
     const current = session.stage === "open" ? now() : housekeepingNow();
     if (current < deadline.atMs) return;
+    // A closure pinned before the deadline wins: channel_close/revoke is mid-anchor, so the
+    // session completes as closed/revoked and never also stalls (one closure anchor only).
+    if (deadline.outcome === "stalled" && pendingClosures.has(session.sessionId)) return;
     const fromStage = session.stage;
     if (deadline.outcome === "expired") {
       session.stage = "expired";

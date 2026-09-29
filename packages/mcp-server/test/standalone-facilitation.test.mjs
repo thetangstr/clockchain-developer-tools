@@ -429,3 +429,73 @@ test("e2e: an agent that never returns ends the session as stalled for the other
     assert.deepEqual(ended.terminal.anchors.map((anchor) => anchor.kind), ["terms-readiness", "consent", "open", "stall-closure"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pre-ship review fixes (PR #161, 7c7fe29)
+// ---------------------------------------------------------------------------
+
+test("a readiness whose identity does not fit the policy is refused before the invitation is claimed", async () => {
+  const h = harness({ nowMs: T });
+  const invite = await h.invite();
+  const wrongShape = await h.readiness("responder", { identity: { agentId: "1", chainId: "eip155:11155111", registryAddress: "0x8004a818bfb912233c491871b3d84c89a494bd9e" } });
+  await assert.rejects(() => h.instance.invoke("handshake_accept_invitation", { invitation: invite.invitation, readiness: wrongShape }));
+  assert.equal((await h.instance.invoke("handshake_preview_invitation", { invitation: invite.invitation })).sessionId, invite.sessionId, "still unclaimed");
+  assert.equal((await h.accept(invite.invitation)).stage, "ready");
+});
+
+test("a close pinned before the reply deadline wins even if the deadline passes mid-anchor: one closure anchor", async () => {
+  let h;
+  const ledger = (await import("./helpers/standalone-signer.mjs")).fakeLedger();
+  const slow = {
+    ...ledger,
+    async log(input) {
+      if (input.assetReferenceId.endsWith(":closure")) h.setNow(T + 11 * MIN); // the deadline passes during the write
+      return ledger.log(input);
+    },
+  };
+  h = harness({ nowMs: T, coordinator: { client: slow } });
+  const { a, b } = await toOpen(h);
+  await h.instance.invoke("channel_send", { access: a, kind: "question", body: "Tuesday?" });
+  h.setNow(T + 9 * MIN);
+  const closed = await h.instance.invoke("channel_close", { access: a });
+  assert.equal(closed.outcome, "closed");
+  for (const access of [a, b]) {
+    const result = await h.next(access, { cursor: 0 });
+    assert.equal(result.action, "closed");
+    assert.deepEqual(result.terminal.anchors.map((anchor) => anchor.kind), ["terms-readiness", "consent", "open", "closure"]);
+  }
+  const closures = [...ledger.entries.values()].filter((entry) => /:closure/.test(entry.assetReferenceId));
+  assert.deepEqual(closures.map((entry) => entry.assetReferenceId.split(":").at(-1)), ["closure"]);
+});
+
+test("a turn deadline passing during consent recovery or open anchoring refuses with STALLED and records nothing", async () => {
+  const { recoverLocally, fakeLedger } = await import("./helpers/standalone-signer.mjs");
+  let h;
+  let trip = false;
+  h = harness({
+    nowMs: T,
+    coordinator: {
+      recoverEip191Address: async (input) => {
+        if (trip) h.setNow(T + 11 * MIN);
+        return recoverLocally(input);
+      },
+    },
+  });
+  const { a, b } = await toConsentPending(h);
+  const step = await h.next(b);
+  const signatureHex = await h.keys.responder.signMessage({ message: step.sign.bytes });
+  trip = true;
+  await assert.rejects(() => h.instance.invoke("consent_sign", { access: b, signatureHex }), (error) => error.reason === "STALLED");
+  const events = (await h.instance.invoke("handshake_timeline", { access: a })).events;
+  assert.equal(events.filter((event) => event.type === "consent").length, 1, "the responder's consent was never recorded");
+  assert.equal((await h.next(a)).reason, "STALLED_CONSENT_BY_RESPONDER");
+
+  const ledger = fakeLedger();
+  let o;
+  const tripping = { ...ledger, async log(input) { o.setNow(T + 11 * MIN); return ledger.log(input); } };
+  o = harness({ nowMs: T, coordinator: { client: tripping } });
+  const pair = await toConsentPending(o);
+  await o.consent("responder", pair.b);
+  await assert.rejects(() => o.instance.invoke("channel_open", { access: pair.a }), (error) => error.reason === "STALLED");
+  assert.equal((await o.next(pair.b)).reason, "STALLED_OPEN_BY_BOTH");
+});
