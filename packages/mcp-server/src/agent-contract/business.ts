@@ -543,6 +543,14 @@ export function createBusinessOps(options: {
 
       case "rendezvous_send_invitation": {
         purgeListings();
+        // N4b-7 (MEDIUM-3): a `*` principal has no agentId until a late bind
+        // proves one — an invitation carrying senderAgentId "*" would claim
+        // an identity that was never established. Resolve the bound role's
+        // agentId or refuse.
+        const senderAgentId = principal.agentId === "*"
+          ? run?.bound[principal.role]?.agentId
+          : principal.agentId;
+        if (senderAgentId === undefined) return refuse("STATE_REFUSED");
         // A delivery that doesn't parse as the real v2 seal is refused
         // WITHOUT burning the listing.
         const seal = sealedBoxV2Schema.safeParse(args.sealedInvitation);
@@ -571,7 +579,7 @@ export function createBusinessOps(options: {
           messageId: `msg-${canonicalDigest({ kind: "inbox", listingId: listing.listingId, receivedAt, seal: canonicalDigest(seal.data) }).slice(2, 14)}`,
           kind: "handshake_invitation",
           senderKeyId: principal.keyId,
-          senderAgentId: principal.agentId,
+          senderAgentId,
           listingId: listing.listingId,
           sealedPayload: seal.data,
           receivedAt,

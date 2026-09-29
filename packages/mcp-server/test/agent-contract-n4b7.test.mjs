@@ -549,3 +549,31 @@ test("startup refuses a `*` token without CONTRACT_REQUIRE_BIND_STATEMENT=1 (HIG
 
 // --- review fixes (LOW-4 / LOW-5 / MEDIUM-3) ---------------------------------
 
+test("MEDIUM-3: an unbound `*` principal cannot send rendezvous invitations", async () => {
+  const env = await boot();
+  try {
+    const listing = await env.rpc("tp1", "rendezvous_publish_listing", {
+      title: "SFO-FCO managed travel", summary: "desk", sealedBoxPublicKeyHex: `0x${"ab".repeat(32)}`,
+    });
+    const seal = {
+      v: 2, epk: `0x${"ab".repeat(32)}`, iv: `0x${"cd".repeat(12)}`,
+      ct: `0x${"ef".repeat(32)}`, tag: `0x${"01".repeat(16)}`,
+    };
+    // Unbound: the token has no proven agentId — nothing honest to disclose.
+    const refused = await env.rpc("tlb1", "rendezvous_send_invitation", {
+      listingId: listing.listingId, sealedInvitation: seal,
+    });
+    assert.equal(refused.error, "STATE_REFUSED");
+    // After binding, the invitation carries the CERTIFICATE-resolved agentId.
+    const c = cert(22);
+    await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: c, runId: uuid(22),
+    });
+    const delivered = await env.rpc("tlb1", "rendezvous_send_invitation", {
+      listingId: listing.listingId, sealedInvitation: seal,
+    });
+    assert.equal(delivered.delivered, true);
+    const inbox = await env.rpc("tp1", "rendezvous_inbox", {});
+    assert.ok(inbox.messages.some((m) => m.senderAgentId === "9501" && m.listingId === listing.listingId));
+  } finally { await env.close(); }
+});
