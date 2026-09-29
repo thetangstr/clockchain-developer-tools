@@ -158,9 +158,12 @@ const orderRefInputSchema = z
   .strict();
 
 /**
- * The canonical pairing-route board (ZRH→JFK). `IT-QW-ONESTOP` prices the
+ * The canonical pairing-route boards. ZRH→JFK: `IT-QW-ONESTOP` prices the
  * frozen prepare-envelope offer vector (fare 429000 + fee 10000 = 439000);
  * `IT-ZX118-ECON` prices the family bundle used elsewhere in the suite.
+ * SFO→FCO: the Rome family scenario (RUNBOOK-ROME-P4) — fares are the old
+ * inventory's family totals; the two-stop routings are deliberately
+ * non-qualifying (a mandate's allowedItineraryIds excludes them).
  * Fares are fixed — they are the deterministic ground truth offers bind to.
  */
 const CANONICAL_BOARD: readonly SimItinerary[] = Object.freeze([
@@ -186,6 +189,46 @@ const CANONICAL_BOARD: readonly SimItinerary[] = Object.freeze([
     destination: "JFK",
     summary: "ZX 118 nonstop — premium economy",
     fareMinor: 596000,
+    currency: "USD",
+  },
+  {
+    itineraryId: "IT-ROME-ZX118-ECON",
+    origin: "SFO",
+    destination: "FCO",
+    summary: "ZX 118/119 nonstop — economy family bundle",
+    fareMinor: 481800,
+    currency: "USD",
+  },
+  {
+    itineraryId: "IT-ROME-ZX118-PREM",
+    origin: "SFO",
+    destination: "FCO",
+    summary: "ZX 118/119 nonstop — premium economy family bundle",
+    fareMinor: 596000,
+    currency: "USD",
+  },
+  {
+    itineraryId: "IT-ROME-QW-ONESTOP",
+    origin: "SFO",
+    destination: "FCO",
+    summary: "QW 2204/2207 via JFK — 1 stop, arrives next day",
+    fareMinor: 431000,
+    currency: "USD",
+  },
+  {
+    itineraryId: "IT-ROME-2STOP-A",
+    origin: "SFO",
+    destination: "FCO",
+    summary: "QW 2210/2211/2212 via JFK+LHR — 2 stops, overnight (non-qualifying)",
+    fareMinor: 398800,
+    currency: "USD",
+  },
+  {
+    itineraryId: "IT-ROME-2STOP-B",
+    origin: "SFO",
+    destination: "FCO",
+    summary: "QW 2220/2221/2222 via ORD+LHR — 2 stops, overnight (non-qualifying)",
+    fareMinor: 404800,
     currency: "USD",
   },
 ]);
