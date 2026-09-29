@@ -85,6 +85,9 @@ export function checkConfig(env) {
     // N4b-8 (gap 3): terminal close delivery — mandatory at S|P (the config
     // load itself misconfigures when unset); at L it may be absent.
     telemetryCloseUrl: cfg.telemetryCloseUrl ?? null,
+    // N4b-8 (gap 4): CONTRACT_ANCHOR_ENABLED=1 — tsa_issue-backed run
+    // anchoring (agreement digest + terminal chain head).
+    anchorEnabled: cfg.anchorEnabled,
     stateDir: cfg.stateDir,
     hostRoots,
     simFaultsEnabled: cfg.simFaultsEnabled,
