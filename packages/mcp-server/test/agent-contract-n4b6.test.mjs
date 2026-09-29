@@ -424,3 +424,172 @@ test("an honest run carries no simFault field anywhere", async () => {
     await app.close();
   }
 });
+
+// === 2. the evidence routes are one exported code path =======================
+
+const KEYS_DOC = buildServerKeysDoc([
+  { keyId: "contract-server-test", alg: "Ed25519",
+    publicKeyHex: `0x${"aa".repeat(32)}`, validFrom: "2026-01-01T00:00:00.000Z", validUntil: null },
+]);
+
+async function probe(url, { method = "GET", token = null } = {}) {
+  const headers = {};
+  if (token !== null) headers.authorization = `Bearer ${token}`;
+  const res = await fetch(url, { method, headers });
+  return { status: res.status, body: await res.text() };
+}
+
+test("the exported evidence routes serve receipts, keys and run-salt over a shared service", async () => {
+  const { startContractEvidenceServer } = await import("../dist/agent-contract/evidence-routes.js");
+  const service = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER,
+    policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
+  });
+  const app = await boot({ service });
+  const evidence = await startContractEvidenceServer({
+    service, observerToken: "obs", verifierToken: "ver", keysDoc: KEYS_DOC,
+    allowFeed: () => true,
+  });
+  try {
+    const { runId } = await bookedPair(app.rpc, 905, "tb1", "tp1");
+
+    // /contract/receipts — observer-token auth, run feed.
+    assert.equal((await probe(`${evidence.url}/contract/receipts?runId=${runId}`)).status, 401);
+    const feedRes = await fetch(`${evidence.url}/contract/receipts?runId=${runId}`, {
+      headers: { authorization: "Bearer obs" },
+    });
+    assert.equal(feedRes.status, 200);
+    const feed = await feedRes.json();
+    assert.equal(feed.runId, runId);
+    assert.ok(feed.receipts.length > 0);
+    assert.equal(feed.head.length > 0, true);
+    // The verifier token does NOT open the observer feed — separate credentials.
+    assert.equal(
+      (await probe(`${evidence.url}/contract/receipts?runId=${runId}`, { token: "ver" })).status, 401,
+    );
+
+    // /contract/run-salt — verifier-token auth, salt disclosure.
+    assert.equal((await probe(`${evidence.url}/contract/run-salt?runId=${runId}`)).status, 401);
+    assert.equal(
+      (await probe(`${evidence.url}/contract/run-salt?runId=${runId}`, { token: "obs" })).status, 401,
+    );
+    const saltRes = await fetch(`${evidence.url}/contract/run-salt?runId=${runId}`, {
+      headers: { authorization: "Bearer ver" },
+    });
+    assert.equal(saltRes.status, 200);
+    const salt = await saltRes.json();
+    assert.deepEqual({ scope: salt.scope, id: salt.id }, { scope: "run", id: runId });
+    assert.match(salt.salt, /^[0-9a-f]{64}$/);
+
+    // /contract/keys — public, byte-identical to the document passed in.
+    const keysRes = await fetch(`${evidence.url}/contract/keys`);
+    assert.equal(keysRes.status, 200);
+    assert.equal(await keysRes.text(), JSON.stringify(KEYS_DOC));
+
+    // Everything else is closed on the evidence mount.
+    assert.equal((await probe(`${evidence.url}/contract/mcp`)).status, 404);
+    assert.equal((await probe(`${evidence.url}/contract/keys`, { method: "POST" })).status, 404);
+  } finally {
+    await evidence.close();
+    await app.close();
+  }
+});
+
+test("http.ts and the exported handler give identical responses on shared inputs", async () => {
+  const { startContractEvidenceServer } = await import("../dist/agent-contract/evidence-routes.js");
+  const app = await bootHttp(READY_ENV); // obs-token / ver-token wired via env
+  const service = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER,
+    policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
+  });
+  const evidence = await startContractEvidenceServer({
+    service, observerToken: "obs-token", verifierToken: "ver-token",
+    keysDoc: { schema: "agent-contract.server-keys/v1", keys: [] },
+    allowFeed: () => true,
+  });
+  try {
+    // Same statuses and byte-identical bodies for every shared input.
+    for (const [path, opts] of [
+      ["/contract/receipts?runId=nope", {}],
+      ["/contract/receipts?runId=nope", { token: "wrong" }],
+      ["/contract/receipts?runId=nope", { token: "obs-token" }],
+      ["/contract/receipts", { method: "POST", token: "obs-token" }],
+      ["/contract/run-salt?runId=nope", {}],
+      ["/contract/run-salt?runId=nope", { token: "ver-token" }],
+      ["/contract/run-salt", { method: "POST", token: "ver-token" }],
+      ["/contract/keys", { method: "POST" }],
+    ]) {
+      const a = await probe(`${app.url}${path}`, opts);
+      const b = await probe(`${evidence.url}${path}`, opts);
+      assert.equal(b.status, a.status, `${opts.method ?? "GET"} ${path}`);
+      assert.equal(b.body, a.body, `${opts.method ?? "GET"} ${path}`);
+    }
+    // Tokens unset → both routes are closed (404), identically.
+    const closed = await startContractEvidenceServer({
+      service, keysDoc: { schema: "agent-contract.server-keys/v1", keys: [] },
+      allowFeed: () => true,
+    });
+    try {
+      assert.equal((await probe(`${closed.url}/contract/receipts?runId=x`, { token: "obs-token" })).status, 404);
+      assert.equal((await probe(`${closed.url}/contract/run-salt?runId=x`, { token: "ver-token" })).status, 404);
+    } finally {
+      await closed.close();
+    }
+  } finally {
+    await evidence.close();
+    await app.close();
+    service.close();
+  }
+});
+
+test("the evidence server is loopback-only by default and honors listenHost", async () => {
+  const { startContractEvidenceServer } = await import("../dist/agent-contract/evidence-routes.js");
+  const service = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER,
+    policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
+  });
+  const evidence = await startContractEvidenceServer({
+    service, keysDoc: KEYS_DOC,
+  });
+  try {
+    assert.equal(evidence.server.address().address, "127.0.0.1");
+    assert.match(evidence.url, /^http:\/\/127\.0\.0\.1:\d+/);
+    assert.equal((await fetch(`${evidence.url}/contract/keys`)).status, 200);
+  } finally {
+    await evidence.close();
+    service.close();
+  }
+});
+
+test("the exported routes rate-limit feed access like http.ts does", async () => {
+  const { createContractEvidenceRoutes } = await import("../dist/agent-contract/evidence-routes.js");
+  const service = createContractService({
+    hostRoots: HOST_ROOTS, signer: SIGNER,
+    policyDigests: POLICY_DIGESTS, principals: PRINCIPALS,
+  });
+  // No allowFeed injected → the built-in low-rate default applies.
+  const routes = createContractEvidenceRoutes({
+    service, observerToken: "obs", keysDoc: KEYS_DOC,
+  });
+  const srv = createServer((req, res) => {
+    if (!routes(req, res)) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not_found" }));
+    }
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    let last = 0;
+    for (let i = 0; i < 30; i += 1) {
+      last = (await probe(`${url}/contract/receipts?runId=nope`, { token: "obs" })).status;
+    }
+    assert.equal(last, 404); // 30 within the window, all fine (unknown run)
+    const limited = await probe(`${url}/contract/receipts?runId=nope`, { token: "obs" });
+    assert.equal(limited.status, 429);
+    assert.deepEqual(JSON.parse(limited.body), { error: "rate_limited" });
+  } finally {
+    await new Promise((r) => srv.close(r));
+    service.close();
+  }
+});

@@ -74,8 +74,8 @@ import {
   buildServerCard,
   buildServerKeysDoc,
   SERVER_CARD_PATH,
-  SERVER_KEYS_PATH,
 } from "./agent-contract/server-card.js";
+import { createContractEvidenceRoutes } from "./agent-contract/evidence-routes.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -537,6 +537,22 @@ export async function runHttp(): Promise<Server> {
   };
   // The observer receipt feed is a low-rate surface (default 30/min).
   const allowObserverFeed = keyedWindowLimiter(Number(process.env.CONTRACT_OBSERVER_PER_MINUTE ?? "30"), 60_000, Date.now);
+
+  // N4b-6: the evidence routes are ONE exported code path — shared with the
+  // l-stack so nothing can drift (receipts feed, keys doc, run-salt). The
+  // server card itself stays here (it's a host-level .well-known document).
+  const contractEvidenceRoutes = createContractEvidenceRoutes({
+    service: contractConfig.kind === "ready" ? contractConfig.service : undefined,
+    observerToken: contractConfig.kind === "ready" ? contractConfig.observerToken : undefined,
+    verifierToken: contractConfig.kind === "ready" ? contractConfig.verifierToken : undefined,
+    keysDoc: contractConfig.kind === "ready"
+      ? buildServerKeysDoc(contractConfig.serverKeys, {
+          simFaultsEnabled: contractConfig.simFaultsEnabled,
+        })
+      : undefined,
+    allowFeed: (scope) => allowObserverFeed(scope),
+    onRateLimited: () => rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) }),
+  });
 
   let standaloneHandshakeHandler: ReturnType<typeof createStandaloneHttpHandler> | undefined;
   let standaloneHandshakeCoordinator: ReturnType<typeof createRuntimeStandaloneCoordinator> | undefined;
@@ -1170,114 +1186,12 @@ export async function runHttp(): Promise<Server> {
       })));
       return;
     }
-    if (pathOf(req.url) === SERVER_KEYS_PATH) {
-      if (req.method !== "GET" || contractConfig.kind !== "ready") {
-        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "not_found" }));
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });
-      res.end(JSON.stringify(buildServerKeysDoc(contractConfig.serverKeys, {
-        simFaultsEnabled: contractConfig.simFaultsEnabled,
-      })));
-      return;
-    }
-
-    // Read-only observer receipt feed (N4b-2b): `GET /contract/receipts?runId=`
-    // behind its own bearer token — off unless CONTRACT_OBSERVER_TOKEN is set.
-    // The token compares constant-time over sha256 digests (same pattern as
-    // the metrics token) and the feed itself is rate-limited per observer.
-    if (pathOf(req.url) === "/contract/receipts") {
-      const token = contractConfig.kind === "ready" ? contractConfig.observerToken : undefined;
-      if (contractConfig.kind !== "ready" || token === undefined) {
-        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "not_found" }));
-        return;
-      }
-      if (req.method !== "GET") {
-        res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "forbidden" }));
-        return;
-      }
-      const expected = createHash("sha256").update(token).digest();
-      const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
-      const presented = bearer ? createHash("sha256").update(bearer[1].trim()).digest() : null;
-      if (presented === null || !timingSafeEqual(presented, expected)) {
-        res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "unauthorized" }));
-        return;
-      }
-      if (!allowObserverFeed("observer")) {
-        rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) });
-        res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "rate_limited" }));
-        return;
-      }
-      const params = new URL(req.url ?? "/", "http://localhost").searchParams;
-      // M1: `?keyId=` serves a principal's PRE-BIND chain (refused binds and
-      // rendezvous evidence have no runId to key on); `?runId=` serves the
-      // run chain plus both bound principals' pre-bind chains.
-      const keyId = params.get("keyId");
-      const runId = params.get("runId") ?? "";
-      const feed = keyId !== null
-        ? contractConfig.service.preBindFeed(keyId)
-        : contractConfig.service.receiptFeed(runId);
-      if (feed === undefined) {
-        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "not_found" }));
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      res.end(JSON.stringify(feed));
-      return;
-    }
-
-    // M4: `GET /contract/run-salt?runId=…|keyId=…` — the VERIFIER-scoped salt
-    // disclosure endpoint. Deliberately a different credential from the
-    // observer token: the observer feed carries salted argsDigests, and the
-    // salt is what lets a verifier (not the observer) reconstruct them.
-    // Unset CONTRACT_VERIFIER_TOKEN → closed (404).
-    if (pathOf(req.url) === "/contract/run-salt") {
-      const token = contractConfig.kind === "ready" ? contractConfig.verifierToken : undefined;
-      if (contractConfig.kind !== "ready" || token === undefined) {
-        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "not_found" }));
-        return;
-      }
-      if (req.method !== "GET") {
-        res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "forbidden" }));
-        return;
-      }
-      const expected = createHash("sha256").update(token).digest();
-      const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
-      const presented = bearer ? createHash("sha256").update(bearer[1].trim()).digest() : null;
-      if (presented === null || !timingSafeEqual(presented, expected)) {
-        res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "unauthorized" }));
-        return;
-      }
-      if (!allowObserverFeed("verifier")) {
-        rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) });
-        res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "rate_limited" }));
-        return;
-      }
-      const q = new URL(req.url ?? "/", "http://localhost").searchParams;
-      const keyIdQ = q.get("keyId");
-      const runIdQ = q.get("runId");
-      const salt = contractConfig.service.saltFor(
-        keyIdQ !== null ? { keyId: keyIdQ } : runIdQ !== null ? { runId: runIdQ } : {},
-      );
-      if (salt === undefined) {
-        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "not_found" }));
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      res.end(JSON.stringify(salt));
-      return;
-    }
+    // N4b-6: `GET /contract/keys`, `GET /contract/receipts`, and
+    // `GET /contract/run-salt` are served by the exported evidence-routes
+    // handler — the same code path the l-stack mounts, so behavior cannot
+    // drift between the two mounts. Auth (observer/verifier bearer, sha256
+    // constant-time), method gates, rate limits and filtering are identical.
+    if (contractEvidenceRoutes(req, res)) return;
 
     // A Responder exchanges the URL-fragment capability exactly once. The
     // capability is never sent in a query string and the response is never
