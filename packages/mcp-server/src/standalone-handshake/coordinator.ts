@@ -4,6 +4,8 @@ import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
 import { ClockchainClock } from "@clockchain/clock-sdk";
 import { ssrfOptionsFromEnv } from "@clockchain/keeper";
 
+import { handshakeStateDir } from "../handshake-core/durable-store.js";
+
 import { canonicalBytes } from "../handshake/protocol.js";
 import { recoverEip191Address, resolveOwnedAgentRegistration } from "../handshake/evm.js";
 
@@ -158,11 +160,14 @@ export function createStandaloneCoordinator(options: {
   resumeGapMs?: number;
   /** F4: webhook signing and destination policy (keeper's). */
   webhooks?: StandaloneNotifierOptions;
+  /** B2: durable state directory (sessions survive a restart); memory-only when omitted. */
+  stateDir?: string;
+  coalesceMs?: number;
 } = {}) {
   if (!options.client) throw new StandaloneCoordinatorError("A ledger client is required.");
   const client = options.client;
   const now = options.now ?? Date.now;
-  const store = createStandaloneSessionStore({ now, preOpenTtlMs: options.preOpenTtlMs });
+  const store = createStandaloneSessionStore({ now, preOpenTtlMs: options.preOpenTtlMs, stateDir: options.stateDir, coalesceMs: options.coalesceMs });
   const holds = createHoldRegistry({ maxHolds: options.maxHolds, maxHoldsPerClient: options.maxHoldsPerClient });
   const stallAfterMs = options.stallAfterMs ?? STALL_AFTER_MS;
   const resumeGapMs = options.resumeGapMs ?? RESUME_GAP_MS;
@@ -218,6 +223,11 @@ export function createStandaloneCoordinator(options: {
       return result;
     },
 
+    /** Writes any coalesced state and stops timers (tests, graceful shutdown). */
+    close(): void {
+      store.close();
+    },
+
     /** Waits for in-flight webhook notices (tests, graceful shutdown). */
     async drainNotices(): Promise<void> {
       while (notices.size > 0) await Promise.all([...notices]);
@@ -233,7 +243,7 @@ export function createStandaloneCoordinator(options: {
     if (session === undefined || turn === undefined) return;
     const roles = turn.pendingOn === "both" ? ["initiator", "responder"] : [turn.pendingOn];
     for (const role of roles) {
-      const target = store.getNotify(sessionId, role);
+      const target = notifyTarget(sessionId, role);
       if (target === undefined) continue;
       const seenAt = session.lastSeenAtMs[role];
       if (seenAt !== undefined && softNow() - seenAt < NOTICE_QUIET_MS) continue;
@@ -378,6 +388,7 @@ export function createStandaloneCoordinator(options: {
       // is bound to the responder access issued here, so nobody else can take over.
       const outcome = await readinessAttempt(session, readiness, {
         previousStage: "invited",
+        invitationSecret: decoded.secret,
         onRollback: () => store.putInvitation({ secret: decoded.secret, sessionId, expiresAtMs: session.invitationExpiresAtMs }),
       });
       const responderAccess = `sat_${randomBytes(32).toString("base64url")}`;
@@ -408,7 +419,7 @@ export function createStandaloneCoordinator(options: {
       if (turn === undefined || (turn.pendingOn !== target && turn.pendingOn !== "both")) throw new StandaloneAdmissionError("NOT_THEIR_TURN");
       if (!store.claimNudge(session.sessionId, role)) throw new StandaloneAdmissionError("NUDGE_RATE_LIMITED");
       store.setPendingNudge(session.sessionId, target, role);
-      const push = store.getNotify(session.sessionId, target);
+      const push = notifyTarget(session.sessionId, target);
       const canPush = push !== undefined && notifier.enabled() && store.claimNotice(session.sessionId, target, "nudge", NOTICE_MIN_INTERVAL_MS);
       store.appendEvent(session.sessionId, { type: "nudged", byRole: role, toRole: target, pendingAction: turn.action, pushed: canPush });
       const delivery = canPush ? await sendNotice(session.sessionId, target, push, turn.action, "nudge") : undefined;
@@ -692,9 +703,18 @@ export function createStandaloneCoordinator(options: {
   // Fail: readiness_retry while attempts remain and every failure is the Responder's to
   // fix; otherwise ready_failed for both. Nothing is anchored here: the terms-readiness
   // transition is anchored by channel_open, which only a passed checklist can reach.
-  async function readinessAttempt(session: any, readiness: Readonly<Record<string, any>>, options: { previousStage: "invited" | "readiness_retry"; onRollback?: () => void }): Promise<Record<string, unknown>> {
+  // A registered webhook, with its signing secret (re-derived after a restart: never stored).
+  function notifyTarget(sessionId: string, role: string): { webhookUrl: string; secret: string } | undefined {
+    const stored = store.getNotify(sessionId, role);
+    if (stored === undefined) return undefined;
+    return stored.secret ? stored : { webhookUrl: stored.webhookUrl, secret: notifier.secretFor(sessionId, role, stored.webhookUrl) };
+  }
+
+  async function readinessAttempt(session: any, readiness: Readonly<Record<string, any>>, options: { previousStage: "invited" | "readiness_retry"; onRollback?: () => void; invitationSecret?: string }): Promise<Record<string, unknown>> {
     const sessionId = session.sessionId;
     const previousReadiness = session.responderReadiness;
+    // Durable before evaluation starts: a restart mid-evaluation rolls this attempt back.
+    store.beginAttempt(sessionId, { previousStage: options.previousStage, invitationSecret: options.invitationSecret });
     store.setResponderReadiness(sessionId, readiness);
     store.setStage(sessionId, "readiness_pending");
     let checklist;
@@ -831,6 +851,8 @@ export function createRuntimeStandaloneCoordinator(env: Record<string, string | 
     },
     recoverEip191Address: ({ bytes, signatureHex }) => recoverEip191Address({ bytes, signatureHex, rpcUrl }),
     ...resolveStandaloneHoldLimits(env),
+    // B2: durable when HANDSHAKE_STATE_DIR is set (production: /app/state on the mcp_state volume).
+    stateDir: handshakeStateDir("standalone-handshake", env),
     // F4 reuses the timer tools' webhook secret and destination policy (allow-listed in HTTP mode).
     webhooks: { serverSecret: env.STANDALONE_WEBHOOK_SECRET || env.KEEPER_WEBHOOK_SECRET || "", ssrf: ssrfOptionsFromEnv(env) },
     resolveIdentity: async (identity, sessionKeyAddress) => {

@@ -1,4 +1,7 @@
-import { createHash, randomBytes } from "node:crypto";
+import { join } from "node:path";
+
+import { handshakeStateDir } from "../handshake-core/durable-store.js";
+import { createHandleMap } from "../handshake-core/handle-map.js";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -122,55 +125,34 @@ class StandaloneRoleAccessError extends Error {
   }
 }
 
-function accessDigest(access: string): string {
-  return createHash("sha256").update(access, "utf8").digest("hex");
-}
+// Handles live in a HandleMap (handshake-core/handle-map.ts): durable when a state
+// directory is configured, with neither handle nor token stored in the clear.
+function createRoleAccessBroker(invoke: (name: string, args: Record<string, unknown>) => Promise<unknown>, now: () => number, stateDir: string | undefined) {
+  const handles = createHandleMap({
+    label: "standalone/csha",
+    prefix: "csha_",
+    limit: ROLE_ACCESS_HANDLE_LIMIT,
+    now,
+    ...(stateDir === undefined ? {} : { path: join(stateDir, "role-handles.json") }),
+  });
 
-function createRoleAccessBroker(invoke: (name: string, args: Record<string, unknown>) => Promise<unknown>, now: () => number) {
-  const handles = new Map<string, { access: string; digest: string; expiresAt: number }>();
   // One live handle per access token: a client that keeps passing the raw sat_ token gets
-  // the same handle back instead of minting a new one each call and filling the cap.
-  const handleByAccess = new Map<string, string>();
-
-  function prune(): void {
-    const current = now();
-    for (const [handle, entry] of handles) {
-      if (current < entry.expiresAt) continue;
-      handles.delete(handle);
-      if (handleByAccess.get(entry.digest) === handle) handleByAccess.delete(entry.digest);
-    }
-  }
-
+  // the same handle back (TTL refreshed) instead of minting a new one each call.
   function issue(access: unknown): string {
     if (typeof access !== "string" || access.length < 20 || access.length > 4096) throw new StandaloneRoleAccessError();
-    prune();
-    const digest = accessDigest(access);
-    const existing = handleByAccess.get(digest);
-    const entry = existing === undefined ? undefined : handles.get(existing);
-    if (existing !== undefined && entry !== undefined && entry.access === access) {
-      entry.expiresAt = now() + ROLE_ACCESS_HANDLE_TTL_MS;
-      return existing;
-    }
-    if (handles.size >= ROLE_ACCESS_HANDLE_LIMIT) throw new StandaloneRoleAccessError();
-    let handle: string;
-    do {
-      handle = `csha_${randomBytes(16).toString("base64url")}`;
-    } while (handles.has(handle));
-    handles.set(handle, { access, digest, expiresAt: now() + ROLE_ACCESS_HANDLE_TTL_MS });
-    handleByAccess.set(digest, handle);
+    const handle = handles.issue(access, now() + ROLE_ACCESS_HANDLE_TTL_MS);
+    if (handle === undefined) throw new StandaloneRoleAccessError();
     return handle;
   }
 
   function resolve(value: unknown): { clientHandle: string | undefined; signedAccess: string } {
     if (typeof value !== "string") throw new StandaloneRoleAccessError();
     if (!ROLE_ACCESS_HANDLE.test(value)) return { clientHandle: undefined, signedAccess: value };
-    prune();
-    const entry = handles.get(value);
-    if (!entry) throw new StandaloneRoleAccessError();
     // Sliding TTL: channels may run far longer than one handle horizon, so each successful
     // resolve of a live handle refreshes it. An idle handle still expires on its own.
-    entry.expiresAt = now() + ROLE_ACCESS_HANDLE_TTL_MS;
-    return { clientHandle: value, signedAccess: entry.access };
+    const access = handles.resolve(value, now() + ROLE_ACCESS_HANDLE_TTL_MS);
+    if (access === undefined) throw new StandaloneRoleAccessError();
+    return { clientHandle: value, signedAccess: access };
   }
 
   return async (name: string, args: Record<string, unknown>) => {
@@ -206,12 +188,14 @@ export function createStandaloneHttpHandler(options: {
   callsPerMinute?: number;
   now?: () => number;
   env?: Record<string, string | undefined>;
+  /** Durable state directory for role handles; defaults to HANDSHAKE_STATE_DIR/standalone-handshake. */
+  stateDir?: string;
 }) {
   const now = options.now ?? Date.now;
   const env = options.env ?? process.env;
   const allowInvite = limiter(options.invitesPerHour ?? 5, 60 * 60_000, now);
   const allowCall = limiter(options.callsPerMinute ?? 120, 60_000, now);
-  const invoke = createRoleAccessBroker(options.invoke, now);
+  const invoke = createRoleAccessBroker(options.invoke, now, options.stateDir ?? handshakeStateDir("standalone-handshake", env));
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if ((req.url ?? "").split("?")[0] !== "/connect/mcp") {
       res.writeHead(404, { "content-type": "application/json" });
