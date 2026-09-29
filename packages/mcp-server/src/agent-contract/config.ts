@@ -61,6 +61,8 @@ export type ContractRouteConfig =
       readonly serverKeys: readonly PublishedServerKey[];
       /** N4b-6: CONTRACT_ALLOW_SIM_FAULTS=1 — the card/keys must say so. */
       readonly simFaultsEnabled: boolean;
+      /** N4b-7: CONTRACT_REQUIRE_BIND_STATEMENT=1 (mandatory at level S|P). */
+      readonly requireBindStatement: boolean;
       readonly service: ContractService;
     };
 
@@ -256,6 +258,19 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     }
   }
 
+  // N4b-7 (P-GAP): CONTRACT_LEVEL selects the deployment tier. At S|P the
+  // bind-statement possession proof is MANDATORY — startup refuses without
+  // CONTRACT_REQUIRE_BIND_STATEMENT=1. At L (default) it is optional: a
+  // presented statement is still verified, but binds may omit it.
+  const levelRaw = (env.CONTRACT_LEVEL ?? "L").trim().toUpperCase();
+  if (levelRaw !== "L" && levelRaw !== "S" && levelRaw !== "P") {
+    return misconfigured(`CONTRACT_LEVEL must be one of L|S|P, got "${env.CONTRACT_LEVEL}"`);
+  }
+  const requireBindStatement = env.CONTRACT_REQUIRE_BIND_STATEMENT === "1";
+  if ((levelRaw === "S" || levelRaw === "P") && !requireBindStatement) {
+    return misconfigured(`CONTRACT_LEVEL=${levelRaw} requires CONTRACT_REQUIRE_BIND_STATEMENT=1`);
+  }
+
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "4096");
@@ -293,6 +308,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       signerValidUntilMs: keyValidUntilMs,
       // N4b-5: config-only sim fault seeds (A2) — never settable by a tool.
       ...(simFaults !== undefined ? { simFaults } : {}),
+      // N4b-7: session-key possession proof at bind (mandatory at S|P).
+      requireBindStatement,
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);
@@ -319,6 +336,7 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     principals,
     serverKeys,
     simFaultsEnabled: simFaultsAllowed,
+    requireBindStatement,
     service,
   };
 }

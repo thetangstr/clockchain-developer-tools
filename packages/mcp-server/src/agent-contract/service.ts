@@ -15,6 +15,7 @@ import type { ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import { createBusinessOps, type BusinessOps } from "./business.js";
 import { createSimWorld, type SimFaults, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
+import { eip191RecoverPublicKey, publicKeyToAddress } from "./eip191.js";
 
 /**
  * Run-scoped contract state and the `contract_bind` decision logic
@@ -170,7 +171,15 @@ export type BindOutcome =
 export interface ContractService {
   bind(
     principal: ContractPrincipal,
-    args: { certificate: unknown; signerKey: unknown; approvalKey: unknown; listingId?: unknown },
+    args: {
+      certificate: unknown;
+      signerKey: unknown;
+      approvalKey: unknown;
+      listingId?: unknown;
+      /** N4b-7 (DRAFT): optional session-key possession statement + sig. */
+      bindStatement?: unknown;
+      bindStatementSignature?: unknown;
+    },
     evidence: {
       argsDigest: string;
       serverNonce: string;
@@ -180,6 +189,13 @@ export interface ContractService {
       clientInfo?: { name: string; version: string };
     },
   ): BindOutcome;
+  /**
+   * N4b-7 (P-GAP): issue a single-use, short-TTL nonce the caller signs into
+   * its DRAFT bindStatement to prove session-key possession. Nonces are
+   * in-memory only — an unissued or expired one simply refuses at bind.
+   */
+  issueBindChallenge(principal: ContractPrincipal):
+    { ok: true; challenge: string; expiresAt: string } | { ok: false; code: ContractRefusalCode };
   /**
    * Record a call's receipt onto the run chain (run-scoped, order-committed).
    * At a cap this REFUSES — it never throws (N3: a refusal is a result, an
@@ -284,6 +300,9 @@ interface PreBindSegment {
 }
 const DEFAULT_PREBIND_SEGMENT_MAX = 256;
 const DEFAULT_PREBIND_MAX_SEGMENTS = 8;
+/** N4b-7: outstanding bind-statement challenge caps (swept by TTL). */
+const MAX_BIND_CHALLENGES = 1024;
+const MAX_BIND_CHALLENGES_PER_PRINCIPAL = 8;
 /** The runId sentinel pre-bind receipts are scoped under (no run exists yet). */
 const PRE_BIND_SCOPE = "pre-bind";
 const RUN_TTL_MS = 24 * 3600_000; // LLD §3: run-scoped state TTL is 24h
@@ -318,6 +337,17 @@ function loadUsedSessions(stateDir: string): Map<string, string> {
 interface AgentBinding {
   agentId: string;
   runId: string;
+}
+
+/**
+ * N4b-7: a `contract_bind_challenge` nonce — issued to one principal keyId,
+ * single-use, short-TTL. `used` flips only when a statement carrying it
+ * commits to a bound seat.
+ */
+interface BindChallenge {
+  keyId: string;
+  expiresAtMs: number;
+  used: boolean;
 }
 
 /** Same fail-closed rule as used-sessions: corrupt ≠ empty (N1). */
@@ -355,6 +385,47 @@ function persistAgentBindings(stateDir: string, bindings: ReadonlyMap<string, Ag
   } finally {
     closeSync(dirFd);
   }
+}
+
+/**
+ * N4b-7 (P-GAP, DRAFT schema): verify a bind statement — the caller's proof
+ * that it possesses the handshake session key of the certificate side it
+ * claims. EVERY field check lives here so the audit agent's final schema
+ * (PR #159) is a one-place change: domain/runId/side/tokenKeyId/serverKeyId
+ * must name this exact bind, the challenge must be live, unconsumed and
+ * issued to this principal, and the EIP-191 signature over
+ * canonicalDigest(statement) must recover to the certificate party's
+ * `sessionKeyAddress` — NOT the hostSessionKeyCertificate.
+ */
+function verifyBindStatement(fields: {
+  statement: unknown;
+  signatureHex: unknown;
+  principal: ContractPrincipal;
+  sessionId: string;
+  serverKeyId: string;
+  expectedSessionKeyAddress: string;
+  challenge: BindChallenge | undefined;
+  nowMs: number;
+}): boolean {
+  const st = fields.statement;
+  if (!isPlainRecord(st)) return false;
+  if (
+    st.domain !== "agent-contract.bind/v1" ||
+    st.runId !== fields.sessionId ||
+    st.side !== fields.principal.side ||
+    st.tokenKeyId !== fields.principal.keyId ||
+    st.serverKeyId !== fields.serverKeyId ||
+    typeof st.challenge !== "string" ||
+    typeof st.issuedAt !== "string"
+  ) return false;
+  const ch = fields.challenge;
+  if (ch === undefined || ch.used || ch.expiresAtMs <= fields.nowMs || ch.keyId !== fields.principal.keyId) {
+    return false;
+  }
+  if (typeof fields.signatureHex !== "string") return false;
+  const recovered = eip191RecoverPublicKey(Buffer.from(canonicalDigest(st).slice(2), "hex"), fields.signatureHex);
+  if (recovered === null) return false;
+  return publicKeyToAddress(recovered).toLowerCase() === fields.expectedSessionKeyAddress.toLowerCase();
 }
 
 /** Durable write: tmp file → fsync → rename → fsync the directory (N1). */
@@ -591,6 +662,14 @@ export function createContractService(options: {
   policyDigests: Readonly<Record<ContractRole, string>>;
   /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
   principals?: ReadonlyMap<string, string>;
+  /**
+   * N4b-7 (P-GAP): `CONTRACT_REQUIRE_BIND_STATEMENT=1` — every contract_bind
+   * must carry a verified session-key possession statement. At L the
+   * statement is optional but a presented one is still verified.
+   */
+  requireBindStatement?: boolean;
+  /** N4b-7: `contract_bind_challenge` nonce TTL (default 60s). */
+  bindChallengeTtlMs?: number;
 }): ContractService {
   const now = options.now ?? Date.now;
   const sim = options.sim ?? createSimWorld({
@@ -631,6 +710,10 @@ export function createContractService(options: {
   let usedMandates: Map<string, UsedMandate> = new Map();
   // N4b-7: write-once {keyId → {agentId, runId}} for late-bound (*) tokens.
   let agentBindings: Map<string, AgentBinding> = new Map();
+  // N4b-7: live bind-statement challenges (in-memory — a nonce never needs
+  // to survive a restart; an expired/unissued one simply refuses).
+  const bindChallenges = new Map<string, BindChallenge>();
+  const bindChallengeTtlMs = options.bindChallengeTtlMs ?? 60_000;
   // LOW (N4b-3): retention window for used-mandate entries = expiresAt +
   // graceMs (the same clock-skew grace used elsewhere; default 10 min).
   const mandateGraceMs = options.graceMs ?? 600_000;
@@ -762,9 +845,35 @@ export function createContractService(options: {
     }
   }
 
+  function issueBindChallenge(
+    principal: ContractPrincipal,
+  ): { ok: true; challenge: string; expiresAt: string } | { ok: false; code: ContractRefusalCode } {
+    const nowMs = now();
+    for (const [nonce, rec] of bindChallenges) {
+      if (rec.expiresAtMs <= nowMs) bindChallenges.delete(nonce);
+    }
+    if (bindChallenges.size >= MAX_BIND_CHALLENGES) return { ok: false, code: "RATE_LIMITED" };
+    let outstanding = 0;
+    for (const rec of bindChallenges.values()) {
+      if (rec.keyId === principal.keyId && !rec.used) outstanding++;
+    }
+    if (outstanding >= MAX_BIND_CHALLENGES_PER_PRINCIPAL) return { ok: false, code: "RATE_LIMITED" };
+    const challenge = randomBytes(32).toString("hex");
+    const expiresAtMs = nowMs + bindChallengeTtlMs;
+    bindChallenges.set(challenge, { keyId: principal.keyId, expiresAtMs, used: false });
+    return { ok: true, challenge, expiresAt: new Date(expiresAtMs).toISOString() };
+  }
+
   function bind(
     principal: ContractPrincipal,
-    args: { certificate: unknown; signerKey: unknown; approvalKey: unknown; listingId?: unknown },
+    args: {
+      certificate: unknown;
+      signerKey: unknown;
+      approvalKey: unknown;
+      listingId?: unknown;
+      bindStatement?: unknown;
+      bindStatementSignature?: unknown;
+    },
     evidence: {
       argsDigest: string;
       serverNonce: string;
@@ -850,6 +959,41 @@ export function createContractService(options: {
       ) {
         return { ok: false, code: "STATE_REFUSED" };
       }
+    }
+
+    // N4b-7 P-GAP hook (DRAFT schema): a presented statement must verify;
+    // when the deployment requires it, absence refuses too. Every check
+    // lives in verifyBindStatement so the final schema is a one-place
+    // change. The challenge is consumed at COMMIT, not here — a refused
+    // bind leaves the nonce usable.
+    const statementPresent =
+      args.bindStatement !== undefined || args.bindStatementSignature !== undefined;
+    let consumedChallenge: BindChallenge | undefined;
+    if (options.requireBindStatement === true && !statementPresent) {
+      return { ok: false, code: "BIND_STATEMENT_INVALID" };
+    }
+    if (statementPresent) {
+      const statement = args.bindStatement;
+      const challenge = isPlainRecord(statement) && typeof statement.challenge === "string"
+        ? bindChallenges.get(statement.challenge)
+        : undefined;
+      const sessionKeyAddress = typeof party?.sessionKeyAddress === "string" ? party.sessionKeyAddress : "";
+      if (
+        statement === undefined ||
+        !verifyBindStatement({
+          statement,
+          signatureHex: args.bindStatementSignature,
+          principal,
+          sessionId: verdict.sessionId,
+          serverKeyId: options.signer.keyId,
+          expectedSessionKeyAddress: sessionKeyAddress,
+          challenge,
+          nowMs: now(),
+        })
+      ) {
+        return { ok: false, code: "BIND_STATEMENT_INVALID" };
+      }
+      consumedChallenge = challenge;
     }
 
     const priorRunId = principalRuns.get(principal.keyId);
@@ -958,7 +1102,7 @@ export function createContractService(options: {
         // N4b-7: evidence records how the agentId was established and whether
         // the session-key-possession statement was verified (P-GAP).
         bindMode: lateBinding ? "late" : "static",
-        bindStatement: "absent",
+        bindStatement: statementPresent ? "verified" : "absent",
         // M1: the bind receipt carries THIS principal's pre-bind chain head —
         // the run chain's link back to the evidence that preceded it.
         preBindHead: preBindHeadFor(principal.keyId),
@@ -1015,6 +1159,9 @@ export function createContractService(options: {
     if (principal.role === "provider" && bindListingId !== undefined) {
       business.consumeListing(principal.keyId, bindListingId);
     }
+    // N4b-7: commit-time consumption — the verified statement's challenge
+    // nonce burns exactly once, with the seat it proved.
+    if (consumedChallenge !== undefined) consumedChallenge.used = true;
     // N4b-3: a successful bind SEALS this principal's pre-bind segment — the
     // next pre-bind call starts a fresh segment (fresh salt) anchored on the
     // sealed head, so the lifetime cap can never lock a principal out.
@@ -1069,6 +1216,7 @@ export function createContractService(options: {
 
   return {
     bind,
+    issueBindChallenge,
     business,
     recordReceipt(run, fields) {
       evictEnded();

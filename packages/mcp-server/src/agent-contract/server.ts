@@ -170,15 +170,33 @@ export function buildContractServer(options: {
 
     let outcome: CallOutcome;
 
+    if (name === "contract_bind_challenge") {
+      // N4b-7 (P-GAP): a caller takes a single-use nonce into its DRAFT bind
+      // statement. The call lands on the pre-bind chain like any other
+      // pre-run evidence.
+      const issued = service.issueBindChallenge(principal);
+      outcome = issued.ok
+        ? ok({ challenge: issued.challenge, expiresAt: issued.expiresAt, serverNonce })
+        : refusal(issued.code, serverNonce);
+      return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
+    }
+
     if (name === "contract_bind") {
       // P-GAP: the caller proves it holds the bearer token pinned to a party's
       // agentId, but NOT that it possesses that party's handshake session key.
-      // Closing the gap needs the handshake helper to sign a bind statement;
-      // until then the result/receipt carry bindAssurance:"agentId-pinned-token"
-      // so consumers know exactly what was proven.
+      // N4b-7 closes it behind CONTRACT_REQUIRE_BIND_STATEMENT=1: the DRAFT
+      // bindStatement (challenge-bound, EIP-191 over its canonical digest)
+      // must recover to the certificate party's sessionKeyAddress.
       const bound = service.bind(
         principal,
-        parsed.data as { certificate: unknown; signerKey: unknown; approvalKey: unknown },
+        parsed.data as {
+          certificate: unknown;
+          signerKey: unknown;
+          approvalKey: unknown;
+          listingId?: unknown;
+          bindStatement?: unknown;
+          bindStatementSignature?: unknown;
+        },
         { argsDigest, serverNonce, tool: name, ...sessionFields() },
       );
       if (!bound.ok) {

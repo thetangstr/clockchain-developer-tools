@@ -52,6 +52,22 @@ const sealedBox = z.object({
 export const sealedBoxV2Schema = sealedBox;
 
 /**
+ * DRAFT (N4b-7): the bind-statement wire shape. The audit agent owns the
+ * final schema (PR #159); the service verifies it in one function so the
+ * final schema is a one-place change. `domain` is pinned here so a foreign
+ * statement never reaches dispatch.
+ */
+const bindStatementSchema = z.object({
+  domain: z.literal("agent-contract.bind/v1"),
+  runId: z.string().min(4).max(128),
+  side: z.enum(["initiator", "responder"]),
+  tokenKeyId: keyId,
+  serverKeyId: keyId,
+  challenge: z.string().regex(/^[0-9a-f]{64}$/),
+  issuedAt: isoDateTime,
+}).strict();
+
+/**
  * The signed consequential-action approval record (LLD §13, T0
  * `ApprovalRecord`). Produced deterministically by the role's local signer
  * policy and verified against the approval key bound at contract time.
@@ -183,6 +199,21 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
   },
   // -- binding / mandate -----------------------------------------------------
   {
+    // N4b-7 (P-GAP): issues the single-use, short-TTL challenge a caller
+    // signs into its DRAFT bindStatement to prove it possesses the handshake
+    // session key of the certificate side it claims.
+    name: "contract_bind_challenge",
+    role: "both",
+    schema: {},
+    outputSchema: z.object({
+      challenge: z.string().regex(/^[0-9a-f]{64}$/),
+      expiresAt: isoDateTime,
+      serverNonce,
+    }).strict(),
+    readOnly: false,
+    simulated: false,
+  },
+  {
     name: "contract_bind",
     role: "both",
     schema: {
@@ -192,6 +223,17 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       /** LOW (N4b-3): providers name the listing the handshake came through —
        *  only that listing is consumed, not every listing they own. */
       listingId: listingId.optional(),
+      /**
+       * DRAFT (N4b-7 P-GAP hook): optional session-key possession proof.
+       * The statement binds domain/runId/side/tokenKeyId/serverKeyId plus a
+       * single-use `contract_bind_challenge` nonce; `bindStatementSignature`
+       * is the party's EIP-191 signature over canonicalDigest(statement) and
+       * must recover to the certificate party's `sessionKeyAddress`. The
+       * audit agent owns the final schema (PR #159) — verification lives in
+       * one function so this shape is a one-place change.
+       */
+      bindStatement: bindStatementSchema.optional(),
+      bindStatementSignature: signatureHex.optional(),
     },
     outputSchema: z.object({
       runId: z.string().min(4).max(128),

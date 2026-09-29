@@ -300,3 +300,149 @@ test("late binding is write-once — a different agentId or run refuses, durably
   } finally { await env2.close(); }
 });
 
+// --- piece 2: bind statement (the P-GAP, DRAFT schema) ----------------------
+
+test("contract_bind_challenge issues a single-use nonce; the statement proves session-key possession", async () => {
+  const env = await boot({ serviceOptions: { requireBindStatement: true } });
+  try {
+    const challenge = await env.rpc("tlb1", "contract_bind_challenge", {});
+    assert.match(challenge.challenge, /^[0-9a-f]{64}$/);
+    assert.ok(typeof challenge.expiresAt === "string");
+    const c = cert(10);
+    const st = makeStatement({ runId: uuid(10), side: "initiator", tokenKeyId: "klb1", challenge: challenge.challenge });
+    const bound = await env.rpc("tlb1", "contract_bind",
+      bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
+    assert.equal(bound.bound, true);
+    const receipt = bindReceipt(env.service, bound.runId);
+    assert.equal(receipt.bindMode, "late");
+    assert.equal(receipt.bindStatement, "verified");
+    // Single-use: a second bind naming the SAME challenge refuses.
+    const c2 = cert(11);
+    const st2 = makeStatement({ runId: uuid(11), side: "initiator", tokenKeyId: "klb2", challenge: challenge.challenge });
+    const replay = await env.rpc("tlb2", "contract_bind",
+      bindArgs(c2, "buyer", { bindStatement: st2, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st2) }));
+    assert.equal(replay.error, "BIND_STATEMENT_INVALID");
+  } finally { await env.close(); }
+});
+
+test("the challenge expires — a stale nonce refuses", async () => {
+  let now = Date.now();
+  const env = await boot({ serviceOptions: { requireBindStatement: true, bindChallengeTtlMs: 5_000, now: () => now } });
+  try {
+    const { challenge } = await env.rpc("tlb1", "contract_bind_challenge", {});
+    now += 10_000; // past the TTL — the cert window (10 min) still holds
+    const st = makeStatement({ runId: uuid(12), side: "initiator", tokenKeyId: "klb1", challenge });
+    const refused = await env.rpc("tlb1", "contract_bind",
+      bindArgs(cert(12), "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
+    assert.equal(refused.error, "BIND_STATEMENT_INVALID");
+  } finally { await env.close(); }
+});
+
+test("a statement signed by the wrong key refuses — other side's or a stranger's", async () => {
+  const env = await boot({ serviceOptions: { requireBindStatement: true } });
+  try {
+    const { challenge } = await env.rpc("tlb1", "contract_bind_challenge", {});
+    const st = makeStatement({ runId: uuid(13), side: "initiator", tokenKeyId: "klb1", challenge });
+    // The OTHER side's session key.
+    const wrongSide = await env.rpc("tlb1", "contract_bind",
+      bindArgs(cert(13), "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.responder.priv, st) }));
+    assert.equal(wrongSide.error, "BIND_STATEMENT_INVALID");
+    // An unrelated key entirely.
+    const stranger = await env.rpc("tlb1", "contract_bind",
+      bindArgs(cert(13), "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.stranger.priv, st) }));
+    assert.equal(stranger.error, "BIND_STATEMENT_INVALID");
+  } finally { await env.close(); }
+});
+
+test("domain, runId, side, tokenKeyId or serverKeyId mismatch refuses", async () => {
+  const env = await boot({ serviceOptions: { requireBindStatement: true } });
+  try {
+    const { challenge } = await env.rpc("tlb1", "contract_bind_challenge", {});
+    const c = cert(14);
+    // Domain is pinned by the DRAFT schema — wrong domain dies at the schema.
+    const badDomain = makeStatement({ runId: uuid(14), side: "initiator", tokenKeyId: "klb1", challenge, domain: "agent-contract.bind/v0" });
+    const dom = await env.rpc("tlb1", "contract_bind",
+      bindArgs(c, "buyer", { bindStatement: badDomain, bindStatementSignature: signStatement(sessionEvm.initiator.priv, badDomain) }));
+    assert.equal(dom.rpcError, -32602);
+    for (const patch of [
+      { runId: uuid(99) },                 // a different handshake session
+      { side: "responder" },               // wrong side for a buyer token
+      { tokenKeyId: "kpx" },               // not this principal's keyId
+      { serverKeyId: "contract-server-2" },// not this server's keyId
+    ]) {
+      const st = makeStatement({ runId: uuid(14), side: "initiator", tokenKeyId: "klb1", challenge, ...patch });
+      const out = await env.rpc("tlb1", "contract_bind",
+        bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
+      assert.equal(out.error, "BIND_STATEMENT_INVALID", JSON.stringify(patch));
+    }
+  } finally { await env.close(); }
+});
+
+test("CONTRACT_REQUIRE_BIND_STATEMENT: absent refuses when required; optional at L", async () => {
+  const required = await boot({ serviceOptions: { requireBindStatement: true } });
+  try {
+    const noStatement = await required.rpc("tlb1", "contract_bind", bindArgs(cert(15), "buyer"));
+    assert.equal(noStatement.error, "BIND_STATEMENT_INVALID");
+  } finally { await required.close(); }
+  // At L (flag off) a presented statement is still verified.
+  const optional = await boot();
+  try {
+    const { challenge } = await optional.rpc("tlb1", "contract_bind_challenge", {});
+    const st = makeStatement({ runId: uuid(16), side: "initiator", tokenKeyId: "klb1", challenge });
+    const bound = await optional.rpc("tlb1", "contract_bind",
+      bindArgs(cert(16), "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
+    assert.equal(bound.bound, true);
+    assert.equal(bindReceipt(optional.service, bound.runId).bindStatement, "verified");
+    // ... and absence stays legal.
+    const plain = await optional.rpc("tlb3", "contract_bind", bindArgs(cert(17), "buyer"));
+    assert.equal(plain.bound, true);
+    assert.equal(bindReceipt(optional.service, plain.runId).bindStatement, "absent");
+  } finally { await optional.close(); }
+});
+
+test("a challenge issued to one principal cannot be consumed by another", async () => {
+  const env = await boot({ serviceOptions: { requireBindStatement: true } });
+  try {
+    const { challenge } = await env.rpc("tlb1", "contract_bind_challenge", {});
+    // klb2 presents klb1's challenge under its own tokenKeyId.
+    const st = makeStatement({ runId: uuid(18), side: "initiator", tokenKeyId: "klb2", challenge });
+    const out = await env.rpc("tlb2", "contract_bind",
+      bindArgs(cert(18), "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
+    assert.equal(out.error, "BIND_STATEMENT_INVALID");
+  } finally { await env.close(); }
+});
+
+// --- config gate -------------------------------------------------------------
+
+const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
+const READY_ENV = Object.freeze({
+  CONTRACT_MCP_ENABLED: "1",
+  CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:9452:initiator,tp1:provider:kp1:9453:responder",
+  CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+  CONTRACT_POLICY_DIGESTS: `buyer:0x${"77".repeat(32)},provider:0x${"88".repeat(32)}`,
+  CONTRACT_SERVER_KEY_VALID_FROM: "2026-09-01T00:00:00.000Z",
+});
+
+test("CONTRACT_LEVEL S|P refuse to start without CONTRACT_REQUIRE_BIND_STATEMENT=1", () => {
+  const dir = () => mkdtempSync(path.join(tmpdir(), "contract-n4b7-cfg-"));
+  for (const level of ["S", "P"]) {
+    const missing = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: level, CONTRACT_STATE_DIR: dir() });
+    assert.equal(missing.kind, "misconfigured", `level ${level} without the flag`);
+    const set = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: level, CONTRACT_REQUIRE_BIND_STATEMENT: "1", CONTRACT_STATE_DIR: dir() });
+    assert.equal(set.kind, "ready", `level ${level} with the flag`);
+    set.service.close();
+  }
+  // L: the flag is optional both ways.
+  const lPlain = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: "L", CONTRACT_STATE_DIR: dir() });
+  assert.equal(lPlain.kind, "ready");
+  lPlain.service.close();
+  const lFlag = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: "L", CONTRACT_REQUIRE_BIND_STATEMENT: "1", CONTRACT_STATE_DIR: dir() });
+  assert.equal(lFlag.kind, "ready");
+  lFlag.service.close();
+  // Unset behaves as L; garbage refuses.
+  const unset = loadContractConfig({ ...READY_ENV, CONTRACT_STATE_DIR: dir() });
+  assert.equal(unset.kind, "ready");
+  unset.service.close();
+  const bad = loadContractConfig({ ...READY_ENV, CONTRACT_LEVEL: "X", CONTRACT_STATE_DIR: dir() });
+  assert.equal(bad.kind, "misconfigured");
+});
