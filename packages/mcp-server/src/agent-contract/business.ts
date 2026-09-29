@@ -2,7 +2,7 @@ import { createPublicKey, type KeyObject } from "node:crypto";
 
 import { z } from "zod";
 
-import { canonicalDigest } from "./canonical.js";
+import { canonicalDigest, saltedCanonicalDigest } from "./canonical.js";
 import {
   signEnvelope, verifyEnvelope, type ContractSigner, type PrepareEnvelope,
 } from "./envelope.js";
@@ -288,6 +288,55 @@ export function createBusinessOps(options: {
     }
     run.claimedNonces.add(env.nonce);
     return { ok: true, envelope: env };
+  }
+
+  /**
+   * N6g-2 (observer R12): locate the receipted `*_prepare` response that
+   * carried THIS envelope — each candidate receipt's responseDigest is
+   * recomputed over `{envelope, serverNonce}` under the receipt's own
+   * scheme (the envelope schema is strict, so the parsed envelope digests
+   * to the same bytes the response carried). Returns that receipt's
+   * responseDigest — the digest the approval record is bound to in feed
+   * evidence — or undefined when no matching receipt exists.
+   */
+  function prepareReceiptDigestFor(
+    run: ContractRun,
+    role: ContractRole,
+    family: "booking" | "settlement",
+    envelope: PrepareEnvelope,
+  ): string | undefined {
+    const tool = `${family}_prepare`;
+    for (const r of run.receipts) {
+      if (r.tool !== tool || r.outcome !== "ok" || r.principal.role !== role) {
+        continue;
+      }
+      const body = { envelope, serverNonce: r.serverNonce };
+      const digest =
+        r.responseDigestScheme === "hmac-sha256"
+          ? saltedCanonicalDigest(run.runSalt, body)
+          : canonicalDigest(body);
+      if (digest === r.responseDigest) return r.responseDigest;
+    }
+    return undefined;
+  }
+
+  /**
+   * N6g-2: retain a cryptographically VERIFIED approval record for the
+   * observer feed — allow and deny decisions alike (a signed deny is a
+   * policy verdict). The record is stored verbatim; `boundDigest` carries
+   * the receipt linkage R12 cites.
+   */
+  function recordApproval(
+    run: ContractRun,
+    role: ContractRole,
+    family: "booking" | "settlement",
+    envelope: PrepareEnvelope,
+    approval: ApprovalRecord,
+  ): void {
+    (run.approvalRecords ??= []).push({
+      record: structuredClone(approval),
+      boundDigest: prepareReceiptDigestFor(run, role, family, envelope),
+    });
   }
 
   /**
@@ -976,6 +1025,10 @@ export function createBusinessOps(options: {
           nowMs: now(),
         });
         if (decision === null) return refuse("APPROVAL_INVALID");
+        // N6g-2 (R12): keep the verified record for the observer feed —
+        // bound to the receipted booking_prepare response carrying this
+        // exact envelope.
+        recordApproval(liveRun, "provider", "booking", submitted.envelope, args.approval as ApprovalRecord);
         if (decision === "deny") {
           // N4b-8 (gap 5): a cryptographically VALID deny is a policy verdict —
           // the run ends blocked_by_policy: terminal, receipted, and (wired)
@@ -1088,6 +1141,7 @@ export function createBusinessOps(options: {
           nowMs: now(),
         });
         if (cancelDecision === null) return refuse("APPROVAL_INVALID");
+        recordApproval(liveRun, "provider", "booking", submitted.envelope, args.approval as ApprovalRecord);
         if (cancelDecision === "deny") {
           // N4b-8 (gap 5): a signed deny on the cancel gate refuses the cancel
           // but does NOT end the run — cancel can fire post-terminal
@@ -1242,6 +1296,7 @@ export function createBusinessOps(options: {
           nowMs: now(),
         });
         if (settleDecision === null) return refuse("APPROVAL_INVALID");
+        recordApproval(liveRun, "buyer", "settlement", submitted.envelope, args.approval as ApprovalRecord);
         if (settleDecision === "deny") {
           // N4b-8 (gap 5): a signed deny on the settlement gate is the same
           // policy verdict — the run ends blocked_by_policy.

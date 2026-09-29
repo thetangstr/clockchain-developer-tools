@@ -8,11 +8,12 @@ import path from "node:path";
 import { z } from "zod";
 
 import { canonicalDigest } from "./canonical.js";
+import { guidanceDigests, type GuidanceDigests } from "./tools-list.js";
 import { verifyCertificateEnvelope, type HostRootPin } from "./certificate.js";
 import type { ContractAnchor } from "./anchor.js";
 import { makeReceipt, checkReceiptDraft, chainHead, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
 import type { ContractSigner } from "./envelope.js";
-import type { ContractRole } from "./schemas.js";
+import { CONTRACT_TOOL_DEFS, type ApprovalRecord, type ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import { createBusinessOps, type BusinessOps } from "./business.js";
 import { createSimWorld, type SimFaults, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
@@ -183,6 +184,15 @@ export interface ContractRun {
    * itself never rides inside the signed payload.
    */
   mandatePrepared?: { nonce: string; mandateSignature: string };
+  /**
+   * N6g-2 (observer R12): cryptographically verified approval records
+   * collected at consequential submits — wire fields verbatim plus
+   * `boundDigest`, the receipted `*_prepare` responseDigest the record
+   * binds to in feed evidence (the wire `digest` stays the
+   * envelope-binding approval tuple; an auditor recomputes it via
+   * computeApprovalDigest).
+   */
+  approvalRecords?: { record: ApprovalRecord; boundDigest?: string }[];
   terminalState: string | null;
   /**
    * N4b-8 (gap 3): the terminal close delivery to the telemetry sink —
@@ -317,6 +327,32 @@ export interface ContractService {
     receipts: ServerReceipt[];
     /** M1: each bound principal's pre-bind chain, served beside the run's. */
     preBind: (NonNullable<ReturnType<ContractService["preBindFeed"]>> & { role: ContractRole })[];
+    /**
+     * N6g-2 (observer H1): SIMULATED labels keyed by the receipt that
+     * carried sim-derived evidence — always present (possibly empty).
+     */
+    simLabels: { receiptId: string; simulated: boolean }[];
+    /**
+     * N6g-2 (observer R12): the consequential-submit approval records the
+     * service verified. `digest` is the RECEIPT linkage — the `*_prepare`
+     * responseDigest covering the approved envelope; `ts` is ISO-8601.
+     * Wire decision vocabulary ("allow"/"deny") is kept verbatim.
+     */
+    approvalRecords?: {
+      role: ContractRole;
+      action: string;
+      digest: string;
+      policyDigest: string;
+      decision: string;
+      ts: string;
+      approverKeyId: string;
+      signature: string;
+    }[];
+    /**
+     * N6g-2 (observer R10c): the surface's published guidance digests per
+     * role — exactly what `tools/list` and `initialize.instructions` serve.
+     */
+    guidance: Record<ContractRole, GuidanceDigests>;
   } | undefined;
   /**
    * M4: the per-scope argsDigest salt — `{ runId }` for a run's salt,
@@ -364,6 +400,20 @@ const MAX_BIND_CHALLENGES = 1024;
 const MAX_BIND_CHALLENGES_PER_PRINCIPAL = 8;
 /** The runId sentinel pre-bind receipts are scoped under (no run exists yet). */
 const PRE_BIND_SCOPE = "pre-bind";
+
+/**
+ * N6g-2 (observer H1): tools whose receipted evidence is sim-derived. The
+ * tool def's `simulated` flag covers the data calls; the sim-family
+ * `*_prepare` responses are signed envelopes whose payloads bind sim-world
+ * artifacts (booking terms on the sim board, the sim-rail settlement
+ * amount) — they are labelled SIMULATED in the feed the same way.
+ */
+const SIM_LABELLED_TOOLS: ReadonlySet<string> = new Set([
+  ...CONTRACT_TOOL_DEFS.filter((d) => d.simulated).map((d) => d.name),
+  "booking_prepare",
+  "booking_cancel_prepare",
+  "settlement_prepare",
+]);
 const RUN_TTL_MS = 24 * 3600_000; // LLD §3: run-scoped state TTL is 24h
 const USED_SESSIONS_FILE = "used-sessions.json";
 const USED_MANDATES_FILE = "used-mandates.json";
@@ -1534,6 +1584,33 @@ export function createContractService(options: {
         runId, head,
         receipts: run.receipts.map((r) => structuredClone(r)),
         preBind,
+        // N6g-2 (H1): every sim-backed receipt is labelled in the feed —
+        // keyed by receiptId, `simulated` is always true on emission.
+        simLabels: run.receipts
+          .filter((r) => SIM_LABELLED_TOOLS.has(r.tool))
+          .map((r) => ({ receiptId: r.receiptId, simulated: true })),
+        // N6g-2 (R12): verified consequential-submit approvals, bound to
+        // the receipted `*_prepare` response that carried the envelope.
+        ...(run.approvalRecords !== undefined && run.approvalRecords.length > 0
+          ? {
+              approvalRecords: run.approvalRecords.map(({ record, boundDigest }) => ({
+                role: record.role,
+                action: record.action,
+                digest: boundDigest ?? record.digest,
+                policyDigest: record.policyDigest,
+                decision: record.decision,
+                ts: new Date(record.ts).toISOString(),
+                approverKeyId: record.approverKeyId,
+                signature: record.signature,
+              })),
+            }
+          : {}),
+        // N6g-2 (R10c): the published per-role guidance digests — what the
+        // transport's tools/list and instructions actually serve.
+        guidance: {
+          buyer: guidanceDigests("buyer"),
+          provider: guidanceDigests("provider"),
+        },
         // N4b-6: a seeded sim fault is disclosed at feed level too.
         ...(run.simFault !== undefined ? { simFault: run.simFault } : {}),
       };
