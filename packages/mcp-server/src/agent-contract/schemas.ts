@@ -578,6 +578,15 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         "terminal",
       ]),
       terminalState: terminalState.nullable(),
+      // N4b-8 (gap 3): telemetry close delivery state — null until the run
+      // reaches a terminal state; "failed" stays visible forever.
+      telemetryClose: z.object({
+        status: z.enum(["delivering", "delivered", "failed"]),
+        attempts: z.number().int().nonnegative(),
+        lastError: z.string().nullable(),
+        deliveredAt: z.string().nullable(),
+        receiptDigest: digestHex,
+      }).strict().nullable(),
       serverNonce,
     }).strict(),
     readOnly: true,

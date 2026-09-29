@@ -210,6 +210,7 @@ test("CONTRACT_LEVEL gates v:2 via loadContractConfig", async () => {
   const s = loadContractConfig({
     ...base, CONTRACT_STATE_DIR: "/tmp/n4b8-seal-level-S",
     CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1",
+    TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
   });
   assert.equal(s.kind, "ready");
   // The behavior difference is exercised by the dispatch tests above; here we

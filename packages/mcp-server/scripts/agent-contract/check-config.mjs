@@ -82,6 +82,9 @@ export function checkConfig(env) {
     policyDigests: { ...cfg.policyDigests },
     observerToken: cfg.observerToken === undefined ? "absent" : "configured",
     verifierToken: cfg.verifierToken === undefined ? "absent" : "configured",
+    // N4b-8 (gap 3): terminal close delivery — mandatory at S|P (the config
+    // load itself misconfigures when unset); at L it may be absent.
+    telemetryCloseUrl: cfg.telemetryCloseUrl ?? null,
     stateDir: cfg.stateDir,
     hostRoots,
     simFaultsEnabled: cfg.simFaultsEnabled,

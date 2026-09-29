@@ -152,6 +152,18 @@ export interface ContractRun {
   settlement?: { transferId: string; status: "authorized" | "released" };
   settlementPrepared?: boolean;
   terminalState: string | null;
+  /**
+   * N4b-8 (gap 3): the terminal close delivery to the telemetry sink —
+   * delivering/delivered/failed, attempt count and last error. Surfaced in
+   * contract_status; a permanently failed close is never silent.
+   */
+  telemetryClose?: {
+    status: "delivering" | "delivered" | "failed";
+    attempts: number;
+    lastError?: string;
+    deliveredAt?: string;
+    receiptDigest: string;
+  };
   stage: ContractStage;
   /**
    * M4: per-run HMAC salt for cap-bearing call argsDigests — generated at
@@ -231,9 +243,11 @@ export interface ContractService {
   runIdForPrincipal(keyId: string): string | undefined;
   /**
    * Move a run to its terminal state and retire the sim world entry
-   * (post-terminal retention lives in the world itself).
+   * (post-terminal retention lives in the world itself). The triggering
+   * principal rides along so the close emitter can receipt the delivery
+   * outcome against the caller that ended the run.
    */
-  endRun(run: ContractRun, terminalState: string): void;
+  endRun(run: ContractRun, terminalState: string, principal?: ContractPrincipal): void;
   /**
    * M1/N4b-3: append to the principal's active PRE-BIND segment — segments
    * seal at each bind and roll by count, so polling can never lock a
@@ -697,6 +711,13 @@ export function createContractService(options: {
    * Absent/false: only the listing-bound v:4 wire delivers.
    */
   allowLegacySealV2?: boolean;
+  /**
+   * N4b-8 (gap 3): terminal-transition hook — the config layer wires the
+   * telemetry close emitter here. Fired once per run at endRun, AFTER the
+   * terminal state is recorded; the triggering principal is passed so the
+   * delivery outcome can be receipted on the run chain.
+   */
+  onTerminalRun?: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => void;
 }): ContractService {
   const now = options.now ?? Date.now;
   const sim = options.sim ?? createSimWorld({
@@ -1243,12 +1264,17 @@ export function createContractService(options: {
     };
   }
 
-  const endRun = (run: ContractRun, terminalState: string): void => {
+  const endRun = (run: ContractRun, terminalState: string, principal?: ContractPrincipal): void => {
     // "settled" is itself a named terminal stage; every other terminal reason
     // reads stage:"terminal" with terminalState carrying the why.
     run.stage = terminalState === "settled" ? "settled" : "terminal";
     run.terminalState = terminalState;
     sim.markTerminal(run.runId);
+    // N4b-8 (gap 3): the close emitter POSTs the signed terminal receipt to
+    // the telemetry sink — async, retried, outcome receipted onto the run.
+    try {
+      options.onTerminalRun?.(run, terminalState, principal);
+    } catch { /* an emitter bug must never break the terminal transition */ }
   };
   const business = createBusinessOps({
     signer: options.signer,

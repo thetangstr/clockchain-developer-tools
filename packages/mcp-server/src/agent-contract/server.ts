@@ -221,10 +221,22 @@ export function buildContractServer(options: {
       if (run === undefined) {
         // No run yet — the caller is still in discovery/handshake. The call
         // lands on the principal's pre-bind chain (M1).
-        outcome = ok({ stage: "rendezvous", terminalState: null, serverNonce });
+        outcome = ok({ stage: "rendezvous", terminalState: null, telemetryClose: null, serverNonce });
         return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
       }
-      outcome = ok({ stage: run.stage, terminalState: run.terminalState, serverNonce });
+      outcome = ok({
+        stage: run.stage,
+        terminalState: run.terminalState,
+        // N4b-8 (gap 3): a permanently failed telemetry close is visible here.
+        telemetryClose: run.telemetryClose === undefined ? null : {
+          status: run.telemetryClose.status,
+          attempts: run.telemetryClose.attempts,
+          lastError: run.telemetryClose.lastError ?? null,
+          deliveredAt: run.telemetryClose.deliveredAt ?? null,
+          receiptDigest: run.telemetryClose.receiptDigest,
+        },
+        serverNonce,
+      });
       outcome = recordCall(run, name, argsDigest, outcome, serverNonce, argsScheme);
       return asResult(outcome);
     }

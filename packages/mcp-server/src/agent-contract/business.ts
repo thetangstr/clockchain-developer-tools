@@ -176,7 +176,7 @@ export function createBusinessOps(options: {
    * Absent this hook an in-memory ledger still enforces single-use.
    */
   claimMandate?(principalAddress: string, mandateId: string, runId: string, expiresAtMs: number): "ok" | "used" | "unavailable";
-  endRun: (run: ContractRun, terminalState: string) => void;
+  endRun: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => void;
   /**
    * N4b-8 (gap 2): CONTRACT_LEVEL=L only — legacy unbound v:2 boxes still
    * deliver. At S|P only the listing-bound v:4 wire is accepted; the server
@@ -878,7 +878,7 @@ export function createBusinessOps(options: {
         // After the booking is on the sim ledger there is no withdrawal —
         // the run ends only through the explicit terminal path.
         if (liveRun.booking !== undefined) return refuse("STATE_REFUSED");
-        options.endRun(liveRun, "no_agreement");
+        options.endRun(liveRun, "no_agreement", principal);
         return ok({ state: "withdrawn", serverNonce });
       }
 
@@ -1039,7 +1039,7 @@ export function createBusinessOps(options: {
         const cancelled = liveRun.simRun!.cancelOrder({ orderRef: liveRun.booking.orderRef });
         if (!cancelled.ok) return refuse("STATE_REFUSED");
         liveRun.cancellation = { orderRef: cancelled.orderRef, cancelledAt: cancelled.cancelledAt };
-        options.endRun(liveRun, "cancelled");
+        options.endRun(liveRun, "cancelled", principal);
         return ok({
           orderRef: cancelled.orderRef,
           status: "CANCELLED",
@@ -1114,7 +1114,7 @@ export function createBusinessOps(options: {
         // (the disagreement is the `flagged` bit). No settlement can follow.
         const failed = claimed === "mismatch" || observed === "mismatch";
         if (failed) {
-          options.endRun(liveRun, "verification_failed");
+          options.endRun(liveRun, "verification_failed", principal);
         } else {
           liveRun.stage = "verified";
         }
@@ -1196,7 +1196,7 @@ export function createBusinessOps(options: {
         });
         if (!transfer.ok) return refuse("STATE_REFUSED");
         liveRun.settlement = { transferId: transfer.receipt.transferId, status: "released" };
-        options.endRun(liveRun, "settled");
+        options.endRun(liveRun, "settled", principal);
         return ok({
           transferId: transfer.receipt.transferId,
           status: "released",

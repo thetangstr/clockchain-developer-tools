@@ -3,7 +3,9 @@ import path from "node:path";
 
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
-import { createContractService, type ContractService } from "./service.js";
+import { canonicalDigest } from "./canonical.js";
+import { createCloseEmitter } from "./close-emitter.js";
+import { createContractService, type ContractRun, type ContractService } from "./service.js";
 import type { SimFaults } from "./sim/index.js";
 import type { ContractSigner } from "./envelope.js";
 import type { IncomingHttpHeaders } from "node:http";
@@ -63,6 +65,11 @@ export type ContractRouteConfig =
       readonly simFaultsEnabled: boolean;
       /** N4b-7: CONTRACT_REQUIRE_BIND_STATEMENT=1 (mandatory at level S|P). */
       readonly requireBindStatement: boolean;
+      /**
+       * N4b-8 (gap 3): the telemetry sink's close-only listener base URL —
+       * mandatory at S|P, optional at L (undefined = no close delivery).
+       */
+      readonly telemetryCloseUrl?: string;
       readonly service: ContractService;
     };
 
@@ -280,6 +287,33 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     );
   }
 
+  // N4b-8 (gap 3): TELEMETRY_CLOSE_URL — the telemetry sink's close-only
+  // listener (a compose DNS name on clockchain_edge, never a public route).
+  // At S|P a terminal run MUST close against the sink — unset refuses the
+  // boot (check-config surfaces the same verdict). At L it is optional: a
+  // dev run may have no sink.
+  const telemetryCloseRaw = (env.TELEMETRY_CLOSE_URL ?? "").trim();
+  if ((levelRaw === "S" || levelRaw === "P") && telemetryCloseRaw === "") {
+    return misconfigured(
+      `CONTRACT_LEVEL=${levelRaw} requires TELEMETRY_CLOSE_URL (terminal close delivery is mandatory)`,
+    );
+  }
+  if (telemetryCloseRaw !== "" && !/^https?:\/\/[^\s/?#]+/.test(telemetryCloseRaw)) {
+    return misconfigured("TELEMETRY_CLOSE_URL must be an http(s) URL");
+  }
+  const telemetryCloseUrl = telemetryCloseRaw === "" ? undefined : telemetryCloseRaw;
+  // Retry schedule for close delivery — test/dev can shorten it; default
+  // retries ~5 attempts over ~30s. Non-numeric/negative entries refuse.
+  const backoffRaw = (env.TELEMETRY_CLOSE_BACKOFF_MS ?? "").trim();
+  let telemetryCloseBackoff: readonly number[] | undefined;
+  if (backoffRaw !== "") {
+    const parts = backoffRaw.split(",").map((s) => Number(s.trim()));
+    if (parts.length === 0 || parts.some((n) => !Number.isFinite(n) || n < 0 || n > 120_000)) {
+      return misconfigured("TELEMETRY_CLOSE_BACKOFF_MS wants a comma list of ms delays (0..120000)");
+    }
+    telemetryCloseBackoff = parts;
+  }
+
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "4096");
@@ -300,6 +334,53 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
   // a state dir already locked by a live process are misconfiguration, not a
   // mid-request exception.
   let service: ContractService;
+
+  // N4b-8 (gap 3): the terminal close emitter. notify() is fired by the
+  // service's onTerminalRun hook; delivery state is written back onto the
+  // run (contract_status surfaces it) and the delivered/failed outcome is
+  // receipted onto the run chain — a failed close is never silent. The
+  // triggering principal is remembered so the evidence receipt names the
+  // caller that ended the run.
+  const terminalPrincipal = new Map<string, { role: "buyer" | "provider"; keyId: string }>();
+  const closeEmitter = telemetryCloseUrl === undefined ? undefined : createCloseEmitter({
+    signer,
+    closeUrl: telemetryCloseRaw,
+    ...(telemetryCloseBackoff !== undefined ? { backoffMs: telemetryCloseBackoff } : {}),
+    setState: (runId, state) => {
+      const run = service.runFor(runId);
+      if (run !== undefined) run.telemetryClose = state;
+    },
+    recordOutcome: (outcome, d) => {
+      const run = service.runFor(d.runId);
+      if (run === undefined) return;
+      const principal =
+        terminalPrincipal.get(d.runId)
+        ?? (run.bound.buyer !== undefined
+          ? { role: "buyer" as const, keyId: run.bound.buyer.principalKeyId }
+          : undefined)
+        ?? (run.bound.provider !== undefined
+          ? { role: "provider" as const, keyId: run.bound.provider.principalKeyId }
+          : undefined);
+      if (principal === undefined) return;
+      service.recordReceipt(run, {
+        tool: "telemetry_close",
+        surface: "anchoring",
+        argsDigest: canonicalDigest({
+          runId: d.runId,
+          terminalState: run.terminalState,
+          receiptDigest: d.receiptDigest,
+        }),
+        argsDigestScheme: "canonical",
+        principal,
+        outcome: `telemetry_close_${outcome}`,
+        responseDigest: canonicalDigest(
+          d.response !== undefined ? d.response : { error: d.lastError ?? null, attempts: d.attempts },
+        ),
+        responseDigestScheme: "canonical",
+      });
+    },
+  });
+
   try {
     service = createContractService({
       hostRoots,
@@ -321,6 +402,21 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       requireBindStatement,
       // N4b-8 (gap 2): the unbound v:2 seal wire exists only at level L.
       allowLegacySealV2: levelRaw === "L",
+      // N4b-8 (gap 3): POST the signed terminal receipt to the sink.
+      ...(closeEmitter !== undefined
+        ? {
+            onTerminalRun: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => {
+              if (principal !== undefined) {
+                terminalPrincipal.set(run.runId, { role: principal.role, keyId: principal.keyId });
+              }
+              closeEmitter.notify({
+                runId: run.runId,
+                terminalState,
+                ts: new Date().toISOString(),
+              });
+            },
+          }
+        : {}),
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);
@@ -348,6 +444,7 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     serverKeys,
     simFaultsEnabled: simFaultsAllowed,
     requireBindStatement,
+    ...(telemetryCloseUrl !== undefined ? { telemetryCloseUrl } : {}),
     service,
   };
 }

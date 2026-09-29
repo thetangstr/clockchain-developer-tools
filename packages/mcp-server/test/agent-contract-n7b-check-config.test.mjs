@@ -32,7 +32,7 @@ function readyEnv(extra = {}) {
 }
 
 test("check-config reports a redacted ready verdict", () => {
-  const out = checkConfig(readyEnv({ CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1" }));
+  const out = checkConfig(readyEnv({ CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083" }));
   assert.equal(out.exitCode, 0);
   assert.equal(out.report.status, "ready");
   assert.equal(out.report.level, "S");
@@ -89,7 +89,7 @@ test("check-config reports disabled distinctly (exit 2)", () => {
 test("check-config refuses a test root at S/P but allows it at L", () => {
   const testRoot = `root-test:${"ab".repeat(32)}`;
   const atP = checkConfig(readyEnv({
-    CONTRACT_LEVEL: "P", CONTRACT_REQUIRE_BIND_STATEMENT: "1",
+    CONTRACT_LEVEL: "P", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
     CONTRACT_HOST_ROOTS: testRoot,
   }));
   assert.equal(atP.exitCode, 1);
@@ -99,7 +99,7 @@ test("check-config refuses a test root at S/P but allows it at L", () => {
   assert.equal(atL.report.hostRoots[0].production, false);
   // Production root at P is fine.
   const prodAtP = checkConfig(readyEnv({
-    CONTRACT_LEVEL: "P", CONTRACT_REQUIRE_BIND_STATEMENT: "1",
+    CONTRACT_LEVEL: "P", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
     CONTRACT_HOST_ROOTS: PROD_ROOT,
   }));
   assert.equal(prodAtP.exitCode, 0);
@@ -107,7 +107,7 @@ test("check-config refuses a test root at S/P but allows it at L", () => {
 
 test("check-config refuses an ephemeral signer at S/P", () => {
   const out = checkConfig(readyEnv({
-    CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1",
+    CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
     CONTRACT_SERVER_ED25519_SEED: "", CONTRACT_ALLOW_EPHEMERAL_KEY: "1",
   }));
   assert.equal(out.exitCode, 1);
