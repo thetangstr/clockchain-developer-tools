@@ -885,6 +885,8 @@ export function createContractService(options: {
         // M1: the bind receipt carries THIS principal's pre-bind chain head —
         // the run chain's link back to the evidence that preceded it.
         preBindHead: preBindHeadFor(principal.keyId),
+        // N4b-6: bind receipts on a fault-seeded run carry the marker too.
+        ...(run.simFault !== undefined ? { simFault: run.simFault } : {}),
         ts: now(),
       }, options.signer);
     } catch {
@@ -995,7 +997,9 @@ export function createContractService(options: {
       try {
         receipt = makeReceipt(
           run.receipts.at(-1) ?? null,
-          { ...fields, runId: run.runId, ts: now() },
+          // N4b-6: every receipt on a fault-seeded run carries the marker —
+          // server-derived evidence, never caller-supplied.
+          { ...fields, runId: run.runId, simFault: run.simFault, ts: now() },
           options.signer,
         );
       } catch {
@@ -1019,6 +1023,7 @@ export function createContractService(options: {
         const ok = checkReceiptDraft(run.receipts.at(-1) ?? null, {
           ...fields,
           runId: run.runId,
+          simFault: run.simFault,
           principal: { role: principal.role, keyId: principal.keyId },
         });
         return ok ? { ok: true } : { ok: false, code: "CONTRACT_UNAVAILABLE" };
@@ -1096,7 +1101,13 @@ export function createContractService(options: {
         const feed = this.preBindFeed(bound.principalKeyId);
         if (feed !== undefined) preBind.push({ ...feed, role });
       }
-      return { runId, head, receipts: run.receipts.map((r) => structuredClone(r)), preBind };
+      return {
+        runId, head,
+        receipts: run.receipts.map((r) => structuredClone(r)),
+        preBind,
+        // N4b-6: a seeded sim fault is disclosed at feed level too.
+        ...(run.simFault !== undefined ? { simFault: run.simFault } : {}),
+      };
     },
     saltFor(query) {
       if (query.runId !== undefined) {

@@ -63,11 +63,21 @@ export interface ContractServerCard {
   };
   /** Published signing keys (M3) — empty only on a card built without a signer. */
   keys?: readonly PublishedServerKey[];
+  /**
+   * N4b-6 (H1 honesty): present and true only when the deployment allows
+   * config-seeded sim faults (`CONTRACT_ALLOW_SIM_FAULTS=1`). Verifiers use
+   * it to tell a fault-capable server from a strictly honest one; the field
+   * is inside `cardDigest`'s coverage.
+   */
+  simFaultsEnabled?: true;
   cardDigest?: string;
 }
 
 /** The server card body; `cardDigest` covers the card minus itself. */
-export function buildServerCard(keys: readonly PublishedServerKey[] = []): ContractServerCard {
+export function buildServerCard(
+  keys: readonly PublishedServerKey[] = [],
+  options: { simFaultsEnabled?: boolean } = {},
+): ContractServerCard {
   const card: ContractServerCard = {
     schema: SERVER_CARD_SCHEMA_ID,
     host: MCP_HOST_ORIGIN,
@@ -94,14 +104,24 @@ export function buildServerCard(keys: readonly PublishedServerKey[] = []): Contr
       provider: guidanceDigests("provider"),
     },
     keys,
+    ...(options.simFaultsEnabled ? { simFaultsEnabled: true as const } : {}),
   };
   return { ...card, cardDigest: canonicalDigest(card) };
 }
 
 /** `GET /contract/keys` — the standalone key-discovery document (M3). */
-export function buildServerKeysDoc(keys: readonly PublishedServerKey[]): {
+export function buildServerKeysDoc(
+  keys: readonly PublishedServerKey[],
+  options: { simFaultsEnabled?: boolean } = {},
+): {
   schema: typeof SERVER_KEYS_SCHEMA_ID;
   keys: readonly PublishedServerKey[];
+  /** N4b-6: the same honesty flag as the card. */
+  simFaultsEnabled?: true;
 } {
-  return { schema: SERVER_KEYS_SCHEMA_ID, keys };
+  return {
+    schema: SERVER_KEYS_SCHEMA_ID,
+    keys,
+    ...(options.simFaultsEnabled ? { simFaultsEnabled: true as const } : {}),
+  };
 }

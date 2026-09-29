@@ -1165,7 +1165,9 @@ export async function runHttp(): Promise<Server> {
         return;
       }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });
-      res.end(JSON.stringify(buildServerCard(contractConfig.serverKeys)));
+      res.end(JSON.stringify(buildServerCard(contractConfig.serverKeys, {
+        simFaultsEnabled: contractConfig.simFaultsEnabled,
+      })));
       return;
     }
     if (pathOf(req.url) === SERVER_KEYS_PATH) {
@@ -1175,7 +1177,9 @@ export async function runHttp(): Promise<Server> {
         return;
       }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });
-      res.end(JSON.stringify(buildServerKeysDoc(contractConfig.serverKeys)));
+      res.end(JSON.stringify(buildServerKeysDoc(contractConfig.serverKeys, {
+        simFaultsEnabled: contractConfig.simFaultsEnabled,
+      })));
       return;
     }
 

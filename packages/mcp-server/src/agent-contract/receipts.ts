@@ -74,6 +74,14 @@ export const serverReceiptSchema = z.object({
    * observer feed can't be brute-forced into the agreed money values.
    */
   responseDigestScheme: z.enum(["canonical", "hmac-sha256"]).optional(),
+  /**
+   * N4b-6 (H1 honesty): set on every receipt of a run whose sim world was
+   * seeded with a config-only fault — a verifier can tell a fault-injected
+   * run from an honest one. Server-derived; never caller-supplied.
+   */
+  simFault: z.object({
+    issueMismatch: z.enum(["fare", "travellers"]).optional(),
+  }).strict().optional(),
   prevHash: digestHex,
   serverSignature: ed25519SignatureSchema,
 }).strict();
@@ -115,6 +123,8 @@ export interface ReceiptFields {
   clientInfo?: { name: string; version: string };
   sourceIp?: string;
   bindAssurance?: "agentId-pinned-token";
+  /** N4b-6: sim fault marker copied from the run — server-derived. */
+  simFault?: { issueMismatch?: "fare" | "travellers" };
   serverNonce?: string;
   ts?: number;
 }
@@ -143,6 +153,7 @@ function draftCore(prev: ServerReceipt | null, fields: ReceiptFields): ReceiptCo
     serverNonce: fields.serverNonce ?? newServerNonce(),
     responseDigest: fields.responseDigest,
     responseDigestScheme: fields.responseDigestScheme,
+    ...(fields.simFault !== undefined ? { simFault: fields.simFault } : {}),
     prevHash: prev === null ? RECEIPT_CHAIN_GENESIS : canonicalDigest(prev),
   });
 }

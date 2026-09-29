@@ -59,6 +59,8 @@ export type ContractRouteConfig =
       readonly principals: ReadonlyMap<string, string>;
       /** M3: the published receipt/envelope signing keys (card + /contract/keys). */
       readonly serverKeys: readonly PublishedServerKey[];
+      /** N4b-6: CONTRACT_ALLOW_SIM_FAULTS=1 — the card/keys must say so. */
+      readonly simFaultsEnabled: boolean;
       readonly service: ContractService;
     };
 
@@ -216,12 +218,18 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     return misconfigured("CONTRACT_VERIFIER_TOKEN must differ from CONTRACT_OBSERVER_TOKEN");
   }
 
-  // N4b-5: config-only sim fault seeds (A2 adverse cases) — JSON object
+  // N4b-5/6: config-only sim fault seeds (A2 adverse cases) — JSON object
   // `{"<runId>": {"issueMismatch": "fare"|"travellers"}}`. This env is the
   // ONLY way a fault can be seeded over the served surface; there is no
-  // tool/agent path by design.
+  // tool/agent path by design. H1 honesty: seeding faults requires an
+  // explicit CONTRACT_ALLOW_SIM_FAULTS=1 — a server that can inject faults
+  // must say so (simFaultsEnabled on the card/keys, simFault on receipts).
+  const simFaultsAllowed = env.CONTRACT_ALLOW_SIM_FAULTS === "1";
   const simFaultsRaw = (env.CONTRACT_SIM_FAULTS ?? "").trim();
   let simFaults: Record<string, SimFaults> | undefined;
+  if (simFaultsRaw !== "" && !simFaultsAllowed) {
+    return misconfigured("CONTRACT_SIM_FAULTS requires CONTRACT_ALLOW_SIM_FAULTS=1");
+  }
   if (simFaultsRaw !== "") {
     try {
       const parsed: unknown = JSON.parse(simFaultsRaw);
@@ -310,6 +318,7 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     policyDigests: policyDigests as { buyer: string; provider: string },
     principals,
     serverKeys,
+    simFaultsEnabled: simFaultsAllowed,
     service,
   };
 }

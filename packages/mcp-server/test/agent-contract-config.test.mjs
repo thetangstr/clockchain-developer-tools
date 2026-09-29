@@ -163,16 +163,20 @@ test("N4b-5: CONTRACT_SIM_FAULTS is config-only JSON keyed by runId", () => {
     '{"run-x": {"issueMismatch": "fare", "extra": true}}',
     '{"run-x": "fare"}',
   ]) {
-    const cfg = loadContractConfig({ ...base, CONTRACT_SIM_FAULTS: raw });
+    const cfg = loadContractConfig({
+      ...base, CONTRACT_ALLOW_SIM_FAULTS: "1", CONTRACT_SIM_FAULTS: raw,
+    });
     assert.equal(cfg.kind, "misconfigured", raw);
     assert.match(cfg.reason, /CONTRACT_SIM_FAULTS/);
   }
-  // A valid seed boots ready.
+  // A valid seed boots ready only behind the N4b-6 allow flag.
   const ok = loadContractConfig({
     ...base,
     ...stateDirEnv(),
+    CONTRACT_ALLOW_SIM_FAULTS: "1",
     CONTRACT_SIM_FAULTS: '{"run-a2": {"issueMismatch": "fare"}}',
   });
   assert.equal(ok.kind, "ready");
+  assert.equal(ok.simFaultsEnabled, true);
   ok.service.close();
 });
