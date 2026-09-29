@@ -279,6 +279,7 @@ test("both roles bind the same verified certificate; status advances to bound", 
     principalKeyId: "kb1", agentId: "9452", side: "initiator",
     signerKey: bindArgs(certA, "b1").signerKey, approvalKey: bindArgs(certA, "b1").approvalKey,
     boundAt: service.runFor(SESSION_A).bound.buyer.boundAt,
+    bindMode: "static", bindStatement: "absent", bindAssurance: "agentId-pinned-token",
   });
 });
 

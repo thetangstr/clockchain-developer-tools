@@ -64,7 +64,11 @@ export const serverReceiptSchema = z.object({
   mcpSessionId: z.string().min(1).max(128).optional(),
   clientInfo: receiptClientInfoSchema.optional(),
   sourceIp: z.string().min(1).max(64).optional(),
-  bindAssurance: z.literal("agentId-pinned-token").optional(),
+  bindAssurance: z.enum([
+    "agentId-pinned-token",
+    "late-certificate-party",
+    "session-key-possession",
+  ]).optional(),
   /**
    * N4b-7: bind receipts record HOW the agentId was established — pinned in
    * the token at config time, or taken from the certificate's party on the
@@ -130,7 +134,7 @@ export interface ReceiptFields {
   mcpSessionId?: string;
   clientInfo?: { name: string; version: string };
   sourceIp?: string;
-  bindAssurance?: "agentId-pinned-token";
+  bindAssurance?: "agentId-pinned-token" | "late-certificate-party" | "session-key-possession";
   /** N4b-7: bind receipts only — how the agentId was established. */
   bindMode?: "static" | "late";
   /** N4b-7: bind receipts only — whether the possession statement verified. */

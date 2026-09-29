@@ -67,6 +67,11 @@ export interface BoundRole {
   readonly signerKey: { keyId: string; publicKeyHex: string };
   readonly approvalKey: { keyId: string; publicKeyHex: string };
   readonly boundAt: string;
+  /** N4b-7 (MEDIUM-2): how the agentId was established — kept for replays. */
+  readonly bindMode: "static" | "late";
+  /** N4b-7: whether the session-key possession statement verified. */
+  readonly bindStatement: "verified" | "absent";
+  readonly bindAssurance: "agentId-pinned-token" | "late-certificate-party" | "session-key-possession";
 }
 
 export type ContractStage =
@@ -1049,6 +1054,15 @@ export function createContractService(options: {
     // Every check passed — build the result and SIGN THE RECEIPT before any
     // state mutation commits. A receipt failure here aborts the bind with no
     // partial state (H2).
+    // N4b-7 (MEDIUM-2): the assurance claim must describe what was actually
+    // proven — a late bind took the agentId from the certificate party
+    // (statement always verified there), a static+statement bind proved
+    // session-key possession, a plain static bind is the token pin alone.
+    const bindMode = lateBinding ? "late" as const : "static" as const;
+    const bindStatementOutcome = statementPresent ? "verified" as const : "absent" as const;
+    const bindAssurance = lateBinding
+      ? "late-certificate-party" as const
+      : statementPresent ? "session-key-possession" as const : "agentId-pinned-token" as const;
     const boundAt = new Date(now()).toISOString();
     const resultBody = {
       runId: verdict.sessionId,
@@ -1057,7 +1071,9 @@ export function createContractService(options: {
       boundAt,
       side: principal.side,
       serverNonce: evidence.serverNonce,
-      bindAssurance: "agentId-pinned-token" as const,
+      bindMode,
+      bindStatement: bindStatementOutcome,
+      bindAssurance,
     };
     const runId = verdict.sessionId;
     const prevReceipt = existing === undefined ? null : (existing.receipts.at(-1) ?? null);
@@ -1101,11 +1117,11 @@ export function createContractService(options: {
         sourceIp: evidence.sourceIp,
         mcpSessionId: evidence.mcpSessionId,
         clientInfo: evidence.clientInfo,
-        bindAssurance: "agentId-pinned-token",
+        bindAssurance,
         // N4b-7: evidence records how the agentId was established and whether
         // the session-key-possession statement was verified (P-GAP).
-        bindMode: lateBinding ? "late" : "static",
-        bindStatement: statementPresent ? "verified" : "absent",
+        bindMode,
+        bindStatement: bindStatementOutcome,
         // M1: the bind receipt carries THIS principal's pre-bind chain head —
         // the run chain's link back to the evidence that preceded it.
         preBindHead: preBindHeadFor(principal.keyId),
@@ -1151,6 +1167,9 @@ export function createContractService(options: {
       signerKey: signerKey.data,
       approvalKey: approvalKey.data,
       boundAt,
+      bindMode,
+      bindStatement: bindStatementOutcome,
+      bindAssurance,
     };
     run.receipts.push(receipt);
     run.receiptsByPrincipal.set(principal.keyId, principalReceipts + 1);
@@ -1190,7 +1209,9 @@ export function createContractService(options: {
         boundAt,
         side: run.bound[role]?.side,
         serverNonce,
-        bindAssurance: "agentId-pinned-token" as const,
+        bindMode: run.bound[role]?.bindMode,
+        bindStatement: run.bound[role]?.bindStatement,
+        bindAssurance: run.bound[role]?.bindAssurance,
         idempotent: true,
       },
       // An idempotent re-bind appends no receipt: nothing changed.

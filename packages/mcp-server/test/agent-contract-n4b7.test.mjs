@@ -277,6 +277,10 @@ test("late token binds the certificate's agentId on the token's own side", async
     const receipt = bindReceipt(env.service, buyer.runId);
     assert.equal(receipt.bindMode, "late");
     assert.equal(receipt.bindStatement, "verified");
+    assert.equal(receipt.bindAssurance, "late-certificate-party");
+    // ... and the tool result carries the same disclosure.
+    assert.equal(buyer.bindMode, "late");
+    assert.equal(buyer.bindStatement, "verified");
   } finally { await env.close(); }
 });
 
@@ -294,6 +298,26 @@ test("static tokens keep the pinned-agentId check and bindMode: static", async (
     const receipt = bindReceipt(env.service, ok.runId);
     assert.equal(receipt.bindMode, "static");
     assert.equal(receipt.bindStatement, "absent");
+    assert.equal(receipt.bindAssurance, "agentId-pinned-token");
+    assert.equal(ok.bindMode, "static");
+    assert.equal(ok.bindStatement, "absent");
+  } finally { await env.close(); }
+});
+
+test("a static token with a verified statement reports session-key-possession", async () => {
+  const env = await boot();
+  try {
+    const c = cert(30, { initiator: { agentId: "9452" } });
+    const { challenge } = await env.rpc("tb1", "contract_bind_challenge", {});
+    const st = makeStatement({ runId: uuid(30), side: "initiator", tokenKeyId: "kb1", challenge });
+    const bound = await env.rpc("tb1", "contract_bind",
+      bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: signStatement(sessionEvm.initiator.priv, st) }));
+    assert.equal(bound.bound, true);
+    const receipt = bindReceipt(env.service, bound.runId);
+    assert.equal(receipt.bindMode, "static");
+    assert.equal(receipt.bindStatement, "verified");
+    assert.equal(receipt.bindAssurance, "session-key-possession");
+    assert.equal(bound.bindAssurance, "session-key-possession");
   } finally { await env.close(); }
 });
 
