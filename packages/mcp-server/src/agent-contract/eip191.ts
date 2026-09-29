@@ -236,6 +236,26 @@ export function eip191RecoverPublicKey(digestBytes: Uint8Array, signatureHex: st
   }
 }
 
+/**
+ * LOW-5 (N4b-7): canonical-signature gate for the DRAFT bind statement ONLY.
+ * eip191RecoverPublicKey is intentionally lenient (v 0/1 or 27/28, any s <
+ * N) because role-signature verification is frozen by vectors.v2 — this
+ * predicate adds the statement-specific requirement: v ∈ {27,28} and low-s
+ * (s ≤ N/2), so a malleated (r, N−s, v^1) twin is refused before recovery.
+ */
+export function isCanonicalEip191Signature(signatureHex: string): boolean {
+  try {
+    const sig = hexToBytes(signatureHex);
+    if (sig.length !== 65) return false;
+    const vByte = sig[64]!;
+    if (vByte !== 27 && vByte !== 28) return false;
+    const s = bytesToBigInt(sig.subarray(32, 64));
+    return s > 0n && s <= (N >> 1n);
+  } catch {
+    return false;
+  }
+}
+
 /** Ethereum address = last 20 bytes of keccak256(uncompressed pubkey sans 0x04). */
 export function publicKeyToAddress(uncompressed: Uint8Array): string {
   if (uncompressed.length !== 65 || uncompressed[0] !== 4) throw new Error("need a 65-byte uncompressed key");

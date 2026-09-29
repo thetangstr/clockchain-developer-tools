@@ -570,6 +570,37 @@ test("LOW-4: statement issuedAt is bounded to the challenge TTL", async () => {
   } finally { await env.close(); }
 });
 
+test("LOW-5: the statement signature requires low-s and v in {27,28}", async () => {
+  const SECP_N = BigInt("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+  const env = await boot({ serviceOptions: { requireBindStatement: true } });
+  try {
+    const { challenge } = await env.rpc("tlb1", "contract_bind_challenge", {});
+    const c = cert(21);
+    const st = makeStatement({ runId: uuid(21), side: "initiator", tokenKeyId: "klb1", challenge });
+    const good = signStatement(sessionEvm.initiator.priv, st); // 0x + r(64) + s(64) + v(2)
+    const bytes = Buffer.from(good.slice(2), "hex");
+    const s = BigInt(`0x${bytes.subarray(32, 64).toString("hex")}`);
+    const v = bytes[64];
+    // High-s malleation (EIP-2) — same recovered address, must refuse.
+    const hiS = Buffer.concat([bytes.subarray(0, 32),
+      Buffer.from((SECP_N - s).toString(16).padStart(64, "0"), "hex"),
+      Buffer.from([v === 27 ? 28 : 27])]);
+    const malleated = `0x${hiS.toString("hex")}`;
+    const hi = await env.rpc("tlb1", "contract_bind",
+      bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: malleated }));
+    assert.equal(hi.error, "BIND_STATEMENT_INVALID");
+    // Raw recovery-id v (0|1) — recovers under the lenient path, must refuse.
+    const rawV = `0x${Buffer.concat([bytes.subarray(0, 64), Buffer.from([v - 27])]).toString("hex")}`;
+    const rv = await env.rpc("tlb1", "contract_bind",
+      bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: rawV }));
+    assert.equal(rv.error, "BIND_STATEMENT_INVALID");
+    // The strict, canonical signature still binds.
+    const ok = await env.rpc("tlb1", "contract_bind",
+      bindArgs(c, "buyer", { bindStatement: st, bindStatementSignature: good }));
+    assert.equal(ok.bound, true);
+  } finally { await env.close(); }
+});
+
 test("MEDIUM-3: an unbound `*` principal cannot send rendezvous invitations", async () => {
   const env = await boot();
   try {

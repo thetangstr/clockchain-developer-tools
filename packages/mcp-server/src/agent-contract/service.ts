@@ -15,7 +15,7 @@ import type { ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import { createBusinessOps, type BusinessOps } from "./business.js";
 import { createSimWorld, type SimFaults, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
-import { eip191RecoverPublicKey, publicKeyToAddress } from "./eip191.js";
+import { eip191RecoverPublicKey, isCanonicalEip191Signature, publicKeyToAddress } from "./eip191.js";
 
 /**
  * Run-scoped contract state and the `contract_bind` decision logic
@@ -440,7 +440,11 @@ function verifyBindStatement(fields: {
     issuedAtMs < ch.issuedAtMs ||
     issuedAtMs > ch.issuedAtMs + fields.challengeTtlMs
   ) return false;
-  if (typeof fields.signatureHex !== "string") return false;
+  // LOW-5: the statement path requires canonical signature form — v in
+  // {27,28} and low-s — before recovery (role-sig semantics untouched).
+  if (typeof fields.signatureHex !== "string" || !isCanonicalEip191Signature(fields.signatureHex)) {
+    return false;
+  }
   const recovered = eip191RecoverPublicKey(Buffer.from(canonicalDigest(st).slice(2), "hex"), fields.signatureHex);
   if (recovered === null) return false;
   return publicKeyToAddress(recovered).toLowerCase() === fields.expectedSessionKeyAddress.toLowerCase();
