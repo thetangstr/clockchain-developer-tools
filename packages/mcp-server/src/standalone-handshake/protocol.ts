@@ -9,7 +9,8 @@ export const DATA_HANDLING_CLASSES = ["public", "confidential", "restricted"] as
 // response carries it, so an agent running from an old script learns to re-read the rules.
 // 1: handshake_next/readiness_prepare. 2: supervised sessions. 3: self-describing invitations.
 // 4: active facilitation (stall reports, nudges, resume, turn deadlines, webhooks).
-export const STANDALONE_PLAYBOOK_VERSION = 4;
+// 5: handshake addresses (listen, invite `to`, review_invitation).
+export const STANDALONE_PLAYBOOK_VERSION = 5;
 export const STANDALONE_DEFAULT_ENDPOINT = "https://mcp.clockchain.network/connect/mcp";
 // v2 invitations are readable at a glance: "chs2." + base64url(JSON).
 export const INVITATION_V2_PREFIX = "chs2.";

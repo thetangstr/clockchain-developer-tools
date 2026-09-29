@@ -640,6 +640,57 @@ export function createStandaloneSessionStore(options: {
       return invitation.sessionId;
     },
 
+    // Mailbox invitations (B4) are claimed by session, not by secret: the listener never
+    // holds the secret. The claim is coalesced like claimInvitation (the attempt write that
+    // follows in the same tick carries it, with the digest for rollback).
+    claimSessionInvitation(sessionId: string): { digest: string; expiresAtMs: number } | undefined {
+      const session = sessions.get(sessionId);
+      const invitation = session?.invitation;
+      if (invitation === undefined || housekeepingNow() >= invitation.expiresAtMs) return undefined;
+      invitations.delete(invitation.digest);
+      session.invitation = undefined;
+      persist(session, "soon");
+      return { digest: invitation.digest, expiresAtMs: invitation.expiresAtMs };
+    },
+
+    putInvitationDigest(sessionId: string, digest: string, expiresAtMs: number): void {
+      const session = sessions.get(sessionId);
+      if (session === undefined) return;
+      invitations.set(digest, { sessionId, expiresAtMs });
+      session.invitation = { digest, expiresAtMs };
+      persist(session);
+    },
+
+    // An invitation sent to an address: which mailbox, and (once accepted) the key the
+    // Responder is bound to for the rest of the session, retries included.
+    bindMailbox(sessionId: string, binding: { address: string; invitationId: string }): void {
+      const session = requireSession(sessionId);
+      session.mailbox = { ...binding };
+      persist(session);
+    },
+
+    bindResponderKey(sessionId: string, key: string): void {
+      const session = requireSession(sessionId);
+      session.boundResponderKey = key;
+      persist(session);
+    },
+
+    // The listener declined a mailbox invitation: the Initiator's session ends at once
+    // (abandoned, reason INVITATION_DECLINED) instead of waiting out the invitation TTL.
+    declineInvitation(sessionId: string): boolean {
+      const session = sessions.get(sessionId);
+      if (session === undefined || session.stage !== "invited") return false;
+      if (session.invitation !== undefined) invitations.delete(session.invitation.digest);
+      session.invitation = undefined;
+      session.abandonedFrom = "declined";
+      session.stage = "abandoned";
+      markEnded(session);
+      pushEvent(session, { type: "declined" });
+      pushEvent(session, { type: "abandon", fromStage: "declined" });
+      persist(session);
+      return true;
+    },
+
     getSession(sessionId: string): any {
       const session = sessions.get(sessionId);
       if (!session) return undefined;
@@ -725,12 +776,12 @@ export function createStandaloneSessionStore(options: {
     // Recorded before a readiness attempt starts, so a restart mid-evaluation can roll the
     // session back (and give back the invitation it claimed) instead of leaving it stuck in
     // readiness_pending: the client's interrupted call is then simply retryable.
-    beginAttempt(sessionId: string, input: { previousStage: string; invitationSecret?: string }): void {
+    beginAttempt(sessionId: string, input: { previousStage: string; invitationSecret?: string; invitationDigest?: string }): void {
       const session = requireSession(sessionId);
       session.attemptInFlight = {
         previousStage: input.previousStage,
         previousReadiness: session.responderReadiness,
-        invitationDigest: input.invitationSecret === undefined ? undefined : tokenDigest(input.invitationSecret),
+        invitationDigest: input.invitationDigest ?? (input.invitationSecret === undefined ? undefined : tokenDigest(input.invitationSecret)),
         invitationExpiresAtMs: session.invitationExpiresAtMs,
       };
       persist(session);

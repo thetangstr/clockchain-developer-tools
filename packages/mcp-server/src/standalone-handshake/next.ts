@@ -309,6 +309,7 @@ function terminalReason(action: StandaloneNextAction, session: JsonRecord): stri
   if (action === "abandoned") {
     if (session.abandonedFrom === "invited") return "INVITATION_NOT_ACCEPTED";
     if (session.abandonedFrom === "readiness_retry") return "READINESS_NOT_CORRECTED";
+    if (session.abandonedFrom === "declined") return "INVITATION_DECLINED";
     return "NOT_OPENED_BEFORE_DEADLINE";
   }
   return `${action.toUpperCase()}_BY_${String(session.closedBy ?? "unknown").toUpperCase()}`;
@@ -326,7 +327,8 @@ function terminalStatement(action: StandaloneNextAction, session: JsonRecord, ro
   }
   if (action === "abandoned") {
     const why =
-      reason === "INVITATION_NOT_ACCEPTED" ? "the invitation was not accepted before it expired"
+      reason === "INVITATION_DECLINED" ? "the other agent declined the invitation"
+      : reason === "INVITATION_NOT_ACCEPTED" ? "the invitation was not accepted before it expired"
       : reason === "READINESS_NOT_CORRECTED" ? "the Responder's readiness was not corrected before the invitation expired"
       : "the channel was not opened within the deadline after acceptance";
     return { guidance: `The session was abandoned: ${why}.`, nextStep: NEW_INVITATION_STEP, tellYourUser: `The handshake ended without opening a channel: ${why}.` };
