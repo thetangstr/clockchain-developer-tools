@@ -57,7 +57,10 @@ runs `S`. At `S|P` a non-production host root or an ephemeral signer fails
 - `probe-staging` — post-deploy read-only conformance: server card +
   `cardDigest`, `/contract/keys`, `initialize`/`tools/list` per role token
   with digest comparison against the card, and the pre-bind `contract_status`
-  rendezvous shape. It never calls a mutating tool.
+  rendezvous shape. It never calls a mutating tool. Note: the `contract_status`
+  call itself appends ONE pre-bind receipt to the pre-bind chain (status sits
+  in `POLL_TOOLS`) — "read-only" for the business surface, not literally
+  side-effect-free; expect one extra receipt per probe run.
 
 ## 4. Rollback
 
@@ -69,8 +72,9 @@ via `deploy-box.sh <sha> --no-deps`-equivalent code path. No state migration:
 ## 5. N7a pairing
 
 The contract server needs the sink's close URL on the compose network:
-`http://172.30.0.4:8083` (production sink; `172.30.0.5` for staging) per the
-N7a compose patch. The close call posts the signed terminal receipt — the
+`http://telemetry-sink:8083` (production sink; `http://telemetry-sink-staging:8083`
+for staging) — compose DNS names, never static IPs (they collide on the shared
+edge subnet), per the N7a compose patch. The close call posts the signed terminal receipt — the
 receipt signature is the only credential and the endpoint is never routed by
 Caddy. Wire the env (`TELEMETRY_CLOSE_URL` or the equivalent host wiring) when
 the N6 close-emitting path lands; until then the surface runs without it and
