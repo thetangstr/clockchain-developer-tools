@@ -4,6 +4,11 @@ import path from "node:path";
 import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
 
 import { createTsaContractAnchor, type ContractAnchor } from "./anchor.js";
+import {
+  createStripeTestRail,
+  type SettlementRail,
+  type StripeTestSecretResolver,
+} from "./settlement-rail.js";
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
 import { createCloseEmitter } from "./close-emitter.js";
@@ -74,6 +79,13 @@ export type ContractRouteConfig =
       readonly telemetryCloseUrl?: string;
       /** N4b-8 (gap 4): CONTRACT_ANCHOR_ENABLED=1 — tsa_issue-backed run anchoring. */
       readonly anchorEnabled: boolean;
+      /**
+       * N4b-10 (D13): CONTRACT_SETTLEMENT_RAIL — "simulated" (default) or
+       * "stripe_test_mode". The rail object is exposed so check-config can
+       * probe the key's *status* without ever touching its bytes.
+       */
+      readonly settlementRailId: "simulated" | "stripe_test_mode";
+      readonly settlementRail?: SettlementRail;
       readonly service: ContractService;
     };
 
@@ -83,7 +95,15 @@ function misconfigured(reason: string): ContractRouteConfig {
   return { kind: "misconfigured", reason };
 }
 
-export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig {
+export function loadContractConfig(
+  env: NodeJS.ProcessEnv,
+  /**
+   * N4b-10 (D13): test seam — substitute the Stripe test-key resolver so
+   * no AWS call happens under test. The real path always uses Secrets
+   * Manager (call-time); this is undefined in production code.
+   */
+  deps?: { resolveStripeTestSecret?: StripeTestSecretResolver },
+): ContractRouteConfig {
   if (env.CONTRACT_MCP_ENABLED !== "1") return { kind: "disabled" };
 
   let tokens: ReturnType<typeof parseContractTokens>;
@@ -369,6 +389,28 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     }
   }
 
+  // N4b-10 (spec D13): CONTRACT_SETTLEMENT_RAIL — "simulated" (default) or
+  // "stripe_test_mode". Construction resolves NO key material: the rail
+  // resolves the test key at call time (Secrets Manager
+  // agentcontract/travel-stripe-test-key, us-west-2); an absent key is the
+  // honest awaiting_stripe_test_key stop, never a boot failure. check-config
+  // probes the key status without printing it.
+  const settlementRailRaw = (env.CONTRACT_SETTLEMENT_RAIL ?? "simulated").trim();
+  if (settlementRailRaw !== "simulated" && settlementRailRaw !== "stripe_test_mode") {
+    return misconfigured(
+      `CONTRACT_SETTLEMENT_RAIL must be simulated|stripe_test_mode, got "${env.CONTRACT_SETTLEMENT_RAIL}"`,
+    );
+  }
+  const settlementRailId = settlementRailRaw;
+  const settlementRail: SettlementRail | undefined =
+    settlementRailId === "stripe_test_mode"
+      ? createStripeTestRail(
+          deps?.resolveStripeTestSecret === undefined
+            ? undefined
+            : { resolveSecret: deps.resolveStripeTestSecret },
+        )
+      : undefined;
+
   // N1/N2: construction can fail closed — corrupt/unreadable used-sessions or
   // a state dir already locked by a live process are misconfiguration, not a
   // mid-request exception.
@@ -427,6 +469,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       allowLegacySealV2: levelRaw === "L",
       // N4b-8 (gap 4): the tsa_issue-backed anchor (injected fake in tests).
       ...(anchor !== undefined ? { anchor } : {}),
+      // N4b-10 (D13): absent = the default simulated settlement rail.
+      ...(settlementRail !== undefined ? { settlementRail } : {}),
       // N4b-8 (gap 3): POST the signed terminal receipt to the sink.
       ...(closeEmitter !== undefined
         ? {
@@ -482,6 +526,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     requireBindStatement,
     ...(telemetryCloseUrl !== undefined ? { telemetryCloseUrl } : {}),
     anchorEnabled,
+    settlementRailId,
+    ...(settlementRail !== undefined ? { settlementRail } : {}),
     service,
   };
 }

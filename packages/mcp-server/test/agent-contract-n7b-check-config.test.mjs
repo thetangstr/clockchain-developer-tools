@@ -31,8 +31,8 @@ function readyEnv(extra = {}) {
   };
 }
 
-test("check-config reports a redacted ready verdict", () => {
-  const out = checkConfig(readyEnv({ CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083" }));
+test("check-config reports a redacted ready verdict", async () => {
+  const out = await checkConfig(readyEnv({ CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083" }));
   assert.equal(out.exitCode, 0);
   assert.equal(out.report.status, "ready");
   assert.equal(out.report.level, "S");
@@ -60,57 +60,110 @@ test("check-config reports a redacted ready verdict", () => {
   assert.equal(text.includes("ver-token"), false);
 });
 
-test("check-config exits non-zero on misconfiguration", () => {
+test("check-config exits non-zero on misconfiguration", async () => {
   // missing seed
-  const noSeed = checkConfig(readyEnv({ CONTRACT_SERVER_ED25519_SEED: "" }));
+  const noSeed = await checkConfig(readyEnv({ CONTRACT_SERVER_ED25519_SEED: "" }));
   assert.equal(noSeed.exitCode, 1);
   assert.equal(noSeed.report.status, "misconfigured");
   // S without the bind-statement flag
-  const sNoFlag = checkConfig(readyEnv({ CONTRACT_LEVEL: "S" }));
+  const sNoFlag = await checkConfig(readyEnv({ CONTRACT_LEVEL: "S" }));
   assert.equal(sNoFlag.exitCode, 1);
   assert.match(sNoFlag.report.reason, /REQUIRE_BIND_STATEMENT/);
   // * token without the flag (HIGH-1 startup gate)
-  const star = checkConfig(readyEnv({
+  const star = await checkConfig(readyEnv({
     CONTRACT_AUTH_TOKENS: "tb1:buyer:kb1:*:initiator",
     CONTRACT_LEVEL: "L",
   }));
   assert.equal(star.exitCode, 1);
   // bad level
-  const badLevel = checkConfig(readyEnv({ CONTRACT_LEVEL: "X" }));
+  const badLevel = await checkConfig(readyEnv({ CONTRACT_LEVEL: "X" }));
   assert.equal(badLevel.exitCode, 1);
 });
 
-test("check-config reports disabled distinctly (exit 2)", () => {
-  const out = checkConfig({});
+test("check-config reports disabled distinctly (exit 2)", async () => {
+  const out = await checkConfig({});
   assert.equal(out.exitCode, 2);
   assert.equal(out.report.status, "disabled");
 });
 
-test("check-config refuses a test root at S/P but allows it at L", () => {
+test("check-config refuses a test root at S/P but allows it at L", async () => {
   const testRoot = `root-test:${"ab".repeat(32)}`;
-  const atP = checkConfig(readyEnv({
+  const atP = await checkConfig(readyEnv({
     CONTRACT_LEVEL: "P", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
     CONTRACT_HOST_ROOTS: testRoot,
   }));
   assert.equal(atP.exitCode, 1);
   assert.match(atP.report.refusals.join(" "), /non-production host root/i);
-  const atL = checkConfig(readyEnv({ CONTRACT_LEVEL: "L", CONTRACT_HOST_ROOTS: testRoot }));
+  const atL = await checkConfig(readyEnv({ CONTRACT_LEVEL: "L", CONTRACT_HOST_ROOTS: testRoot }));
   assert.equal(atL.exitCode, 0);
   assert.equal(atL.report.hostRoots[0].production, false);
   // Production root at P is fine.
-  const prodAtP = checkConfig(readyEnv({
+  const prodAtP = await checkConfig(readyEnv({
     CONTRACT_LEVEL: "P", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
     CONTRACT_HOST_ROOTS: PROD_ROOT,
   }));
   assert.equal(prodAtP.exitCode, 0);
 });
 
-test("check-config refuses an ephemeral signer at S/P", () => {
-  const out = checkConfig(readyEnv({
+test("check-config refuses an ephemeral signer at S/P", async () => {
+  const out = await checkConfig(readyEnv({
     CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1", TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
     CONTRACT_SERVER_ED25519_SEED: "", CONTRACT_ALLOW_EPHEMERAL_KEY: "1",
   }));
   assert.equal(out.exitCode, 1);
   assert.match(out.report.refusals.join(" "), /ephemeral/i);
+});
+
+// N4b-10 (D13): CONTRACT_SETTLEMENT_RAIL parse + check-config key-status
+// reporting. The resolver seam stands in for Secrets Manager — no AWS.
+test("check-config parses CONTRACT_SETTLEMENT_RAIL and reports key status redacted", async () => {
+  // Default: simulated rail, no key probe.
+  const sim = await checkConfig(readyEnv({}));
+  assert.equal(sim.exitCode, 0);
+  assert.equal(sim.report.settlementRail, "simulated");
+  assert.equal(sim.report.stripeTestKey, null);
+
+  // Unknown value → misconfigured.
+  const bad = await checkConfig(readyEnv({ CONTRACT_SETTLEMENT_RAIL: "stripe_live" }));
+  assert.equal(bad.exitCode, 1);
+  assert.match(bad.report.reason, /CONTRACT_SETTLEMENT_RAIL/);
+
+  // stripe_test_mode with a test key resolvable → status "configured",
+  // and the serialized report never carries the key bytes.
+  const cfg = await checkConfig(
+    readyEnv({ CONTRACT_SETTLEMENT_RAIL: "stripe_test_mode" }),
+    { resolveStripeTestSecret: async () => "sk_test_CheckConfigOnly" },
+  );
+  assert.equal(cfg.exitCode, 0);
+  assert.equal(cfg.report.settlementRail, "stripe_test_mode");
+  assert.equal(cfg.report.stripeTestKey, "configured");
+  assert.equal(JSON.stringify(cfg.report).includes("sk_test_CheckConfigOnly"), false,
+    "the key never appears in the report");
+
+  // Absent → honest "absent", still ready (awaiting stop is runtime's).
+  const absent = await checkConfig(
+    readyEnv({ CONTRACT_SETTLEMENT_RAIL: "stripe_test_mode" }),
+    { resolveStripeTestSecret: async () => undefined },
+  );
+  assert.equal(absent.exitCode, 0);
+  assert.equal(absent.report.stripeTestKey, "absent");
+
+  // A non-test key resolves → "refused" at L (reported); at S it's a gate.
+  const live = await checkConfig(
+    readyEnv({ CONTRACT_SETTLEMENT_RAIL: "stripe_test_mode" }),
+    { resolveStripeTestSecret: async () => "sk_live_ShouldNeverBeUsed" },
+  );
+  assert.equal(live.report.stripeTestKey, "refused");
+  assert.equal(JSON.stringify(live.report).includes("sk_live_ShouldNeverBeUsed"), false);
+  const liveAtS = await checkConfig(
+    readyEnv({
+      CONTRACT_SETTLEMENT_RAIL: "stripe_test_mode",
+      CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1",
+      TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
+    }),
+    { resolveStripeTestSecret: async () => "sk_live_ShouldNeverBeUsed" },
+  );
+  assert.equal(liveAtS.exitCode, 1);
+  assert.match(liveAtS.report.refusals.join(" "), /non-TEST key/i);
 });
 

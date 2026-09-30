@@ -413,7 +413,7 @@ test("mintTerminalReceipt matches the sink's ac-terminal-receipt/v1 verification
   }
 });
 
-test("unset TELEMETRY_CLOSE_URL refuses at S/P, allowed at L; check-config surfaces it", () => {
+test("unset TELEMETRY_CLOSE_URL refuses at S/P, allowed at L; check-config surfaces it", async () => {
   const base = {
     CONTRACT_MCP_ENABLED: "1",
     CONTRACT_AUTH_TOKENS: TOKENS,
@@ -438,7 +438,7 @@ test("unset TELEMETRY_CLOSE_URL refuses at S/P, allowed at L; check-config surfa
   assert.equal(s.kind, "misconfigured");
   assert.match(s.reason, /TELEMETRY_CLOSE_URL/);
   // check-config reports the same verdict.
-  const chk = checkConfig({
+  const chk = await checkConfig({
     ...base,
     CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "n4b8-close-cfg-")),
     CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1",
@@ -462,7 +462,7 @@ test("unset TELEMETRY_CLOSE_URL refuses at S/P, allowed at L; check-config surfa
   assert.equal(bad.kind, "misconfigured");
   // S with the URL set and published (production) roots → check-config green,
   // and the report carries the close URL.
-  const sOk = checkConfig({
+  const sOk = await checkConfig({
     ...base,
     CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "n4b8-close-cfg-")),
     CONTRACT_LEVEL: "S", CONTRACT_REQUIRE_BIND_STATEMENT: "1",

@@ -31,13 +31,13 @@ function isProductionRoot(root) {
  *   released before returning (the ready path constructs the real service,
  *   so close() MUST run to free the lockfile for the subsequent server boot).
  */
-export function checkConfig(env) {
+export async function checkConfig(env, deps) {
   const enabled = env.CONTRACT_MCP_ENABLED === "1";
   const level = (env.CONTRACT_LEVEL ?? "L").trim().toUpperCase();
 
   let cfg;
   try {
-    cfg = loadContractConfig(env);
+    cfg = loadContractConfig(env, deps);
   } catch (err) {
     return {
       exitCode: 1,
@@ -88,6 +88,13 @@ export function checkConfig(env) {
     // N4b-8 (gap 4): CONTRACT_ANCHOR_ENABLED=1 — tsa_issue-backed run
     // anchoring (agreement digest + terminal chain head).
     anchorEnabled: cfg.anchorEnabled,
+    // N4b-10 (D13): settlement rail — "simulated" (default) or
+    // "stripe_test_mode". When the Stripe rail is selected, the key's
+    // STATUS is resolved (configured|absent|refused) — never its bytes.
+    settlementRail: cfg.settlementRailId,
+    stripeTestKey: cfg.settlementRail === undefined
+      ? null
+      : await cfg.settlementRail.keyStatus().catch(() => "absent"),
     stateDir: cfg.stateDir,
     hostRoots,
     simFaultsEnabled: cfg.simFaultsEnabled,
@@ -122,6 +129,14 @@ export function checkConfig(env) {
     if (cfg.signerEphemeral) {
       refusals.push(`ephemeral signer (ephemeral-dev-*) is not allowed at CONTRACT_LEVEL=${level}`);
     }
+    // N4b-10 (D13): a REFUSED key status means non-test key material
+    // resolved — a gate, never tolerated at S|P. `absent` is the honest
+    // awaiting_stripe_test_key stop, not a refusal.
+    if (report.stripeTestKey === "refused") {
+      refusals.push(
+        `CONTRACT_SETTLEMENT_RAIL=stripe_test_mode resolved a non-TEST key at CONTRACT_LEVEL=${level}`,
+      );
+    }
   }
   if (refusals.length > 0) {
     report.status = "refused";
@@ -134,7 +149,7 @@ export function checkConfig(env) {
 const isMain = process.argv[1] !== undefined
   && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isMain) {
-  const { exitCode, report } = checkConfig(process.env);
+  const { exitCode, report } = await checkConfig(process.env);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   process.exit(exitCode);
 }
