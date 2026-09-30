@@ -836,6 +836,14 @@ export function createContractService(options: {
   now?: () => number;
   graceMs?: number;
   stateDir?: string;
+  /**
+   * N4b-11 (L3): retention cap on FINISHED jobs persisted to
+   * `terminal-jobs.json` (default 256) — the file cannot grow forever.
+   * A job is finished once its close is delivered/failed/absent AND no
+   * anchor job is still anchoring/pending; unfinished jobs are never
+   * dropped, and the least-recently-updated finished jobs go first.
+   */
+  terminalJobsMaxFinished?: number;
   maxRuns?: number;
   maxReceiptsPerRun?: number;
   maxReceiptsPerPrincipal?: number;
@@ -962,7 +970,7 @@ export function createContractService(options: {
    * subjects, delivery/anchor outcomes, and post-restart evidence survive
    * the in-memory run. In-memory-only when no stateDir is configured.
    */
-  const outbox = createTerminalOutbox(options.stateDir);
+  const outbox = createTerminalOutbox(options.stateDir, options.terminalJobsMaxFinished);
   /**
    * N4b-9 (F14): a persist failure must never strand async terminal work
    * that already executed (anchor outcome recording, post-transition
@@ -1687,8 +1695,11 @@ export function createContractService(options: {
    * (the deterministic commitmentId resolves the same on-chain object);
    * `pending` means awaiting confirmation → confirm/re-issue reads the
    * current chain state. Outcomes mint into the job's persisted evidence.
+   * Re-arms under the same `anchorConfirmMaxAttempts` budget as the live
+   * confirm loop (N4b-11 L3) — a still-pending job past the budget rests
+   * for the next boot.
    */
-  const recoverAnchorJob = (job: TerminalJob, aj: TerminalAnchorJob): void => {
+  const recoverAnchorJob = (job: TerminalJob, aj: TerminalAnchorJob, attempt = 1): void => {
     const anchor = options.anchor;
     if (anchor === undefined) return;
     const runId = job.runId;
@@ -1710,6 +1721,22 @@ export function createContractService(options: {
         responseDigestScheme: "canonical",
       }));
     };
+    // N4b-11 (L3): the recovered confirm loop carries the SAME budget as
+    // the live path — at `anchorConfirmMaxAttempts` the job rests as
+    // "pending" and the NEXT boot resumes it. Unbounded polling here would
+    // let a permanently-unconfirmable anchor burn the process forever.
+    const rearm = (): void => {
+      if (anchorConfirmDelayMs <= 0 || attempt >= anchorConfirmMaxAttempts) return;
+      const op2 = sleep(anchorConfirmDelayMs)
+        .then(() => {
+          const freshJob = outbox.get(runId);
+          const fresh = freshJob?.anchors?.[aj.kind];
+          if (freshJob !== undefined && fresh !== undefined && fresh.status === "pending") {
+            recoverAnchorJob(freshJob, fresh, attempt + 1);
+          }
+        });
+      trackAnchorOp(op2);
+    };
     const poll = anchor.confirm !== undefined && aj.anchorId !== undefined
       ? anchor.confirm(aj.anchorId).then((ledger) => ({ ledger }))
       : anchor.anchor({ kind: aj.kind, runId, digestHex: aj.digest }).then((w) => ({ write: w }));
@@ -1722,29 +1749,14 @@ export function createContractService(options: {
             anchorId: r.write!.anchorId, eventHash: r.write!.eventHash, ledger: r.write!.anchor,
           });
           if (confirmed) evidence("anchor_anchored", r.write!);
-          else if (anchorConfirmDelayMs > 0) {
-            // Re-arm a bounded confirm loop against the persisted job.
-            const op2 = sleep(anchorConfirmDelayMs)
-              .then(() => {
-                const fresh = outbox.get(runId)?.anchors?.[aj.kind];
-                if (fresh !== undefined && fresh.status === "pending") recoverAnchorJob(outbox.get(runId)!, fresh);
-              });
-            trackAnchorOp(op2);
-          }
+          else rearm();
         } else {
           const ledger = r.ledger!;
           const confirmed = ledger.status === "anchored" &&
             ledger.blockHeight !== null && ledger.time !== null;
           persist(confirmed ? "anchored" : "pending", { ledger });
           if (confirmed) evidence("anchor_anchored", { anchorId: aj.anchorId, ledger });
-          else if (anchorConfirmDelayMs > 0) {
-            const op2 = sleep(anchorConfirmDelayMs)
-              .then(() => {
-                const fresh = outbox.get(runId)?.anchors?.[aj.kind];
-                if (fresh !== undefined && fresh.status === "pending") recoverAnchorJob(outbox.get(runId)!, fresh);
-              });
-            trackAnchorOp(op2);
-          }
+          else rearm();
         }
       })
       .catch((err) => {

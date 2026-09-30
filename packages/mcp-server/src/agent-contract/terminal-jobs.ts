@@ -32,6 +32,8 @@ import type { ServerReceipt } from "./receipts.js";
 
 export const TERMINAL_JOBS_FILE = "terminal-jobs.json";
 export const TERMINAL_JOBS_SCHEMA = "ac-terminal-jobs/v1";
+/** N4b-11 (L3): default retention cap on FINISHED jobs in the durable file. */
+export const DEFAULT_TERMINAL_JOBS_MAX_FINISHED = 256;
 
 /** A persisted anchor job — mirrors AnchorRunState plus the subject digest. */
 export interface TerminalAnchorJob {
@@ -105,14 +107,48 @@ function loadTerminalJobs(stateDir: string): Map<string, TerminalJob> {
   return out;
 }
 
-/** Durable write: tmp file → fsync → rename → fsync the directory. */
-function persistTerminalJobs(stateDir: string, jobs: ReadonlyMap<string, TerminalJob>): void {
+/**
+ * N4b-11 (L3): a job is FINISHED — prunable — once its close is
+ * delivered/failed/absent AND no anchor job is still anchoring/pending
+ * (the exact complement of the `unfinished()` predicate). Unfinished jobs
+ * are never dropped: they are the recovery state.
+ */
+function isFinishedJob(j: TerminalJob): boolean {
+  const closeDone = j.close === undefined || j.close.status !== "delivering";
+  const anchorOpen = [j.anchors?.agreement, j.anchors?.terminal].some(
+    (a) => a !== undefined && (a.status === "anchoring" || a.status === "pending"),
+  );
+  return closeDone && !anchorOpen;
+}
+
+/**
+ * Durable write: tmp file → fsync → rename → fsync the directory.
+ * N4b-11 (L3): bounded retention — finished jobs beyond `maxFinished`
+ * (least-recently `updatedAtMs` first) are left out of the durable write
+ * so the file cannot grow forever. The in-memory map is untouched: a
+ * later mutation simply re-persists the job.
+ */
+function persistTerminalJobs(
+  stateDir: string,
+  jobs: ReadonlyMap<string, TerminalJob>,
+  maxFinished: number,
+): void {
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, TERMINAL_JOBS_FILE);
   const tmp = `${file}.${process.pid}.tmp`;
+  const finished = [...jobs.values()]
+    .map((j, insertion) => ({ j, insertion }))
+    .filter(({ j }) => isFinishedJob(j))
+    // Most-recent first; a same-ms tie keeps the later-ENQUEUED job (Map
+    // order is insertion order — a re-set keeps its original slot).
+    .sort((a, b) => (b.j.updatedAtMs - a.j.updatedAtMs) || (b.insertion - a.insertion));
+  const dropped = new Set(finished.slice(Math.max(0, maxFinished)).map(({ j }) => j.runId));
   const fd = openSync(tmp, "w");
   try {
-    writeFileSync(fd, JSON.stringify({ schema: TERMINAL_JOBS_SCHEMA, jobs: [...jobs.values()] }));
+    writeFileSync(fd, JSON.stringify({
+      schema: TERMINAL_JOBS_SCHEMA,
+      jobs: [...jobs.values()].filter((j) => !dropped.has(j.runId)),
+    }));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -148,11 +184,14 @@ export interface TerminalOutbox {
   unfinished(): TerminalJob[];
 }
 
-export function createTerminalOutbox(stateDir: string | undefined): TerminalOutbox {
+export function createTerminalOutbox(
+  stateDir: string | undefined,
+  maxFinished: number = DEFAULT_TERMINAL_JOBS_MAX_FINISHED,
+): TerminalOutbox {
   const jobs: Map<string, TerminalJob> =
     stateDir === undefined ? new Map() : loadTerminalJobs(stateDir);
   const save = (): void => {
-    if (stateDir !== undefined) persistTerminalJobs(stateDir, jobs);
+    if (stateDir !== undefined) persistTerminalJobs(stateDir, jobs, maxFinished);
   };
   return {
     get: (runId) => jobs.get(runId),
