@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  boot, bookPair, signedSubmit, makeApproval,
+  boot, bookPair, signedSubmit, makeApproval, signRoleSig,
   keys, uuid,
 } from "./n4b9-harness.mjs";
 
@@ -40,3 +40,44 @@ test("F15: a deny submission on settlement_authorize ends blocked_by_policy thro
   } finally { env.close(); }
 });
 
+
+test("D11 addendum: booking_cancel_submit refuses a deny approval — deny submissions are execute/authorize-only", async () => {
+  const env = await boot();
+  try {
+    const { runId } = await bookPair(env, uuid(505), "tb1", "tp1");
+    const prepC = await env.callTool("tp1", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
+    assert.ok(prepC.envelope, JSON.stringify(prepC));
+    const deny = makeApproval({
+      envelope: prepC.envelope, role: "provider", action: "booking",
+      tool: "booking_cancel_submit", key: keys.providerApproval, decision: "deny",
+    });
+    // Signature-free deny submission: signatureHex is mandatory on cancel —
+    // refused at the args gate; the cancel never happens.
+    const noSig = await env.callTool("tp1", "booking_cancel_submit", {
+      envelope: prepC.envelope, approval: deny,
+    });
+    assert.ok(noSig.error !== undefined || noSig.rpcError !== undefined,
+      `a deny submission on cancel is refused, got ${JSON.stringify(noSig)}`);
+    assert.notEqual(noSig.status, "CANCELLED");
+    // Deny + role signature: the verified deny refuses the cancel with
+    // POLICY_DENIED and never ends the run.
+    const e = prepC.envelope;
+    const sig = signRoleSig(keys.providerSigner.priv, {
+      runId: e.runId, role: "provider", tool: e.tool, nonce: e.nonce, payloadDigest: e.payloadDigest,
+    });
+    const withSig = await env.callTool("tp1", "booking_cancel_submit", {
+      envelope: e, signatureHex: sig, approval: deny,
+    });
+    assert.equal(withSig.error, "POLICY_DENIED", JSON.stringify(withSig));
+    const run = env.service.runFor(runId);
+    assert.equal(run.cancellation, undefined, "the deny never cancelled");
+    assert.equal(run.terminalState, null, "the run stays live");
+    // The verified deny record is still retained, bound to the
+    // booking_cancel_prepare receipt (R12).
+    const feed = env.service.receiptFeed(runId);
+    const cancelPrep = feed.receipts.find((r) => r.tool === "booking_cancel_prepare");
+    const denyRec = feed.approvalRecords?.find((a) => a.decision === "deny");
+    assert.ok(denyRec, "the signed deny is retained as a verified verdict");
+    assert.equal(denyRec.digest, cancelPrep.responseDigest);
+  } finally { env.close(); }
+});
