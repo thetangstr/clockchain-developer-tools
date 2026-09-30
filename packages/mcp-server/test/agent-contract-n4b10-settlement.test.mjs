@@ -426,6 +426,44 @@ test("L4: concurrent settlement_authorize serialize — exactly one confirm, set
   } finally { env.close(); }
 });
 
+// M2 (adversarial review): a confirm response that isn't `succeeded` —
+// or names a different intent — is a code-only failure, NEVER settled.
+// (The real rail also validates amount/currency/metadata echoes; this is
+// the business-layer belt behind it — a fake rail bypassing them still
+// cannot settle.)
+test("M2: a non-succeeded or wrong-id confirm response never settles", async () => {
+  for (const [name, confirmResult] of [
+    ["requiresAction", { id: "pi_test_001", status: "requires_action" }],
+    ["wrongId", { id: "pi_test_OTHER", status: "succeeded" }],
+  ]) {
+    const { rail, calls } = fakeRail();
+    rail.confirmPaymentIntent = async () => {
+      calls.confirm += 1;
+      return confirmResult;
+    };
+    const env = await boot({ settlementRail: rail });
+    try {
+      const { runId } = await verifiedPair(env, uuid(816), name === "wrongId" ? "tb2" : "tb1", name === "wrongId" ? "tp2" : "tp1");
+      const prepS = await env.callTool(name === "wrongId" ? "tb2" : "tb1", "settlement_prepare", {});
+      const buyer = name === "wrongId" ? "tb2" : "tb1";
+      const approval = makeApproval({
+        envelope: prepS.envelope, role: "buyer", action: "settlement",
+        tool: "settlement_authorize", key: keys.buyerApproval,
+      });
+      const res = await signedSubmit(env, {
+        token: buyer, role: "buyer", prepared: prepS,
+        submitTool: "settlement_authorize", extraArgs: { approval },
+      });
+      assert.equal(res.status, "failed", `${name}: ${JSON.stringify(res)}`);
+      assert.equal(res.error, "STRIPE_RAIL_BAD_RESPONSE");
+      assert.equal(res.commercialTransfer, false);
+      const run = env.service.runFor(runId);
+      assert.equal(run.settlement, undefined, `${name}: never settled`);
+      assert.equal(run.terminalState, null, `${name}: run stays live`);
+    } finally { env.close(); }
+  }
+});
+
 test("D13: no PaymentIntent without a match verification — the gate precedes the rail", async () => {
   const { rail, calls } = fakeRail();
   const env = await boot({ settlementRail: rail });

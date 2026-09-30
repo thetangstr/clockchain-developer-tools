@@ -1573,6 +1573,14 @@ export function createBusinessOps(options: {
               intent = await rail.confirmPaymentIntent({
                 paymentIntentId,
                 idempotencyKey: `${expected.agreementDigest}:confirm`,
+                // M2: pin the agreement terms — a confirmed intent that
+                // disagrees is a rail failure, never a settlement.
+                expected: {
+                  amountAtomic: String(expected.amountMinor),
+                  currency: expected.currency as string,
+                  runId: liveRun.runId,
+                  agreementDigest: expected.agreementDigest as string,
+                },
               });
             } catch (err) {
               // Code-only, receipted; the run stays NON-settled. The nonce
@@ -1584,6 +1592,21 @@ export function createBusinessOps(options: {
                 paymentRail: rail.railId,
                 paymentIntentId,
                 error: err instanceof StripeTestRailError ? err.code : "STRIPE_RAIL_HTTP",
+                simulated: true,
+                commercialTransfer: false,
+                label: STRIPE_RAIL_LABEL,
+                serverNonce,
+              });
+            }
+            // M2 belt-and-suspenders behind the rail's own validation: a
+            // confirm result that is not `succeeded` or names a different
+            // intent id is a code-only failure — NEVER settled.
+            if (intent.id !== paymentIntentId || intent.status !== "succeeded") {
+              return ok({
+                status: "failed",
+                paymentRail: rail.railId,
+                paymentIntentId,
+                error: "STRIPE_RAIL_BAD_RESPONSE",
                 simulated: true,
                 commercialTransfer: false,
                 label: STRIPE_RAIL_LABEL,

@@ -28,6 +28,17 @@ import { z } from "zod";
  * constructing a rail performs no AWS traffic; without the SDK the key
  * resolves `absent`). Tests inject recording doubles for both — no
  * network, no Secrets Manager, no real key.
+ *
+ * Two hardening invariants on top of the ported rail:
+ *  - M1: EVERY request — the default fetch AND any injected transport —
+ *    runs under a bounded deadline (`requestTimeoutMs`, default 10s).
+ *    A hung Stripe endpoint or a custom transport can never stall
+ *    settlement; expiry surfaces as a coded `StripeTestRailError`.
+ *  - M2: a parsed 2xx response is NOT trusted — the rail verifies the
+ *    intent echoes what was sent (create: amount/currency/the metadata
+ *    triple; confirm: the requested id, `succeeded`, and `expected`).
+ *    A confused or adversarial upstream is a rail failure, never a
+ *    settlement.
  */
 
 export const STRIPE_TEST_RAIL_ID = "stripe_test_mode" as const;
@@ -380,6 +391,23 @@ const errorMessage = (body: unknown): string | undefined => {
 };
 
 /**
+ * M2: Stripe returns currency lowercase on the wire — compare
+ * case-insensitively so `USD`/`usd` agreement casing never false-fails.
+ */
+const currencyMatches = (wire: string, requested: string): boolean =>
+  wire.toLowerCase() === requested.toLowerCase();
+
+/**
+ * M2: a parsed 2xx body that does not echo the request is a rail
+ * failure — same family as a malformed body, never a settlement.
+ */
+const echoMismatch = (field: string): StripeTestRailError =>
+  new StripeTestRailError(
+    "STRIPE_RAIL_BAD_RESPONSE",
+    `payment intent response does not echo the request: ${field} mismatch`,
+  );
+
+/**
  * The real rail. `resolveSecret` is the ONLY source of key material —
  * resolved at call time, never cached, never exposed. `transport` is
  * injectable so tests record the exact wire requests — including the
@@ -478,7 +506,7 @@ export const createStripeTestRail = (input?: {
       // signed settlement payload before any charge-like transition; only
       // `confirmPaymentIntent` — after signature + approval — releases
       // the test-mode payment.
-      return call({
+      const intent = await call({
         method: "POST",
         path: "/v1/payment_intents",
         idempotencyKey: parsed.data.idempotencyKey,
@@ -492,16 +520,53 @@ export const createStripeTestRail = (input?: {
           "metadata[paymentRail]": STRIPE_TEST_RAIL_ID,
         },
       });
+      // M2: the intent that comes back MUST be the intent that was sent.
+      // A parsed 2xx whose amount, currency, or metadata digests disagree
+      // with the request is a confused/adversarial response — a rail
+      // failure, never the basis of a settlement.
+      if (intent.amount !== parsed.data.amountAtomic) throw echoMismatch("amount");
+      if (!currencyMatches(intent.currency, parsed.data.currency)) throw echoMismatch("currency");
+      if (intent.metadata.runId !== metadata.runId) throw echoMismatch("metadata.runId");
+      if (intent.metadata.agreementDigest !== metadata.agreementDigest) {
+        throw echoMismatch("metadata.agreementDigest");
+      }
+      if (intent.metadata.verificationDigest !== metadata.verificationDigest) {
+        throw echoMismatch("metadata.verificationDigest");
+      }
+      return intent;
     },
-    confirmPaymentIntent: async ({ paymentIntentId, idempotencyKey }) => {
+    confirmPaymentIntent: async ({ paymentIntentId, idempotencyKey, expected }) => {
       const id = paymentIntentIdSchema.parse(paymentIntentId);
       const key = z.string().min(1).max(255).parse(idempotencyKey);
-      return call({
+      const intent = await call({
         method: "POST",
         path: `/v1/payment_intents/${encodeURIComponent(id)}/confirm`,
         idempotencyKey: key,
         form: { payment_method: "pm_card_visa" },
       });
+      // M2: confirm must settle EXACTLY the intent the server asked to
+      // release — a different id or any non-`succeeded` status is a
+      // failure, NEVER a settlement that happens to resolve.
+      if (intent.id !== id) throw echoMismatch("id");
+      if (intent.status !== "succeeded") {
+        throw new StripeTestRailError(
+          "STRIPE_RAIL_BAD_RESPONSE",
+          `payment intent ${intent.id} did not succeed (status: ${intent.status})`,
+        );
+      }
+      if (expected !== undefined) {
+        // The agreement's pinned terms — a confirmed intent that drifts
+        // from them is as unacceptable as a drifted create response.
+        if (intent.amount !== expected.amountAtomic) throw echoMismatch("amount");
+        if (!currencyMatches(intent.currency, expected.currency)) {
+          throw echoMismatch("currency");
+        }
+        if (intent.metadata.runId !== expected.runId) throw echoMismatch("metadata.runId");
+        if (intent.metadata.agreementDigest !== expected.agreementDigest) {
+          throw echoMismatch("metadata.agreementDigest");
+        }
+      }
+      return intent;
     },
   };
 };

@@ -219,3 +219,156 @@ test("N4b-10: the Secrets Manager resolver reads the pinned secret id and unwrap
 
 // ---------------------------------------------------------------------------
 // M1 — every transport call runs under a bounded deadline.
+// ---------------------------------------------------------------------------
+
+test("N4b-10 M1: a never-resolving transport fails at the request deadline — never hangs", async () => {
+  // A custom transport that hangs FOREVER and ignores everything — the
+  // rail's own deadline race is the only bound on it.
+  const rail = createStripeTestRail({
+    resolveSecret: async () => "sk_test_x",
+    requestTimeoutMs: 25,
+    transport: { request: () => new Promise(() => {}) },
+  });
+  const started = Date.now();
+  await assert.rejects(
+    rail.createPaymentIntent({
+      amountAtomic: "1", currency: "usd", idempotencyKey: "k",
+      metadata: { runId: "r", agreementDigest: DIGEST_A, verificationDigest: DIGEST_B },
+    }),
+    (e) =>
+      e instanceof StripeTestRailError &&
+      e.code === "STRIPE_RAIL_HTTP" &&
+      /deadline/.test(e.message) &&
+      !e.message.includes("sk_test_x"),
+  );
+  assert.ok(Date.now() - started < 2_000, "bounded at ~requestTimeoutMs, not forever");
+});
+
+test("N4b-10 M1: the deadline also bounds confirmPaymentIntent", async () => {
+  const rail = createStripeTestRail({
+    resolveSecret: async () => "sk_test_x",
+    requestTimeoutMs: 25,
+    transport: { request: () => new Promise(() => {}) },
+  });
+  await assert.rejects(
+    rail.confirmPaymentIntent({ paymentIntentId: "pi_test000000000000001", idempotencyKey: "k" }),
+    (e) => e instanceof StripeTestRailError && e.code === "STRIPE_RAIL_HTTP",
+  );
+});
+
+test("N4b-10 M1: fetchStripeTransport passes a firing AbortSignal to fetchImpl", async () => {
+  // A fetchImpl that honors the signal like real fetch does — it must
+  // observe an AbortSignal and be rejected by it at the deadline.
+  const transport = fetchStripeTransport({
+    requestTimeoutMs: 25,
+    fetchImpl: (url, init) => new Promise((_, reject) => {
+      assert.ok(init.signal instanceof AbortSignal, "fetchImpl received an AbortSignal");
+      init.signal.addEventListener("abort", () =>
+        reject(new DOMException("The operation was aborted", "AbortError")));
+    }),
+  });
+  const started = Date.now();
+  await assert.rejects(
+    transport.request(
+      { method: "GET", path: "/v1/payment_intents/pi_test000000000000001" },
+      { authorization: "Bearer sk_test_x" },
+    ),
+    (e) => e.name === "AbortError",
+  );
+  assert.ok(Date.now() - started < 2_000, "AbortSignal.timeout fired promptly");
+});
+
+// ---------------------------------------------------------------------------
+// M2 — a parsed 2xx response must echo what was sent.
+// ---------------------------------------------------------------------------
+
+const CREATE_INPUT = {
+  amountAtomic: "437000", currency: "usd", idempotencyKey: "k",
+  metadata: { runId: "run-9", agreementDigest: DIGEST_A, verificationDigest: DIGEST_B },
+};
+
+test("N4b-10 M2: create refuses a 200 response that does not echo the request", async () => {
+  const mismatches = [
+    ["amount", { amount: 437001 }],
+    ["currency", { currency: "eur" }],
+    ["metadata.runId", { metadata: { runId: "run-OTHER", agreementDigest: DIGEST_A, verificationDigest: DIGEST_B } }],
+    ["metadata.agreementDigest", { metadata: { runId: "run-9", agreementDigest: DIGEST_B, verificationDigest: DIGEST_B } }],
+    ["metadata.verificationDigest", { metadata: { runId: "run-9", agreementDigest: DIGEST_A, verificationDigest: DIGEST_A } }],
+  ];
+  for (const [field, over] of mismatches) {
+    const { rail } = recordingRail({ responder: async (req) => echoPi(req, over) });
+    await assert.rejects(
+      rail.createPaymentIntent(CREATE_INPUT),
+      (e) => e instanceof StripeTestRailError && e.code === "STRIPE_RAIL_BAD_RESPONSE",
+      `${field} mismatch is a rail failure`,
+    );
+  }
+});
+
+test("N4b-10 M2: create accepts a faithfully echoed response", async () => {
+  const { rail } = recordingRail();
+  const intent = await rail.createPaymentIntent(CREATE_INPUT);
+  assert.equal(intent.amount, "437000");
+  assert.equal(intent.currency, "usd");
+  assert.equal(intent.metadata.runId, "run-9");
+  assert.equal(intent.metadata.agreementDigest, DIGEST_A);
+  assert.equal(intent.metadata.verificationDigest, DIGEST_B);
+});
+
+test("N4b-10 M2: confirm refuses a response for a DIFFERENT intent id", async () => {
+  const { rail } = recordingRail({
+    responder: async () => PI({ id: "pi_evil00000000000000", status: "succeeded" }),
+  });
+  await assert.rejects(
+    rail.confirmPaymentIntent({ paymentIntentId: "pi_test000000000000001", idempotencyKey: "k" }),
+    (e) => e instanceof StripeTestRailError && e.code === "STRIPE_RAIL_BAD_RESPONSE",
+  );
+});
+
+test("N4b-10 M2: confirm never resolves a non-succeeded status", async () => {
+  for (const status of ["requires_payment_method", "requires_action", "requires_confirmation", "processing", "canceled"]) {
+    const { rail } = recordingRail({ responder: async () => PI({ status }) });
+    await assert.rejects(
+      rail.confirmPaymentIntent({ paymentIntentId: "pi_test000000000000001", idempotencyKey: "k" }),
+      (e) => e instanceof StripeTestRailError && e.code === "STRIPE_RAIL_BAD_RESPONSE",
+      `status ${status} is a failure, not a settlement`,
+    );
+  }
+});
+
+test("N4b-10 M2: confirm verifies expected{} when provided, and succeeds when all match", async () => {
+  const expected = {
+    amountAtomic: "437000", currency: "usd",
+    runId: "run-9", agreementDigest: DIGEST_A,
+  };
+  const mismatches = [
+    ["amount", { amount: 1 }],
+    ["currency", { currency: "eur" }],
+    ["metadata.runId", { metadata: { runId: "run-X", agreementDigest: DIGEST_A } }],
+    ["metadata.agreementDigest", { metadata: { runId: "run-9", agreementDigest: DIGEST_B } }],
+  ];
+  for (const [field, over] of mismatches) {
+    const { rail } = recordingRail({
+      responder: async () => PI({ status: "succeeded", ...over }),
+    });
+    await assert.rejects(
+      rail.confirmPaymentIntent({
+        paymentIntentId: "pi_test000000000000001", idempotencyKey: "k", expected,
+      }),
+      (e) => e instanceof StripeTestRailError && e.code === "STRIPE_RAIL_BAD_RESPONSE",
+      `expected ${field} mismatch is a rail failure`,
+    );
+  }
+  // All-good + expected → resolves the confirmed intent.
+  const { rail } = recordingRail({
+    responder: async () => PI({
+      status: "succeeded",
+      metadata: { runId: "run-9", agreementDigest: DIGEST_A, verificationDigest: DIGEST_B },
+    }),
+  });
+  const intent = await rail.confirmPaymentIntent({
+    paymentIntentId: "pi_test000000000000001", idempotencyKey: "k", expected,
+  });
+  assert.equal(intent.id, "pi_test000000000000001");
+  assert.equal(intent.status, "succeeded");
+});
