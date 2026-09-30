@@ -170,6 +170,24 @@ export interface SettlementRail {
       readonly agreementDigest: string;
     };
   }) => Promise<StripePaymentIntent>;
+  /**
+   * N4b-11 (LOW follow-up): a READ-ONLY lookup — GET the intent. A confirm
+   * that times out may have succeeded upstream; before the business layer
+   * accepts a later deny or reports the settlement failed, it reconciles
+   * against this. Unlike confirm, `status` is REPORTED, never asserted —
+   * the caller decides what `succeeded` means. `expected` still pins the
+   * agreement terms: a retrieved intent whose id, amount, currency, or
+   * metadata runId/agreementDigest disagree is a rail failure.
+   */
+  readonly retrievePaymentIntent?: (input: {
+    readonly paymentIntentId: string;
+    readonly expected?: {
+      readonly amountAtomic: string;
+      readonly currency: string;
+      readonly runId: string;
+      readonly agreementDigest: string;
+    };
+  }) => Promise<StripePaymentIntent>;
 }
 
 // ---------------------------------------------------------------------------
