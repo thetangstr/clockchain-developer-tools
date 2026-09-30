@@ -277,13 +277,35 @@ export const stripeTestKeyStatus = async (input?: {
 // Transports
 // ---------------------------------------------------------------------------
 
+/**
+ * M1: the per-request deadline covering connect, response headers AND
+ * the body read (same shape as the close emitter's attempt deadline).
+ * Default 10s, clamped to 100ms–120s so a caller can neither disarm it
+ * nor park a request for minutes.
+ */
+export const STRIPE_RAIL_REQUEST_TIMEOUT_DEFAULT_MS = 10_000;
+const clampRequestTimeoutMs = (ms: number | undefined): number => {
+  if (ms === undefined || !Number.isFinite(ms)) {
+    return STRIPE_RAIL_REQUEST_TIMEOUT_DEFAULT_MS;
+  }
+  return Math.min(120_000, Math.max(100, Math.floor(ms)));
+};
+
 /** The HTTPS transport — `fetch` against `https://api.stripe.com`. */
 export const fetchStripeTransport = (input?: {
   readonly baseUrl?: string;
   readonly fetchImpl?: typeof fetch;
+  /**
+   * M1: fetch-level deadline via `AbortSignal.timeout` — aborts a real
+   * fetch that honors it (connect + headers + body). The adapter ALSO
+   * races this call against the same deadline, so a fetch impl that
+   * ignores the signal is still bounded.
+   */
+  readonly requestTimeoutMs?: number;
 }): StripeRailTransport => {
   const baseUrl = (input?.baseUrl ?? STRIPE_API_BASE_URL).replace(/\/+$/, "");
   const fetchImpl = input?.fetchImpl ?? fetch;
+  const requestTimeoutMs = clampRequestTimeoutMs(input?.requestTimeoutMs);
   return {
     request: async (request, auth) => {
       const response = await fetchImpl(`${baseUrl}${request.path}`, {
@@ -300,6 +322,7 @@ export const fetchStripeTransport = (input?: {
         ...(request.form === undefined
           ? {}
           : { body: new URLSearchParams(request.form).toString() }),
+        signal: AbortSignal.timeout(requestTimeoutMs),
       });
       const body = (await response.json().catch(() => undefined)) as unknown;
       return { status: response.status, body };
@@ -365,10 +388,19 @@ const errorMessage = (body: unknown): string | undefined => {
 export const createStripeTestRail = (input?: {
   readonly resolveSecret?: StripeTestSecretResolver;
   readonly transport?: StripeRailTransport;
+  /**
+   * M1: the hard deadline applied to EVERY transport call — including
+   * injected transports, which may ignore abort signals entirely.
+   * Default 10s, clamped 100ms–120s; expiry throws
+   * `StripeTestRailError("STRIPE_RAIL_HTTP", …deadline…)`.
+   */
+  readonly requestTimeoutMs?: number;
 }): SettlementRail => {
   const resolveSecret =
     input?.resolveSecret ?? createSecretsManagerStripeTestKeyResolver();
-  const transport = input?.transport ?? fetchStripeTransport();
+  const requestTimeoutMs = clampRequestTimeoutMs(input?.requestTimeoutMs);
+  const transport =
+    input?.transport ?? fetchStripeTransport({ requestTimeoutMs });
 
   const authorization = async (): Promise<string> => {
     const { status, key } = await resolveKeyStatus(resolveSecret);
@@ -388,9 +420,37 @@ export const createStripeTestRail = (input?: {
   };
 
   const call = async (request: StripeRailRequest): Promise<StripePaymentIntent> => {
-    const response = await transport.request(request, {
-      authorization: await authorization(),
+    // M1: the transport call — default fetch or injected double — runs
+    // under ONE hard deadline (emitter-style). The fetch transport's
+    // AbortSignal cancels a real request; this race bounds any
+    // transport, so a hung endpoint can never stall settlement. The
+    // timer is unref'd and always cleared — it can neither keep the
+    // process alive nor fire after the request settled.
+    const work = (async () =>
+      transport.request(request, { authorization: await authorization() })
+    )();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new StripeTestRailError(
+            "STRIPE_RAIL_HTTP",
+            `stripe rail request deadline ${requestTimeoutMs}ms exceeded`,
+          ),
+        );
+      }, requestTimeoutMs);
+      timer.unref?.();
     });
+    let response: StripeRailResponse;
+    try {
+      response = await Promise.race([work, timedOut]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      // The losing branch may settle later — swallow it so an abandoned
+      // transport call never reports as an unhandled rejection.
+      work.catch(() => {});
+      timedOut.catch(() => {});
+    }
     if (response.status < 200 || response.status >= 300) {
       throw new StripeTestRailError(
         "STRIPE_RAIL_HTTP",

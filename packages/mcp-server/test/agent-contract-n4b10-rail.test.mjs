@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createStripeTestRail, createSecretsManagerStripeTestKeyResolver,
+  fetchStripeTransport,
   stripeTestKeyStatus, StripeTestRailError, STRIPE_TEST_RAIL_ID,
   STRIPE_TEST_SECRET_ID, STRIPE_TEST_SECRET_REGION,
 } from "../dist/agent-contract/settlement-rail.js";
@@ -23,6 +24,24 @@ const PI = (over = {}) => ({
 const DIGEST_A = `0x${"a".repeat(64)}`;
 const DIGEST_B = `0x${"b".repeat(64)}`;
 
+// A well-behaved Stripe double: the response ECHOES the form fields the
+// rail sent — M2 echo-verification only trips on deliberately
+// mismatched responders below.
+const echoPi = (request, over = {}) => {
+  const form = request.form ?? {};
+  return PI({
+    amount: form.amount === undefined ? 437000 : Number(form.amount),
+    currency: form.currency ?? "usd",
+    metadata: form["metadata[runId]"] === undefined ? {} : {
+      runId: form["metadata[runId]"],
+      agreementDigest: form["metadata[agreementDigest]"],
+      verificationDigest: form["metadata[verificationDigest]"],
+      paymentRail: form["metadata[paymentRail]"],
+    },
+    ...over,
+  });
+};
+
 function recordingRail(opts = {}) {
   const key = "key" in opts ? opts.key : "sk_test_4TestOnly";
   const responder = opts.responder;
@@ -31,11 +50,12 @@ function recordingRail(opts = {}) {
   const resolverCalls = { n: 0 };
   const rail = createStripeTestRail({
     resolveSecret: async () => { resolverCalls.n += 1; return key; },
+    requestTimeoutMs: opts.requestTimeoutMs,
     transport: {
       request: async (request, auth) => {
         requests.push(request);
         auths.push(auth.authorization);
-        return { status: 200, body: responder ? await responder(request) : PI() };
+        return { status: 200, body: responder ? await responder(request) : echoPi(request) };
       },
     },
   });
@@ -196,3 +216,6 @@ test("N4b-10: the Secrets Manager resolver reads the pinned secret id and unwrap
   });
   assert.equal(await failing(), undefined);
 });
+
+// ---------------------------------------------------------------------------
+// M1 — every transport call runs under a bounded deadline.
