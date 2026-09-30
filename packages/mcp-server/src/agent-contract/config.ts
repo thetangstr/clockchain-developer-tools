@@ -318,6 +318,26 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     }
     telemetryCloseBackoff = parts;
   }
+  // N4b-9 (F12): per-attempt deadline (connect+headers+body) and total
+  // delivery deadline for the close emitter — defaults 10s / 90s.
+  const attemptTimeoutRaw = (env.TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS ?? "").trim();
+  let telemetryCloseAttemptTimeoutMs: number | undefined;
+  if (attemptTimeoutRaw !== "") {
+    const n = Number(attemptTimeoutRaw);
+    if (!Number.isFinite(n) || n < 100 || n > 120_000) {
+      return misconfigured("TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS wants ms (100..120000)");
+    }
+    telemetryCloseAttemptTimeoutMs = n;
+  }
+  const deadlineRaw = (env.TELEMETRY_CLOSE_DEADLINE_MS ?? "").trim();
+  let telemetryCloseDeadlineMs: number | undefined;
+  if (deadlineRaw !== "") {
+    const n = Number(deadlineRaw);
+    if (!Number.isFinite(n) || n < 1000 || n > 600_000) {
+      return misconfigured("TELEMETRY_CLOSE_DEADLINE_MS wants ms (1000..600000)");
+    }
+    telemetryCloseDeadlineMs = n;
+  }
 
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
@@ -366,6 +386,8 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     signer,
     closeUrl: telemetryCloseRaw,
     ...(telemetryCloseBackoff !== undefined ? { backoffMs: telemetryCloseBackoff } : {}),
+    ...(telemetryCloseAttemptTimeoutMs !== undefined ? { attemptTimeoutMs: telemetryCloseAttemptTimeoutMs } : {}),
+    ...(telemetryCloseDeadlineMs !== undefined ? { deadlineMs: telemetryCloseDeadlineMs } : {}),
     setState: (runId, state) => {
       const run = service.runFor(runId);
       if (run !== undefined) run.telemetryClose = state;

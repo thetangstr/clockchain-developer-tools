@@ -361,7 +361,7 @@ test("a permanently failed close is receipted and visible in contract_status", a
   }
 });
 
-test("close delivery is idempotent — a replayed notify re-posts the same signed receipt", async () => {
+test("close delivery is write-once — in-flight AND completed notify/resume dedupe", async () => {
   const sink = await fakeSink();
   try {
     const signer = { keyId: "contract-server-test", privateKey: configServerKey };
@@ -378,11 +378,12 @@ test("close delivery is idempotent — a replayed notify re-posts the same signe
     await emitter.flush();
     assert.equal(sink.received.length, 1);
     assert.equal(states.get("run-9").status, "delivered");
-    // A post-completion replay is a fresh POST — the sink answers the same head.
+    // N4b-9 (F11): a post-completion notify is a NO-OP — the close identity
+    // is write-once; the sink would answer the same head, so no POST at all.
     emitter.notify(fields);
+    emitter.resume(sink.received[0].receipt); // recovery of a delivered job — also a no-op
     await emitter.flush();
-    assert.equal(sink.received.length, 2);
-    assert.deepEqual(sink.received[1].receipt, sink.received[0].receipt);
+    assert.equal(sink.received.length, 1);
   } finally {
     await sink.close();
   }

@@ -11,6 +11,11 @@
  *    idempotent, so retries/replays are safe);
  *  - bounded retries with backoff on transport errors AND non-2xx
  *    refusals;
+ *  - N4b-9 (F11): write-once — a delivered or permanently failed job is
+ *    NEVER re-submitted; notify() dedupes on any recorded state;
+ *  - N4b-9 (F12): every attempt has a deadline covering connect, response
+ *    headers AND the response body, and the whole job has a total delivery
+ *    deadline — a stalled sink can never hang an attempt or the shutdown;
  *  - every outcome lands on the run (run.telemetryClose) and as a
  *    run-chain receipt via recordOutcome — a permanently failed close
  *    is visible evidence, never silent.
@@ -74,11 +79,22 @@ export interface CloseEmitterOptions {
   closeUrl: string;
   now?: () => number;
   /** Injectable for tests — defaults to global fetch. */
-  fetchImpl?: (url: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{ status: number; text(): Promise<string> }>;
+  fetchImpl?: (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{ status: number; text(): Promise<string> }>;
   /** Injectable for tests — defaults to setTimeout-based sleep. */
   sleep?: (ms: number) => Promise<void>;
   /** Backoff schedule per retry; last value repeats. Default ~5 tries over ~30s. */
   backoffMs?: readonly number[];
+  /**
+   * N4b-9 (F12): per-attempt deadline covering connect + response headers
+   * + response body (default 10s). The attempt is aborted on expiry.
+   */
+  attemptTimeoutMs?: number;
+  /**
+   * N4b-9 (F12): total delivery deadline measured from first dispatch
+   * (default 90s). On expiry the job fails with a bounded error even if
+   * retries remain.
+   */
+  deadlineMs?: number;
   /** Server-receipt hook — delivery success AND permanent failure are receipted. */
   recordOutcome?: (
     outcome: "delivered" | "failed",
@@ -100,21 +116,40 @@ export interface CloseEmitterOptions {
 export interface CloseEmitter {
   /**
    * Queue delivery of the signed terminal receipt for `runId`. Idempotent:
-   * a second notify for the same run is a no-op while delivering, and the
-   * sink tolerates a replayed receipt once delivered.
+   * a second notify for the same run is a no-op — in-flight, delivered AND
+   * permanently failed jobs all dedupe (the receipt identity is
+   * write-once). Returns the minted receipt synchronously, BEFORE any
+   * response can be observed — the caller durably enqueues it.
    */
-  notify(input: TerminalReceiptFields): void;
+  notify(input: TerminalReceiptFields): TerminalReceipt | undefined;
+  /**
+   * N4b-9 (F14): deliver an already-minted receipt — the restart-recovery
+   * path. Same dedupe: a run with any recorded state is not re-delivered.
+   */
+  resume(receipt: TerminalReceipt): void;
   /** Resolve when every queued delivery has settled (tests + shutdown). */
   flush(): Promise<void>;
+  /**
+   * N4b-9 (F14): bounded drain — resolves when in-flight deliveries settle
+   * or `deadlineMs` passes, whichever comes first. A deadline expiry never
+   * hangs shutdown; unfinished jobs stay "delivering" for boot recovery.
+   */
+  drain(deadlineMs: number): Promise<void>;
   state(runId: string): CloseDeliveryState | undefined;
 }
 
 export function createCloseEmitter(options: CloseEmitterOptions): CloseEmitter {
   const now = options.now ?? Date.now;
   const fetchImpl = options.fetchImpl ?? fetch;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => {
+    const t = setTimeout(r, ms);
+    t.unref?.();
+  }));
   const backoff = options.backoffMs ?? [500, 1_000, 2_000, 4_000, 8_000];
+  const attemptTimeoutMs = options.attemptTimeoutMs ?? 10_000;
+  const deadlineMs = options.deadlineMs ?? 90_000;
   const states = new Map<string, CloseDeliveryState>();
+  const receipts = new Map<string, TerminalReceipt>();
   const inFlight = new Map<string, Promise<void>>();
 
   const setState = (runId: string, state: CloseDeliveryState): void => {
@@ -122,30 +157,77 @@ export function createCloseEmitter(options: CloseEmitterOptions): CloseEmitter {
     options.setState?.(runId, state);
   };
 
-  async function deliver(runId: string, receipt: TerminalReceipt): Promise<void> {
+  /**
+   * F12: ONE attempt with a hard deadline covering the whole exchange —
+   * connect, response headers AND the body read. The AbortController
+   * cancels a real fetch; the race bounds a transport that ignores it.
+   */
+  async function attemptOnce(url: string, body: string): Promise<{ status: number; text: string }> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`attempt deadline ${attemptTimeoutMs}ms exceeded`));
+      }, attemptTimeoutMs);
+      timer.unref?.();
+    });
+    const work = (async () => {
+      const res = await fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: controller.signal,
+      });
+      return { status: res.status, text: await res.text() };
+    })();
+    try {
+      return await Promise.race([work, timedOut]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      // The losing branch may settle later — swallow it so an abandoned
+      // fetch never reports as an unhandled rejection.
+      work.catch(() => {});
+      timedOut.catch(() => {});
+    }
+  }
+
+  async function deliver(receipt: TerminalReceipt): Promise<void> {
+    const runId = receipt.runId;
     const receiptDigest = canonicalDigest(receipt);
     const url = `${options.closeUrl.replace(/\/+$/, "")}/v1/runs/${encodeURIComponent(runId)}/close`;
+    const body = JSON.stringify(receipt);
+    const startedAt = now();
     setState(runId, { status: "delivering", attempts: 0, receiptDigest });
     let lastError = "unreachable";
-    for (let attempt = 1; ; attempt++) {
+    let attempt = 0;
+    for (;;) {
+      if (now() - startedAt >= deadlineMs) {
+        lastError = `delivery deadline ${deadlineMs}ms exceeded`;
+        break;
+      }
+      attempt += 1;
       const delay = attempt === 1 ? 0 : backoff[Math.min(attempt - 2, backoff.length - 1)];
       if (delay > 0) await sleep(delay);
+      if (now() - startedAt >= deadlineMs) {
+        lastError = `delivery deadline ${deadlineMs}ms exceeded`;
+        break;
+      }
+      // F12: the attempt is counted at DISPATCH — a stalled request that
+      // is aborted still consumed an attempt.
+      setState(runId, { status: "delivering", attempts: attempt, receiptDigest });
       try {
-        const res = await fetchImpl(url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(receipt),
-        });
+        const res = await attemptOnce(url, body);
         if (res.status >= 200 && res.status < 300) {
           let response: unknown;
-          try { response = JSON.parse(await res.text()); } catch { response = null; }
+          try { response = JSON.parse(res.text); } catch { response = null; }
           // A sink `pending:true` reply means the signed receipt was accepted —
           // the run seals at its deterministic boundary. That IS delivery.
           setState(runId, { status: "delivered", attempts: attempt, deliveredAt: new Date(now()).toISOString(), receiptDigest });
           options.recordOutcome?.("delivered", { runId, receiptDigest, attempts: attempt, response });
           return;
         }
-        lastError = `http ${res.status}: ${(await res.text()).slice(0, 200)}`;
+        lastError = `http ${res.status}: ${res.text.slice(0, 200)}`;
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
       }
@@ -153,19 +235,36 @@ export function createCloseEmitter(options: CloseEmitterOptions): CloseEmitter {
       if (attempt > backoff.length) break;
     }
     // Permanently failed — receipted and left visible on the run.
-    setState(runId, { status: "failed", attempts: backoff.length + 1, lastError, receiptDigest });
-    options.recordOutcome?.("failed", { runId, receiptDigest, attempts: backoff.length + 1, lastError });
+    setState(runId, { status: "failed", attempts: attempt, lastError, receiptDigest });
+    options.recordOutcome?.("failed", { runId, receiptDigest, attempts: attempt, lastError });
   }
+
+  const enqueue = (receipt: TerminalReceipt): void => {
+    const runId = receipt.runId;
+    if (states.has(runId) || inFlight.has(runId)) return;
+    receipts.set(runId, receipt);
+    inFlight.set(runId, deliver(receipt).finally(() => inFlight.delete(runId)));
+  };
 
   return {
     notify(input) {
-      const runId = input.runId;
-      if (inFlight.has(runId)) return;
+      if (states.has(input.runId) || inFlight.has(input.runId)) return undefined;
       const receipt = mintTerminalReceipt(input, options.signer);
-      inFlight.set(runId, deliver(runId, receipt).finally(() => inFlight.delete(runId)));
+      enqueue(receipt);
+      return receipt;
+    },
+    resume(receipt) {
+      enqueue(receipt);
     },
     async flush() {
       await Promise.allSettled([...inFlight.values()]);
+    },
+    async drain(deadline) {
+      const timeout = new Promise<"timeout">((resolve) => {
+        const t = setTimeout(() => resolve("timeout"), deadline);
+        t.unref?.();
+      });
+      await Promise.race([Promise.allSettled([...inFlight.values()]).then(() => "settled" as const), timeout]);
     },
     state(runId) {
       return options.getState?.(runId) ?? states.get(runId);
