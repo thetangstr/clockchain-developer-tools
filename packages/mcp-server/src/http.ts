@@ -536,7 +536,9 @@ export async function runHttp(): Promise<Server> {
     return contractHandler;
   };
   // The observer receipt feed is a low-rate surface (default 30/min).
-  const allowObserverFeed = keyedWindowLimiter(Number(process.env.CONTRACT_OBSERVER_PER_MINUTE ?? "30"), 60_000, Date.now);
+  // `||` not `??`: compose injects "" when the host var is unset (N7c) —
+  // empty must mean the default, not 0.
+  const allowObserverFeed = keyedWindowLimiter(Number(process.env.CONTRACT_OBSERVER_PER_MINUTE || "30"), 60_000, Date.now);
 
   // N4b-6: the evidence routes are ONE exported code path — shared with the
   // l-stack so nothing can drift (receipts feed, keys doc, run-salt). The

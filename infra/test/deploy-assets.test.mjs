@@ -36,6 +36,53 @@ const expectedOptionalSecretNames = [
   "/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS",
 ];
 
+// N7c: the /contract/mcp env surface — every knob is an OPTIONAL SSM read
+// (absent parameter → the env var stays untouched; the route ships disabled
+// without CONTRACT_MCP_ENABLED). Order matches the compose-up.sh read block,
+// which matches ENV_PARAMETERS in check-config-from-ssm.mjs (including
+// CONTRACT_OBSERVER_PER_MINUTE — read in src/http.ts, not config.ts).
+const expectedContractEnv = {
+  CONTRACT_MCP_ENABLED: "1\n",
+  CONTRACT_AUTH_TOKENS: "contract-tb:buyer:kb1:9452:initiator,contract-tp:provider:kp1:9453:responder\n",
+  CONTRACT_HOST_ROOTS: `root-2026-08:${"c".repeat(64)}\n`,
+  CONTRACT_SERVER_ED25519_SEED: "ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ=\n",
+  CONTRACT_SERVER_KEY_ID: "contract-server-2026-09\n",
+  // Flag values are deliberately non-degenerate: a bare "0"/"1" secret would
+  // false-positive the wrapper-output leak scan (e.g. "--wait-timeout 180\n").
+  CONTRACT_ALLOW_EPHEMERAL_KEY: "disabled\n",
+  CONTRACT_SERVER_KEY_VALID_FROM: "2026-09-01T00:00:00.000Z\n",
+  CONTRACT_SERVER_KEY_VALID_UNTIL: "2027-09-01T00:00:00.000Z\n",
+  CONTRACT_POLICY_DIGESTS: `buyer:0x${"7".repeat(64)},provider:0x${"8".repeat(64)}\n`,
+  CONTRACT_PRINCIPALS: `kb1:0x${"1".repeat(40)},kp1:0x${"2".repeat(40)}\n`,
+  CONTRACT_OBSERVER_TOKEN: "observer-feed-token\n",
+  CONTRACT_VERIFIER_TOKEN: "verifier-salt-token\n",
+  CONTRACT_ALLOW_SIM_FAULTS: "1\n",
+  CONTRACT_SIM_FAULTS: '{"run-fixture":{"issueMismatch":"fare"}}\n',
+  CONTRACT_LEVEL: "L\n",
+  CONTRACT_REQUIRE_BIND_STATEMENT: "disabled\n",
+  TELEMETRY_CLOSE_URL: "http://telemetry-sink-staging:8083\n",
+  TELEMETRY_CLOSE_BACKOFF_MS: "250,1000,5000\n",
+  TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS: "10000\n",
+  TELEMETRY_CLOSE_DEADLINE_MS: "90000\n",
+  CONTRACT_CALLS_PER_MINUTE: "60\n",
+  CONTRACT_OBSERVER_PER_MINUTE: "45\n",
+  CONTRACT_MAX_RUNS: "256\n",
+  CONTRACT_MAX_RECEIPTS_PER_RUN: "1024\n",
+  CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL: "128\n",
+  CONTRACT_RUN_TTL_MS: "86400000\n",
+  CONTRACT_CERT_GRACE_MS: "600000\n",
+  CONTRACT_SESSION_TTL_MS: "1800000\n",
+  CONTRACT_STATE_DIR: "/app/state/contract\n",
+  CONTRACT_ERC8004_CHAIN_ID: "eip155:11155111\n",
+  CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e\n",
+  CONTRACT_ANCHOR_ENABLED: "1\n",
+  CONTRACT_SETTLEMENT_RAIL: "simulated\n",
+  CONTRACT_TRUST_PROXY: "disabled\n",
+};
+const expectedContractParamNames = Object.keys(expectedContractEnv).map(
+  (name) => `/clockchain/mcp/${name}`,
+);
+
 const expectedHostSecretNames = [
   "/clockchain/host/FUNDING_WALLET_JSON",
   "/clockchain/host/FUNDING_WALLET_PUBLIC_JSON",
@@ -57,6 +104,9 @@ const expectedEnv = {
   AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: '{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\n',
   AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: '{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\n',
   AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: '{"kid":"accept-previous","secretBase64":"ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ="}\n',
+  // N7c: every /contract/mcp knob is optional in SSM; present values are
+  // exported byte-for-byte into the docker-compose environment.
+  ...expectedContractEnv,
 };
 
 const expectedHostSecrets = {
@@ -149,6 +199,11 @@ const expected = JSON.parse(await readFile(process.env.EXPECTED_ENV_FILE, "utf8"
 for (const [name, value] of Object.entries(expected)) {
   assert.equal(process.env[name], value, name);
 }
+// Names in EXPECTED_UNSET must be absent entirely — an SSM parameter that is
+// not found leaves the variable untouched (no exported empty string).
+for (const name of (process.env.EXPECTED_UNSET ?? "").split(",").filter(Boolean)) {
+  assert.equal(process.env[name], undefined, name + " must stay unset");
+}
 const expectedHostSecrets = JSON.parse(await readFile(process.env.EXPECTED_HOST_SECRETS_FILE, "utf8"));
 assert.equal(process.env.HANDSHAKE_RELAY, "http://44.249.47.220:8080");
 assert.equal(process.env.MCP_HANDSHAKE_FILE, "/app/state/handshake.json");
@@ -238,6 +293,41 @@ case "$name" in
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) value=$'{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS) value=$'{"kid":"accept-previous","secretBase64":"ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ="}\\n' ;;
+  # N7c /contract/mcp surface — optional reads; every value is synthetic.
+  /clockchain/mcp/CONTRACT_MCP_ENABLED) value=$'1\\n' ;;
+  /clockchain/mcp/CONTRACT_AUTH_TOKENS) value=$'contract-tb:buyer:kb1:9452:initiator,contract-tp:provider:kp1:9453:responder\\n' ;;
+  /clockchain/mcp/CONTRACT_HOST_ROOTS) value=$'root-2026-08:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\n' ;;
+  /clockchain/mcp/CONTRACT_SERVER_ED25519_SEED) value=$'ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ=\\n' ;;
+  /clockchain/mcp/CONTRACT_SERVER_KEY_ID) value=$'contract-server-2026-09\\n' ;;
+  /clockchain/mcp/CONTRACT_ALLOW_EPHEMERAL_KEY) value=$'disabled\\n' ;;
+  /clockchain/mcp/CONTRACT_SERVER_KEY_VALID_FROM) value=$'2026-09-01T00:00:00.000Z\\n' ;;
+  /clockchain/mcp/CONTRACT_SERVER_KEY_VALID_UNTIL) value=$'2027-09-01T00:00:00.000Z\\n' ;;
+  /clockchain/mcp/CONTRACT_POLICY_DIGESTS) value=$'buyer:0x7777777777777777777777777777777777777777777777777777777777777777,provider:0x8888888888888888888888888888888888888888888888888888888888888888\\n' ;;
+  /clockchain/mcp/CONTRACT_PRINCIPALS) value=$'kb1:0x1111111111111111111111111111111111111111,kp1:0x2222222222222222222222222222222222222222\\n' ;;
+  /clockchain/mcp/CONTRACT_OBSERVER_TOKEN) value=$'observer-feed-token\\n' ;;
+  /clockchain/mcp/CONTRACT_VERIFIER_TOKEN) value=$'verifier-salt-token\\n' ;;
+  /clockchain/mcp/CONTRACT_ALLOW_SIM_FAULTS) value=$'1\\n' ;;
+  /clockchain/mcp/CONTRACT_SIM_FAULTS) value=$'{"run-fixture":{"issueMismatch":"fare"}}\\n' ;;
+  /clockchain/mcp/CONTRACT_LEVEL) value=$'L\\n' ;;
+  /clockchain/mcp/CONTRACT_REQUIRE_BIND_STATEMENT) value=$'disabled\\n' ;;
+  /clockchain/mcp/TELEMETRY_CLOSE_URL) value=$'http://telemetry-sink-staging:8083\\n' ;;
+  /clockchain/mcp/TELEMETRY_CLOSE_BACKOFF_MS) value=$'250,1000,5000\\n' ;;
+  /clockchain/mcp/TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS) value=$'10000\\n' ;;
+  /clockchain/mcp/TELEMETRY_CLOSE_DEADLINE_MS) value=$'90000\\n' ;;
+  /clockchain/mcp/CONTRACT_CALLS_PER_MINUTE) value=$'60\\n' ;;
+  /clockchain/mcp/CONTRACT_OBSERVER_PER_MINUTE) value=$'45\\n' ;;
+  /clockchain/mcp/CONTRACT_MAX_RUNS) value=$'256\\n' ;;
+  /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_RUN) value=$'1024\\n' ;;
+  /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL) value=$'128\\n' ;;
+  /clockchain/mcp/CONTRACT_RUN_TTL_MS) value=$'86400000\\n' ;;
+  /clockchain/mcp/CONTRACT_CERT_GRACE_MS) value=$'600000\\n' ;;
+  /clockchain/mcp/CONTRACT_SESSION_TTL_MS) value=$'1800000\\n' ;;
+  /clockchain/mcp/CONTRACT_STATE_DIR) value=$'/app/state/contract\\n' ;;
+  /clockchain/mcp/CONTRACT_ERC8004_CHAIN_ID) value=$'eip155:11155111\\n' ;;
+  /clockchain/mcp/CONTRACT_ERC8004_REGISTRY_ADDRESS) value=$'0x8004A818BFB912233c491871b3d84c89A494BD9e\\n' ;;
+  /clockchain/mcp/CONTRACT_ANCHOR_ENABLED) value=$'1\\n' ;;
+  /clockchain/mcp/CONTRACT_SETTLEMENT_RAIL) value=$'simulated\\n' ;;
+  /clockchain/mcp/CONTRACT_TRUST_PROXY) value=$'disabled\\n' ;;
   /clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=="}\\n' ;;
   /clockchain/mcp/SHORT_ACCEPTANCE_HMAC) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw="}\\n' ;;
   /clockchain/mcp/NEWLINE_KID_HMAC) value=$'{"kid":"accept-fresh\\n","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU="}\\n' ;;
@@ -629,7 +719,7 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedHostSecretNames],
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
     for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
@@ -643,7 +733,11 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
         file.endsWith("expected-env.json") ||
         file.endsWith("expected-host-secrets.json") ||
         file.endsWith("env-check.mjs") ||
-        file.endsWith("aws") ||
+        // The bin/ stubs are test-authored fixtures, not wrapper output —
+        // the aws stub legitimately embeds every fixture value (it plays the
+        // SSM responder), and degenerate flag values like "1\n"/"0\n" would
+        // false-positive inside any shell script.
+        file.startsWith(`${temp}${path.sep}bin${path.sep}`) ||
         file.startsWith(`${env.EXPECTED_HOST_SECRET_DIR}${path.sep}`)
       ) {
         continue;
@@ -693,7 +787,7 @@ for (const onlyArgs of [["--only", "mcp"], ["--only=mcp"]]) {
       const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
       assert.deepEqual(
         calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-        [...expectedSecretNames, ...expectedOptionalSecretNames],
+        [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames],
         "mcp-only fetches the mcp secrets and no host secrets",
       );
       assert.equal(await pathExists(env.EXPECTED_HOST_SECRET_DIR), false, "host secret files are not rewritten");
@@ -884,7 +978,7 @@ test("compose wrapper treats missing optional previous acceptance HMAC as absent
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedHostSecretNames],
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
     for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
@@ -908,6 +1002,87 @@ test("compose wrapper fails closed on optional previous acceptance HMAC fetch co
     try {
       const result = await run(wrapper, [], { cwd: temp, env });
       assert.notEqual(result.code, 0);
+      assert.equal(await pathExists(dockerInvokedFile), false, "docker compose was not invoked");
+      assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
+      for (const secret of Object.values(expectedEnv)) {
+        assert.equal(result.stdout.includes(secret), false);
+        assert.equal(result.stderr.includes(secret), false);
+      }
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("compose wrapper reads the /contract/mcp surface optionally — absent params leave the env untouched", async () => {
+  // CONTRACT_MCP_ENABLED absent in SSM and unset on the host: the route ships
+  // disabled — the variable must stay UNSET (never exported empty).
+  const { temp, callsFile, dockerOkFile, env } = await createWrapperFixture({
+    env: {
+      AWS_PARAMETER_NOT_FOUND: "/clockchain/mcp/CONTRACT_MCP_ENABLED",
+      EXPECTED_UNSET: "CONTRACT_MCP_ENABLED",
+    },
+  });
+
+  try {
+    const { CONTRACT_MCP_ENABLED: _dropped, ...expectedMinusEnabled } = expectedEnv;
+    await writeFile(env.EXPECTED_ENV_FILE, JSON.stringify(expectedMinusEnabled), "utf8");
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
+    assert.deepEqual(
+      calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
+      "the parameter is still fetched — only the export is skipped",
+    );
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+    for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
+      assert.equal(result.stdout.includes(secret), false);
+      assert.equal(result.stderr.includes(secret), false);
+    }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper preserves a pre-set contract env override when the SSM parameter is absent", async () => {
+  const { temp, dockerOkFile, env } = await createWrapperFixture({
+    env: {
+      AWS_PARAMETER_NOT_FOUND: "/clockchain/mcp/CONTRACT_OBSERVER_TOKEN",
+      CONTRACT_OBSERVER_TOKEN: "operator-preset-observer",
+    },
+  });
+
+  try {
+    await writeFile(
+      env.EXPECTED_ENV_FILE,
+      JSON.stringify({ ...expectedEnv, CONTRACT_OBSERVER_TOKEN: "operator-preset-observer" }),
+      "utf8",
+    );
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper fails closed naming the parameter on a non-ParameterNotFound contract fetch error", async () => {
+  const param = "/clockchain/mcp/CONTRACT_MCP_ENABLED";
+  for (const extra of [
+    { AWS_DENY_PARAMETER: param },
+    { AWS_TRANSIENT_PARAMETER: param },
+    { AWS_MALFORMED_PARAMETER: param },
+  ]) {
+    const { temp, dockerInvokedFile, dockerOkFile, env } = await createWrapperFixture({ env: extra });
+    try {
+      const result = await run(wrapper, [], { cwd: temp, env });
+      assert.notEqual(result.code, 0, JSON.stringify(extra));
+      assert.match(result.stderr, /CONTRACT_MCP_ENABLED/, "the failing parameter is named");
       assert.equal(await pathExists(dockerInvokedFile), false, "docker compose was not invoked");
       assert.equal(await pathExists(dockerOkFile), false, "docker compose was not invoked");
       for (const secret of Object.values(expectedEnv)) {

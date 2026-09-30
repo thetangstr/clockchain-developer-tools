@@ -140,7 +140,7 @@ export function loadContractConfig(
       return misconfigured("CONTRACT_SERVER_ED25519_SEED must be a canonical base64 32-byte seed");
     }
     signer = {
-      keyId: env.CONTRACT_SERVER_KEY_ID ?? "contract-server",
+      keyId: (env.CONTRACT_SERVER_KEY_ID ?? "").trim() || "contract-server",
       privateKey: createPrivateKey({
         key: Buffer.concat([Buffer.from(ED25519_PKCS8_PREFIX, "hex"), seed]),
         format: "der",
@@ -293,7 +293,9 @@ export function loadContractConfig(
   // bind-statement possession proof is MANDATORY — startup refuses without
   // CONTRACT_REQUIRE_BIND_STATEMENT=1. At L (default) it is optional: a
   // presented statement is still verified, but binds may omit it.
-  const levelRaw = (env.CONTRACT_LEVEL ?? "L").trim().toUpperCase();
+  // N7c: compose injects "" for host-unset vars — an empty CONTRACT_LEVEL is
+  // the default tier, not a startup refusal.
+  const levelRaw = (env.CONTRACT_LEVEL ?? "").trim().toUpperCase() || "L";
   if (levelRaw !== "L" && levelRaw !== "S" && levelRaw !== "P") {
     return misconfigured(`CONTRACT_LEVEL must be one of L|S|P, got "${env.CONTRACT_LEVEL}"`);
   }
@@ -358,20 +360,27 @@ export function loadContractConfig(
     telemetryCloseDeadlineMs = n;
   }
 
-  const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE ?? "120");
-  const maxRuns = Number(env.CONTRACT_MAX_RUNS ?? "1024");
-  const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN ?? "4096");
-  const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL ?? "512");
-  const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS ?? String(24 * 3600_000));
-  const certGraceMs = Number(env.CONTRACT_CERT_GRACE_MS ?? "600000");
-  const sessionTtlMs = Number(env.CONTRACT_SESSION_TTL_MS ?? String(30 * 60_000));
-  const stateDir = env.CONTRACT_STATE_DIR ?? path.join(process.cwd(), "state", "contract");
+  // N7c: `docker compose` map-form environment injects "" for every var the
+  // host left unset (an absent SSM parameter) — Number("") is 0, so the
+  // defaults use || and treat "" exactly like an absent variable.
+  const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE || "120");
+  const maxRuns = Number(env.CONTRACT_MAX_RUNS || "1024");
+  const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN || "4096");
+  const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL || "512");
+  const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS || String(24 * 3600_000));
+  const certGraceMs = Number(env.CONTRACT_CERT_GRACE_MS || "600000");
+  const sessionTtlMs = Number(env.CONTRACT_SESSION_TTL_MS || String(30 * 60_000));
+  const stateDir = env.CONTRACT_STATE_DIR || path.join(process.cwd(), "state", "contract");
 
   // Optional ERC-8004 chain/registry pins (LOW): when set, certificates must
-  // attest exactly this deployment, not just the agent id.
+  // attest exactly this deployment, not just the agent id. An injected "" must
+  // not create a {chainId:"",registryAddress:""} pin — that would refuse every
+  // certificate — so the pin exists only when at least one value is non-empty.
+  const erc8004ChainId = (env.CONTRACT_ERC8004_CHAIN_ID ?? "").trim();
+  const erc8004Registry = (env.CONTRACT_ERC8004_REGISTRY_ADDRESS ?? "").trim();
   const expectedErc8004 =
-    env.CONTRACT_ERC8004_CHAIN_ID !== undefined || env.CONTRACT_ERC8004_REGISTRY_ADDRESS !== undefined
-      ? { chainId: env.CONTRACT_ERC8004_CHAIN_ID ?? "", registryAddress: env.CONTRACT_ERC8004_REGISTRY_ADDRESS ?? "" }
+    erc8004ChainId !== "" || erc8004Registry !== ""
+      ? { chainId: erc8004ChainId, registryAddress: erc8004Registry }
       : undefined;
 
   // N4b-8 (gap 4): the run anchor. CONTRACT_ANCHOR_ENABLED=1 backs it with
@@ -395,7 +404,7 @@ export function loadContractConfig(
   // agentcontract/travel-stripe-test-key, us-west-2); an absent key is the
   // honest awaiting_stripe_test_key stop, never a boot failure. check-config
   // probes the key status without printing it.
-  const settlementRailRaw = (env.CONTRACT_SETTLEMENT_RAIL ?? "simulated").trim();
+  const settlementRailRaw = (env.CONTRACT_SETTLEMENT_RAIL ?? "").trim() || "simulated";
   if (settlementRailRaw !== "simulated" && settlementRailRaw !== "stripe_test_mode") {
     return misconfigured(
       `CONTRACT_SETTLEMENT_RAIL must be simulated|stripe_test_mode, got "${env.CONTRACT_SETTLEMENT_RAIL}"`,

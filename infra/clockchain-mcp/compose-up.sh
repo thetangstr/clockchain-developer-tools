@@ -115,6 +115,36 @@ read_optional_secret() {
   export "$env_name"
 }
 
+# Like read_optional_secret, but ParameterNotFound leaves the variable
+# COMPLETELY UNTOUCHED — never exported empty — so a pre-set environment
+# override survives and an absent optional knob stays absent (compose then
+# injects "", which the in-container config treats exactly like unset).
+# Any other failure (access denied, throttling, missing sentinel, malformed
+# output) names the parameter on stderr and fails the run — never the value.
+read_optional_env() {
+  local env_name="$1"
+  local parameter_name="$2"
+  local error_file payload value
+  error_file="$(mktemp)"
+  if ! payload="$(fetch_secret "$parameter_name" 2>"$error_file")"; then
+    if grep -q 'ParameterNotFound' "$error_file"; then
+      rm -f "$error_file"
+      return 0
+    fi
+    rm -f "$error_file"
+    printf 'failed to fetch optional SSM parameter: %s\n' "$parameter_name" >&2
+    return 1
+  fi
+  rm -f "$error_file"
+  if [[ "$payload" != *"$SECRET_SENTINEL" ]]; then
+    printf 'missing secret sentinel for optional SSM parameter: %s\n' "$parameter_name" >&2
+    return 1
+  fi
+  value="${payload%"$SECRET_SENTINEL"}"
+  printf -v "$env_name" '%s' "$value"
+  export "$env_name"
+}
+
 fetch_host_secret_value() {
   local env_name="$1" parameter_name="$2" payload value
   if ! payload="$(fetch_secret "$parameter_name")"; then
@@ -333,6 +363,44 @@ read_secret AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE "$AGENT_HANDSHAKE_ROLE_ACCESS_ACT
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS "$AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM"
 read_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM"
 read_optional_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM"
+# /contract/mcp surface (N7c): ALL contract/telemetry knobs are optional reads —
+# an absent parameter leaves the variable unset (never exported empty), and the
+# route ships disabled: no CONTRACT_MCP_ENABLED → the container answers 404.
+# A pre-set environment override survives an absent parameter.
+read_optional_env CONTRACT_MCP_ENABLED /clockchain/mcp/CONTRACT_MCP_ENABLED
+read_optional_env CONTRACT_AUTH_TOKENS /clockchain/mcp/CONTRACT_AUTH_TOKENS
+read_optional_env CONTRACT_HOST_ROOTS /clockchain/mcp/CONTRACT_HOST_ROOTS
+read_optional_env CONTRACT_SERVER_ED25519_SEED /clockchain/mcp/CONTRACT_SERVER_ED25519_SEED
+read_optional_env CONTRACT_SERVER_KEY_ID /clockchain/mcp/CONTRACT_SERVER_KEY_ID
+read_optional_env CONTRACT_ALLOW_EPHEMERAL_KEY /clockchain/mcp/CONTRACT_ALLOW_EPHEMERAL_KEY
+read_optional_env CONTRACT_SERVER_KEY_VALID_FROM /clockchain/mcp/CONTRACT_SERVER_KEY_VALID_FROM
+read_optional_env CONTRACT_SERVER_KEY_VALID_UNTIL /clockchain/mcp/CONTRACT_SERVER_KEY_VALID_UNTIL
+read_optional_env CONTRACT_POLICY_DIGESTS /clockchain/mcp/CONTRACT_POLICY_DIGESTS
+read_optional_env CONTRACT_PRINCIPALS /clockchain/mcp/CONTRACT_PRINCIPALS
+read_optional_env CONTRACT_OBSERVER_TOKEN /clockchain/mcp/CONTRACT_OBSERVER_TOKEN
+read_optional_env CONTRACT_VERIFIER_TOKEN /clockchain/mcp/CONTRACT_VERIFIER_TOKEN
+read_optional_env CONTRACT_ALLOW_SIM_FAULTS /clockchain/mcp/CONTRACT_ALLOW_SIM_FAULTS
+read_optional_env CONTRACT_SIM_FAULTS /clockchain/mcp/CONTRACT_SIM_FAULTS
+read_optional_env CONTRACT_LEVEL /clockchain/mcp/CONTRACT_LEVEL
+read_optional_env CONTRACT_REQUIRE_BIND_STATEMENT /clockchain/mcp/CONTRACT_REQUIRE_BIND_STATEMENT
+read_optional_env TELEMETRY_CLOSE_URL /clockchain/mcp/TELEMETRY_CLOSE_URL
+read_optional_env TELEMETRY_CLOSE_BACKOFF_MS /clockchain/mcp/TELEMETRY_CLOSE_BACKOFF_MS
+read_optional_env TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS /clockchain/mcp/TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS
+read_optional_env TELEMETRY_CLOSE_DEADLINE_MS /clockchain/mcp/TELEMETRY_CLOSE_DEADLINE_MS
+read_optional_env CONTRACT_CALLS_PER_MINUTE /clockchain/mcp/CONTRACT_CALLS_PER_MINUTE
+read_optional_env CONTRACT_OBSERVER_PER_MINUTE /clockchain/mcp/CONTRACT_OBSERVER_PER_MINUTE
+read_optional_env CONTRACT_MAX_RUNS /clockchain/mcp/CONTRACT_MAX_RUNS
+read_optional_env CONTRACT_MAX_RECEIPTS_PER_RUN /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_RUN
+read_optional_env CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL
+read_optional_env CONTRACT_RUN_TTL_MS /clockchain/mcp/CONTRACT_RUN_TTL_MS
+read_optional_env CONTRACT_CERT_GRACE_MS /clockchain/mcp/CONTRACT_CERT_GRACE_MS
+read_optional_env CONTRACT_SESSION_TTL_MS /clockchain/mcp/CONTRACT_SESSION_TTL_MS
+read_optional_env CONTRACT_STATE_DIR /clockchain/mcp/CONTRACT_STATE_DIR
+read_optional_env CONTRACT_ERC8004_CHAIN_ID /clockchain/mcp/CONTRACT_ERC8004_CHAIN_ID
+read_optional_env CONTRACT_ERC8004_REGISTRY_ADDRESS /clockchain/mcp/CONTRACT_ERC8004_REGISTRY_ADDRESS
+read_optional_env CONTRACT_ANCHOR_ENABLED /clockchain/mcp/CONTRACT_ANCHOR_ENABLED
+read_optional_env CONTRACT_SETTLEMENT_RAIL /clockchain/mcp/CONTRACT_SETTLEMENT_RAIL
+read_optional_env CONTRACT_TRUST_PROXY /clockchain/mcp/CONTRACT_TRUST_PROXY
 validate_v2_server_config
 # Read-only; exports the HANDSHAKE_* values compose interpolates, so the resolved compose
 # config is the same in both modes.

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { loadContractConfig } from "../dist/agent-contract/config.js";
 import { PUBLISHED_HOST_ROOTS } from "../dist/agent-contract/certificate.js";
+import { HOST_ROOTS, mintCertificate, rootKey } from "./n4b9-harness.mjs";
 
 // loadContractConfig: the contract surface's eager, fail-closed config verdict.
 // It never throws — bad env is a deterministic "misconfigured" the route layer
@@ -179,4 +181,134 @@ test("N4b-5: CONTRACT_SIM_FAULTS is config-only JSON keyed by runId", () => {
   assert.equal(ok.kind, "ready");
   assert.equal(ok.simFaultsEnabled, true);
   ok.service.close();
+});
+
+// N7c: docker compose map-form `environment: VAR: "${VAR}"` injects "" into the
+// container for every var the host left unset (an absent SSM parameter). Empty
+// string is not a valid value for any contract knob, so loadContractConfig must
+// treat "" exactly like an absent variable everywhere they would differ.
+
+function readyBase() {
+  return {
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: TOKENS,
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
+    ...KEY_WINDOW,
+    ...stateDirEnv(),
+  };
+}
+
+test("injected empty strings fall back to the defaults for the numeric limits", () => {
+  const cfg = loadContractConfig({
+    ...readyBase(),
+    CONTRACT_CALLS_PER_MINUTE: "",
+    CONTRACT_MAX_RUNS: "",
+    CONTRACT_MAX_RECEIPTS_PER_RUN: "",
+    CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL: "",
+    CONTRACT_RUN_TTL_MS: "",
+    CONTRACT_CERT_GRACE_MS: "",
+    CONTRACT_SESSION_TTL_MS: "",
+  });
+  assert.equal(cfg.kind, "ready");
+  assert.equal(cfg.callsPerMinute, 120);
+  assert.equal(cfg.maxRuns, 1024);
+  assert.equal(cfg.maxReceiptsPerRun, 4096);
+  assert.equal(cfg.maxReceiptsPerPrincipal, 512);
+  assert.equal(cfg.runTtlMs, 24 * 3600_000);
+  assert.equal(cfg.certGraceMs, 600_000);
+  assert.equal(cfg.sessionTtlMs, 30 * 60_000);
+  cfg.service.close();
+});
+
+test("empty CONTRACT_LEVEL / CONTRACT_SETTLEMENT_RAIL / CONTRACT_SERVER_KEY_ID resolve to their defaults", () => {
+  // ""/"  " are not levels or rails — unset means the default, not a startup refusal.
+  for (const raw of ["", "   "]) {
+    const cfg = loadContractConfig({
+      ...readyBase(),
+      CONTRACT_LEVEL: raw,
+      CONTRACT_SETTLEMENT_RAIL: raw,
+      CONTRACT_SERVER_KEY_ID: raw,
+    });
+    assert.equal(cfg.kind, "ready", JSON.stringify(raw));
+    assert.equal(cfg.settlementRailId, "simulated");
+    assert.equal(cfg.signer.keyId, "contract-server");
+    assert.equal(cfg.serverKeys[0].keyId, "contract-server");
+    cfg.service.close();
+  }
+});
+
+test("an empty CONTRACT_STATE_DIR resolves to the default state dir", () => {
+  const defaultDir = path.join(process.cwd(), "state", "contract");
+  const existedBefore = existsSync(defaultDir);
+  const cfg = loadContractConfig({ ...readyBase(), CONTRACT_STATE_DIR: "" });
+  try {
+    assert.equal(cfg.kind, "ready");
+    assert.equal(cfg.stateDir, defaultDir);
+  } finally {
+    if (cfg.kind === "ready") cfg.service.close();
+    // The default dir lives under the package cwd — remove only what this
+    // test created so no fixture residue lands in the worktree.
+    if (!existedBefore) {
+      rmSync(defaultDir, { recursive: true, force: true });
+      try {
+        rmdirSync(path.dirname(defaultDir));
+      } catch { /* state/ may hold other entries */ }
+    }
+  }
+});
+
+test("empty CONTRACT_ERC8004_* values create no pin; a set pin still verifies", () => {
+  // expectedErc8004 is not on the ready surface — it is observable through
+  // bind: a {chainId:"",registryAddress:""} pin would refuse every real
+  // certificate with CERTIFICATE_INVALID, while a matching pin must accept.
+  const certificate = mintCertificate({
+    root: rootKey,
+    session: generateKeyPairSync("ed25519"),
+    sessionId: randomUUID(),
+  });
+  const bind = (cfg) =>
+    cfg.service.bind(
+      { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" },
+      {
+        certificate,
+        signerKey: { keyId: "signer-erc", publicKeyHex: `0x${"11".repeat(32)}` },
+        approvalKey: { keyId: "approval-erc", publicKeyHex: `0x${"22".repeat(32)}` },
+      },
+      { argsDigest: `0x${"0".repeat(64)}`, serverNonce: `0x${"ab".repeat(16)}`, tool: "contract_bind" },
+    );
+
+  const emptyPin = loadContractConfig({
+    ...readyBase(),
+    CONTRACT_HOST_ROOTS: `root-test:${HOST_ROOTS[0].fingerprint}`,
+    CONTRACT_ERC8004_CHAIN_ID: "",
+    CONTRACT_ERC8004_REGISTRY_ADDRESS: "",
+  });
+  assert.equal(emptyPin.kind, "ready");
+  const emptyRes = bind(emptyPin);
+  assert.equal(emptyRes.ok, true, JSON.stringify(emptyRes));
+  emptyPin.service.close();
+
+  const matchingPin = loadContractConfig({
+    ...readyBase(),
+    CONTRACT_HOST_ROOTS: `root-test:${HOST_ROOTS[0].fingerprint}`,
+    CONTRACT_ERC8004_CHAIN_ID: "eip155:11155111",
+    CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
+  });
+  assert.equal(matchingPin.kind, "ready");
+  const matchRes = bind(matchingPin);
+  assert.equal(matchRes.ok, true, JSON.stringify(matchRes));
+  matchingPin.service.close();
+
+  // Control: a real pin against a different deployment still refuses.
+  const mismatchedPin = loadContractConfig({
+    ...readyBase(),
+    CONTRACT_HOST_ROOTS: `root-test:${HOST_ROOTS[0].fingerprint}`,
+    CONTRACT_ERC8004_CHAIN_ID: "eip155:1",
+  });
+  assert.equal(mismatchedPin.kind, "ready");
+  const mismatchRes = bind(mismatchedPin);
+  assert.equal(mismatchRes.ok, false);
+  assert.equal(mismatchRes.code, "CERTIFICATE_INVALID");
+  mismatchedPin.service.close();
 });

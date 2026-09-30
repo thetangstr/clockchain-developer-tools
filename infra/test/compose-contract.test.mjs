@@ -41,6 +41,73 @@ test("the v2 host uses a private root file and restart-safe bounded funding stat
   assert.match(source, /\/app\/keys:ro/);
 });
 
+// N7c: the /contract/mcp env surface — the same name list as
+// packages/mcp-server/scripts/agent-contract/check-config-from-ssm.mjs
+// (ENV_PARAMETERS; CONTRACT_OBSERVER_PER_MINUTE is read in src/http.ts).
+// compose-up.sh reads each /clockchain/mcp/<NAME> parameter only when it
+// exists, so a host-unset var injects "" here — config.ts normalizes ""
+// exactly like absent.
+const CONTRACT_ENV_NAMES = [
+  "CONTRACT_MCP_ENABLED",
+  "CONTRACT_AUTH_TOKENS",
+  "CONTRACT_HOST_ROOTS",
+  "CONTRACT_SERVER_ED25519_SEED",
+  "CONTRACT_SERVER_KEY_ID",
+  "CONTRACT_ALLOW_EPHEMERAL_KEY",
+  "CONTRACT_SERVER_KEY_VALID_FROM",
+  "CONTRACT_SERVER_KEY_VALID_UNTIL",
+  "CONTRACT_POLICY_DIGESTS",
+  "CONTRACT_PRINCIPALS",
+  "CONTRACT_OBSERVER_TOKEN",
+  "CONTRACT_VERIFIER_TOKEN",
+  "CONTRACT_ALLOW_SIM_FAULTS",
+  "CONTRACT_SIM_FAULTS",
+  "CONTRACT_LEVEL",
+  "CONTRACT_REQUIRE_BIND_STATEMENT",
+  "TELEMETRY_CLOSE_URL",
+  "TELEMETRY_CLOSE_BACKOFF_MS",
+  "TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS",
+  "TELEMETRY_CLOSE_DEADLINE_MS",
+  "CONTRACT_CALLS_PER_MINUTE",
+  "CONTRACT_OBSERVER_PER_MINUTE",
+  "CONTRACT_MAX_RUNS",
+  "CONTRACT_MAX_RECEIPTS_PER_RUN",
+  "CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL",
+  "CONTRACT_RUN_TTL_MS",
+  "CONTRACT_CERT_GRACE_MS",
+  "CONTRACT_SESSION_TTL_MS",
+  "CONTRACT_STATE_DIR",
+  "CONTRACT_ERC8004_CHAIN_ID",
+  "CONTRACT_ERC8004_REGISTRY_ADDRESS",
+  "CONTRACT_ANCHOR_ENABLED",
+  "CONTRACT_SETTLEMENT_RAIL",
+  "CONTRACT_TRUST_PROXY",
+];
+
+test("the mcp service carries the full /contract/mcp environment surface", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  assert.notEqual(mcpBlock.indexOf("environment:"), -1, "mcp service has an environment block");
+  for (const name of CONTRACT_ENV_NAMES) {
+    assert.match(
+      mcpBlock,
+      new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}\\}"\\s*$`, "m"),
+      `mcp environment must carry ${name}: "\${${name}}"`,
+    );
+  }
+});
+
+test("the wired contract surface covers check-config-from-ssm ENV_PARAMETERS", async () => {
+  const { ENV_PARAMETERS } = await import(
+    "../../packages/mcp-server/scripts/agent-contract/check-config-from-ssm.mjs"
+  );
+  // Subset, not equality: every name the checker reads must reach the
+  // container; a wired extra is benign.
+  for (const name of ENV_PARAMETERS) {
+    assert.ok(CONTRACT_ENV_NAMES.includes(name), `compose does not wire ${name}`);
+  }
+});
+
 test("Caddy is the only ingress and has the one trusted internal address", async () => {
   const source = await readFile(composeFile, "utf8");
   assert.doesNotMatch(source, /-\s*"8080:8080"/);

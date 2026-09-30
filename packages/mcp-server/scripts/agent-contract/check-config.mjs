@@ -33,7 +33,9 @@ function isProductionRoot(root) {
  */
 export async function checkConfig(env, deps) {
   const enabled = env.CONTRACT_MCP_ENABLED === "1";
-  const level = (env.CONTRACT_LEVEL ?? "L").trim().toUpperCase();
+  // Same empty≡unset normalization as loadContractConfig: compose injects ""
+  // for host-unset vars.
+  const level = (env.CONTRACT_LEVEL ?? "").trim().toUpperCase() || "L";
 
   let cfg;
   try {
