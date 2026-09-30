@@ -142,10 +142,22 @@ export interface SettlementRail {
   readonly createPaymentIntent: (
     input: CreateStripePaymentIntentInput,
   ) => Promise<StripePaymentIntent>;
-  /** The release step: confirm a created intent (`pm_card_visa`, test mode). */
+  /**
+   * The release step: confirm a created intent (`pm_card_visa`, test mode).
+   * `expected` pins the agreement's terms — when given, a confirmed intent
+   * whose amount, currency, or metadata runId/agreementDigest disagree (or
+   * whose id is not the requested intent, or whose status is not
+   * `succeeded`) is a rail failure, NEVER a settlement.
+   */
   readonly confirmPaymentIntent: (input: {
     readonly paymentIntentId: string;
     readonly idempotencyKey: string;
+    readonly expected?: {
+      readonly amountAtomic: string;
+      readonly currency: string;
+      readonly runId: string;
+      readonly agreementDigest: string;
+    };
   }) => Promise<StripePaymentIntent>;
 }
 
