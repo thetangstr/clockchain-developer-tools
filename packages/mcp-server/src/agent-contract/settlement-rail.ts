@@ -39,6 +39,11 @@ import { z } from "zod";
  *    triple; confirm: the requested id, `succeeded`, and `expected`).
  *    A confused or adversarial upstream is a rail failure, never a
  *    settlement.
+ *
+ * N4b-11 (LOW): `retrievePaymentIntent` is the READ-ONLY reconcile
+ * lookup — a confirm that timed out may have succeeded upstream, so
+ * the caller GETs the intent for post-timeout truth. It verifies the
+ * same echoes as confirm but REPORTS `status` instead of asserting it.
  */
 
 export const STRIPE_TEST_RAIL_ID = "stripe_test_mode" as const;
@@ -584,6 +589,34 @@ export const createStripeTestRail = (input?: {
           throw echoMismatch("metadata.agreementDigest");
         }
       }
+      return intent;
+    },
+    retrievePaymentIntent: async ({ paymentIntentId, expected }) => {
+      const id = paymentIntentIdSchema.parse(paymentIntentId);
+      // GET is safe/idempotent by nature — no form, no Idempotency-Key.
+      const intent = await call({
+        method: "GET",
+        path: `/v1/payment_intents/${encodeURIComponent(id)}`,
+      });
+      // M2: the reconcile lookup must be about EXACTLY the intent the
+      // server asked about — a different id is a rail failure.
+      if (intent.id !== id) throw echoMismatch("id");
+      if (expected !== undefined) {
+        // The agreement's pinned terms still apply: a retrieved intent
+        // that drifts from them is as unacceptable as a drifted
+        // create/confirm response.
+        if (intent.amount !== expected.amountAtomic) throw echoMismatch("amount");
+        if (!currencyMatches(intent.currency, expected.currency)) {
+          throw echoMismatch("currency");
+        }
+        if (intent.metadata.runId !== expected.runId) throw echoMismatch("metadata.runId");
+        if (intent.metadata.agreementDigest !== expected.agreementDigest) {
+          throw echoMismatch("metadata.agreementDigest");
+        }
+      }
+      // Status is REPORTED, never asserted — unlike confirm, a
+      // non-`succeeded` upstream state is honest truth for the caller
+      // to reconcile, not a rail failure.
       return intent;
     },
   };

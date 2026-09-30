@@ -372,3 +372,100 @@ test("N4b-10 M2: confirm verifies expected{} when provided, and succeeds when al
   assert.equal(intent.id, "pi_test000000000000001");
   assert.equal(intent.status, "succeeded");
 });
+
+// ---------------------------------------------------------------------------
+// N4b-11 (LOW) — retrievePaymentIntent: the READ-ONLY reconcile lookup.
+// A confirm that timed out may have succeeded upstream; retrieve GETs the
+// intent for post-timeout truth — status is REPORTED, never asserted.
+// ---------------------------------------------------------------------------
+
+test("N4b-11 LOW: retrievePaymentIntent issues a bare GET and reports upstream status", async () => {
+  const { rail, requests, auths } = recordingRail({
+    responder: async () => PI({ status: "requires_confirmation" }),
+  });
+  const intent = await rail.retrievePaymentIntent({
+    paymentIntentId: "pi_test000000000000001",
+  });
+  // Whatever status upstream reports is returned — NOT refused like confirm.
+  assert.equal(intent.id, "pi_test000000000000001");
+  assert.equal(intent.status, "requires_confirmation");
+  assert.equal(intent.livemode, false);
+
+  assert.equal(requests.length, 1);
+  const req = requests[0];
+  assert.equal(req.method, "GET");
+  assert.equal(req.path, "/v1/payment_intents/pi_test000000000000001");
+  assert.equal(req.form, undefined, "GET carries no form body");
+  assert.equal(req.idempotencyKey, undefined, "GET carries no Idempotency-Key");
+  assert.equal(auths[0], "Bearer sk_test_4TestOnly");
+});
+
+test("N4b-11 LOW: retrievePaymentIntent verifies id and expected{} echoes", async () => {
+  const expected = {
+    amountAtomic: "437000", currency: "usd",
+    runId: "run-9", agreementDigest: DIGEST_A,
+  };
+  const mismatches = [
+    ["id", { id: "pi_evil00000000000000" }],
+    ["amount", { amount: 1 }],
+    ["currency", { currency: "eur" }],
+    ["metadata.runId", { metadata: { runId: "run-X", agreementDigest: DIGEST_A } }],
+    ["metadata.agreementDigest", { metadata: { runId: "run-9", agreementDigest: DIGEST_B } }],
+  ];
+  for (const [field, over] of mismatches) {
+    const { rail } = recordingRail({ responder: async () => PI(over) });
+    await assert.rejects(
+      rail.retrievePaymentIntent({
+        paymentIntentId: "pi_test000000000000001", expected,
+      }),
+      (e) => e instanceof StripeTestRailError && e.code === "STRIPE_RAIL_BAD_RESPONSE",
+      `expected ${field} mismatch is a rail failure`,
+    );
+  }
+  // All-match + expected → resolves the retrieved intent, status reported.
+  const { rail } = recordingRail({
+    responder: async () => PI({
+      status: "processing",
+      metadata: { runId: "run-9", agreementDigest: DIGEST_A },
+    }),
+  });
+  const intent = await rail.retrievePaymentIntent({
+    paymentIntentId: "pi_test000000000000001", expected,
+  });
+  assert.equal(intent.id, "pi_test000000000000001");
+  assert.equal(intent.status, "processing");
+});
+
+test("N4b-11 LOW: a malformed paymentIntentId throws before any transport call", async () => {
+  const { rail, requests } = recordingRail();
+  await assert.rejects(
+    rail.retrievePaymentIntent({ paymentIntentId: "not-a-pi" }),
+  );
+  assert.equal(requests.length, 0, "no wire call for a malformed id");
+});
+
+test("N4b-11 LOW: the deadline bounds retrievePaymentIntent like every call", async () => {
+  const rail = createStripeTestRail({
+    resolveSecret: async () => "sk_test_x",
+    requestTimeoutMs: 25,
+    transport: { request: () => new Promise(() => {}) },
+  });
+  const started = Date.now();
+  await assert.rejects(
+    rail.retrievePaymentIntent({ paymentIntentId: "pi_test000000000000001" }),
+    (e) =>
+      e instanceof StripeTestRailError &&
+      e.code === "STRIPE_RAIL_HTTP" &&
+      /deadline/.test(e.message) &&
+      !e.message.includes("sk_test_x"),
+  );
+  assert.ok(Date.now() - started < 2_000, "bounded at ~requestTimeoutMs, not forever");
+});
+
+test("N4b-11 LOW: a livemode:true retrieve response is refused like every call", async () => {
+  const { rail } = recordingRail({ responder: async () => PI({ livemode: true }) });
+  await assert.rejects(
+    rail.retrievePaymentIntent({ paymentIntentId: "pi_test000000000000001" }),
+    (e) => e instanceof StripeTestRailError && e.code === "STRIPE_RAIL_LIVEMODE_REFUSED",
+  );
+});

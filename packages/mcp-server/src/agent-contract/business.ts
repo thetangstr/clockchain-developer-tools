@@ -1546,10 +1546,58 @@ export function createBusinessOps(options: {
           });
           if (denyDecision === null) return refuse("APPROVAL_INVALID");
           if (denyDecision !== "deny") return refuse("SIGNATURE_INVALID");
-          liveRun.claimedNonces.add(envCheck.envelope.nonce);
-          recordApproval(liveRun, "buyer", "settlement_prepare", envCheck.envelope, args.approval as ApprovalRecord);
-          options.endRun(liveRun, "blocked_by_policy", principal);
-          return refuse("POLICY_DENIED");
+          const finishDeny = (): BusinessOutcome => {
+            liveRun.claimedNonces.add(envCheck.envelope.nonce);
+            recordApproval(liveRun, "buyer", "settlement_prepare", envCheck.envelope, args.approval as ApprovalRecord);
+            options.endRun(liveRun, "blocked_by_policy", principal);
+            return refuse("POLICY_DENIED");
+          };
+          const denyRail = options.settlementRail;
+          if (
+            denyRail?.retrievePaymentIntent !== undefined &&
+            liveRun.settlementIntent !== undefined
+          ) {
+            // N4b-11 (LOW follow-up): a prior confirm may have TIMED OUT
+            // yet landed upstream — accepting this deny blind could end a
+            // run blocked_by_policy while Stripe already moved the money.
+            // Look the intent up FIRST (a GET — never a re-confirm, which
+            // would release an unconfirmed intent the caller is denying).
+            // Unresolvable truth fails the deny closed; a succeeded intent
+            // settles the run instead of blocking it.
+            return (async (): Promise<BusinessOutcome> => {
+              let intent;
+              try {
+                intent = await denyRail.retrievePaymentIntent!({
+                  paymentIntentId: liveRun.settlementIntent!.paymentIntentId,
+                  expected: {
+                    amountAtomic: String(expected.amountMinor),
+                    currency: expected.currency as string,
+                    runId: liveRun.runId,
+                    agreementDigest: expected.agreementDigest as string,
+                  },
+                });
+              } catch {
+                return refuse("CONTRACT_UNAVAILABLE");
+              }
+              if (
+                intent.id === liveRun.settlementIntent!.paymentIntentId &&
+                intent.status === "succeeded"
+              ) {
+                liveRun.settlementIntent = { paymentIntentId: intent.id, status: intent.status };
+                liveRun.settlement = {
+                  transferId: intent.id, status: "released",
+                  paymentRail: denyRail.railId, paymentIntentId: intent.id,
+                };
+                options.endRun(liveRun, "settled", principal);
+                return refuse("ALREADY_TERMINAL");
+              }
+              liveRun.settlementIntent = {
+                paymentIntentId: intent.id, status: intent.status,
+              };
+              return finishDeny();
+            })();
+          }
+          return finishDeny();
         }
         const submitted = verifySubmission(liveRun, "buyer", "settlement_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
@@ -1587,6 +1635,12 @@ export function createBusinessOps(options: {
           return (async (): Promise<BusinessOutcome> => {
             const paymentIntentId = liveRun.settlementIntent?.paymentIntentId;
             if (paymentIntentId === undefined) return refuse("STATE_REFUSED");
+            const expectedTerms = {
+              amountAtomic: String(expected.amountMinor),
+              currency: expected.currency as string,
+              runId: liveRun.runId,
+              agreementDigest: expected.agreementDigest as string,
+            };
             let intent;
             try {
               intent = await rail.confirmPaymentIntent({
@@ -1594,28 +1648,47 @@ export function createBusinessOps(options: {
                 idempotencyKey: `${expected.agreementDigest}:confirm`,
                 // M2: pin the agreement terms — a confirmed intent that
                 // disagrees is a rail failure, never a settlement.
-                expected: {
-                  amountAtomic: String(expected.amountMinor),
-                  currency: expected.currency as string,
-                  runId: liveRun.runId,
-                  agreementDigest: expected.agreementDigest as string,
-                },
+                expected: expectedTerms,
               });
             } catch (err) {
-              // Code-only, receipted; the run stays NON-settled. The nonce
-              // is already consumed — the retry path is a FRESH
-              // settlement_prepare (reusing the stored intent), not a
-              // same-envelope retry.
-              return ok({
-                status: "failed",
-                paymentRail: rail.railId,
-                paymentIntentId,
-                error: err instanceof StripeTestRailError ? err.code : "STRIPE_RAIL_HTTP",
-                simulated: true,
-                commercialTransfer: false,
-                label: STRIPE_RAIL_LABEL,
-                serverNonce,
-              });
+              // N4b-11 (LOW follow-up): a deadline/transport failure does
+              // NOT prove the confirm failed — it may have landed upstream
+              // after the race. Reconcile against the READ-ONLY lookup
+              // before reporting failure; a `succeeded` intent settles
+              // through the normal path below, anything else is the same
+              // code-only failed body as before.
+              let recovered;
+              if (rail.retrievePaymentIntent !== undefined) {
+                try {
+                  recovered = await rail.retrievePaymentIntent({
+                    paymentIntentId, expected: expectedTerms,
+                  });
+                } catch {
+                  recovered = undefined; // truth unresolvable — report the failure
+                }
+              }
+              if (recovered !== undefined && recovered.id === paymentIntentId) {
+                liveRun.settlementIntent = {
+                  paymentIntentId, status: recovered.status,
+                };
+                if (recovered.status === "succeeded") intent = recovered;
+              }
+              if (intent === undefined) {
+                // Code-only, receipted; the run stays NON-settled. The nonce
+                // is already consumed — the retry path is a FRESH
+                // settlement_prepare (reusing the stored intent), not a
+                // same-envelope retry.
+                return ok({
+                  status: "failed",
+                  paymentRail: rail.railId,
+                  paymentIntentId,
+                  error: err instanceof StripeTestRailError ? err.code : "STRIPE_RAIL_HTTP",
+                  simulated: true,
+                  commercialTransfer: false,
+                  label: STRIPE_RAIL_LABEL,
+                  serverNonce,
+                });
+              }
             }
             // M2 belt-and-suspenders behind the rail's own validation: a
             // confirm result that is not `succeeded` or names a different

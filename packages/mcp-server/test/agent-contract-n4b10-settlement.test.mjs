@@ -17,7 +17,8 @@ import {
 // awaiting/refused/failed/replay surfaces are what these tests pin.
 
 function fakeRail({ keyStatus = "configured", createFails = null, confirmFails = null } = {}) {
-  const calls = { keyStatus: 0, create: 0, confirm: 0, lastCreate: null, lastConfirm: null };
+  const calls = { keyStatus: 0, create: 0, confirm: 0, retrieve: 0, lastCreate: null, lastConfirm: null };
+  const intents = new Map();
   const rail = {
     railId: "stripe_test_mode",
     async keyStatus() {
@@ -29,16 +30,29 @@ function fakeRail({ keyStatus = "configured", createFails = null, confirmFails =
       calls.create += 1;
       calls.lastCreate = input;
       if (createFails !== null) throw createFails;
-      return { id: `pi_test_${String(calls.create).padStart(3, "0")}`, status: "requires_confirmation" };
+      const intent = { id: `pi_test_${String(calls.create).padStart(3, "0")}`, status: "requires_confirmation" };
+      intents.set(intent.id, intent);
+      return { ...intent };
     },
     async confirmPaymentIntent(input) {
       calls.confirm += 1;
       calls.lastConfirm = input;
       if (confirmFails !== null) throw confirmFails;
+      const intent = intents.get(input.paymentIntentId);
+      if (intent !== undefined) intent.status = "succeeded";
       return { id: input.paymentIntentId, status: "succeeded" };
     },
+    async retrievePaymentIntent(input) {
+      calls.retrieve += 1;
+      const intent = intents.get(input.paymentIntentId);
+      if (intent === undefined) {
+        throw new StripeTestRailError("STRIPE_RAIL_HTTP", "no such intent");
+      }
+      return { ...intent };
+    },
+    intents,
   };
-  return { rail, calls };
+  return { rail, calls, intents };
 }
 
 /** Drive a pair to match-verified; returns {runId, orderRef}. */
@@ -656,4 +670,115 @@ test("M3-follow-up: the cancel replay also completes a failed terminal transitio
     assert.equal(run.terminalState, "cancelled");
     assert.deepEqual(terms, ["cancelled"]);
   } finally { allowWrites(); env.close(); }
+});
+
+// N4b-11 (adversarial LOW): a confirm that times out may still have
+// landed upstream. Before reporting "failed" the authorize reconciles
+// via the read-only retrieve; and a later deny must look the intent up
+// first — blocking a PAID run as blocked_by_policy is never allowed.
+test("LOW: a confirm that lands after its deadline settles via reconcile — a later deny cannot block a paid run", async () => {
+  const { rail, calls, intents } = fakeRail();
+  // The confirm "times out" (deadline error) but the upstream intent
+  // flips to succeeded shortly after — the classic ambiguous outcome.
+  rail.confirmPaymentIntent = async ({ paymentIntentId }) => {
+    calls.confirm += 1;
+    const intent = intents.get(paymentIntentId);
+    setTimeout(() => { intent.status = "succeeded"; }, 60);
+    throw new StripeTestRailError("STRIPE_RAIL_HTTP", "request deadline exceeded");
+  };
+  const env = await boot({ settlementRail: rail });
+  try {
+    const { runId } = await verifiedPair(env, uuid(819), "tb1", "tp1");
+    const prepS = await env.callTool("tb1", "settlement_prepare", {});
+    const res = await signedSubmit(env, {
+      token: "tb1", role: "buyer", prepared: prepS,
+      submitTool: "settlement_authorize",
+      extraArgs: {
+        approval: makeApproval({
+          envelope: prepS.envelope, role: "buyer", action: "settlement",
+          tool: "settlement_authorize", key: keys.buyerApproval,
+        }),
+      },
+    });
+    // The inline reconcile ran before the upstream flip — honest failure.
+    assert.equal(res.status, "failed", JSON.stringify(res));
+    assert.equal(res.error, "STRIPE_RAIL_HTTP");
+    assert.equal(calls.retrieve, 1, "the ambiguous confirm was looked up, not trusted dead");
+    assert.equal(env.service.runFor(runId).terminalState, null);
+    // Upstream lands after the deadline — the intent is now PAID.
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(intents.get("pi_test_001").status, "succeeded");
+    // A buyer deny now would end the run blocked_by_policy on a PAID
+    // intent without the lookup. Reconcile refuses that: the run settles.
+    const prepS2 = await env.callTool("tb1", "settlement_prepare", {});
+    const denied = await env.callTool("tb1", "settlement_authorize", {
+      envelope: prepS2.envelope,
+      approval: makeApproval({
+        envelope: prepS2.envelope, role: "buyer", action: "settlement",
+        tool: "settlement_authorize", key: keys.buyerApproval, decision: "deny",
+      }),
+    });
+    assert.equal(denied.error, "ALREADY_TERMINAL", JSON.stringify(denied));
+    const run = env.service.runFor(runId);
+    assert.equal(run.terminalState, "settled", "the paid intent wins — never blocked_by_policy");
+    assert.ok(run.settlement !== undefined);
+    assert.equal(run.settlement.paymentIntentId, "pi_test_001");
+    assert.equal(calls.confirm, 1, "no second confirm — truth came from the lookup");
+  } finally { env.close(); }
+});
+
+test("LOW: an intent already succeeded upstream at confirm-catch settles inline — never reported failed", async () => {
+  const { rail, calls, intents } = fakeRail();
+  // The deadline fired, but the intent is ALREADY succeeded when the
+  // reconcile lookup runs — the authorize must answer released.
+  rail.confirmPaymentIntent = async ({ paymentIntentId }) => {
+    calls.confirm += 1;
+    intents.get(paymentIntentId).status = "succeeded";
+    throw new StripeTestRailError("STRIPE_RAIL_HTTP", "request deadline exceeded");
+  };
+  const env = await boot({ settlementRail: rail });
+  try {
+    const { runId } = await verifiedPair(env, uuid(820), "tb1", "tp1");
+    const prepS = await env.callTool("tb1", "settlement_prepare", {});
+    const res = await signedSubmit(env, {
+      token: "tb1", role: "buyer", prepared: prepS,
+      submitTool: "settlement_authorize",
+      extraArgs: {
+        approval: makeApproval({
+          envelope: prepS.envelope, role: "buyer", action: "settlement",
+          tool: "settlement_authorize", key: keys.buyerApproval,
+        }),
+      },
+    });
+    assert.equal(res.status, "released", JSON.stringify(res));
+    assert.equal(res.paymentIntentId, "pi_test_001");
+    assert.equal(calls.retrieve, 1);
+    assert.equal(env.service.runFor(runId).terminalState, "settled");
+  } finally { env.close(); }
+});
+
+test("LOW: a deny when the intent's truth is unresolvable fails closed — run stays live", async () => {
+  const { rail, calls } = fakeRail();
+  rail.retrievePaymentIntent = async () => {
+    calls.retrieve += 1;
+    throw new StripeTestRailError("STRIPE_RAIL_HTTP", "lookup down");
+  };
+  const env = await boot({ settlementRail: rail });
+  try {
+    const { runId } = await verifiedPair(env, uuid(821), "tb1", "tp1");
+    const prepS = await env.callTool("tb1", "settlement_prepare", {});
+    const denied = await env.callTool("tb1", "settlement_authorize", {
+      envelope: prepS.envelope,
+      approval: makeApproval({
+        envelope: prepS.envelope, role: "buyer", action: "settlement",
+        tool: "settlement_authorize", key: keys.buyerApproval, decision: "deny",
+      }),
+    });
+    // Cannot prove the intent unpaid → the deny is NOT accepted.
+    assert.equal(denied.error, "CONTRACT_UNAVAILABLE", JSON.stringify(denied));
+    const run = env.service.runFor(runId);
+    assert.equal(run.terminalState, null, "the run stays live — the deny is retryable");
+    assert.equal(run.settlement, undefined);
+    assert.equal(calls.retrieve, 1);
+  } finally { env.close(); }
 });
