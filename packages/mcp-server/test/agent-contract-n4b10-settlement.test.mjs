@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { StripeTestRailError } from "../dist/agent-contract/settlement-rail.js";
 
 import {
-  boot, agreePair, signedSubmit, makeApproval, signRoleSig, keys, uuid, statusSchema,
+  boot, agreePair, bookPair, signedSubmit, makeApproval, signRoleSig, keys, uuid, statusSchema,
 } from "./n4b9-harness.mjs";
 
 // N4b-10 (spec D13): business integration of the Stripe TEST-mode
@@ -554,4 +557,103 @@ test("D13: the default rail stays 'simulated' — payload labels it, no intent",
     assert.equal(st.state, "released");
     assert.equal(st.paymentRail, "simulated");
   } finally { env.close(); }
+});
+
+// N4b-11 (adversarial M3 follow-up): settlement/cancellation are written
+// BEFORE endRun — if the durable terminal enqueue fails, the client sees
+// CONTRACT_UNAVAILABLE but the run keeps settlement set with
+// terminalState null. A byte-identical replay must COMPLETE the
+// transition (endRun) before answering — never answer "released" for a
+// run with no durable job, close, or anchor.
+test("M3-follow-up: a failed durable write during authorize leaves a live run — the byte-identical retry settles it durably FIRST (both rails)", async () => {
+  for (const railSpec of [undefined, fakeRail().rail]) {
+    const stateDir = mkdtempSync(path.join(tmpdir(), "n4b11-settleheal-"));
+    const terms = [];
+    const env = await boot({
+      stateDir, settlementRail: railSpec,
+      onTerminalRun: (_r, s) => terms.push(s),
+    });
+    let denied = false;
+    const denyWrites = () => { chmodSync(stateDir, 0o555); denied = true; };
+    const allowWrites = () => { if (denied) { chmodSync(stateDir, 0o700); denied = false; } };
+    try {
+      const { runId } = await verifiedPair(env, uuid(817), "tb1", "tp1");
+      const prepS = await env.callTool("tb1", "settlement_prepare", {});
+      const approval = makeApproval({
+        envelope: prepS.envelope, role: "buyer", action: "settlement",
+        tool: "settlement_authorize", key: keys.buyerApproval,
+      });
+      const args = {
+        envelope: prepS.envelope,
+        signatureHex: signRoleSig(keys.buyerSigner.priv, {
+          runId: prepS.envelope.runId, role: "buyer", tool: prepS.envelope.tool,
+          nonce: prepS.envelope.nonce, payloadDigest: prepS.envelope.payloadDigest,
+        }),
+        approval,
+      };
+      // The authorize records settlement, then its durable enqueue throws.
+      denyWrites();
+      const first = await env.callTool("tb1", "settlement_authorize", args);
+      assert.equal(first.error, "CONTRACT_UNAVAILABLE", JSON.stringify(first));
+      const run = env.service.runFor(runId);
+      assert.ok(run.settlement !== undefined, "settlement was recorded before the failed enqueue");
+      assert.equal(run.terminalState, null, "the transition was NOT acknowledged");
+      assert.equal(terms.length, 0, "no terminal callback fired");
+      // While writes stay denied, a byte-identical replay CANNOT quietly
+      // answer released — the heal attempt fails closed again.
+      const stillDenied = await env.callTool("tb1", "settlement_authorize", args);
+      assert.equal(stillDenied.error, "CONTRACT_UNAVAILABLE", JSON.stringify(stillDenied));
+      assert.equal(run.terminalState, null);
+      // Restore durability: the SAME bytes now complete the transition
+      // and only then return the recorded result.
+      allowWrites();
+      const retry = await env.callTool("tb1", "settlement_authorize", args);
+      assert.equal(retry.status, "released", JSON.stringify(retry));
+      assert.equal(run.terminalState, "settled");
+      assert.deepEqual(terms, ["settled"], "exactly one terminal transition");
+      const jobs = JSON.parse(readFileSync(path.join(stateDir, "terminal-jobs.json"), "utf8")).jobs;
+      assert.equal(jobs.find((j) => j.runId === runId).terminalState, "settled");
+      // Once terminal, the replay is a normal recorded replay again.
+      const again = await env.callTool("tb1", "settlement_authorize", args);
+      assert.equal(again.status, "released");
+    } finally { allowWrites(); env.close(); }
+  }
+});
+
+test("M3-follow-up: the cancel replay also completes a failed terminal transition before answering", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "n4b11-cancelheal-"));
+  const terms = [];
+  const env = await boot({ stateDir, onTerminalRun: (_r, s) => terms.push(s) });
+  let denied = false;
+  const denyWrites = () => { chmodSync(stateDir, 0o555); denied = true; };
+  const allowWrites = () => { if (denied) { chmodSync(stateDir, 0o700); denied = false; } };
+  try {
+    const { runId } = await bookPair(env, uuid(818), "tb1", "tp1");
+    const prep = await env.callTool("tp1", "booking_cancel_prepare", { reason: "mutual_withdrawal" });
+    const approval = makeApproval({
+      envelope: prep.envelope, role: "provider", action: "booking",
+      tool: "booking_cancel_submit", key: keys.providerApproval,
+    });
+    const args = {
+      envelope: prep.envelope,
+      signatureHex: signRoleSig(keys.providerSigner.priv, {
+        runId: prep.envelope.runId, role: "provider", tool: prep.envelope.tool,
+        nonce: prep.envelope.nonce, payloadDigest: prep.envelope.payloadDigest,
+      }),
+      approval,
+    };
+    denyWrites();
+    const first = await env.callTool("tp1", "booking_cancel_submit", args);
+    assert.equal(first.error, "CONTRACT_UNAVAILABLE", JSON.stringify(first));
+    const run = env.service.runFor(runId);
+    assert.ok(run.cancellation !== undefined, "the cancellation was recorded before the failed enqueue");
+    assert.equal(run.terminalState, null);
+    assert.equal(terms.length, 0);
+    allowWrites();
+    const retry = await env.callTool("tp1", "booking_cancel_submit", args);
+    assert.equal(retry.status, "CANCELLED", JSON.stringify(retry));
+    assert.equal(retry.terminalState, "cancelled");
+    assert.equal(run.terminalState, "cancelled");
+    assert.deepEqual(terms, ["cancelled"]);
+  } finally { allowWrites(); env.close(); }
 });

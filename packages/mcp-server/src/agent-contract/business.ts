@@ -1214,6 +1214,15 @@ export function createBusinessOps(options: {
         // Idempotent replay: the recorded cancellation is returned verbatim —
         // never a nonce error — even though the envelope's nonce is claimed.
         if (liveRun.cancellation !== undefined) {
+          // N4b-11 (adversarial M3 follow-up): if a previous submit wrote
+          // the cancellation but its durable terminal enqueue FAILED,
+          // the run kept cancellation set with terminalState null — and
+          // this replay would answer CANCELLED for a run with no durable
+          // job, no close, no anchor. Complete the transition FIRST; a
+          // repeat persist failure propagates to CONTRACT_UNAVAILABLE.
+          if (liveRun.terminalState === null) {
+            options.endRun(liveRun, "cancelled", principal);
+          }
           return ok({
             orderRef: liveRun.cancellation.orderRef,
             status: "CANCELLED",
@@ -1491,6 +1500,16 @@ export function createBusinessOps(options: {
             approval: args.approval,
           });
           if (replayDigest !== liveRun.settlementRequest?.digest) return refuse("STATE_REFUSED");
+          // N4b-11 (adversarial M3 follow-up): a prior authorize could
+          // record settlement and then lose the durable terminal enqueue
+          // — leaving terminalState null. Answering "released" here would
+          // return a settled claim for a run with NO durable job, close
+          // or anchor. Retry the transition FIRST; a repeat persist
+          // failure propagates to CONTRACT_UNAVAILABLE and the run
+          // stays live-but-unanswered.
+          if (liveRun.terminalState === null) {
+            options.endRun(liveRun, "settled", principal);
+          }
           return ok({ ...liveRun.settlementRequest!.result, serverNonce });
         }
         if (
