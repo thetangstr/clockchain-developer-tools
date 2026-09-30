@@ -397,7 +397,13 @@ export interface ContractService {
      * N6g-2 (observer H1): SIMULATED labels keyed by the receipt that
      * carried sim-derived evidence — always present (possibly empty).
      */
-    simLabels: { receiptId: string; simulated: boolean }[];
+    simLabels: {
+      receiptId: string;
+      simulated: boolean;
+      /** N4b-10 (D13): settlement-family labels carry the rail + its text. */
+      paymentRail?: "simulated" | "stripe_test_mode";
+      label?: string;
+    }[];
     /**
      * N6g-2 (observer R12): the consequential-submit approval records the
      * service verified. `digest` is the RECEIPT linkage — the `*_prepare`
@@ -2023,19 +2029,26 @@ export function createContractService(options: {
         // N6g-2 (H1): every sim-backed receipt is labelled in the feed —
         // keyed by receiptId, `simulated` is always true on emission.
         // N4b-10 (D13): settlement-family labels name the rail that produced
-        // them — "stripe_test_mode" carries the "no real money" text.
+        // them — "stripe_test_mode" carries the "no real money" text. The
+        // rail is decided from the run's recorded paymentRail evidence
+        // (settlement record, created intent, awaiting stop), NEVER from
+        // `simulated: true` — which stays true on both rails.
         simLabels: run.receipts
           .filter((r) => SIM_LABELLED_TOOLS.has(r.tool))
-          .map((r) => ({
-            receiptId: r.receiptId,
-            simulated: true,
-            ...(r.tool.startsWith("settlement")
-              ? {
-                  paymentRail: options.settlementRail?.railId ?? "simulated",
-                  label: options.settlementRail !== undefined ? "Stripe TEST mode — no real money" : "simulated — no real money",
-                }
-              : {}),
-          })),
+          .map((r) => {
+            if (!r.tool.startsWith("settlement")) {
+              return { receiptId: r.receiptId, simulated: true };
+            }
+            const rail = run.settlement?.paymentRail
+              ?? (run.settlementIntent !== undefined || run.awaitingStripeTestKey === true
+                ? "stripe_test_mode" : options.settlementRail?.railId ?? "simulated");
+            return {
+              receiptId: r.receiptId,
+              simulated: true,
+              paymentRail: rail,
+              label: rail === "stripe_test_mode" ? "Stripe TEST mode — no real money" : "simulated — no real money",
+            };
+          }),
         // N6g-2 (R12): verified consequential-submit approvals, bound to
         // the receipted `*_prepare` response that carried the envelope.
         ...(run.approvalRecords !== undefined && run.approvalRecords.length > 0

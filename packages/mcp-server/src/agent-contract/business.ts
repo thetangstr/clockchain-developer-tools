@@ -1622,7 +1622,12 @@ export function createBusinessOps(options: {
           state,
           ...(railStatus.state === "released" ? { transferId: railStatus.transferId } : {}),
           ...(stripeReleased ? { transferId: liveRun.settlement!.transferId } : {}),
-          paymentRail: rail?.railId ?? "simulated",
+          // D13 clarification: the rail is reported from the recorded
+          // paymentRail evidence first — `simulated: true` is never the
+          // discriminator (it stays true on BOTH rails).
+          paymentRail: liveRun.settlement?.paymentRail
+            ?? (liveRun.settlementIntent !== undefined || liveRun.awaitingStripeTestKey === true
+              ? "stripe_test_mode" : rail?.railId ?? "simulated"),
           ...(liveRun.settlementIntent !== undefined
             ? { paymentIntentId: liveRun.settlementIntent.paymentIntentId, stripeStatus: liveRun.settlementIntent.status }
             : {}),

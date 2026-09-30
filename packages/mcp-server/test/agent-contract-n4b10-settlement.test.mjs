@@ -124,27 +124,41 @@ test("D13: authorize confirms ONLY after signature + approval; result is labelle
   } finally { env.close(); }
 });
 
-test("D13: a bad signature or a denied approval never reaches confirm", async () => {
-  for (const [name, kind] of [["badSig", "badSig"], ["denied", "deny"]]) {
+test("D13: a bad signature, a deny submission, or an ambiguous deny+sig never reaches confirm", async () => {
+  for (const [name, kind, buyer, provider] of [
+    ["badSig", "badSig", "tb1", "tp1"],
+    ["denied", "deny", "tb2", "tp2"],
+    ["denySig", "deny", "tb1", "tp1"],
+  ]) {
     const { rail, calls } = fakeRail();
     const env = await boot({ settlementRail: rail });
     try {
-      await verifiedPair(env, uuid(809), name === "badSig" ? "tb1" : "tb2", name === "badSig" ? "tp1" : "tp2");
-      const prepS = await env.callTool(name === "badSig" ? "tb1" : "tb2", "settlement_prepare", {});
+      await verifiedPair(env, uuid(809), buyer, provider);
+      const prepS = await env.callTool(buyer, "settlement_prepare", {});
       const approval = makeApproval({
         envelope: prepS.envelope, role: "buyer", action: "settlement",
         tool: "settlement_authorize", key: keys.buyerApproval,
         decision: kind === "deny" ? "deny" : "allow",
       });
+      const e = prepS.envelope;
       const signatureHex = kind === "badSig"
         ? `0x${"ab".repeat(65)}`
-        : undefined;
-      const res = await env.callTool(name === "badSig" ? "tb1" : "tb2", "settlement_authorize", {
-        envelope: prepS.envelope, approval,
+        : kind === "denySig"
+          ? signRoleSig(keys.buyerSigner.priv, {
+              runId: e.runId, role: "buyer", tool: e.tool, nonce: e.nonce, payloadDigest: e.payloadDigest,
+            })
+          : undefined;
+      const res = await env.callTool(buyer, "settlement_authorize", {
+        envelope: e, approval,
         ...(signatureHex !== undefined ? { signatureHex } : {}),
       });
       if (kind === "badSig") assert.equal(res.error, "SIGNATURE_INVALID", JSON.stringify(res));
-      else assert.equal(res.error, "POLICY_DENIED", JSON.stringify(res));
+      else if (kind === "denySig") {
+        // D11: deny + role signature is ambiguous — refused, never terminal.
+        assert.equal(res.error, "APPROVAL_INVALID", JSON.stringify(res));
+        const cs = await env.callTool(buyer, "contract_status", {});
+        assert.equal(cs.terminalState, null, "an ambiguous deny ends nothing");
+      } else assert.equal(res.error, "POLICY_DENIED", JSON.stringify(res));
       assert.equal(calls.confirm, 0, `${name}: confirm must not run`);
     } finally { env.close(); }
   }
@@ -313,10 +327,41 @@ test("D13: the feed's settlement sim-labels name the rail and 'no real money'", 
     assert.ok(labels.length >= 2, "prepare + authorize both labelled");
     for (const l of labels) {
       assert.equal(l.simulated, true);
+      // D13 clarification: `simulated:true` stays on the Stripe rail — the
+      // rail is decided from paymentRail, never from simulated.
       assert.equal(l.paymentRail, "stripe_test_mode");
       assert.match(l.label, /no real money/);
     }
-    assert.ok(prepS.envelope.payload.paymentRail === "stripe_test_mode");
+    assert.equal(prepS.envelope.payload.paymentRail, "stripe_test_mode");
+    assert.equal(prepS.envelope.payload.simulated, true, "simulated:true coexists with the stripe rail");
+    assert.equal(settled.simulated, true, "the released body stays simulated:true");
+    assert.equal(settled.paymentRail, "stripe_test_mode");
+    // The run's recorded settlement decides the rail, not the flag.
+    const cs = await env.callTool("tb1", "contract_status", {});
+    assert.equal(cs.settlement.paymentRail, "stripe_test_mode");
+  } finally { env.close(); }
+});
+
+test("D13: on the simulated rail the same labels read 'simulated' — paymentRail is the discriminator", async () => {
+  const env = await boot();
+  try {
+    const { runId } = await verifiedPair(env, uuid(812));
+    const { settled } = await prepareAndAuthorize(env, { buyer: "tb1" });
+    assert.equal(settled.status, "released");
+    assert.equal(settled.simulated, true);
+    const feed = env.service.receiptFeed(runId);
+    const labels = feed.simLabels.filter((l) => {
+      const rec = feed.receipts.find((r) => r.receiptId === l.receiptId);
+      return rec !== undefined && rec.tool.startsWith("settlement");
+    });
+    assert.ok(labels.length >= 2);
+    for (const l of labels) {
+      assert.equal(l.simulated, true, "simulated:true on BOTH rails — it never discriminates");
+      assert.equal(l.paymentRail, "simulated");
+      assert.match(l.label, /no real money/);
+    }
+    const cs = await env.callTool("tb1", "contract_status", {});
+    assert.equal(cs.settlement.paymentRail, "simulated");
   } finally { env.close(); }
 });
 

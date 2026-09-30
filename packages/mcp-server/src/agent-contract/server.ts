@@ -293,7 +293,11 @@ export function buildContractServer(options: {
         // default; awaitingStripeTestKey is the honest stop when the
         // Stripe rail is configured but unkeyed.
         settlement: {
-          paymentRail: service.settlementRailId,
+          // D13 clarification: recorded paymentRail evidence first —
+          // `simulated: true` is never the discriminator.
+          paymentRail: run.settlement?.paymentRail
+            ?? (run.settlementIntent !== undefined || run.awaitingStripeTestKey === true
+              ? "stripe_test_mode" : service.settlementRailId),
           awaitingStripeTestKey: run.awaitingStripeTestKey === true,
           ...(run.settlementIntent !== undefined
             ? { paymentIntentId: run.settlementIntent.paymentIntentId, stripeStatus: run.settlementIntent.status }
