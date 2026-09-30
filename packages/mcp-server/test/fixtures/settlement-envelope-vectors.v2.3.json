@@ -1,0 +1,79 @@
+{
+  "schema": "agent-contract.settlement-envelope-vectors/v2.3",
+  "generator": "orchestrator independent generator (not N5/N4b code), 2026-09-29",
+  "contract": "docs/travel-mvp/design/CONTRACT-PAYLOADS-v2.md rev 6.11 (D13)",
+  "supersedes": "nothing — ADDITIVE (settlement gains paymentRail + paymentIntentId; v2/v2.1/v2.2 unchanged)",
+  "testOnlyServerKey": {
+    "keyId": "test-server-ed25519-v1",
+    "alg": "ed25519",
+    "publicKeyHex": "0x3f7de43bef96b9fca5efad242bf133584be9b5e2614aee0e36530323a36d340a",
+    "note": "TEST-ONLY deterministic key; never deploy"
+  },
+  "ledgerFacts": {
+    "runId": "run-test-0002",
+    "offerDigest": "0x0f54a5e28325492485d609d169466ab82ed73488d9a692903d6f03fc3947a7f2",
+    "agreementDigest": "0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864",
+    "verificationDigest": "0x0987893b9654b7c715398efb2f427a8aeb36dab2cdb678f811636633bf43a7c3"
+  },
+  "vectors": [
+    {
+      "envelope": {
+        "schema": "agent-contract.prepare-envelope/v1",
+        "runId": "run-test-0002",
+        "tool": "settlement_prepare",
+        "role": "buyer",
+        "payload": {
+          "kind": "settlement",
+          "agreementId": "agr-0002",
+          "agreementDigest": "0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864",
+          "verificationDigest": "0x0987893b9654b7c715398efb2f427a8aeb36dab2cdb678f811636633bf43a7c3",
+          "itineraryId": "IT-QW-ONESTOP",
+          "currency": "USD",
+          "amountMinor": 437000,
+          "simulated": true,
+          "paymentRail": "stripe_test_mode",
+          "paymentIntentId": "pi_3TestOnly0000000000000001"
+        },
+        "payloadDigest": "0x03261498a624c984d1ceca3e238445d5a0a976973c44f5e5860839455d58f0a4",
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "nonce": "0x91f1a6fa1749041fa8b83a2c5dc33d6e",
+        "serverKeyId": "test-server-ed25519-v1",
+        "serverSig": {
+          "alg": "ed25519",
+          "keyId": "test-server-ed25519-v1",
+          "sig": "0x721384205b237bbc1a177c6ff4aba65f50973130bb583c72ac2f556b3fa808befcd709a1128781b72bbff9765e5803b6c1a55075296086307301d893e1342702"
+        }
+      },
+      "signedMessage": "{\"expiresAt\":\"2030-01-01T00:00:00.000Z\",\"nonce\":\"0x91f1a6fa1749041fa8b83a2c5dc33d6e\",\"payload\":{\"agreementDigest\":\"0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864\",\"agreementId\":\"agr-0002\",\"amountMinor\":437000,\"currency\":\"USD\",\"itineraryId\":\"IT-QW-ONESTOP\",\"kind\":\"settlement\",\"paymentIntentId\":\"pi_3TestOnly0000000000000001\",\"paymentRail\":\"stripe_test_mode\",\"simulated\":true,\"verificationDigest\":\"0x0987893b9654b7c715398efb2f427a8aeb36dab2cdb678f811636633bf43a7c3\"},\"payloadDigest\":\"0x03261498a624c984d1ceca3e238445d5a0a976973c44f5e5860839455d58f0a4\",\"role\":\"buyer\",\"runId\":\"run-test-0002\",\"schema\":\"agent-contract.prepare-envelope/v1\",\"serverKeyId\":\"test-server-ed25519-v1\",\"tool\":\"settlement_prepare\"}"
+    },
+    {
+      "envelope": {
+        "schema": "agent-contract.prepare-envelope/v1",
+        "runId": "run-test-0002",
+        "tool": "settlement_prepare",
+        "role": "buyer",
+        "payload": {
+          "kind": "settlement",
+          "agreementId": "agr-0002",
+          "agreementDigest": "0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864",
+          "verificationDigest": "0x0987893b9654b7c715398efb2f427a8aeb36dab2cdb678f811636633bf43a7c3",
+          "itineraryId": "IT-QW-ONESTOP",
+          "currency": "USD",
+          "amountMinor": 437000,
+          "simulated": true,
+          "paymentRail": "simulated"
+        },
+        "payloadDigest": "0x395d9ca1d9d8c4d2b3f9a75f7163c019720dce32bd7bb4be50c21629ba52c689",
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "nonce": "0x1ef523c1f162a6f3ba94a1b612ed5409",
+        "serverKeyId": "test-server-ed25519-v1",
+        "serverSig": {
+          "alg": "ed25519",
+          "keyId": "test-server-ed25519-v1",
+          "sig": "0x8647462c7c4e31ec27cfce3ef46e235bf134e9da270dcb1a162e134752efa53d798154250b5d48d0a93405049b5880a790aee1ff13256bf0b3402f28cd7a530f"
+        }
+      },
+      "signedMessage": "{\"expiresAt\":\"2030-01-01T00:00:00.000Z\",\"nonce\":\"0x1ef523c1f162a6f3ba94a1b612ed5409\",\"payload\":{\"agreementDigest\":\"0x2450b8df16dd0d5c62b23fc5c0a70efa2264b746315e132eb39d581002e3d864\",\"agreementId\":\"agr-0002\",\"amountMinor\":437000,\"currency\":\"USD\",\"itineraryId\":\"IT-QW-ONESTOP\",\"kind\":\"settlement\",\"paymentRail\":\"simulated\",\"simulated\":true,\"verificationDigest\":\"0x0987893b9654b7c715398efb2f427a8aeb36dab2cdb678f811636633bf43a7c3\"},\"payloadDigest\":\"0x395d9ca1d9d8c4d2b3f9a75f7163c019720dce32bd7bb4be50c21629ba52c689\",\"role\":\"buyer\",\"runId\":\"run-test-0002\",\"schema\":\"agent-contract.prepare-envelope/v1\",\"serverKeyId\":\"test-server-ed25519-v1\",\"tool\":\"settlement_prepare\"}"
+    }
+  ]
+}

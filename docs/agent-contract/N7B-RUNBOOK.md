@@ -80,7 +80,22 @@ Caddy. Wire the env (`TELEMETRY_CLOSE_URL` or the equivalent host wiring) when
 the N6 close-emitting path lands; until then the surface runs without it and
 runs seal by window expiry only.
 
-## 6. Notices
+## 6. Egress
+
+When `CONTRACT_SETTLEMENT_RAIL=stripe_test_mode` (off by default; the default
+rail is in-process `simulated`), the box needs exactly two additional outbound
+destinations:
+
+- `api.stripe.com:443` — PaymentIntent create/confirm, TEST-mode keys only;
+  `Idempotency-Key` on every POST.
+- AWS Secrets Manager in `us-west-2` — `agentcontract/travel-stripe-test-key`,
+  resolved at call time (never cached, never logged; `check-config` reports
+  only its status: configured / absent / refused).
+
+No other egress is introduced by the surface beyond the existing telemetry
+close URL and the Clockchain client endpoints.
+
+## 7. Notices
 
 - Orchestrator notice before any production deploy — always.
 - Founder gate on the deploy itself (N7): seed, tokens, and the merge sha are
