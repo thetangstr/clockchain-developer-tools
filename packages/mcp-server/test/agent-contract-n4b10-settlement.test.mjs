@@ -340,6 +340,18 @@ test("D13: a confirm failure answers code-only — run stays live, authorize ret
     assert.equal(res.commercialTransfer, false);
     const cs = await env.callTool("tb1", "contract_status", {});
     assert.notEqual(cs.terminalState, "settled");
+    // L1 (adversarial review): the failed attempt CONSUMED its nonce —
+    // retrying the SAME envelope is refused; recovery requires a fresh
+    // settlement_prepare (which reuses the stored intent).
+    const sameEnvRetry = await env.callTool("tb1", "settlement_authorize", {
+      envelope: prepS.envelope,
+      signatureHex: signRoleSig(keys.buyerSigner.priv, {
+        runId: prepS.envelope.runId, role: "buyer", tool: prepS.envelope.tool,
+        nonce: prepS.envelope.nonce, payloadDigest: prepS.envelope.payloadDigest,
+      }),
+      approval,
+    });
+    assert.equal(sameEnvRetry.error, "NONCE_REUSED", JSON.stringify(sameEnvRetry));
     // Recover: a fresh prepare reuses the stored intent (no second
     // create), mints a new-nonce envelope, and its authorize confirms.
     rail.confirmPaymentIntent = async ({ paymentIntentId }) => {

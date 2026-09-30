@@ -1550,8 +1550,10 @@ export function createBusinessOps(options: {
                 idempotencyKey: `${expected.agreementDigest}:confirm`,
               });
             } catch (err) {
-              // Code-only, receipted; the run stays NON-settled and the
-              // authorize may be retried with the same envelope.
+              // Code-only, receipted; the run stays NON-settled. The nonce
+              // is already consumed — the retry path is a FRESH
+              // settlement_prepare (reusing the stored intent), not a
+              // same-envelope retry.
               return ok({
                 status: "failed",
                 paymentRail: rail.railId,
