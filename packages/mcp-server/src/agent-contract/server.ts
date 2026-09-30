@@ -340,9 +340,18 @@ export function buildContractServer(options: {
     // negotiation, booking, verification, settlement (business.ts).
     // N4b-10 (D13): settlement cases may return a Promise (the Stripe
     // TEST rail is async) — awaited here; every other tool stays sync.
-    const dispatched = await service.business.dispatch(
-      principal, run, name, parsed.data, serverNonce,
-    );
+    // N4b-11 (M3): a failed durable enqueue throws out of endRun — the
+    // transition was never acknowledged. Surface it as a code-only,
+    // RECEIPTED refusal instead of a bare JSON-RPC error carrying the
+    // filesystem error (and its stateDir path) verbatim.
+    let dispatched: Awaited<ReturnType<typeof service.business.dispatch>>;
+    try {
+      dispatched = await service.business.dispatch(
+        principal, run, name, parsed.data, serverNonce,
+      );
+    } catch {
+      dispatched = { ok: false as const, code: "CONTRACT_UNAVAILABLE" as const };
+    }
     outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
     // D8: the dispatch may carry extra server-derived receipt fields (e.g.
     // an invitation's senderProof disclosure).

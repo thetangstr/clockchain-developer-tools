@@ -964,10 +964,13 @@ export function createContractService(options: {
    */
   const outbox = createTerminalOutbox(options.stateDir);
   /**
-   * N4b-9 (F14): a persist failure must never strand a terminal
-   * transition that already executed — the in-memory job is still recorded
-   * (every later mutation retries the durable write); the error is kept
-   * on the job so contract_status can surface it.
+   * N4b-9 (F14): a persist failure must never strand async terminal work
+   * that already executed (anchor outcome recording, post-transition
+   * evidence) — the in-memory job is still recorded (every later mutation
+   * retries the durable write). N4b-11 (M3): the terminal transition
+   * itself does NOT take this path — `endRun` enqueues via the
+   * fail-closed `outbox.updateDurable`, where a persist failure throws
+   * BEFORE the run is marked terminal.
    */
   const updateJob = (runId: string, mutate: (job: TerminalJob) => void): TerminalJob | undefined => {
     try {
@@ -1760,11 +1763,6 @@ export function createContractService(options: {
     // never re-fires the close emitter, and never re-anchors — the first
     // transition owns the close identity and the anchor subject.
     if (run.terminalState !== null) return;
-    // "settled" is itself a named terminal stage; every other terminal reason
-    // reads stage:"terminal" with terminalState carrying the why.
-    run.stage = terminalState === "settled" ? "settled" : "terminal";
-    run.terminalState = terminalState;
-    sim.markTerminal(run.runId);
     // N4b-9 (F14): durably enqueue the terminal job BEFORE the transition is
     // acknowledged — the immutable close receipt, the anchor subject (the
     // chain tip at this instant), the bound principals, and the run-chain
@@ -1775,7 +1773,12 @@ export function createContractService(options: {
           options.signer,
         )
       : undefined;
-    updateJob(run.runId, (job) => {
+    // N4b-11 (M3): the enqueue is FAIL-CLOSED. A persist failure throws out
+    // of dispatch (the caller gets an error, never a success), the
+    // un-persisted mutation is rolled back inside the outbox, and the run
+    // below is left untouched — nothing terminal is acknowledged without
+    // the durable record. A retry re-mints and rebuilds the same job.
+    outbox.updateDurable(run.runId, now(), (job) => {
       job.terminalState = terminalState;
       job.principal = principal !== undefined
         ? { role: principal.role, keyId: principal.keyId }
@@ -1791,6 +1794,11 @@ export function createContractService(options: {
         job.close = { status: "delivering", attempts: 0 };
       }
     });
+    // "settled" is itself a named terminal stage; every other terminal reason
+    // reads stage:"terminal" with terminalState carrying the why.
+    run.stage = terminalState === "settled" ? "settled" : "terminal";
+    run.terminalState = terminalState;
+    sim.markTerminal(run.runId);
     // N4b-8 (gap 4): anchor the receipt-chain head at the terminal
     // transition BEFORE the close emitter runs — the anchored head is the
     // head at terminality; close/anchor evidence receipts chain on after it.

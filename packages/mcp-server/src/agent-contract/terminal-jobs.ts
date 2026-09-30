@@ -135,6 +135,14 @@ export interface TerminalOutbox {
   get(runId: string): TerminalJob | undefined;
   /** Get-or-create + mutate + persist. A persist failure THROWS — the caller decides whether the transition may proceed. */
   update(runId: string, nowMs: number, mutate: (job: TerminalJob) => void): TerminalJob;
+  /**
+   * N4b-11 (M3): the fail-closed variant for transitions that must NOT be
+   * acknowledged without the durable write (the terminal enqueue). The
+   * mutation is applied to a copy; a persist failure restores the prior
+   * in-memory entry — or drops a new one — before rethrowing, so the
+   * outbox never carries a mutation the durable file does not have.
+   */
+  updateDurable(runId: string, nowMs: number, mutate: (job: TerminalJob) => void): TerminalJob;
   all(): TerminalJob[];
   /** Jobs still owed work: close not delivered/failed, or anchor jobs still anchoring/pending. */
   unfinished(): TerminalJob[];
@@ -154,6 +162,25 @@ export function createTerminalOutbox(stateDir: string | undefined): TerminalOutb
       job.updatedAtMs = nowMs;
       jobs.set(runId, job);
       save();
+      return job;
+    },
+    updateDurable(runId, nowMs, mutate) {
+      const prev = jobs.get(runId);
+      const job = prev === undefined
+        ? createTerminalJob(runId, nowMs)
+        : structuredClone(prev);
+      mutate(job);
+      job.updatedAtMs = nowMs;
+      jobs.set(runId, job);
+      try {
+        save();
+      } catch (err) {
+        // Fail closed: the un-persisted mutation leaves no trace — a retry
+        // rebuilds the job from the last durable state.
+        if (prev === undefined) jobs.delete(runId);
+        else jobs.set(runId, prev);
+        throw err;
+      }
       return job;
     },
     all: () => [...jobs.values()],
