@@ -146,6 +146,12 @@ export interface ContractRun {
     capMinor: number;
     currency: string;
     allowedItineraryIds: string[];
+    /**
+     * N4b-9 (F16 → D12): the principal-signed traveller count (v2.2).
+     * The booking issues exactly this many tickets and verification
+     * recomputes match against it — never model-supplied.
+     */
+    partySize?: number;
     expiresAt: string;
     /** The family-principal address the mandate signature recovered to. */
     principalAddress: string;

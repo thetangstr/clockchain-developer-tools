@@ -137,6 +137,10 @@ const mandateSchema = z.object({
   capMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   currency: z.string().regex(/^[A-Z]{3}$/),
   allowedItineraryIds: z.array(z.string().min(1).max(64)).min(1).max(64),
+  // N4b-9 (F16 → D12): the traveller count is principal-signed, never
+  // model-supplied (v2.2). Required — a v2 mandate without it is refused
+  // MANDATE_INVALID like every other shape failure.
+  partySize: z.number().int().min(1).max(9),
   expiresAt: z.string().datetime({ offset: false }),
 }).strict();
 type Mandate = z.infer<typeof mandateSchema>;
@@ -422,8 +426,14 @@ export function createBusinessOps(options: {
     return canonicalDigest({ domain: AGREEMENT_DOMAIN, runId, offerDigest });
   }
 
-  /** v2 booking payload — server-derived from the agreement only. */
-  function bookingPayload(agreement: AgreementRecord): Record<string, unknown> {
+  /**
+   * Booking payload — server-derived from the agreement (and, for a v2.2
+   * mandate, the principal-signed partySize → `travellers`). A fabricated
+   * or legacy run without partySize emits the byte-identical v2 payload —
+   * the frozen v2 vectors stay exact.
+   */
+  function bookingPayload(run: ContractRun): Record<string, unknown> {
+    const agreement = run.agreement!;
     return {
       kind: "booking",
       agreementId: agreement.agreementId,
@@ -431,6 +441,7 @@ export function createBusinessOps(options: {
       itineraryId: agreement.itineraryId,
       currency: agreement.currency,
       totalMinor: agreement.totalMinor,
+      ...(run.mandate?.partySize !== undefined ? { travellers: run.mandate.partySize } : {}),
     };
   }
 
@@ -768,6 +779,7 @@ export function createBusinessOps(options: {
           capMinor: mandate.capMinor,
           currency: mandate.currency,
           allowedItineraryIds: [...mandate.allowedItineraryIds],
+          partySize: mandate.partySize,
           expiresAt: mandate.expiresAt,
           principalAddress: principals.get(principal.keyId)!,
           submittedAt: iso(now()),
@@ -978,7 +990,7 @@ export function createBusinessOps(options: {
           return refuse("NOT_FOUND");
         }
         if (liveRun.booking !== undefined) return refuse("STATE_REFUSED");
-        const envelope = prepare(liveRun, "provider", "booking_prepare", bookingPayload(agreement));
+        const envelope = prepare(liveRun, "provider", "booking_prepare", bookingPayload(liveRun));
         return ok({ envelope, serverNonce });
       }
 
@@ -1007,7 +1019,7 @@ export function createBusinessOps(options: {
         }
         const submitted = verifySubmission(liveRun, "provider", "booking_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
-        if (!samePayload(submitted.envelope.payload, bookingPayload(agreement))) {
+        if (!samePayload(submitted.envelope.payload, bookingPayload(liveRun))) {
           return refuse("ENVELOPE_INVALID");
         }
         const approvalKey = liveRun.bound.provider!.approvalKey;
@@ -1041,6 +1053,9 @@ export function createBusinessOps(options: {
           itineraryId: agreement.itineraryId,
           feeMinor: agreement.feeMinor,
           totalMinor: agreement.totalMinor,
+          // N4b-9 (F16 → D12): the traveller count is the principal-signed
+          // mandate's partySize — never a model argument.
+          travelerCount: liveRun.mandate?.partySize,
         });
         if (!booked.ok) return refuse("STATE_REFUSED");
         const issued = liveRun.simRun!.issueTickets({ orderRef: booked.orderRef });
@@ -1205,10 +1220,16 @@ export function createBusinessOps(options: {
         // Independent check: the server's own observation of the order decides
         // truth — a claimed result that disagrees is flagged, not trusted.
         const observation = liveRun.simRun!.lookupOrder({ orderRef: liveRun.booking.orderRef });
+        // N4b-9 (F16 → D12): the server recomputes match — a short booking
+        // (ticketCount < the principal-signed partySize) is never a match,
+        // so a model's `match` over it lands flagged. A legacy/fabricated
+        // mandate without partySize keeps the v2 field checks only.
+        const expectedTravellers = liveRun.mandate?.partySize;
         const observed = (
           observation.status === "ISSUED" &&
           observation.itineraryId === liveRun.agreement.itineraryId &&
-          observation.totalMinor === liveRun.agreement.totalMinor
+          observation.totalMinor === liveRun.agreement.totalMinor &&
+          (expectedTravellers === undefined || observation.ticketCount === expectedTravellers)
         ) ? "match" : "mismatch";
         const claimed = payload.result as "match" | "mismatch";
         const verificationDigest = canonicalDigest(payload);

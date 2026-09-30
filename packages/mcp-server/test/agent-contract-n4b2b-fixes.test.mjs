@@ -164,6 +164,7 @@ function goodMandate(overrides = {}) {
     capMinor: 500_000,
     currency: "USD",
     allowedItineraryIds: ["IT-QW-ONESTOP"],
+    partySize: 2,
     expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     ...overrides,
   };

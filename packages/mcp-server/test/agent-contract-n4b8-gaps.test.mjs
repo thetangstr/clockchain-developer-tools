@@ -137,6 +137,7 @@ function signMandate(overrides = {}) {
     capMinor: 500_000,
     currency: "USD",
     allowedItineraryIds: ["IT-QW-ONESTOP"],
+    partySize: 2,
     expiresAt: new Date(Date.now() + 600_000).toISOString(),
     ...overrides,
   };

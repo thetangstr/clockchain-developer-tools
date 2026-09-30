@@ -519,7 +519,7 @@ test("LOW: used-mandates prunes entries past expiresAt + grace; live and legacy 
     assert.equal(pb.bound, true, JSON.stringify(pb));
 
     const submitMandate = async (token, mandateId) => {
-      const mandate = { kind: "mandate", mandateId, capMinor: 1_000, currency: "USD", allowedItineraryIds: ["IT-QW-ONESTOP"], expiresAt: "2030-01-01T00:00:00.000Z" };
+      const mandate = { kind: "mandate", mandateId, capMinor: 1_000, currency: "USD", partySize: 2, allowedItineraryIds: ["IT-QW-ONESTOP"], expiresAt: "2030-01-01T00:00:00.000Z" };
       const prep = await call(token, "mandate_prepare", {
         mandate, mandateSignature: signMandate(PRINCIPAL_PRIV, mandate),
       });
