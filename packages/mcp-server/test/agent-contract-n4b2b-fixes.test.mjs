@@ -539,10 +539,15 @@ test("the prepare builders emit exactly the frozen v2 payloads, field for field"
   };
   run.stage = "verified";
 
-  // settlement (vector 5)
+  // settlement (vector 5) — v2.3 (D13) adds `paymentRail` to BOTH rails'
+  // payloads, so the frozen v2 fixture is asserted on the other fields
+  // while the additive field is checked separately.
   const settlementPayload = payloadOf(business.dispatch(buyer, run, "settlement_prepare", {}, "0xnonce"));
-  assert.deepEqual(settlementPayload, vec(5).payload);
-  assert.equal(canonicalDigest(settlementPayload), vec(5).payloadDigest);
+  assert.equal(settlementPayload.paymentRail, "simulated", "D13: the default rail names itself");
+  assert.equal(settlementPayload.paymentIntentId, undefined, "the sim rail never mints an intent id");
+  const { paymentRail: _rail, ...frozenSettlement } = settlementPayload;
+  assert.deepEqual(frozenSettlement, vec(5).payload);
+  assert.equal(canonicalDigest(frozenSettlement), vec(5).payloadDigest);
 });
 
 // === 4. pinned policy digest + allow + key/ts binding =========================

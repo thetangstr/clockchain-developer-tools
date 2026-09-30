@@ -10,6 +10,7 @@ import {
   eip191RecoverPublicKey, publicKeyToAddress, verifyRoleSignature,
 } from "./eip191.js";
 import { checkApprovalRecord, verifyApprovalRecord } from "./approval.js";
+import { StripeTestRailError, type SettlementRail } from "./settlement-rail.js";
 import { sealedBoxSchema, type ApprovalRecord, type ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import type {
@@ -100,13 +101,19 @@ interface InboxMessage {
 }
 
 export interface BusinessOps {
+  /**
+   * Synchronous for every tool except the two Stripe-rail settlement
+   * calls — `settlement_prepare`/`settlement_authorize` under
+   * CONTRACT_SETTLEMENT_RAIL=stripe_test_mode resolve their rail calls
+   * and return a Promise. Callers must `await` the union.
+   */
   dispatch(
     principal: ContractPrincipal,
     run: ContractRun | undefined,
     tool: string,
     args: Record<string, unknown>,
     serverNonce: string,
-  ): BusinessOutcome;
+  ): BusinessOutcome | Promise<BusinessOutcome>;
   /**
    * Non-mutating probe (LOW, N4b-3): is `listingId` a live listing owned by
    * this provider? Used to refuse a provider bind that names a foreign,
@@ -129,6 +136,9 @@ const refuse = (code: ContractRefusalCode): BusinessOutcome => ({ ok: false, cod
 
 const AGREEMENT_DOMAIN = "agent-contract.agreement/v1";
 const MANDATE_DOMAIN = "agent-contract.mandate/v1";
+
+/** N4b-10 (D13): the sim-label every Stripe-rail response carries. */
+const STRIPE_RAIL_LABEL = "Stripe TEST mode — no real money";
 
 /** rev 6.5: the mandate is the family principal's statement — all fields required. */
 const mandateSchema = z.object({
@@ -193,6 +203,14 @@ export function createBusinessOps(options: {
    * carries every box opaque either way.
    */
   allowLegacySealV2?: boolean;
+  /**
+   * N4b-10 (spec D13): the Stripe TEST-mode settlement rail
+   * (CONTRACT_SETTLEMENT_RAIL=stripe_test_mode). Absent = the default
+   * simulated rail — the settlement payload then reads
+   * paymentRail:"simulated". Only the settlement_prepare/authorize cases
+   * touch this; its async calls make dispatch return a Promise there.
+   */
+  settlementRail?: SettlementRail;
 }): BusinessOps {
   const now = options.now ?? Date.now;
   const sim = options.sim;
@@ -233,11 +251,16 @@ export function createBusinessOps(options: {
    * N4b-4: the cancel pair stays reachable after terminalState — a booked
    * order may still be cancelled after a claimed mismatch ends the run
    * (verification_failed), and a replayed submit must land on the recorded
-   * cancellation for a deterministic result. The cases below still refuse
-   * ALREADY_TERMINAL once a settlement has authorized (settled runs can
-   * never be cancelled).
+   * cancellation for a deterministic result.
+   * N4b-10 (D13): settlement_authorize joins the set — a settled run is
+   * terminal, but a replayed authorize must reach the recorded outcome
+   * (idempotent replay), and a non-replay call still refuses
+   * STATE_REFUSED on the digest check. Settled runs can still never be
+   * cancelled.
    */
-  const TERMINAL_REPLAY_TOOLS = new Set(["booking_cancel_prepare", "booking_cancel_submit"]);
+  const TERMINAL_REPLAY_TOOLS = new Set([
+    "booking_cancel_prepare", "booking_cancel_submit", "settlement_authorize",
+  ]);
 
   /** Both seats must be occupied before any business step runs. */
   function requireRun(run: ContractRun | undefined, tool: string): BusinessOutcome | null {
@@ -464,7 +487,13 @@ export function createBusinessOps(options: {
     };
   }
 
-  /** v2 settlement payload — server-derived from agreement + verification. */
+  /**
+   * Settlement payload — server-derived from agreement + verification.
+   * v2.3 (D13) adds `paymentRail`: "simulated" on the default rail;
+   * "stripe_test_mode" plus the rail-created `paymentIntentId` on the
+   * Stripe rail. `simulated: true` stays on both — on the Stripe rail it
+   * means NO commercial transfer (D13 clarification).
+   */
   function settlementPayload(run: ContractRun): Record<string, unknown> | null {
     const agreement = run.agreement;
     const verification = run.verification;
@@ -478,6 +507,10 @@ export function createBusinessOps(options: {
       currency: agreement.currency,
       amountMinor: agreement.totalMinor,
       simulated: true,
+      paymentRail: options.settlementRail === undefined ? "simulated" : options.settlementRail.railId,
+      ...(run.settlementIntent !== undefined
+        ? { paymentIntentId: run.settlementIntent.paymentIntentId }
+        : {}),
     };
   }
 
@@ -585,7 +618,7 @@ export function createBusinessOps(options: {
     tool: string,
     args: Record<string, unknown>,
     serverNonce: string,
-  ): BusinessOutcome {
+  ): BusinessOutcome | Promise<BusinessOutcome> {
     // N4b-4: a signer past its published validUntil signs nothing — no
     // envelope, no receipt — so no business call can dispatch at all.
     if (!signingOpen()) return refuse("CONTRACT_UNAVAILABLE");
@@ -1331,6 +1364,68 @@ export function createBusinessOps(options: {
         ) {
           return refuse("STATE_REFUSED");
         }
+        const rail = options.settlementRail;
+        if (rail !== undefined) {
+          // N4b-10 (D13): the Stripe rail creates the UNCONFIRMED
+          // PaymentIntent at prepare time — sign-then-release. The match
+          // gate above runs BEFORE any rail call, so no PaymentIntent can
+          // exist without a match verification. The envelope then signs a
+          // payload naming the intent id. Async → dispatch returns a
+          // Promise for this branch only.
+          return (async (): Promise<BusinessOutcome> => {
+            const status = await rail.keyStatus();
+            if (status === "refused") {
+              // A non-test key resolved — fail closed, generic refusal.
+              return refuse("CONTRACT_UNAVAILABLE");
+            }
+            if (status === "absent") {
+              // Honest stop, NO PaymentIntent created — contract_status
+              // surfaces awaitingStripeTestKey.
+              liveRun.awaitingStripeTestKey = true;
+              return ok({
+                status: "awaiting_stripe_test_key",
+                paymentRail: rail.railId,
+                simulated: true,
+                label: STRIPE_RAIL_LABEL,
+                serverNonce,
+              });
+            }
+            if (liveRun.settlementIntent === undefined) {
+              let intent;
+              try {
+                intent = await rail.createPaymentIntent({
+                  amountAtomic: String(liveRun.agreement!.totalMinor),
+                  currency: liveRun.agreement!.currency.toLowerCase(),
+                  idempotencyKey: liveRun.agreement!.agreementDigest,
+                  metadata: {
+                    runId: liveRun.runId,
+                    agreementDigest: liveRun.agreement!.agreementDigest,
+                    verificationDigest: liveRun.verification!.verificationDigest,
+                  },
+                });
+              } catch (err) {
+                // Code-only, receipted; no intent created — retryable.
+                return ok({
+                  status: "failed",
+                  paymentRail: rail.railId,
+                  error: err instanceof StripeTestRailError ? err.code : "STRIPE_RAIL_HTTP",
+                  simulated: true,
+                  label: STRIPE_RAIL_LABEL,
+                  serverNonce,
+                });
+              }
+              liveRun.settlementIntent = { paymentIntentId: intent.id, status: intent.status };
+            }
+            liveRun.awaitingStripeTestKey = false;
+            const payload = settlementPayload(liveRun);
+            if (payload === null) return refuse("STATE_REFUSED");
+            const cap = capCheck(liveRun, payload.amountMinor as number, payload.currency as string, liveRun.agreement!.itineraryId);
+            if (cap !== null) return cap;
+            liveRun.settlementPrepared = true;
+            const envelope = prepare(liveRun, "buyer", "settlement_prepare", payload);
+            return ok({ envelope, serverNonce });
+          })();
+        }
         const payload = settlementPayload(liveRun);
         if (payload === null) return refuse("STATE_REFUSED");
         const cap = capCheck(liveRun, payload.amountMinor as number, payload.currency as string, liveRun.agreement!.itineraryId);
@@ -1342,8 +1437,21 @@ export function createBusinessOps(options: {
 
       case "settlement_authorize": {
         const expected = settlementPayload(liveRun);
-        if (expected === null || liveRun.settlementPrepared !== true || liveRun.settlement !== undefined) {
+        if (expected === null || liveRun.settlementPrepared !== true) {
           return refuse("STATE_REFUSED");
+        }
+        if (liveRun.settlement !== undefined) {
+          // N4b-10 (D13): idempotent replay — the SAME call (same
+          // envelope, signature and approval, digested as one request)
+          // returns the recorded result verbatim; a different call on a
+          // settled run is refused. Mirrors booking_execute (N4b-8 gap 6).
+          const replayDigest = canonicalDigest({
+            envelope: args.envelope,
+            signatureHex: args.signatureHex,
+            approval: args.approval,
+          });
+          if (replayDigest !== liveRun.settlementRequest?.digest) return refuse("STATE_REFUSED");
+          return ok({ ...liveRun.settlementRequest!.result, serverNonce });
         }
         if (
           liveRun.verification === undefined ||
@@ -1413,6 +1521,63 @@ export function createBusinessOps(options: {
           // signature-free deny submission above.
           return refuse("APPROVAL_INVALID");
         }
+        // N4b-10 (D13): signature AND approval verified — only now may the
+        // rail release. Confirm runs strictly after every auth check.
+        const rail = options.settlementRail;
+        if (rail !== undefined) {
+          return (async (): Promise<BusinessOutcome> => {
+            const paymentIntentId = liveRun.settlementIntent?.paymentIntentId;
+            if (paymentIntentId === undefined) return refuse("STATE_REFUSED");
+            let intent;
+            try {
+              intent = await rail.confirmPaymentIntent({
+                paymentIntentId,
+                idempotencyKey: `${expected.agreementDigest}:confirm`,
+              });
+            } catch (err) {
+              // Code-only, receipted; the run stays NON-settled and the
+              // authorize may be retried with the same envelope.
+              return ok({
+                status: "failed",
+                paymentRail: rail.railId,
+                paymentIntentId,
+                error: err instanceof StripeTestRailError ? err.code : "STRIPE_RAIL_HTTP",
+                simulated: true,
+                commercialTransfer: false,
+                label: STRIPE_RAIL_LABEL,
+                serverNonce,
+              });
+            }
+            const result = {
+              transferId: intent.id,
+              status: "released" as const,
+              paymentRail: rail.railId,
+              paymentIntentId: intent.id,
+              stripeStatus: intent.status,
+              simulated: true,
+              // Test mode — no commercial transfer ever occurred.
+              commercialTransfer: false,
+              label: STRIPE_RAIL_LABEL,
+            };
+            liveRun.settlementIntent = { paymentIntentId: intent.id, status: intent.status };
+            liveRun.settlement = {
+              transferId: intent.id,
+              status: "released",
+              paymentRail: rail.railId,
+              paymentIntentId: intent.id,
+            };
+            liveRun.settlementRequest = {
+              digest: canonicalDigest({
+                envelope: args.envelope,
+                signatureHex: args.signatureHex,
+                approval: args.approval,
+              }),
+              result,
+            };
+            options.endRun(liveRun, "settled", principal);
+            return ok({ ...result, serverNonce });
+          })();
+        }
         const transfer = liveRun.simRun!.payments.execute({
           agreementId: expected.agreementId,
           agreementDigest: expected.agreementDigest,
@@ -1423,28 +1588,46 @@ export function createBusinessOps(options: {
           currency: expected.currency,
         });
         if (!transfer.ok) return refuse("STATE_REFUSED");
-        liveRun.settlement = { transferId: transfer.receipt.transferId, status: "released" };
-        options.endRun(liveRun, "settled", principal);
-        return ok({
+        liveRun.settlement = { transferId: transfer.receipt.transferId, status: "released", paymentRail: "simulated" };
+        const simResult = {
           transferId: transfer.receipt.transferId,
-          status: "released",
+          status: "released" as const,
+          paymentRail: "simulated" as const,
           simulated: true,
           // The rail is a simulation: no commercial transfer ever occurred.
           commercialTransfer: false,
-          serverNonce,
-        });
+        };
+        liveRun.settlementRequest = {
+          digest: canonicalDigest({
+            envelope: args.envelope,
+            signatureHex: args.signatureHex,
+            approval: args.approval,
+          }),
+          result: simResult,
+        };
+        options.endRun(liveRun, "settled", principal);
+        return ok({ ...simResult, serverNonce });
       }
 
       case "settlement_status": {
+        const rail = options.settlementRail;
         const railStatus = liveRun.simRun!.payments.status();
+        const stripeReleased = liveRun.settlement?.paymentRail === "stripe_test_mode" && liveRun.settlement.status === "released";
         const state =
-          railStatus.state === "released" ? "released"
+          railStatus.state === "released" || stripeReleased ? "released"
+          : liveRun.awaitingStripeTestKey === true ? "awaiting_stripe_test_key"
           : liveRun.settlementPrepared === true ? "prepared"
           : "none";
         return ok({
           state,
           ...(railStatus.state === "released" ? { transferId: railStatus.transferId } : {}),
+          ...(stripeReleased ? { transferId: liveRun.settlement!.transferId } : {}),
+          paymentRail: rail?.railId ?? "simulated",
+          ...(liveRun.settlementIntent !== undefined
+            ? { paymentIntentId: liveRun.settlementIntent.paymentIntentId, stripeStatus: liveRun.settlementIntent.status }
+            : {}),
           simulated: true,
+          ...(rail !== undefined ? { label: STRIPE_RAIL_LABEL } : {}),
           serverNonce,
         });
       }

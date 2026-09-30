@@ -18,6 +18,7 @@ import type { ContractSigner } from "./envelope.js";
 import { CONTRACT_TOOL_DEFS, type ApprovalRecord, type ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import { createBusinessOps, type BusinessOps } from "./business.js";
+import type { SettlementRail } from "./settlement-rail.js";
 import { createSimWorld, type SimFaults, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
 import { eip191RecoverPublicKey, isCanonicalEip191Signature, publicKeyToAddress } from "./eip191.js";
 
@@ -188,8 +189,30 @@ export interface ContractRun {
     flagged: boolean;
     submittedAt: string;
   };
-  settlement?: { transferId: string; status: "authorized" | "released" };
+  settlement?: {
+    transferId: string;
+    status: "authorized" | "released";
+    /** N4b-10 (D13): which rail released the settlement + rail intent id. */
+    paymentRail?: "simulated" | "stripe_test_mode";
+    paymentIntentId?: string;
+  };
   settlementPrepared?: boolean;
+  /**
+   * N4b-10 (D13): the Stripe rail's created-but-unconfirmed PaymentIntent
+   * — its id rides inside the signed settlement payload.
+   */
+  settlementIntent?: { paymentIntentId: string; status: string };
+  /**
+   * N4b-10 (D13): settlement_prepare stopped awaiting the test key —
+   * surfaced honestly in contract_status / settlement_status; cleared
+   * when a prepare lands an envelope.
+   */
+  awaitingStripeTestKey?: boolean;
+  /**
+   * N4b-10 (D13): idempotent settlement_authorize replay — the recorded
+   * request digest + result body (mirrors booking.requestDigest).
+   */
+  settlementRequest?: { digest: string; result: Record<string, unknown> };
   /**
    * The principal signature verified at `mandate_prepare`, pinned to that
    * envelope's nonce. `mandate_submit` replays it against the envelope's
@@ -304,6 +327,8 @@ export interface ContractService {
   runIdForPrincipal(keyId: string): string | undefined;
   /** N4b-8 (gap 4): whether a run anchor is configured (contract_status uses it for the "disabled" summary). */
   readonly anchorConfigured: boolean;
+  /** N4b-10 (D13): the configured settlement rail id — "simulated" or "stripe_test_mode" (contract_status reports it). */
+  readonly settlementRailId: "simulated" | "stripe_test_mode";
   /**
    * N4b-9 (F14): the persisted terminal job for a run — survives restart,
    * so contract_status can still render a terminal run whose in-memory
@@ -879,6 +904,13 @@ export function createContractService(options: {
   anchorConfirmMaxAttempts?: number;
   /** Injectable for tests; defaults to an unref'd setTimeout. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * N4b-10 (spec D13): the Stripe TEST-mode settlement rail
+   * (CONTRACT_SETTLEMENT_RAIL=stripe_test_mode). Absent = the default
+   * simulated rail. Passed through to business — only the settlement
+   * prepare/authorize cases touch it.
+   */
+  settlementRail?: SettlementRail;
 }): ContractService {
   const now = options.now ?? Date.now;
   const sim = options.sim ?? createSimWorld({
@@ -1780,6 +1812,8 @@ export function createContractService(options: {
     // N4b-8 (gap 4): business fires the anchor at agreement formation;
     // the service owns the async call + the outcome receipt.
     ...(options.anchor !== undefined ? { anchorRun: fireAnchor } : {}),
+    // N4b-10 (D13): absent = the default simulated settlement rail.
+    ...(options.settlementRail !== undefined ? { settlementRail: options.settlementRail } : {}),
   });
 
   /**
@@ -1848,6 +1882,7 @@ export function createContractService(options: {
     issueBindChallenge,
     business,
     anchorConfigured: options.anchor !== undefined,
+    settlementRailId: options.settlementRail?.railId ?? "simulated",
     recordReceipt: recordRunReceipt,
     // N4b-9 (F14): terminal outbox surface — status visibility for a
     // recovered run, close-state persistence, post-restart outcome minting,
@@ -1987,9 +2022,20 @@ export function createContractService(options: {
         preBind,
         // N6g-2 (H1): every sim-backed receipt is labelled in the feed —
         // keyed by receiptId, `simulated` is always true on emission.
+        // N4b-10 (D13): settlement-family labels name the rail that produced
+        // them — "stripe_test_mode" carries the "no real money" text.
         simLabels: run.receipts
           .filter((r) => SIM_LABELLED_TOOLS.has(r.tool))
-          .map((r) => ({ receiptId: r.receiptId, simulated: true })),
+          .map((r) => ({
+            receiptId: r.receiptId,
+            simulated: true,
+            ...(r.tool.startsWith("settlement")
+              ? {
+                  paymentRail: options.settlementRail?.railId ?? "simulated",
+                  label: options.settlementRail !== undefined ? "Stripe TEST mode — no real money" : "simulated — no real money",
+                }
+              : {}),
+          })),
         // N6g-2 (R12): verified consequential-submit approvals, bound to
         // the receipted `*_prepare` response that carried the envelope.
         ...(run.approvalRecords !== undefined && run.approvalRecords.length > 0

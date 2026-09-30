@@ -179,13 +179,25 @@ test("MANDATE_REFUSED and refusals cannot carry the cap or extras", () => {
 
 test("sim-backed outputs require simulated:true; every output carries serverNonce", () => {
   const simBacked = ["catalog_quote", "booking_execute", "booking_lookup", "booking_cancel_submit", "settlement_authorize", "settlement_status"];
+  const shapeOf = (schema) => (typeof schema._def.shape === "function" ? schema._def.shape() : undefined);
+  // N4b-10 (D13): settlement_prepare's output is a union (envelope | status
+  // body) — every variant must satisfy the same invariants.
+  const variantsOf = (schema) => {
+    const shape = shapeOf(schema);
+    if (shape !== undefined) return [shape];
+    if (Array.isArray(schema._def.options)) return schema._def.options.map((o) => shapeOf(o));
+    return [];
+  };
   for (const def of CONTRACT_TOOL_DEFS) {
     assert.equal(def.simulated, simBacked.includes(def.name), def.name);
-    const shape = def.outputSchema._def.shape();
-    assert.ok("serverNonce" in shape, `${def.name} output lacks serverNonce`);
-    if (def.simulated) {
-      assert.equal(shape.simulated._def.typeName, "ZodLiteral", `${def.name} simulated flag`);
-      assert.equal(shape.simulated._def.value, true, `${def.name} simulated value`);
+    const variants = variantsOf(def.outputSchema);
+    assert.ok(variants.length > 0 && variants.every((s) => s !== undefined), `${def.name} output shape unreadable`);
+    for (const shape of variants) {
+      assert.ok("serverNonce" in shape, `${def.name} output lacks serverNonce`);
+      if (def.simulated) {
+        assert.equal(shape.simulated._def.typeName, "ZodLiteral", `${def.name} simulated flag`);
+        assert.equal(shape.simulated._def.value, true, `${def.name} simulated value`);
+      }
     }
   }
 });

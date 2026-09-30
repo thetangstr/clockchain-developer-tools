@@ -529,7 +529,20 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     name: "settlement_prepare",
     role: "buyer",
     schema: {},
-    outputSchema: z.object({ ...envelopeOut }).strict(),
+    // N4b-10 (D13): the Stripe rail may answer a non-envelope status body —
+    // awaiting_stripe_test_key (honest stop, no intent created) or a
+    // code-only failed creation. Either is receipted and terminal-neutral.
+    outputSchema: z.union([
+      z.object({ ...envelopeOut }).strict(),
+      z.object({
+        status: z.enum(["awaiting_stripe_test_key", "failed"]),
+        paymentRail: z.enum(["simulated", "stripe_test_mode"]),
+        error: z.string().min(1).max(160).optional(),
+        label: z.string().min(1).max(128).optional(),
+        simulated: z.literal(true),
+        serverNonce,
+      }).strict(),
+    ]),
     readOnly: false,
     simulated: false,
   },
@@ -544,8 +557,14 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       approval: approvalRecordSchema,
     },
     outputSchema: z.object({
-      transferId: z.string().min(4).max(64),
+      // N4b-10 (D13): transferId absent on a code-only rail failure.
+      transferId: z.string().min(4).max(64).optional(),
       status: z.enum(["authorized", "released", "failed"]),
+      paymentRail: z.enum(["simulated", "stripe_test_mode"]).optional(),
+      paymentIntentId: z.string().min(4).max(128).optional(),
+      stripeStatus: z.string().min(1).max(64).optional(),
+      error: z.string().min(1).max(160).optional(),
+      label: z.string().min(1).max(128).optional(),
       simulated: z.literal(true),
       commercialTransfer: z.literal(false),
       serverNonce,
@@ -558,8 +577,17 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     role: "both",
     schema: {},
     outputSchema: z.object({
-      state: z.enum(["none", "prepared", "authorized", "released", "failed"]),
+      state: z.enum([
+        "none", "prepared", "authorized", "released", "failed",
+        // N4b-10 (D13): the Stripe rail is configured but unkeyed — the
+        // honest stop, no PaymentIntent exists.
+        "awaiting_stripe_test_key",
+      ]),
       transferId: z.string().min(4).max(64).optional(),
+      paymentRail: z.enum(["simulated", "stripe_test_mode"]).optional(),
+      paymentIntentId: z.string().min(4).max(128).optional(),
+      stripeStatus: z.string().min(1).max(64).optional(),
+      label: z.string().min(1).max(128).optional(),
       simulated: z.literal(true),
       serverNonce,
     }).strict(),
@@ -584,6 +612,14 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         "terminal",
       ]),
       terminalState: terminalState.nullable(),
+      // N4b-10 (D13): settlement rail visibility — absent on pre-bind and
+      // recovered-terminal statuses (the durable job carries no rail state).
+      settlement: z.object({
+        paymentRail: z.enum(["simulated", "stripe_test_mode"]),
+        awaitingStripeTestKey: z.boolean(),
+        paymentIntentId: z.string().min(4).max(128).optional(),
+        stripeStatus: z.string().min(1).max(64).optional(),
+      }).strict().optional(),
       // N4b-8 (gap 3): telemetry close delivery state — null until the run
       // reaches a terminal state; "failed" stays visible forever.
       telemetryClose: z.object({

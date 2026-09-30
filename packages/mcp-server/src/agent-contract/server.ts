@@ -289,6 +289,16 @@ export function buildContractServer(options: {
       outcome = ok({
         stage: run.stage,
         terminalState: run.terminalState,
+        // N4b-10 (D13): settlement rail visibility — "simulated" by
+        // default; awaitingStripeTestKey is the honest stop when the
+        // Stripe rail is configured but unkeyed.
+        settlement: {
+          paymentRail: service.settlementRailId,
+          awaitingStripeTestKey: run.awaitingStripeTestKey === true,
+          ...(run.settlementIntent !== undefined
+            ? { paymentIntentId: run.settlementIntent.paymentIntentId, stripeStatus: run.settlementIntent.status }
+            : {}),
+        },
         // N4b-8 (gap 3): a permanently failed telemetry close is visible here.
         telemetryClose: run.telemetryClose === undefined ? null : {
           status: run.telemetryClose.status,
@@ -324,7 +334,9 @@ export function buildContractServer(options: {
 
     // Every other catalogued tool is business semantics — mandate,
     // negotiation, booking, verification, settlement (business.ts).
-    const dispatched = service.business.dispatch(
+    // N4b-10 (D13): settlement cases may return a Promise (the Stripe
+    // TEST rail is async) — awaited here; every other tool stays sync.
+    const dispatched = await service.business.dispatch(
       principal, run, name, parsed.data, serverNonce,
     );
     outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
