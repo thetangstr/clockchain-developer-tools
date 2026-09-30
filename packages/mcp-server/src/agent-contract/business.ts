@@ -1436,6 +1436,17 @@ export function createBusinessOps(options: {
       }
 
       case "settlement_authorize": {
+        // Adversarial review (H1): this tool is in TERMINAL_REPLAY_TOOLS so
+        // a settled run's byte-identical replay can reach the recorded
+        // result — but that bypass is for SETTLED runs only. A run that
+        // ended any other way (a deny submission's blocked_by_policy,
+        // verification_failed, cancelled, ...) has settlement === undefined;
+        // letting a second prepare envelope authorize after a policy deny
+        // would CONFIRM a PaymentIntent post-deny on the Stripe rail.
+        // ALREADY_TERMINAL whenever terminal && !settlement.
+        if (liveRun.terminalState !== null && liveRun.settlement === undefined) {
+          return refuse("ALREADY_TERMINAL");
+        }
         const expected = settlementPayload(liveRun);
         if (expected === null || liveRun.settlementPrepared !== true) {
           return refuse("STATE_REFUSED");

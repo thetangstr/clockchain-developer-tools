@@ -164,6 +164,47 @@ test("D13: a bad signature, a deny submission, or an ambiguous deny+sig never re
   }
 });
 
+// Adversarial review H1 (repro ported from /tmp/review-deny-then-pay.test.mjs):
+// settlement_authorize sits in TERMINAL_REPLAY_TOOLS, so a deny submission on
+// envelope E1 ending the run blocked_by_policy must ALSO refuse an authorize
+// on the second envelope E2 — a settled replay is the only terminal bypass.
+test("H1: deny on E1 ends blocked_by_policy — authorize on E2 is ALREADY_TERMINAL (both rails)", async () => {
+  for (const railSpec of [undefined, fakeRail().rail]) {
+    const terms = [];
+    const env = await boot({ settlementRail: railSpec, onTerminalRun: (r, s) => terms.push(s) });
+    try {
+      await verifiedPair(env, uuid(813), "tb1", "tp1");
+      const e1 = await env.callTool("tb1", "settlement_prepare", {});
+      const e2 = await env.callTool("tb1", "settlement_prepare", {});
+      assert.ok(e1.envelope !== undefined && e2.envelope !== undefined, JSON.stringify({ e1, e2 }));
+      assert.notEqual(e1.envelope.nonce, e2.envelope.nonce);
+      const deny = makeApproval({
+        envelope: e1.envelope, role: "buyer", action: "settlement",
+        tool: "settlement_authorize", key: keys.buyerApproval, decision: "deny",
+      });
+      const d = await env.callTool("tb1", "settlement_authorize", {
+        envelope: e1.envelope, approval: deny,
+      });
+      assert.equal(d.error, "POLICY_DENIED", JSON.stringify(d));
+      const run = env.service.runFor(e1.envelope.runId);
+      assert.equal(run.terminalState, "blocked_by_policy");
+      const allow = makeApproval({
+        envelope: e2.envelope, role: "buyer", action: "settlement",
+        tool: "settlement_authorize", key: keys.buyerApproval,
+      });
+      const paid = await signedSubmit(env, {
+        token: "tb1", role: "buyer", prepared: e2,
+        submitTool: "settlement_authorize", extraArgs: { approval: allow },
+      });
+      // The settle-after-deny hole: on the Stripe rail this CONFIRMED a
+      // PaymentIntent after a policy deny. It must refuse.
+      assert.equal(paid.error, "ALREADY_TERMINAL", JSON.stringify(paid));
+      assert.equal(run.settlement, undefined, "a denied run can never settle");
+      assert.deepEqual(terms, ["blocked_by_policy"]);
+    } finally { env.close(); }
+  }
+});
+
 test("D13: absent key → awaiting_stripe_test_key; no intent; honest status", async () => {
   const { rail, calls } = fakeRail({ keyStatus: "absent" });
   const env = await boot({ settlementRail: rail });
