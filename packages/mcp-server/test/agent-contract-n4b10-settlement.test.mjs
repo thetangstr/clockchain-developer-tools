@@ -205,6 +205,28 @@ test("H1: deny on E1 ends blocked_by_policy — authorize on E2 is ALREADY_TERMI
   }
 });
 
+// L2 (adversarial review): the mandate cap must run BEFORE the rail —
+// a cap-failing agreement never mints a PaymentIntent (nor probes the key).
+// A cap-below-total mandate can never get here (booking refuses it first),
+// so the reachable cap-fail at settle is mandate EXPIRY: verified at t,
+// then the clock jumps past mandate.expiresAt.
+test("L2: an expired mandate refuses settlement_prepare before ANY rail call", async () => {
+  const { rail, calls } = fakeRail();
+  // Offset clock: real time during setup (approvals must not read as
+  // future-dated), then jump past the mandate's expiresAt before settle.
+  let offset = 0;
+  const env = await boot({ settlementRail: rail, now: () => Date.now() + offset });
+  try {
+    const { runId } = await verifiedPair(env, uuid(814));
+    offset = 601_000; // mandate expiresAt is signing-time + 600s
+    const prepS = await env.callTool("tb1", "settlement_prepare", {});
+    assert.equal(prepS.error, "MANDATE_REFUSED", JSON.stringify(prepS));
+    assert.equal(calls.keyStatus, 0, "key probe must not run");
+    assert.equal(calls.create, 0, "no PaymentIntent on a cap failure");
+    assert.equal(env.service.runFor(runId).settlementIntent, undefined);
+  } finally { env.close(); }
+});
+
 test("D13: absent key → awaiting_stripe_test_key; no intent; honest status", async () => {
   const { rail, calls } = fakeRail({ keyStatus: "absent" });
   const env = await boot({ settlementRail: rail });

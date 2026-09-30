@@ -1373,6 +1373,12 @@ export function createBusinessOps(options: {
           // payload naming the intent id. Async → dispatch returns a
           // Promise for this branch only.
           return (async (): Promise<BusinessOutcome> => {
+            // L2 (adversarial review): the mandate cap runs BEFORE any
+            // rail interaction — a cap-failing agreement must never mint a
+            // PaymentIntent, and shouldn't even probe the key.
+            const capFirst = capCheck(liveRun, liveRun.agreement!.totalMinor as number,
+              liveRun.agreement!.currency as string, liveRun.agreement!.itineraryId);
+            if (capFirst !== null) return capFirst;
             const status = await rail.keyStatus();
             if (status === "refused") {
               // A non-test key resolved — fail closed, generic refusal.
@@ -1419,8 +1425,6 @@ export function createBusinessOps(options: {
             liveRun.awaitingStripeTestKey = false;
             const payload = settlementPayload(liveRun);
             if (payload === null) return refuse("STATE_REFUSED");
-            const cap = capCheck(liveRun, payload.amountMinor as number, payload.currency as string, liveRun.agreement!.itineraryId);
-            if (cap !== null) return cap;
             liveRun.settlementPrepared = true;
             const envelope = prepare(liveRun, "buyer", "settlement_prepare", payload);
             return ok({ envelope, serverNonce });
