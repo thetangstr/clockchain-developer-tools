@@ -306,10 +306,10 @@ export function createBusinessOps(options: {
   function prepareReceiptDigestFor(
     run: ContractRun,
     role: ContractRole,
-    family: "booking" | "settlement",
+    prepareTool: "booking_prepare" | "booking_cancel_prepare" | "settlement_prepare",
     envelope: PrepareEnvelope,
   ): string | undefined {
-    const tool = `${family}_prepare`;
+    const tool = prepareTool;
     for (const r of run.receipts) {
       if (r.tool !== tool || r.outcome !== "ok" || r.principal.role !== role) {
         continue;
@@ -333,13 +333,13 @@ export function createBusinessOps(options: {
   function recordApproval(
     run: ContractRun,
     role: ContractRole,
-    family: "booking" | "settlement",
+    prepareTool: "booking_prepare" | "booking_cancel_prepare" | "settlement_prepare",
     envelope: PrepareEnvelope,
     approval: ApprovalRecord,
   ): void {
     (run.approvalRecords ??= []).push({
       record: structuredClone(approval),
-      boundDigest: prepareReceiptDigestFor(run, role, family, envelope),
+      boundDigest: prepareReceiptDigestFor(run, role, prepareTool, envelope),
     });
   }
 
@@ -1040,7 +1040,7 @@ export function createBusinessOps(options: {
         // N6g-2 (R12): keep the verified record for the observer feed —
         // bound to the receipted booking_prepare response carrying this
         // exact envelope.
-        recordApproval(liveRun, "provider", "booking", submitted.envelope, args.approval as ApprovalRecord);
+        recordApproval(liveRun, "provider", "booking_prepare", submitted.envelope, args.approval as ApprovalRecord);
         if (decision === "deny") {
           // N4b-8 (gap 5): a cryptographically VALID deny is a policy verdict —
           // the run ends blocked_by_policy: terminal, receipted, and (wired)
@@ -1156,7 +1156,10 @@ export function createBusinessOps(options: {
           nowMs: now(),
         });
         if (cancelDecision === null) return refuse("APPROVAL_INVALID");
-        recordApproval(liveRun, "provider", "booking", submitted.envelope, args.approval as ApprovalRecord);
+        // R12 review fix (from N6g-2 request): the cancel envelope was issued
+        // by booking_cancel_prepare — bind to THAT receipt, never to a
+        // booking_prepare receipt from a different envelope.
+        recordApproval(liveRun, "provider", "booking_cancel_prepare", submitted.envelope, args.approval as ApprovalRecord);
         if (cancelDecision === "deny") {
           // N4b-8 (gap 5): a signed deny on the cancel gate refuses the cancel
           // but does NOT end the run — cancel can fire post-terminal
@@ -1317,7 +1320,7 @@ export function createBusinessOps(options: {
           nowMs: now(),
         });
         if (settleDecision === null) return refuse("APPROVAL_INVALID");
-        recordApproval(liveRun, "buyer", "settlement", submitted.envelope, args.approval as ApprovalRecord);
+        recordApproval(liveRun, "buyer", "settlement_prepare", submitted.envelope, args.approval as ApprovalRecord);
         if (settleDecision === "deny") {
           // N4b-8 (gap 5): a signed deny on the settlement gate is the same
           // policy verdict — the run ends blocked_by_policy.
