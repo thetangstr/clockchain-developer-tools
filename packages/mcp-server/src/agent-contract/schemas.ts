@@ -485,7 +485,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       orderRef,
       status: z.literal("CANCELLED"),
       cancelledAt: isoDateTime,
-      terminalState: z.literal("cancelled"),
+      // N4b-9 (F11): the run's true terminal state — "cancelled" for a clean
+      // cancel; a cleanup cancel after verification_failed reports that.
+      terminalState,
       simulated: z.literal(true),
       serverNonce,
     }).strict(),
@@ -596,7 +598,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       anchor: z.enum(["disabled", "ok", "pending", "failed"]).nullable(),
       anchors: z.object({
         agreement: z.object({
-          status: z.enum(["anchoring", "anchored", "failed"]),
+          // N4b-9 (F13): "pending" = write resolved but block/time not yet
+          // confirmed — NOT anchored.
+          status: z.enum(["anchoring", "pending", "anchored", "failed"]),
           digest: digestHex,
           anchorId: z.string().min(1).max(160).nullable(),
           eventHash: digestHex.nullable(),
@@ -609,7 +613,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
           error: z.string().nullable(),
         }).strict().nullable(),
         terminal: z.object({
-          status: z.enum(["anchoring", "anchored", "failed"]),
+          status: z.enum(["anchoring", "pending", "anchored", "failed"]),
           digest: digestHex,
           anchorId: z.string().min(1).max(160).nullable(),
           eventHash: digestHex.nullable(),

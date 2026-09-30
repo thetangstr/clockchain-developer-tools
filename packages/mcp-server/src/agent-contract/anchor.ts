@@ -15,7 +15,7 @@
  *
  * Tests inject a fake ContractAnchor — no network.
  */
-import { tsaIssue } from "@clockchain/core";
+import { deriveAnchorStatus, tsaIssue, tsaStatus } from "@clockchain/core";
 
 import type { ClockchainClient } from "@clockchain/core";
 
@@ -45,6 +45,15 @@ export interface ContractAnchor {
     runId: string;
     digestHex: string;
   }): Promise<AnchorWrite>;
+  /**
+   * N4b-9 (F13): re-check an issued anchor's confirmation state. A resolved
+   * anchor write whose `anchor.status` is `pending_confirmation` is NOT
+   * anchored — the job stays pending and is re-confirmed via this call
+   * (boot recovery, scheduled polls). Optional: a backing that cannot poll
+   * simply omits it and the pending job is re-issued via `anchor` instead
+   * (idempotent — deterministic commitmentId).
+   */
+  confirm?(anchorId: string): Promise<AnchorWrite["anchor"]>;
 }
 
 /**
@@ -63,9 +72,39 @@ export function createTsaContractAnchor(client: ClockchainClient): ContractAncho
       });
       return {
         anchorId: `tsa:${receipt.commitmentId}`,
-        eventHash: receipt.eventHash,
+        // N4b-9 (F17): core emits a BARE 64-hex eventHash; the published
+        // contract_status schema requires the 0x-prefixed digestHex form.
+        // Normalization lives at this adapter boundary — the one place core
+        // types cross into the contract vocabulary.
+        eventHash: normalizeDigestHex(receipt.eventHash),
         anchor: receipt.anchor,
       };
     },
+    // N4b-9 (F13): confirmation polling for pending anchors — reads the
+    // on-chain trail so a restart/recheck can resolve block/time honestly.
+    async confirm(anchorId) {
+      const commitmentId = anchorId.startsWith("tsa:") ? anchorId.slice(4) : anchorId;
+      const status = await tsaStatus(client, commitmentId);
+      const latest = status.events.at(-1);
+      return {
+        ledgerId: latest?.ledgerId ?? "",
+        blockHeight: latest?.blockHeight ?? null,
+        time: latest?.time ?? null,
+        status: deriveAnchorStatus(latest?.blockHeight ?? null),
+      };
+    },
   };
+}
+
+/**
+ * Bare or prefixed hex (either case) normalizes to the published `0x`-lower
+ * digestHex form. Anything else fails at the adapter boundary — a malformed
+ * event hash must never reach `contract_status`.
+ */
+function normalizeDigestHex(hash: string): string {
+  const raw = hash.startsWith("0x") || hash.startsWith("0X") ? hash.slice(2) : hash;
+  if (!/^[0-9a-fA-F]{64}$/.test(raw)) {
+    throw new Error(`anchor substrate returned a malformed eventHash (${hash.length} chars)`);
+  }
+  return `0x${raw.toLowerCase()}`;
 }

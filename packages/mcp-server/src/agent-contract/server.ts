@@ -219,6 +219,52 @@ export function buildContractServer(options: {
 
     if (name === "contract_status") {
       if (run === undefined) {
+        // N4b-9 (F14): after a restart the in-memory run is gone but its
+        // terminal job persisted — render the durable record (terminal
+        // state, close delivery, anchor outcomes), not "rendezvous".
+        const job = runId !== undefined ? service.terminalJobFor(runId) : undefined;
+        if (job !== undefined && job.terminalState !== null) {
+          const anchorJobs = job.anchors === undefined
+            ? []
+            : [job.anchors.agreement, job.anchors.terminal].filter((a) => a !== undefined);
+          outcome = ok({
+            stage: job.terminalState === "settled" ? "settled" : "terminal",
+            terminalState: job.terminalState,
+            telemetryClose: job.close === undefined || job.receiptDigest === undefined
+              ? null
+              : {
+                  status: job.close.status,
+                  attempts: job.close.attempts,
+                  lastError: job.close.lastError ?? null,
+                  deliveredAt: job.close.deliveredAt ?? null,
+                  receiptDigest: job.receiptDigest,
+                },
+            anchor: anchorJobs.length === 0 && !service.anchorConfigured ? "disabled"
+              : anchorJobs.some((a) => a!.status === "failed") ? "failed"
+              : anchorJobs.some((a) => a!.status === "anchoring" || a!.status === "pending") ? "pending"
+              : "ok",
+            anchors: job.anchors === undefined ? null : {
+              agreement: job.anchors.agreement === undefined ? null : {
+                status: job.anchors.agreement.status,
+                digest: job.anchors.agreement.digest,
+                anchorId: job.anchors.agreement.anchorId ?? null,
+                eventHash: job.anchors.agreement.eventHash ?? null,
+                ledger: job.anchors.agreement.ledger ?? null,
+                error: job.anchors.agreement.error ?? null,
+              },
+              terminal: job.anchors.terminal === undefined ? null : {
+                status: job.anchors.terminal.status,
+                digest: job.anchors.terminal.digest,
+                anchorId: job.anchors.terminal.anchorId ?? null,
+                eventHash: job.anchors.terminal.eventHash ?? null,
+                ledger: job.anchors.terminal.ledger ?? null,
+                error: job.anchors.terminal.error ?? null,
+              },
+            },
+            serverNonce,
+          });
+          return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
+        }
         // No run yet — the caller is still in discovery/handshake. The call
         // lands on the principal's pre-bind chain (M1).
         outcome = ok({ stage: "rendezvous", terminalState: null, telemetryClose: null, anchor: null, anchors: null, serverNonce });
@@ -235,7 +281,10 @@ export function buildContractServer(options: {
       const anchorSummary =
         anchorStates === undefined && !service.anchorConfigured ? "disabled"
         : anchorVals.some((s) => s!.status === "failed") ? "failed"
-        : anchorVals.some((s) => s!.status === "anchoring") ? "pending"
+        // N4b-9 (F13): "anchoring" AND "pending" (resolved write awaiting
+        // block/time confirmation) both read as pending — "ok" only once
+        // every fired anchor is confirmed anchored.
+        : anchorVals.some((s) => s!.status === "anchoring" || s!.status === "pending") ? "pending"
         : "ok";
       outcome = ok({
         stage: run.stage,

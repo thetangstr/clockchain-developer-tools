@@ -11,6 +11,8 @@ import { canonicalDigest } from "./canonical.js";
 import { guidanceDigests, type GuidanceDigests } from "./tools-list.js";
 import { verifyCertificateEnvelope, type HostRootPin } from "./certificate.js";
 import type { ContractAnchor } from "./anchor.js";
+import { mintTerminalReceipt, type TerminalReceipt } from "./close-emitter.js";
+import { createTerminalOutbox, type TerminalAnchorJob, type TerminalJob } from "./terminal-jobs.js";
 import { makeReceipt, checkReceiptDraft, chainHead, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
 import type { ContractSigner } from "./envelope.js";
 import { CONTRACT_TOOL_DEFS, type ApprovalRecord, type ContractRole } from "./schemas.js";
@@ -87,7 +89,12 @@ export type ContractStage =
  * contract_status — never silent.
  */
 export interface AnchorRunState {
-  status: "anchoring" | "anchored" | "failed";
+  /**
+   * N4b-9 (F13): "anchored" only when the backing confirms block+time;
+   * a resolved-but-unconfirmed write is "pending" (retained for polling),
+   * never reported as anchored.
+   */
+  status: "anchoring" | "pending" | "anchored" | "failed";
   /** The anchored subject — agreementDigest or the terminal chain head. */
   digest: string;
   /** `tsa:<commitmentId>` when anchored. */
@@ -297,6 +304,34 @@ export interface ContractService {
   runIdForPrincipal(keyId: string): string | undefined;
   /** N4b-8 (gap 4): whether a run anchor is configured (contract_status uses it for the "disabled" summary). */
   readonly anchorConfigured: boolean;
+  /**
+   * N4b-9 (F14): the persisted terminal job for a run — survives restart,
+   * so contract_status can still render a terminal run whose in-memory
+   * record is gone.
+   */
+  terminalJobFor(runId: string): TerminalJob | undefined;
+  /** N4b-9 (F14): persisted jobs still owed work (close delivery or anchor confirmation) — for boot recovery. */
+  pendingTerminalJobs(): TerminalJob[];
+  /**
+   * N4b-9 (F14): record a terminal-close delivery outcome. Mints the
+   * evidence onto the run chain while the run lives; after a restart the
+   * run is gone and the receipt is minted into the job's persisted
+   * evidence (same signer, chained on the recorded transition tip).
+   */
+  recordTerminalOutcome(
+    runId: string,
+    outcome: "delivered" | "failed",
+    detail: { receiptDigest: string; attempts: number; lastError?: string; response?: unknown },
+  ): void;
+  /** N4b-9 (F14): persist emitter delivery state into the outbox job. */
+  persistTerminalClose(runId: string, state: { status: "delivering" | "delivered" | "failed"; attempts: number; lastError?: string; deliveredAt?: string }): void;
+  /**
+   * N4b-9 (F14): bounded shutdown drain — waits for in-flight anchor calls
+   * and the wired `onDrain` (close emitter) up to `deadlineMs`. A deadline
+   * expiry never hangs shutdown; unfinished jobs stay persisted for the
+   * next boot.
+   */
+  drain(deadlineMs: number): Promise<void>;
   /**
    * Move a run to its terminal state and retire the sim world entry
    * (post-terminal retention lives in the world itself). The triggering
@@ -676,13 +711,21 @@ function persistUsedMandates(stateDir: string, used: ReadonlyMap<string, UsedMan
  */
 const PROCESS_BOOT_ID = randomBytes(16).toString("hex");
 
-function acquireStateLock(stateDir: string): () => void {
+function acquireStateLock(stateDir: string, preExit?: () => Promise<void>): () => void {
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, LOCK_FILE);
   linkLock(file);
   let held = true;
-  const onTerm = () => { try { release(); } finally { process.exit(143); } };
-  const onInt = () => { try { release(); } finally { process.exit(130); } };
+  // N4b-9 (F14): drain terminal jobs for a bounded window before release —
+  // a graceful shutdown still delivers/persists what it can.
+  const onTerm = () => {
+    void Promise.resolve(preExit?.())
+      .finally(() => { try { release(); } finally { process.exit(143); } });
+  };
+  const onInt = () => {
+    void Promise.resolve(preExit?.())
+      .finally(() => { try { release(); } finally { process.exit(130); } });
+  };
   process.on("SIGTERM", onTerm);
   process.on("SIGINT", onInt);
   function release(): void {
@@ -813,7 +856,12 @@ export function createContractService(options: {
    * terminal state is recorded; the triggering principal is passed so the
    * delivery outcome can be receipted on the run chain.
    */
-  onTerminalRun?: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => void;
+  onTerminalRun?: (run: ContractRun, terminalState: string, principal: ContractPrincipal | undefined, receipt: TerminalReceipt) => void;
+  /**
+   * N4b-9 (F14): awaited inside `drain(deadlineMs)` — the config layer wires
+   * the close emitter's bounded flush here.
+   */
+  onDrain?: () => Promise<void>;
   /**
    * N4b-8 (gap 4): the run anchor — production wiring is
    * `createTsaContractAnchor` (tsa_issue over the in-process Clockchain
@@ -822,6 +870,15 @@ export function createContractService(options: {
    * and are receipted (anchored AND failed).
    */
   anchor?: ContractAnchor;
+  /**
+   * N4b-9 (F13): delay before re-confirming a `pending_confirmation`
+   * anchor write (default 30s), and the max confirm attempts before the
+   * job rests as `pending` (restart recovery resumes it). 0 disables.
+   */
+  anchorConfirmDelayMs?: number;
+  anchorConfirmMaxAttempts?: number;
+  /** Injectable for tests; defaults to an unref'd setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
 }): ContractService {
   const now = options.now ?? Date.now;
   const sim = options.sim ?? createSimWorld({
@@ -862,6 +919,69 @@ export function createContractService(options: {
   let usedMandates: Map<string, UsedMandate> = new Map();
   // N4b-7: write-once {keyId → {agentId, runId}} for late-bound (*) tokens.
   let agentBindings: Map<string, AgentBinding> = new Map();
+  /**
+   * N4b-9 (F14): the durable terminal outbox — close receipts, anchor
+   * subjects, delivery/anchor outcomes, and post-restart evidence survive
+   * the in-memory run. In-memory-only when no stateDir is configured.
+   */
+  const outbox = createTerminalOutbox(options.stateDir);
+  /**
+   * N4b-9 (F14): a persist failure must never strand a terminal
+   * transition that already executed — the in-memory job is still recorded
+   * (every later mutation retries the durable write); the error is kept
+   * on the job so contract_status can surface it.
+   */
+  const updateJob = (runId: string, mutate: (job: TerminalJob) => void): TerminalJob | undefined => {
+    try {
+      return outbox.update(runId, now(), mutate);
+    } catch {
+      return outbox.get(runId);
+    }
+  };
+  /**
+   * F14: mint a post-transition evidence receipt into the persisted job —
+   * the post-restart path, when the in-memory run is gone. Chains on the
+   * job's last evidence receipt, else the recorded transition tip.
+   */
+  const mintJobEvidence = (job: TerminalJob, fields: Omit<ReceiptFields, "runId">): void => {
+    const prev = job.evidence.at(-1) ?? job.prevReceipt ?? null;
+    try {
+      job.evidence.push(makeReceipt(prev, { ...fields, runId: job.runId, ts: now() }, options.signer));
+    } catch { /* a mint failure must not fault the async recovery path */ }
+  };
+  /**
+   * F14: one outcome-minting path for async terminal work (anchor results,
+   * close-delivery outcomes). Run alive → mint on the run chain AND mirror
+   * into the persisted job; run gone (post-restart) → mint into the job.
+   */
+  const recordTerminalEvidence = (
+    runId: string,
+    fields: Omit<ReceiptFields, "runId">,
+  ): void => {
+    const run = runs.get(runId);
+    const job = outbox.get(runId);
+    if (run !== undefined) {
+      const minted = recordRunReceipt(run, fields);
+      if (minted.ok && job !== undefined) {
+        updateJob(runId, (j) => { j.evidence.push(minted.receipt); });
+      }
+      return;
+    }
+    if (job !== undefined) {
+      updateJob(runId, (j) => mintJobEvidence(j, fields));
+    }
+  };
+  /**
+   * F14: every outstanding async anchor op (issue or confirm) — drained
+   * with a deadline at shutdown.
+   */
+  const anchorOps = new Set<Promise<void>>();
+  const trackAnchorOp = (p: Promise<void>): void => {
+    anchorOps.add(p);
+    void p.finally(() => anchorOps.delete(p));
+  };
+  /** F14: assigned after `drain` is defined; the lock's signal handlers drain through it. */
+  let drainForExit: (() => Promise<void>) | undefined;
   // N4b-7: live bind-statement challenges (in-memory — a nonce never needs
   // to survive a restart; an expired/unissued one simply refuses).
   const bindChallenges = new Map<string, BindChallenge>();
@@ -872,7 +992,10 @@ export function createContractService(options: {
   if (options.stateDir !== undefined) {
     // N1/N2: lock the dir first (a second process is refused outright), then
     // load — a corrupt/unreadable record is a startup failure, not "empty".
-    releaseLock = acquireStateLock(options.stateDir);
+    // F14: the SIGTERM/SIGINT handlers drain terminal jobs for a bounded
+    // window (shutdownDrainMs) before the lock is released and we exit.
+    releaseLock = acquireStateLock(options.stateDir, () =>
+      (drainForExit ?? (() => Promise.resolve()))());
     try {
       usedSessions = loadUsedSessions(options.stateDir);
       usedMandates = loadUsedMandates(options.stateDir, now(), mandateGraceMs);
@@ -1375,23 +1498,42 @@ export function createContractService(options: {
    * AT the terminal transition) so post-terminal evidence receipts never
    * retroactively change what was anchored.
    */
+  const sleep = options.sleep ?? ((ms: number): Promise<void> => new Promise((r) => {
+    const t = setTimeout(r, ms);
+    t.unref?.();
+  }));
+  const anchorConfirmDelayMs = options.anchorConfirmDelayMs ?? 30_000;
+  const anchorConfirmMaxAttempts = options.anchorConfirmMaxAttempts ?? 4;
+
   const fireAnchor = (run: ContractRun, kind: "agreement" | "terminal"): void => {
     const anchor = options.anchor;
     if (anchor === undefined) return;
     const digest = kind === "agreement" ? run.agreement?.agreementDigest : chainHead(run.receipts);
     if (digest === null || digest === undefined) return;
     const anchors = (run.anchors ??= {});
+    // F11: the anchor subject is write-once — a second terminal transition
+    // never replaces the first anchored head.
+    if (anchors[kind] !== undefined) return;
     anchors[kind] = { status: "anchoring", digest };
+    // F14: the anchor job is durably enqueued BEFORE the async dispatch —
+    // a crash mid-flight leaves "anchoring" for boot recovery to re-drive.
+    updateJob(run.runId, (job) => {
+      job.anchors = {
+        ...job.anchors,
+        [kind]: { kind, digest, status: "anchoring" },
+      };
+    });
+    const principalFor = (): { role: "buyer" | "provider"; keyId: string } | undefined =>
+      run.bound.buyer !== undefined
+        ? { role: "buyer" as const, keyId: run.bound.buyer.principalKeyId }
+        : run.bound.provider !== undefined
+          ? { role: "provider" as const, keyId: run.bound.provider.principalKeyId }
+          : undefined;
     const receiptOutcome = (outcome: "anchor_anchored" | "anchor_failed", response: unknown): void => {
-      const p =
-        run.bound.buyer !== undefined
-          ? { role: "buyer" as const, keyId: run.bound.buyer.principalKeyId }
-          : run.bound.provider !== undefined
-            ? { role: "provider" as const, keyId: run.bound.provider.principalKeyId }
-            : undefined;
+      const p = principalFor() ?? outbox.get(run.runId)?.principal ?? undefined;
       if (p === undefined) return;
       try {
-        recordRunReceipt(run, {
+        recordTerminalEvidence(run.runId, {
           tool: "anchor",
           surface: "anchoring",
           argsDigest: canonicalDigest({ runId: run.runId, kind, digest }),
@@ -1403,28 +1545,214 @@ export function createContractService(options: {
         });
       } catch { /* a recording failure must not fault the async path */ }
     };
-    Promise.resolve()
+    const persistAnchor = (state: AnchorRunState): void => {
+      updateJob(run.runId, (job) => {
+        job.anchors = { ...job.anchors, [kind]: { kind, ...state } };
+      });
+    };
+    const op = Promise.resolve()
       .then(() => anchor.anchor({ kind, runId: run.runId, digestHex: digest }))
       .then((write) => {
-        anchors[kind] = {
-          status: "anchored", digest,
+        // F13: a RESOLVED write is anchored only when the backing confirms
+        // block+time; pending_confirmation stays "pending" and is re-checked.
+        const confirmed = write.anchor.status === "anchored" &&
+          write.anchor.blockHeight !== null && write.anchor.time !== null;
+        const next: AnchorRunState = {
+          status: confirmed ? "anchored" : "pending", digest,
           anchorId: write.anchorId, eventHash: write.eventHash, ledger: write.anchor,
         };
-        receiptOutcome("anchor_anchored", write);
+        anchors[kind] = next;
+        persistAnchor(next);
+        if (confirmed) {
+          receiptOutcome("anchor_anchored", write);
+        } else {
+          scheduleAnchorConfirm(run, kind, digest, write.anchorId, 1);
+        }
       })
       .catch((err) => {
         const error = err instanceof Error ? err.message : String(err);
-        anchors[kind] = { status: "failed", digest, error };
+        const next: AnchorRunState = { status: "failed", digest, error };
+        anchors[kind] = next;
+        persistAnchor(next);
         receiptOutcome("anchor_failed", { error });
       });
+    trackAnchorOp(op);
+  };
+
+  /**
+   * F13: re-confirm a pending anchor. `confirm` when the backing supports
+   * polling, else re-issue (idempotent — the deterministic commitmentId
+   * resolves the same on-chain object with its current confirmation state).
+   * A poll ERROR keeps the job pending — a transport hiccup never turns a
+   * landed write into a failure. Bounded by anchorConfirmMaxAttempts; the
+   * job then rests as "pending" and restart recovery resumes it.
+   */
+  const scheduleAnchorConfirm = (run: ContractRun, kind: "agreement" | "terminal", digest: string, anchorId: string, attempt: number): void => {
+    const anchor = options.anchor;
+    if (anchor === undefined || anchorConfirmDelayMs <= 0) return;
+    const op = sleep(anchorConfirmDelayMs)
+      .then(() => anchor.confirm !== undefined
+        ? anchor.confirm(anchorId)
+        : anchor.anchor({ kind, runId: run.runId, digestHex: digest }).then((w) => w.anchor))
+      .then((ledger) => {
+        const state = run.anchors?.[kind];
+        if (state === undefined || state.status !== "pending") return;
+        const confirmed = ledger.status === "anchored" &&
+          ledger.blockHeight !== null && ledger.time !== null;
+        if (confirmed) {
+          const next: AnchorRunState = { ...state, status: "anchored", ledger };
+          run.anchors![kind] = next;
+          updateJob(run.runId, (job) => {
+            job.anchors = { ...job.anchors, [kind]: { kind, ...next } };
+          });
+          const p =
+            run.bound.buyer !== undefined
+              ? { role: "buyer" as const, keyId: run.bound.buyer.principalKeyId }
+              : run.bound.provider !== undefined
+                ? { role: "provider" as const, keyId: run.bound.provider.principalKeyId }
+                : outbox.get(run.runId)?.principal ?? undefined;
+          if (p !== undefined) {
+            try {
+              recordTerminalEvidence(run.runId, {
+                tool: "anchor",
+                surface: "anchoring",
+                argsDigest: canonicalDigest({ runId: run.runId, kind, digest: state.digest }),
+                argsDigestScheme: "canonical",
+                principal: p,
+                outcome: "anchor_anchored",
+                responseDigest: canonicalDigest({ anchorId, ledger }),
+                responseDigestScheme: "canonical",
+              });
+            } catch { /* a recording failure must not fault the async path */ }
+          }
+        } else {
+          state.ledger = ledger;
+          updateJob(run.runId, (job) => {
+            const aj = job.anchors?.[kind];
+            if (aj !== undefined && aj.status === "pending") aj.ledger = ledger;
+          });
+          if (attempt < anchorConfirmMaxAttempts) scheduleAnchorConfirm(run, kind, digest, anchorId, attempt + 1);
+        }
+      })
+      .catch(() => {
+        if (attempt < anchorConfirmMaxAttempts) scheduleAnchorConfirm(run, kind, digest, anchorId, attempt + 1);
+      });
+    trackAnchorOp(op);
+  };
+
+  /**
+   * N4b-9 (F14): boot recovery for a persisted anchor job whose in-memory
+   * run is gone. `anchoring` means the process died mid-issue → re-issue
+   * (the deterministic commitmentId resolves the same on-chain object);
+   * `pending` means awaiting confirmation → confirm/re-issue reads the
+   * current chain state. Outcomes mint into the job's persisted evidence.
+   */
+  const recoverAnchorJob = (job: TerminalJob, aj: TerminalAnchorJob): void => {
+    const anchor = options.anchor;
+    if (anchor === undefined) return;
+    const runId = job.runId;
+    const persist = (status: TerminalAnchorJob["status"], extra?: Partial<TerminalAnchorJob>): void =>
+      void updateJob(runId, (j) => {
+        j.anchors = { ...j.anchors, [aj.kind]: { ...j.anchors?.[aj.kind], kind: aj.kind, digest: aj.digest, status, ...extra } as TerminalAnchorJob };
+      });
+    const evidence = (outcome: "anchor_anchored" | "anchor_failed", response: unknown): void => {
+      const p = job.principal ?? undefined;
+      if (p === undefined) return;
+      updateJob(runId, (j) => mintJobEvidence(j, {
+        tool: "anchor",
+        surface: "anchoring",
+        argsDigest: canonicalDigest({ runId, kind: aj.kind, digest: aj.digest }),
+        argsDigestScheme: "canonical",
+        principal: p,
+        outcome,
+        responseDigest: canonicalDigest(response),
+        responseDigestScheme: "canonical",
+      }));
+    };
+    const poll = anchor.confirm !== undefined && aj.anchorId !== undefined
+      ? anchor.confirm(aj.anchorId).then((ledger) => ({ ledger }))
+      : anchor.anchor({ kind: aj.kind, runId, digestHex: aj.digest }).then((w) => ({ write: w }));
+    const op = Promise.resolve(poll)
+      .then((r) => {
+        if ("write" in r) {
+          const confirmed = r.write!.anchor.status === "anchored" &&
+            r.write!.anchor.blockHeight !== null && r.write!.anchor.time !== null;
+          persist(confirmed ? "anchored" : "pending", {
+            anchorId: r.write!.anchorId, eventHash: r.write!.eventHash, ledger: r.write!.anchor,
+          });
+          if (confirmed) evidence("anchor_anchored", r.write!);
+          else if (anchorConfirmDelayMs > 0) {
+            // Re-arm a bounded confirm loop against the persisted job.
+            const op2 = sleep(anchorConfirmDelayMs)
+              .then(() => {
+                const fresh = outbox.get(runId)?.anchors?.[aj.kind];
+                if (fresh !== undefined && fresh.status === "pending") recoverAnchorJob(outbox.get(runId)!, fresh);
+              });
+            trackAnchorOp(op2);
+          }
+        } else {
+          const ledger = r.ledger!;
+          const confirmed = ledger.status === "anchored" &&
+            ledger.blockHeight !== null && ledger.time !== null;
+          persist(confirmed ? "anchored" : "pending", { ledger });
+          if (confirmed) evidence("anchor_anchored", { anchorId: aj.anchorId, ledger });
+          else if (anchorConfirmDelayMs > 0) {
+            const op2 = sleep(anchorConfirmDelayMs)
+              .then(() => {
+                const fresh = outbox.get(runId)?.anchors?.[aj.kind];
+                if (fresh !== undefined && fresh.status === "pending") recoverAnchorJob(outbox.get(runId)!, fresh);
+              });
+            trackAnchorOp(op2);
+          }
+        }
+      })
+      .catch((err) => {
+        // A recovery transport error is NOT an anchor failure — the write
+        // may have landed. Keep the job pending so the next boot retries.
+        const message = err instanceof Error ? err.message : String(err);
+        if (aj.status === "anchoring") persist("pending", { error: `recovery: ${message}` });
+      });
+    trackAnchorOp(op);
   };
 
   const endRun = (run: ContractRun, terminalState: string, principal?: ContractPrincipal): void => {
+    // N4b-9 (F11): the terminal transition is WRITE-ONCE. A cleanup
+    // cancellation after verification_failed (or any second endRun) is
+    // receipted by the call itself but never changes the terminal state,
+    // never re-fires the close emitter, and never re-anchors — the first
+    // transition owns the close identity and the anchor subject.
+    if (run.terminalState !== null) return;
     // "settled" is itself a named terminal stage; every other terminal reason
     // reads stage:"terminal" with terminalState carrying the why.
     run.stage = terminalState === "settled" ? "settled" : "terminal";
     run.terminalState = terminalState;
     sim.markTerminal(run.runId);
+    // N4b-9 (F14): durably enqueue the terminal job BEFORE the transition is
+    // acknowledged — the immutable close receipt, the anchor subject (the
+    // chain tip at this instant), the bound principals, and the run-chain
+    // state needed to mint post-restart evidence are all on disk first.
+    const receipt = options.onTerminalRun !== undefined
+      ? mintTerminalReceipt(
+          { runId: run.runId, terminalState, ts: new Date(now()).toISOString() },
+          options.signer,
+        )
+      : undefined;
+    updateJob(run.runId, (job) => {
+      job.terminalState = terminalState;
+      job.principal = principal !== undefined
+        ? { role: principal.role, keyId: principal.keyId }
+        : null;
+      job.boundKeyIds = [
+        run.bound.buyer?.principalKeyId,
+        run.bound.provider?.principalKeyId,
+      ].filter((k): k is string => k !== undefined);
+      job.prevReceipt = run.receipts.at(-1) ?? null;
+      if (receipt !== undefined) {
+        job.receipt = receipt;
+        job.receiptDigest = canonicalDigest(receipt);
+        job.close = { status: "delivering", attempts: 0 };
+      }
+    });
     // N4b-8 (gap 4): anchor the receipt-chain head at the terminal
     // transition BEFORE the close emitter runs — the anchored head is the
     // head at terminality; close/anchor evidence receipts chain on after it.
@@ -1434,7 +1762,9 @@ export function createContractService(options: {
     // N4b-8 (gap 3): the close emitter POSTs the signed terminal receipt to
     // the telemetry sink — async, retried, outcome receipted onto the run.
     try {
-      options.onTerminalRun?.(run, terminalState, principal);
+      if (receipt !== undefined) {
+        options.onTerminalRun?.(run, terminalState, principal, receipt);
+      }
     } catch { /* an emitter bug must never break the terminal transition */ }
   };
   const business = createBusinessOps({
@@ -1488,12 +1818,77 @@ export function createContractService(options: {
     return { ok: true, receipt };
   };
 
+  // N4b-9 (F14): restart recovery — persisted anchor jobs that died
+  // mid-issue ("anchoring") or are awaiting confirmation ("pending") are
+  // re-driven against the backing; outcomes mint into the job's persisted
+  // evidence (the run is gone after a restart).
+  if (options.anchor !== undefined) {
+    for (const job of outbox.unfinished()) {
+      for (const aj of [job.anchors?.agreement, job.anchors?.terminal]) {
+        if (aj !== undefined && (aj.status === "anchoring" || aj.status === "pending")) {
+          recoverAnchorJob(job, aj);
+        }
+      }
+    }
+  }
+
+  drainForExit = () => drainImpl(5_000);
+
+  async function drainImpl(deadlineMs: number): Promise<void> {
+    const pending = [...anchorOps, ...(options.onDrain !== undefined ? [options.onDrain()] : [])];
+    const timeout = sleep(deadlineMs).then(() => "timeout" as const);
+    await Promise.race([
+      Promise.allSettled(pending).then(() => "settled" as const),
+      timeout,
+    ]);
+  }
+
   return {
     bind,
     issueBindChallenge,
     business,
     anchorConfigured: options.anchor !== undefined,
     recordReceipt: recordRunReceipt,
+    // N4b-9 (F14): terminal outbox surface — status visibility for a
+    // recovered run, close-state persistence, post-restart outcome minting,
+    // pending jobs for emitter resume, and the bounded drain.
+    terminalJobFor(runId) {
+      return outbox.get(runId);
+    },
+    pendingTerminalJobs() {
+      return outbox.unfinished();
+    },
+    recordTerminalOutcome(runId, outcome, detail) {
+      const run = runs.get(runId);
+      const job = outbox.get(runId);
+      const terminalState = run?.terminalState ?? job?.terminalState ?? null;
+      const principal = job?.principal
+        ?? (run?.bound.buyer !== undefined
+          ? { role: "buyer" as const, keyId: run.bound.buyer.principalKeyId }
+          : undefined)
+        ?? (run?.bound.provider !== undefined
+          ? { role: "provider" as const, keyId: run.bound.provider.principalKeyId }
+          : undefined);
+      if (principal === null || principal === undefined) return;
+      recordTerminalEvidence(runId, {
+        tool: "telemetry_close",
+        surface: "anchoring",
+        argsDigest: canonicalDigest({ runId, terminalState, receiptDigest: detail.receiptDigest }),
+        argsDigestScheme: "canonical",
+        principal,
+        outcome: `telemetry_close_${outcome}`,
+        responseDigest: canonicalDigest(
+          detail.response !== undefined ? detail.response : { error: detail.lastError ?? null, attempts: detail.attempts },
+        ),
+        responseDigestScheme: "canonical",
+      });
+    },
+    persistTerminalClose(runId, state) {
+      updateJob(runId, (job) => {
+        job.close = { status: state.status, attempts: state.attempts, lastError: state.lastError, deliveredAt: state.deliveredAt };
+      });
+    },
+    drain: drainImpl,
     checkReceiptEvidence(run, principal, fields) {
       evictEnded(); // same hygiene as the old canReceipt gate
       // N4b-4: past the key's validUntil nothing can be signed — no receipt,
@@ -1649,11 +2044,22 @@ export function createContractService(options: {
     runIdForPrincipal(keyId) {
       evictEnded();
       const runId = principalRuns.get(keyId);
-      if (runId === undefined) return undefined;
-      const run = runs.get(runId);
-      // Terminal-but-unexpired runs still resolve: contract_status and the
-      // receipt feed remain observable until the run's TTL evicts it.
-      return run !== undefined ? runId : undefined;
+      if (runId !== undefined) {
+        const run = runs.get(runId);
+        // Terminal-but-unexpired runs still resolve: contract_status and the
+        // receipt feed remain observable until the run's TTL evicts it.
+        if (run !== undefined) return runId;
+      }
+      // N4b-9 (F14): a terminal run whose in-memory record is gone (restart)
+      // still resolves for a bound caller via its persisted outbox job —
+      // contract_status renders the terminal record, not "rendezvous".
+      for (const job of outbox.all()) {
+        if (job.terminalState === null) continue;
+        if (job.boundKeyIds?.includes(keyId) === true || job.principal?.keyId === keyId) {
+          return job.runId;
+        }
+      }
+      return undefined;
     },
     close() {
       releaseLock?.();

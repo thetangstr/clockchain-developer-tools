@@ -6,7 +6,6 @@ import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
 import { createTsaContractAnchor, type ContractAnchor } from "./anchor.js";
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
-import { canonicalDigest } from "./canonical.js";
 import { createCloseEmitter } from "./close-emitter.js";
 import { createContractService, type ContractRun, type ContractService } from "./service.js";
 import type { SimFaults } from "./sim/index.js";
@@ -391,35 +390,17 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
     setState: (runId, state) => {
       const run = service.runFor(runId);
       if (run !== undefined) run.telemetryClose = state;
-    },
-    recordOutcome: (outcome, d) => {
-      const run = service.runFor(d.runId);
-      if (run === undefined) return;
-      const principal =
-        terminalPrincipal.get(d.runId)
-        ?? (run.bound.buyer !== undefined
-          ? { role: "buyer" as const, keyId: run.bound.buyer.principalKeyId }
-          : undefined)
-        ?? (run.bound.provider !== undefined
-          ? { role: "provider" as const, keyId: run.bound.provider.principalKeyId }
-          : undefined);
-      if (principal === undefined) return;
-      service.recordReceipt(run, {
-        tool: "telemetry_close",
-        surface: "anchoring",
-        argsDigest: canonicalDigest({
-          runId: d.runId,
-          terminalState: run.terminalState,
-          receiptDigest: d.receiptDigest,
-        }),
-        argsDigestScheme: "canonical",
-        principal,
-        outcome: `telemetry_close_${outcome}`,
-        responseDigest: canonicalDigest(
-          d.response !== undefined ? d.response : { error: d.lastError ?? null, attempts: d.attempts },
-        ),
-        responseDigestScheme: "canonical",
+      // N4b-9 (F14): every delivery state persists into the outbox job —
+      // attempts and outcomes survive a restart.
+      service.persistTerminalClose(runId, {
+        status: state.status, attempts: state.attempts,
+        lastError: state.lastError, deliveredAt: state.deliveredAt,
       });
+    },
+    // N4b-9 (F14): the service mints outcome evidence — onto the live run
+    // chain, or into the persisted job after a restart.
+    recordOutcome: (outcome, d) => {
+      service.recordTerminalOutcome(d.runId, outcome, d);
     },
   });
 
@@ -449,21 +430,32 @@ export function loadContractConfig(env: NodeJS.ProcessEnv): ContractRouteConfig 
       // N4b-8 (gap 3): POST the signed terminal receipt to the sink.
       ...(closeEmitter !== undefined
         ? {
-            onTerminalRun: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => {
+            // N4b-9 (F14): the receipt was minted and durably enqueued by
+            // the service BEFORE this hook runs — we deliver exactly those
+            // bytes, never a re-mint.
+            onTerminalRun: (run: ContractRun, terminalState: string, principal: ContractPrincipal | undefined, receipt: import("./close-emitter.js").TerminalReceipt) => {
               if (principal !== undefined) {
                 terminalPrincipal.set(run.runId, { role: principal.role, keyId: principal.keyId });
               }
-              closeEmitter.notify({
-                runId: run.runId,
-                terminalState,
-                ts: new Date().toISOString(),
-              });
+              closeEmitter.resume(receipt);
             },
+            // F14: bounded shutdown drain passes through the emitter.
+            onDrain: () => closeEmitter.drain(5_000),
           }
         : {}),
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);
+  }
+
+  // N4b-9 (F14): boot recovery — persisted close jobs that never resolved
+  // resume delivery of the SAME minted receipt (the sink dedupes replays).
+  if (closeEmitter !== undefined) {
+    for (const job of service.pendingTerminalJobs()) {
+      if (job.receipt !== undefined && job.close !== undefined && job.close.status === "delivering") {
+        closeEmitter.resume(job.receipt);
+      }
+    }
   }
 
   return {

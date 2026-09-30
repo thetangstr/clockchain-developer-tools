@@ -1164,7 +1164,9 @@ export function createBusinessOps(options: {
             orderRef: liveRun.cancellation.orderRef,
             status: "CANCELLED",
             cancelledAt: liveRun.cancellation.cancelledAt,
-            terminalState: "cancelled",
+            // N4b-9 (F11): report the run's ACTUAL terminal state — a cleanup
+            // cancel after verification_failed did not move it.
+            terminalState: liveRun.terminalState ?? "cancelled",
             simulated: true,
             serverNonce,
           });
@@ -1228,7 +1230,9 @@ export function createBusinessOps(options: {
           orderRef: cancelled.orderRef,
           status: "CANCELLED",
           cancelledAt: cancelled.cancelledAt,
-          terminalState: "cancelled",
+          // N4b-9 (F11): the write-once terminal state — "cancelled" for a
+          // clean cancel, the pre-existing state for a post-failure cleanup.
+          terminalState: liveRun.terminalState ?? "cancelled",
           simulated: true,
           serverNonce,
         });

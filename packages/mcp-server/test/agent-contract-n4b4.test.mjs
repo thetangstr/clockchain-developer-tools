@@ -358,9 +358,12 @@ test("booking_cancel runs after a claimed mismatch (terminal verification_failed
       submitTool: "booking_cancel_submit", extraArgs: { approval },
     });
     assert.equal(cancelled.status, "CANCELLED", JSON.stringify(cancelled));
-    assert.equal(cancelled.terminalState, "cancelled");
+    // N4b-9 (F11): the terminal transition is write-once — the cleanup
+    // cancel lands the booking cancellation but the run stays at its first
+    // terminal state (verification_failed); it is never re-closed.
+    assert.equal(cancelled.terminalState, "verification_failed");
     const status = await app.rpc("tb2", "contract_status", {});
-    assert.equal(status.terminalState, "cancelled");
+    assert.equal(status.terminalState, "verification_failed");
   } finally { await app.close(); }
 });
 
