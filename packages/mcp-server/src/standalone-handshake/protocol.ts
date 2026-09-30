@@ -5,12 +5,23 @@ export const STANDALONE_CHAIN_ID = "eip155:11155111";
 export const STANDALONE_REGISTRY_ADDRESS = "0x8004a818bfb912233c491871b3d84c89a494bd9e";
 export const MESSAGE_KINDS = ["question", "proposal", "evidence", "note"] as const;
 export const DATA_HANDLING_CLASSES = ["public", "confidential", "restricted"] as const;
+// Bumped whenever the rules an agent must follow change (tools, playbook, flows). Every tool
+// response carries it, so an agent running from an old script learns to re-read the rules.
+// 1: handshake_next/readiness_prepare. 2: supervised sessions. 3: self-describing invitations.
+// 4: active facilitation (stall reports, nudges, resume, turn deadlines, webhooks).
+// 5: handshake addresses (listen, invite `to`, review_invitation).
+export const STANDALONE_PLAYBOOK_VERSION = 5;
+export const STANDALONE_DEFAULT_ENDPOINT = "https://mcp.clockchain.network/connect/mcp";
+// v2 invitations are readable at a glance: "chs2." + base64url(JSON).
+export const INVITATION_V2_PREFIX = "chs2.";
 
 type JsonRecord = Record<string, any>;
 
-// ADDRESS and SIGNATURE accept mixed-case hex (EIP-55 checksummed addresses,
-// uppercase signatures). Values are stored verbatim — the authority record must
-// byte-match what the signer signed — and every comparison lowercases both sides.
+// ADDRESS and SIGNATURE accept mixed-case hex on input (EIP-55 checksummed
+// addresses, uppercase signatures), but the stored and signed form is always
+// canonical lowercase: normalizeStandaloneReadiness lowercases sessionKeyAddress
+// before the authority record is rebuilt, so a signer must sign the record built
+// from the lowercase address. readiness_prepare serves those exact bytes.
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -74,11 +85,16 @@ function identityPolicy(value: unknown): Readonly<JsonRecord> {
   return Object.freeze({ erc8004: item.erc8004, chainId: item.chainId, registryAddress });
 }
 
+const DEADLINE_OVERRIDES = ["turnDeadlineSeconds", "replyDeadlineSeconds"] as const;
+
 export function normalizeStandaloneTerms(value: unknown): Readonly<JsonRecord> {
   const item = exact(value, ["reference", "purpose", "channelLimits", "identityPolicy"]);
   if (!printable(item.reference, 128) || !printable(item.purpose, 256)) invalid();
-  const limits = exact(item.channelLimits, ["durationSeconds", "messageKinds", "maxMessageBytes"]);
+  // Optional F3 overrides: per-turn windows, from 60 s up to the channel duration.
+  const optional = DEADLINE_OVERRIDES.filter((key) => item.channelLimits !== null && typeof item.channelLimits === "object" && Object.hasOwn(item.channelLimits, key));
+  const limits = exact(item.channelLimits, ["durationSeconds", "messageKinds", "maxMessageBytes", ...optional]);
   if (!decimalWithin(limits.durationSeconds, 60n, 86400n)) invalid();
+  for (const key of optional) if (!decimalWithin(limits[key], 60n, BigInt(limits.durationSeconds))) invalid();
   if (!decimalWithin(limits.maxMessageBytes, 1n, 16384n)) invalid();
   if (!Array.isArray(limits.messageKinds) || limits.messageKinds.length === 0) invalid();
   const kinds = [...limits.messageKinds];
@@ -86,7 +102,12 @@ export function normalizeStandaloneTerms(value: unknown): Readonly<JsonRecord> {
   return Object.freeze({
     reference: item.reference,
     purpose: item.purpose,
-    channelLimits: Object.freeze({ durationSeconds: limits.durationSeconds, messageKinds: Object.freeze(kinds), maxMessageBytes: limits.maxMessageBytes }),
+    channelLimits: Object.freeze({
+      durationSeconds: limits.durationSeconds,
+      messageKinds: Object.freeze(kinds),
+      maxMessageBytes: limits.maxMessageBytes,
+      ...Object.fromEntries(optional.map((key) => [key, limits[key]])),
+    }),
     identityPolicy: identityPolicy(item.identityPolicy),
   });
 }
@@ -128,6 +149,37 @@ export function standaloneAuthorityRecord(readiness: Readonly<JsonRecord>): Read
   });
 }
 
+/**
+ * Something the caller signs locally: the structured record, its exact canonical
+ * bytes as a UTF-8 string (what EIP-191 personal_sign is applied to) and the sha256
+ * of those bytes. The signer re-derives bytes and digest from `record` before signing;
+ * the server's copy is a convenience, never an authority.
+ */
+export interface StandaloneSigningPayload {
+  record: Readonly<JsonRecord>;
+  bytes: string;
+  bytesSha256: string;
+}
+
+export function standaloneSigningPayload(record: Readonly<JsonRecord>): StandaloneSigningPayload {
+  const bytes = canonicalBytes(record);
+  return Object.freeze({ record, bytes: bytes.toString("utf8"), bytesSha256: digestHex(record) });
+}
+
+/**
+ * The authority record a party signs for its readiness package, built from the
+ * canonical lowercase session-key address exactly as the checklist rebuilds it.
+ */
+export function prepareStandaloneAuthority(value: unknown): StandaloneSigningPayload {
+  const item = exact(value, ["sessionKeyAddress", "accountableParty", "statement"]);
+  if (typeof item.sessionKeyAddress !== "string" || !ADDRESS.test(item.sessionKeyAddress)) invalid();
+  if (!printable(item.accountableParty, 128) || !printable(item.statement, 512)) invalid();
+  return standaloneSigningPayload(standaloneAuthorityRecord({
+    sessionKeyAddress: item.sessionKeyAddress.toLowerCase(),
+    authorityStatement: { accountableParty: item.accountableParty, statement: item.statement },
+  }));
+}
+
 export function buildStandaloneConsentRecord(input: { sessionId: string; role: string; termsDigest: string; checklistDigest: string }): Readonly<JsonRecord> {
   const item = exact(input, ["sessionId", "role", "termsDigest", "checklistDigest"]);
   if (!UUID.test(item.sessionId) || !ROLES.includes(item.role) || !DIGEST.test(item.termsDigest) || !DIGEST.test(item.checklistDigest)) invalid();
@@ -144,7 +196,8 @@ export function buildStandaloneConsentRecord(input: { sessionId: string; role: s
 export function normalizeStandaloneClosure(value: unknown): Readonly<JsonRecord> {
   const item = exact(value, ["schema", "protocol", "sessionId", "outcome", "byRole", "closedAtMs", "externalBusinessActionPerformed"]);
   if (item.schema !== "clockchain.standalone-handshake-closure/v1" || item.protocol !== STANDALONE_HANDSHAKE_PROTOCOL) invalid();
-  if (!UUID.test(item.sessionId) || !["closed", "revoked"].includes(item.outcome)) invalid();
+  // "stalled": a turn deadline passed on an open channel (F3); byRole is the party that did not act.
+  if (!UUID.test(item.sessionId) || !["closed", "revoked", "stalled"].includes(item.outcome)) invalid();
   if (!ROLES.includes(item.byRole)) invalid();
   if (!decimalWithin(item.closedAtMs, 0n, 99999999999999n)) invalid();
   if (item.externalBusinessActionPerformed !== false) invalid();
@@ -154,4 +207,28 @@ export function normalizeStandaloneClosure(value: unknown): Readonly<JsonRecord>
 export function standaloneCanonicalRecord(value: unknown): Readonly<{ bytesHex: string; digest: string }> {
   const bytes = canonicalBytes(value);
   return Object.freeze({ bytesHex: bytes.toString("hex"), digest: digestHex(value) });
+}
+
+/**
+ * Invitation envelope. Only `secret` authorizes anything; `endpoint` and `next` are
+ * non-secret hints so an agent that is handed the string alone knows where to go and
+ * what to call first. v2 is "chs2." + base64url(JSON); bare base64url v1 still decodes.
+ */
+export function encodeStandaloneInvitation(input: { sessionId: string; secret: string; endpoint: string }): string {
+  const envelope = { v: 2, sessionId: input.sessionId, secret: input.secret, endpoint: input.endpoint, next: "handshake_preview_invitation" };
+  return INVITATION_V2_PREFIX + Buffer.from(JSON.stringify(envelope)).toString("base64url");
+}
+
+export function decodeStandaloneInvitation(invitation: unknown): { v: 1 | 2; sessionId: string; secret: string; endpoint?: string } | undefined {
+  if (typeof invitation !== "string" || invitation.length < 80 || invitation.length > 4096) return undefined;
+  const v2 = invitation.startsWith(INVITATION_V2_PREFIX);
+  try {
+    const decoded = JSON.parse(Buffer.from(v2 ? invitation.slice(INVITATION_V2_PREFIX.length) : invitation, "base64url").toString("utf8"));
+    if (typeof decoded?.sessionId !== "string" || typeof decoded.secret !== "string") return undefined;
+    if (v2 && decoded.v === 2 && typeof decoded.endpoint === "string") return { v: 2, sessionId: decoded.sessionId, secret: decoded.secret, endpoint: decoded.endpoint };
+    if (!v2 && decoded.v === 1) return { v: 1, sessionId: decoded.sessionId, secret: decoded.secret };
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }

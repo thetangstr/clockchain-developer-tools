@@ -27,6 +27,9 @@ Provisioning does not report success until the exact new instance is SSM
 - `/clockchain/mcp/KEEPER_WEBHOOK_SECRET` — Standard-Webhooks server secret for timer/alarm
   deliveries; per-owner secrets are derived from it and shown to each owner at registration,
   the value itself is never disclosed
+- `/clockchain/mcp/STANDALONE_WEBHOOK_SECRET` — Standard-Webhooks server secret for Standalone Handshake
+  webhook nudges (F4). Separate from the keeper's; per-registration secrets are derived from it. Never disclosed.
+  The Standalone public endpoint is pinned in compose-up.sh (`STANDALONE_PUBLIC_ENDPOINT`), not derived from Host.
 - `/clockchain/mcp/AGENT_HANDSHAKE_RELEASE_PIN`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS`
@@ -85,13 +88,57 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
    clean, load the active host-root private key from SSM, and record its public
    fingerprint in the release pin.
 3. Install the matching MCP commit and rotate the active/previous role-access
-   key pair if required. From that exact checkout, run
-   `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`. The installer
-   first refreshes the out-of-checkout `compose-up.sh` and systemd unit, then
-   restarts the service. The refreshed wrapper verifies the exact Handshake SHA
-   before Docker starts and atomically replaces the private host files. Never
-   restart the service directly after changing the checkout: systemd deliberately
-   executes `/opt/clockchain-mcp/compose-up.sh`, not the copy inside the repo.
+   key pair if required. `scripts/deploy-box.sh <sha> [--yes] [--full-restart] [--allow-infra-drift]`
+   does this step over SSM in one of two modes (flags in any order):
+
+   - **Code-only (default).** Recreates only the `mcp` container; `caddy`
+     (so `/acm4/*`, `/mcp` anchoring and TLS) and the v2 `host` keep running.
+     From the exact checkout it runs
+     `infra/scripts/install-clockchain-mcp-deploy-assets.sh --no-restart`
+     (refreshes the out-of-checkout `compose-up.sh` and systemd unit, reloads
+     systemd, does not restart), then the checked-out
+     `infra/clockchain-mcp/compose-up.sh --only mcp`. That mode does the same
+     SSM secret, release-pin and nonsecret environment preparation as the unit,
+     verifies the Handshake SHA read-only, does not rewrite the private host
+     files, and ends in
+     `docker compose up -d --no-deps --build --wait --wait-timeout 180 mcp`.
+     It prints the created/started times of the `caddy`, `host` and `mcp`
+     containers before and after; `caddy` and `host` `created=` must not change
+     (`host` restarts itself every ~121s by design, so its `started=` moves).
+     In-memory `mcp` state is still lost, so the notice/freeze rule still applies.
+     Before checking anything out, it **refuses** (box untouched) when:
+     - the target's installer or `compose-up.sh` predates code-only deploys (no
+       `deploy-box: supports ...` marker). Older versions ignore `--no-restart`
+       and `--only mcp`, so a rollback to them would silently become a full
+       restart. Message: "target predates code-only deploy; re-run with
+       --full-restart" (exit 4);
+     - the deploy diff touches the Caddyfile, `docker-compose.yml`, the unit, the
+       installer or `compose-up.sh` (infra drift, exit 5). Use `--full-restart`
+       to apply it, or `--allow-infra-drift` to install the files to disk and
+       recreate only `mcp` anyway (caddy/host keep their current config until
+       the next full restart).
+
+     A dirty box checkout is refused the same way in both modes (exit 3). For
+     these refusals (exit 3, 4, 5) `deploy-box.sh` prints
+     `REFUSED (exit N): <reason> — production unchanged` and exits with the same
+     code. Production was not touched. Any other remote failure prints
+     `deploy FAILED ...` and exits 1: check production and follow the rollback.
+
+     Code-only installs the new unit and wrapper to disk **before** `mcp` is
+     proven healthy. A changed `ExecStop` or wrapper therefore takes effect at
+     the next stop, full restart or reboot even if this deploy fails.
+   - **Full restart (`--full-restart`).** For infra/config changes only. Notify
+     the travel_mvp orchestrator and the ACM4 production owner first. From that
+     exact checkout it runs `sudo infra/scripts/install-clockchain-mcp-deploy-assets.sh`.
+     The installer first refreshes the out-of-checkout `compose-up.sh` and
+     systemd unit, then restarts the service; the unit's `ExecStop` is
+     `docker compose down`, so `mcp`, `host` and `caddy` are all recreated. The
+     refreshed wrapper verifies the exact Handshake SHA before Docker starts and
+     atomically replaces the private host files.
+
+   Never restart the service directly after changing the checkout: systemd
+   deliberately executes `/opt/clockchain-mcp/compose-up.sh`, not the copy
+   inside the repo, so reinstall the deploy assets first (both modes do).
 4. Deploy Research only after the production MCP manifest reports the same
    helper digest and host-root ring that Research pins.
 
@@ -137,3 +184,70 @@ host-root public ring. If any readiness or canary check fails:
 
 Do not delete the prior host-root public key until every certificate issued under
 it is outside the supported verification window.
+
+## Handshake state (durability, spec B2)
+
+With `HANDSHAKE_STATE_DIR=/app/state` (set in `docker-compose.yml`), in-flight Standalone
+handshakes and both surfaces' role-access handles survive an `mcp` restart or deploy. Everything
+lives on the `mcp_state` volume mounted at `/app/state`:
+
+| Path | Contents |
+|---|---|
+| `/app/state/standalone-handshake/sessions/<sessionId>.json` | One Standalone session's snapshot: stage, terms, readiness, checklist attempts, consents, turn and deadline state, timeline, anchors, closure pin, its unclaimed invitation (secret digest only), access-token digests. No message bodies |
+| `/app/state/standalone-handshake/sessions/<sessionId>.messages.jsonl` | That session's messages: an append-only log, one fsync'd line per message (bounded at 256 MiB; a send beyond it is refused with `STORAGE_FULL`) |
+| `/app/state/standalone-handshake/role-handles.json` | `csha_` handle map, sealed (see below) |
+| `/app/state/standalone-handshake/mailboxes/<sha256(address)>.json` | One handshake-address mailbox (spec B4): owner key, allow/block fingerprints, open invitations (session ids only, no secrets), mailbox timeline, listen-token and client-IP digests. Challenge nonces are not stored. Deliveries are coalesced writes, so one made within a second of a crash can be lost; the Initiator then sees INVITATION_NOT_ACCEPTED at the TTL, as for any unanswered invitation |
+| `/app/state/standalone-handshake/listen-handles.json` | `csla_` listen-handle map, sealed like the role handles |
+| `/app/state/standalone-handshake/ended-tokens.json` | Digests of evicted sessions' tokens, so late callers get `SESSION_ENDED` |
+| `/app/state/agent-handshake-v2/role-handles.json` | `ccra_` handle map, sealed. v2 session state is unchanged at `/app/state/agent-handshake-v2-state.json` |
+
+Every file is `0600` in a `0700` directory, written tmp -> fsync -> rename -> fsync(dir), with the
+previous version kept as `<file>.bak`. Every change a client is told about is on disk before the call
+returns (one commit per operation); only last-seen times and timeline notes are coalesced (at most
+one write a second), and those are flushed on SIGTERM/SIGINT. A snapshot that would exceed its bound
+is an error for that call, never a silent loss. Nothing secret is stored in the clear: tokens and invitation
+secrets are digests; each handle record holds the token sealed under a key derived from the handle
+and the handle sealed under a key derived from the token, so the files are useless without the
+credentials clients already hold. There is no server key to back up or rotate for them. Message
+bodies are deleted 24 hours after a session ends (digests stay).
+
+Holds (long-polls) are not persisted: clients simply call `handshake_next` again.
+
+**Backup.** Copy the directories while the stack runs (each file is replaced atomically, so any copy
+is a consistent per-file snapshot):
+`docker run --rm -v mcp_state:/s -v "$PWD":/b alpine tar czf /b/handshake-state.tgz -C /s standalone-handshake agent-handshake-v2`.
+
+**Restore.** Stop `mcp`, extract into the volume keeping ownership and modes (`tar xzpf`), start
+`mcp`. Files readable by group/other are refused.
+
+**Boot.** Sessions are restored oldest first, bounded (20,000 sessions / 1 GiB, logged as
+`handshake_state_restore_bounded` if exceeded), and `handshake_state_restored` logs the count and
+time. Leftover `*.tmp` files are removed and `*.corrupt-*` copies older than 7 days are deleted. A
+readiness check interrupted by the restart is rolled back and its invitation returned. Deadlines are
+judged on consensus time only: until the consensus clock syncs after boot, no session is ended by a
+clock and open-channel calls answer a retryable `HANDSHAKE_TEMPORARILY_UNAVAILABLE`.
+
+**Corruption.** A file that does not parse (or a `.bak` readable by others) is copied to
+`<file>.corrupt-<ms>`, logged as `handshake_state_corrupt`, and the `.bak` is used
+(`handshake_state_restored_from_backup`). A Standalone session with no valid copy is skipped and
+logged (`handshake_state_session_unreadable`) while the others load. An unreadable handle map is
+never overwritten: that surface logs `handshake_handles_memory_only` and keeps serving from memory,
+so only clients presenting a handle lost with the file are refused; everything else, including new
+handles, keeps working. Restore or wipe the file, then restart.
+
+**Wipe safely.** Only when every in-flight handshake may be abandoned: stop `mcp`, then remove
+`/app/state/standalone-handshake/` and/or `/app/state/agent-handshake-v2/role-handles.json*`, then
+start `mcp`. Clients holding old handles get an access error and must start a new handshake. Never
+delete `agent-handshake-v2-state.json`, the invitation files or the funding ledger as part of this.
+
+**Webhook secret rotation.** Webhook signing secrets for Standalone `notify` registrations are
+derived from `STANDALONE_WEBHOOK_SECRET` and never stored. Rotating it changes the secret for every
+restored session: their receivers will reject the next notices until the party registers again in a
+new handshake. Rotate only when that is acceptable (or when no session with a webhook is in flight).
+
+Tool failures log `standalone_handshake_tool_failure` with `reason` (the refusal code) when there is
+one, so an admission loop in the logs names the exact refusal.
+
+**Staging.** The staging container (`/opt/clockchain-mcp/staging-compose.yml`, not in this repo)
+has no state volume. Test restarts there with `docker restart` (keeps the container filesystem),
+not by recreating the container, and set `HANDSHAKE_STATE_DIR` to a path inside it.
