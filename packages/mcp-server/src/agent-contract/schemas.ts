@@ -430,7 +430,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     role: "provider",
     schema: {
       envelope: prepareEnvelopeSchema,
-      signatureHex,
+      // N4b-9 (F15 → D11): absent = a deny submission (envelope + signed
+      // deny approval only); present = an authorized submit.
+      signatureHex: signatureHex.optional(),
       approval: approvalRecordSchema,
     },
     outputSchema: z.object({
@@ -534,7 +536,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     role: "buyer",
     schema: {
       envelope: prepareEnvelopeSchema,
-      signatureHex,
+      // N4b-9 (F15 → D11): absent = a deny submission (envelope + signed
+      // deny approval only); present = an authorized submit.
+      signatureHex: signatureHex.optional(),
       approval: approvalRecordSchema,
     },
     outputSchema: z.object({

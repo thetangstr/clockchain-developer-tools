@@ -255,6 +255,31 @@ export function createBusinessOps(options: {
   }
 
   /**
+   * The envelope half of submit-side verification: server-signed envelope
+   * pinned to this run/tool/role with a fresh nonce. The caller adds its
+   * authorization check — a role signature for an authorized submit, or
+   * (D11, N4b-9) a bound deny verdict for a deny submission, which never
+   * carries a role signature.
+   */
+  function verifySubmitEnvelope(
+    run: ContractRun,
+    role: ContractRole,
+    tool: string,
+    envelope: unknown,
+  ): { ok: true; envelope: PrepareEnvelope } | { ok: false; code: ContractRefusalCode } {
+    const verdict = verifyEnvelope(envelope, serverPublicKeys, {
+      nowMs: now(),
+      nonceSeen: (runId, nonce) => run.runId === runId && run.claimedNonces.has(nonce),
+    });
+    if (!verdict.ok) return { ok: false, code: verdict.code as ContractRefusalCode };
+    const env = verdict.envelope;
+    if (env.runId !== run.runId || env.tool !== tool || env.role !== role) {
+      return { ok: false, code: "ENVELOPE_INVALID" };
+    }
+    return { ok: true, envelope: env };
+  }
+
+  /**
    * The submit-side verification shared by every signed step: server-signed
    * envelope → pinned to this run/tool/role → fresh nonce claimed → EIP-191
    * role signature recovers to the bound signer key.
@@ -266,15 +291,9 @@ export function createBusinessOps(options: {
     envelope: unknown,
     signatureHex: string,
   ): { ok: true; envelope: PrepareEnvelope } | { ok: false; code: ContractRefusalCode } {
-    const verdict = verifyEnvelope(envelope, serverPublicKeys, {
-      nowMs: now(),
-      nonceSeen: (runId, nonce) => run.runId === runId && run.claimedNonces.has(nonce),
-    });
-    if (!verdict.ok) return { ok: false, code: verdict.code as ContractRefusalCode };
-    const env = verdict.envelope;
-    if (env.runId !== run.runId || env.tool !== tool || env.role !== role) {
-      return { ok: false, code: "ENVELOPE_INVALID" };
-    }
+    const checked = verifySubmitEnvelope(run, role, tool, envelope);
+    if (!checked.ok) return checked;
+    const env = checked.envelope;
     const signerKey = run.bound[role]?.signerKey;
     if (
       signerKey === undefined ||
@@ -1017,6 +1036,40 @@ export function createBusinessOps(options: {
             serverNonce,
           });
         }
+        if (args.signatureHex === undefined) {
+          // N4b-9 (F15 → D11): deny submission — the server's prepare
+          // envelope plus a signed `deny` approval, and NO role signature.
+          // A refusing signer can never produce a role signature for the
+          // denied action, yet blocked_by_policy must remain reachable.
+          // This path authenticates the envelope and the deny verdict only;
+          // it can never execute the booking.
+          const envCheck = verifySubmitEnvelope(liveRun, "provider", "booking_prepare", args.envelope);
+          if (!envCheck.ok) return envCheck;
+          if (!samePayload(envCheck.envelope.payload, bookingPayload(liveRun))) {
+            return refuse("ENVELOPE_INVALID");
+          }
+          const denyDecision = checkApprovalRecord({
+            approval: args.approval as ApprovalRecord,
+            runId: liveRun.runId,
+            role: "provider",
+            tool: "booking_execute",
+            action: "booking",
+            nonce: envCheck.envelope.nonce,
+            envelopeDigest: canonicalDigest(envCheck.envelope),
+            expiresAt: envCheck.envelope.expiresAt,
+            approvalKey: liveRun.bound.provider!.approvalKey,
+            expectedPolicyDigest: options.policyDigests.provider,
+            nowMs: now(),
+          });
+          if (denyDecision === null) return refuse("APPROVAL_INVALID");
+          // An `allow` without the role signature is no authorization —
+          // it can neither execute nor end the run as a policy verdict.
+          if (denyDecision !== "deny") return refuse("SIGNATURE_INVALID");
+          liveRun.claimedNonces.add(envCheck.envelope.nonce);
+          recordApproval(liveRun, "provider", "booking_prepare", envCheck.envelope, args.approval as ApprovalRecord);
+          options.endRun(liveRun, "blocked_by_policy", principal);
+          return refuse("POLICY_DENIED");
+        }
         const submitted = verifySubmission(liveRun, "provider", "booking_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
         if (!samePayload(submitted.envelope.payload, bookingPayload(liveRun))) {
@@ -1042,11 +1095,10 @@ export function createBusinessOps(options: {
         // exact envelope.
         recordApproval(liveRun, "provider", "booking_prepare", submitted.envelope, args.approval as ApprovalRecord);
         if (decision === "deny") {
-          // N4b-8 (gap 5): a cryptographically VALID deny is a policy verdict —
-          // the run ends blocked_by_policy: terminal, receipted, and (wired)
-          // it fires the close emitter. No booking is attempted.
-          options.endRun(liveRun, "blocked_by_policy", principal);
-          return refuse("POLICY_DENIED");
+          // N4b-9 (F15 → D11): a deny approval carrying a role signature is
+          // ambiguous — refused, NOT terminal. The reachable policy terminal
+          // is the signature-free deny submission above.
+          return refuse("APPROVAL_INVALID");
         }
         const booked = liveRun.simRun!.bookOrder({
           agreementId: agreement.agreementId,
@@ -1298,6 +1350,36 @@ export function createBusinessOps(options: {
         ) {
           return refuse("STATE_REFUSED");
         }
+        if (args.signatureHex === undefined) {
+          // N4b-9 (F15 → D11): deny submission — the server's prepare
+          // envelope plus a signed `deny` approval, no role signature.
+          // Authenticates the envelope and the deny verdict; can never
+          // authorize the transfer.
+          const envCheck = verifySubmitEnvelope(liveRun, "buyer", "settlement_prepare", args.envelope);
+          if (!envCheck.ok) return envCheck;
+          if (!samePayload(envCheck.envelope.payload, expected)) {
+            return refuse("ENVELOPE_INVALID");
+          }
+          const denyDecision = checkApprovalRecord({
+            approval: args.approval as ApprovalRecord,
+            runId: liveRun.runId,
+            role: "buyer",
+            tool: "settlement_authorize",
+            action: "settlement",
+            nonce: envCheck.envelope.nonce,
+            envelopeDigest: canonicalDigest(envCheck.envelope),
+            expiresAt: envCheck.envelope.expiresAt,
+            approvalKey: liveRun.bound.buyer!.approvalKey,
+            expectedPolicyDigest: options.policyDigests.buyer,
+            nowMs: now(),
+          });
+          if (denyDecision === null) return refuse("APPROVAL_INVALID");
+          if (denyDecision !== "deny") return refuse("SIGNATURE_INVALID");
+          liveRun.claimedNonces.add(envCheck.envelope.nonce);
+          recordApproval(liveRun, "buyer", "settlement_prepare", envCheck.envelope, args.approval as ApprovalRecord);
+          options.endRun(liveRun, "blocked_by_policy", principal);
+          return refuse("POLICY_DENIED");
+        }
         const submitted = verifySubmission(liveRun, "buyer", "settlement_prepare", args.envelope, args.signatureHex as string);
         if (!submitted.ok) return submitted;
         if (!samePayload(submitted.envelope.payload, expected)) {
@@ -1322,10 +1404,10 @@ export function createBusinessOps(options: {
         if (settleDecision === null) return refuse("APPROVAL_INVALID");
         recordApproval(liveRun, "buyer", "settlement_prepare", submitted.envelope, args.approval as ApprovalRecord);
         if (settleDecision === "deny") {
-          // N4b-8 (gap 5): a signed deny on the settlement gate is the same
-          // policy verdict — the run ends blocked_by_policy.
-          options.endRun(liveRun, "blocked_by_policy", principal);
-          return refuse("POLICY_DENIED");
+          // N4b-9 (F15 → D11): deny + role signature is ambiguous — refused,
+          // NOT terminal. The reachable policy terminal is the
+          // signature-free deny submission above.
+          return refuse("APPROVAL_INVALID");
         }
         const transfer = liveRun.simRun!.payments.execute({
           agreementId: expected.agreementId,

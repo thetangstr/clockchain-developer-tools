@@ -377,7 +377,7 @@ test("no anchor configured → anchor:disabled, agreement_get says disabled", as
 
 // --- A4: reachable blocked_by_policy -------------------------------------------
 
-test("a signed deny approval on booking_execute ends the run blocked_by_policy", async () => {
+test("a deny submission on booking_execute (no role signature) ends the run blocked_by_policy", async () => {
   const terminalCalls = [];
   const env = await boot({
     onTerminalRun: (run, terminalState) => terminalCalls.push({ runId: run.runId, terminalState }),
@@ -389,10 +389,9 @@ test("a signed deny approval on booking_execute ends the run blocked_by_policy",
       envelope: prep.envelope, role: "provider", action: "booking",
       tool: "booking_execute", key: keys.providerApproval, decision: "deny",
     });
-    const out = await signedSubmit(env, {
-      token: "tp4", role: "provider", prepared: prep,
-      submitTool: "booking_execute", extraArgs: { approval: deny },
-    });
+    // D11: a refusing signer cannot produce a role signature — the deny
+    // submission is envelope + signed deny approval, nothing else.
+    const out = await env.callTool("tp4", "booking_execute", { envelope: prep.envelope, approval: deny });
     assert.equal(out.error, "POLICY_DENIED", JSON.stringify(out));
 
     // Terminal, receipted, and the terminal hook (close emitter) fired.
@@ -430,6 +429,37 @@ test("a signed deny approval on booking_execute ends the run blocked_by_policy",
       assert.equal(out2.error, "APPROVAL_INVALID");
       const st2 = await env2.callTool("tb3", "contract_status", {});
       assert.equal(st2.terminalState, null);
+
+      // D11: a VALID deny carrying a role signature is ambiguous — refused,
+      // and it does NOT end the run.
+      const env3 = await boot({});
+      try {
+        const { agreementId: aid3 } = await agreePair(env3, uuid(207), "tb1", "tp1");
+        const prep4 = await env3.callTool("tp1", "booking_prepare", { agreementId: aid3 });
+        const denySig = makeApproval({
+          envelope: prep4.envelope, role: "provider", action: "booking",
+          tool: "booking_execute", key: keys.providerApproval, decision: "deny",
+        });
+        const out3 = await signedSubmit(env3, {
+          token: "tp1", role: "provider", prepared: prep4,
+          submitTool: "booking_execute", extraArgs: { approval: denySig },
+        });
+        assert.equal(out3.error, "APPROVAL_INVALID");
+        const st3 = await env3.callTool("tb1", "contract_status", {});
+        assert.equal(st3.terminalState, null);
+
+        // And an `allow` approval WITHOUT the role signature is refused —
+        // it is neither an authorized submit nor a deny verdict.
+        const prep5 = await env3.callTool("tp1", "booking_prepare", { agreementId: aid3 });
+        const allowNoSig = makeApproval({
+          envelope: prep5.envelope, role: "provider", action: "booking",
+          tool: "booking_execute", key: keys.providerApproval, decision: "allow",
+        });
+        const out4 = await env3.callTool("tp1", "booking_execute", { envelope: prep5.envelope, approval: allowNoSig });
+        assert.equal(out4.error, "SIGNATURE_INVALID");
+        const st4 = await env3.callTool("tb1", "contract_status", {});
+        assert.equal(st4.terminalState, null);
+      } finally { env3.close(); }
     } finally { env2.close(); }
   } finally { env.close(); }
 });
