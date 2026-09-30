@@ -374,6 +374,58 @@ test("D13: a confirm failure answers code-only — run stays live, authorize ret
   } finally { env.close(); }
 });
 
+// L4 (adversarial review): two concurrent authorizes must serialize —
+// without the per-run lock both could pass verification and race to
+// overwrite settlementRequest. A gated confirm makes the interleave real.
+test("L4: concurrent settlement_authorize serialize — exactly one confirm, settlementRequest not overwritten", async () => {
+  let releaseGate;
+  const gate = new Promise((r) => { releaseGate = r; });
+  const { rail, calls } = fakeRail();
+  rail.confirmPaymentIntent = async ({ paymentIntentId }) => {
+    calls.confirm += 1;
+    await gate;
+    return { id: paymentIntentId, status: "succeeded" };
+  };
+  const env = await boot({ settlementRail: rail });
+  try {
+    const { runId } = await verifiedPair(env, uuid(815));
+    const e1 = await env.callTool("tb1", "settlement_prepare", {});
+    const e2 = await env.callTool("tb1", "settlement_prepare", {});
+    const sign = (env_) => signRoleSig(keys.buyerSigner.priv, {
+      runId: env_.runId, role: "buyer", tool: env_.tool,
+      nonce: env_.nonce, payloadDigest: env_.payloadDigest,
+    });
+    const approve = (env_) => makeApproval({
+      envelope: env_, role: "buyer", action: "settlement",
+      tool: "settlement_authorize", key: keys.buyerApproval,
+    });
+    const app1 = approve(e1.envelope); // approvals carry ts — reuse the SAME
+    const app2 = approve(e2.envelope); // bytes for a byte-identical replay
+    const a1 = env.callTool("tb1", "settlement_authorize", {
+      envelope: e1.envelope, signatureHex: sign(e1.envelope), approval: app1,
+    });
+    const a2 = env.callTool("tb1", "settlement_authorize", {
+      envelope: e2.envelope, signatureHex: sign(e2.envelope), approval: app2,
+    });
+    await new Promise((r) => setTimeout(r, 60)); // let the winner reach confirm
+    releaseGate();
+    const [r1, r2] = await Promise.all([a1, a2]);
+    const outcomes = [r1, r2].map((r) => (r.error ?? r.status)).sort();
+    assert.deepEqual(outcomes, ["STATE_REFUSED", "released"], JSON.stringify({ r1, r2 }));
+    assert.equal(calls.confirm, 1, "the serialized loser never reaches the rail");
+    const run = env.service.runFor(runId);
+    assert.equal(run.terminalState, "settled");
+    assert.ok(run.settlementRequest !== undefined);
+    // The recorded request replays byte-identically — the winner's result.
+    const winner = r1.status === "released" ? { e: e1, r: r1, a: app1 } : { e: e2, r: r2, a: app2 };
+    const replay = await env.callTool("tb1", "settlement_authorize", {
+      envelope: winner.e.envelope, signatureHex: sign(winner.e.envelope), approval: winner.a,
+    });
+    assert.equal(replay.status, "released");
+    assert.equal(replay.transferId, winner.r.transferId);
+  } finally { env.close(); }
+});
+
 test("D13: no PaymentIntent without a match verification — the gate precedes the rail", async () => {
   const { rail, calls } = fakeRail();
   const env = await boot({ settlementRail: rail });

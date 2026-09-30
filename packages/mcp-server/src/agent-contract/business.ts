@@ -262,6 +262,27 @@ export function createBusinessOps(options: {
     "booking_cancel_prepare", "booking_cancel_submit", "settlement_authorize",
   ]);
 
+  /**
+   * L4 (adversarial review): settlement_authorize resolves rail I/O
+   * asynchronously — two in-flight authorizes on the same run could both
+   * pass verification and race to overwrite settlementRequest (the replay
+   * anchor). Serialize per runId: an authorize runs strictly after the
+   * previous one settles; the loser then hits the recorded-settlement
+   * replay/refusal check instead of mutating. The map entry self-cleans
+   * once the chain drains.
+   */
+  const authorizeLocks = new Map<string, Promise<void>>();
+  const serialized = <T>(runId: string, fn: () => T | Promise<T>): Promise<T> => {
+    const prev = authorizeLocks.get(runId) ?? Promise.resolve();
+    const next = prev.then(fn);
+    const tail: Promise<void> = next.then(() => undefined, () => undefined);
+    authorizeLocks.set(runId, tail);
+    void tail.then(() => {
+      if (authorizeLocks.get(runId) === tail) authorizeLocks.delete(runId);
+    });
+    return next;
+  };
+
   /** Both seats must be occupied before any business step runs. */
   function requireRun(run: ContractRun | undefined, tool: string): BusinessOutcome | null {
     if (run === undefined || run.bound.buyer === undefined || run.bound.provider === undefined) {
@@ -1439,7 +1460,11 @@ export function createBusinessOps(options: {
         return ok({ envelope, serverNonce });
       }
 
-      case "settlement_authorize": {
+      case "settlement_authorize":
+        // L4: the whole case runs under the per-run lock — verification,
+        // nonce claim, rail confirm and the settlementRequest write are
+        // one serialized unit per run.
+        return serialized(liveRun.runId, (): BusinessOutcome | Promise<BusinessOutcome> => {
         // Adversarial review (H1): this tool is in TERMINAL_REPLAY_TOOLS so
         // a settled run's byte-identical replay can reach the recorded
         // result — but that bypass is for SETTLED runs only. A run that
@@ -1624,7 +1649,7 @@ export function createBusinessOps(options: {
         };
         options.endRun(liveRun, "settled", principal);
         return ok({ ...simResult, serverNonce });
-      }
+        });
 
       case "settlement_status": {
         const rail = options.settlementRail;
