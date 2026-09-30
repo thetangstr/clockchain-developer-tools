@@ -40,6 +40,8 @@
     "access": "public"
   },
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "3.1138.0",
+    "@aws-sdk/client-ssm": "3.1138.0",
     "@clockchain/clock-sdk": "0.1.0",
     "@clockchain/core": "0.1.0",
     "@clockchain/keeper": "0.1.0",

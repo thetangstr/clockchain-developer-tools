@@ -17,6 +17,7 @@ const runbook = path.join(deployDir, "RUNBOOK.md");
 const installScript = path.join(repoRoot, "infra", "scripts", "install-clockchain-mcp-deploy-assets.sh");
 const deployBoxScript = path.join(repoRoot, "scripts", "deploy-box.sh");
 const rootPackageJson = path.join(repoRoot, "package.json");
+const mcpServerPackageJson = path.join(repoRoot, "packages", "mcp-server", "package.json");
 
 const expectedSecretNames = [
   "/clockchain/mcp/CLOCKCHAIN_API_KEY",
@@ -1516,4 +1517,22 @@ test("root npm test runs workspace and infra tests with deterministic failure pr
   assert.match(pkg.scripts.test, /npm run test --workspaces --if-present/);
   assert.match(pkg.scripts.test, /node --test infra\/test\/\*\.test\.mjs/);
   assert.match(pkg.scripts.test, /&&/);
+});
+
+test("mcp-server ships the AWS SDK clients its lazy import()s need as runtime deps", async () => {
+  // settlement-rail.ts resolves the Stripe test key via
+  // `await import("@aws-sdk/client-secrets-manager")` and
+  // scripts/agent-contract/check-config-from-ssm.mjs reads config via
+  // `await import("@aws-sdk/client-ssm")`. Both must land in the production
+  // image (npm ci + npm prune --omit=dev → /app/node_modules), so they have to
+  // be pinned entries in "dependencies", not devDependencies.
+  const pkg = JSON.parse(await readFile(mcpServerPackageJson, "utf8"));
+  for (const dep of ["@aws-sdk/client-secrets-manager", "@aws-sdk/client-ssm"]) {
+    assert.match(
+      pkg.dependencies?.[dep] ?? "",
+      /^\d+\.\d+\.\d+$/,
+      `${dep} must be an exact-pinned runtime dependency`,
+    );
+    assert.equal(pkg.devDependencies?.[dep], undefined, `${dep} must not be dev-only`);
+  }
 });
