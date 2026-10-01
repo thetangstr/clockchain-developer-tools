@@ -1,11 +1,11 @@
 {
   "schemaVersion": "2.2",
-  "description": "Telemetry sink admin (D22): mint ONE per-(runId, role) ingest token SEALED to the role's services x25519 public key. Output is ciphertext only ({runId, role, sealed}); plaintext ingest minting is impossible through this document (sealTo is required). Sink admin only: role clockchain-telemetry-sink-admin.",
+  "description": "Telemetry sink admin (D22): mint ONE per-(runId, role) ingest token SEALED to the role's services x25519 public key. Output is {runId, role, tokenId, sealed} only: sealTo is required and the output filter refuses anything carrying a plaintext token or a non-object sealed box. tokenId is the sha256 digest (public identifier) used for reconciliation. Sink admin only (role clockchain-telemetry-sink-admin).",
   "parameters": {
     "runId": {
       "type": "String",
-      "description": "Run UUID / id from the harness plan",
-      "allowedPattern": "^[A-Za-z0-9_-]{1,64}$"
+      "description": "Run id from the harness plan",
+      "allowedPattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
     },
     "role": {
       "type": "String",
@@ -32,7 +32,7 @@
           "CID=$(docker ps -q --filter label=com.docker.compose.project=clockchain-mcp --filter label=com.docker.compose.service=telemetry-sink)",
           "[ -n \"$CID\" ] || { echo 'telemetry-sink is not running' >&2; exit 2; }",
           "OUT=$(docker exec \"$CID\" node dist/mint-cli.js ingest --runId '{{runId}}' --role '{{role}}' --seal-to '{{sealTo}}') || { echo 'mint refused (see stderr)' >&2; exit 65; }",
-          "printf '%s' \"$OUT\" | jq -ce 'if has(\"token\") then error(\"plaintext token in mint output - refused\") else {runId: .record.runId, role: .record.role, sealed: .sealed} end | select(.sealed != null)'"
+          "printf '%s' \"$OUT\" | docker exec -i \"$CID\" node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{let o;try{o=JSON.parse(s)}catch{console.error(\"refused: mint output is not JSON\");process.exit(66)}const r=o&&o.record;const sealed=o&&o.sealed;if(!o||typeof o!==\"object\"||\"token\" in o||!sealed||typeof sealed!==\"object\"||Array.isArray(sealed)||!r||r.kind!==\"ingest\"||r.runId!==process.argv[1]||r.role!==process.argv[2]){console.error(\"refused: not a sealed-only ingest mint for this runId/role\");process.exit(66)}console.log(JSON.stringify({runId:r.runId,role:r.role,tokenId:r.tokenId,sealed}))})' '{{runId}}' '{{role}}'"
         ]
       }
     }

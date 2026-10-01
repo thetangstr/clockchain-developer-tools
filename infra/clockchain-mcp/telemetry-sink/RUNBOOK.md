@@ -228,7 +228,16 @@ What may be claimed depends on how far that has gone:
   path with alerting; the operator retains technical root on the box and could
   still mint (detectable, not prevented)".
 
+Even after F1, the separation is detect-only while the orchestrator holds
+AdministratorAccess. The draft scoped role is in `admin/orchestrator-scoped-role.json`,
+and the residual-trust section of `admin/FOUNDER-STEPS.md` explains it.
+
 Query tokens are plaintext and must not travel through SSM Run Command output.
+After each run, reconcile the sink's minted-token records against the founder's
+mint log. Inside the container, the read-only lister is
+`node dist/list-tokens-cli.js [--runId <id>]`, exposed to the founder as the
+`ClockchainSinkAdmin-ListTokens` document. An ingest record nobody minted means
+the run's evidence is rejected.
 
 Smoke after admin is set up (founder): mint an ingest token for
 `smoke-<date>-1` role buyer sealed to a throwaway x25519 key, POST one OTLP/JSON

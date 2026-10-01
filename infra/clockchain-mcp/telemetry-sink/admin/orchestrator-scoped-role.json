@@ -1,0 +1,156 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DeployViaFixedDocumentsOnly",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainMcpDeploy",
+        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainMcpSinkOps",
+        "arn:aws:ec2:us-west-2:570035913370:instance/i-0d6765d143da7e1ea"
+      ]
+    },
+    {
+      "Sid": "ReadCommandResults",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations",
+        "ssm:ListCommands"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "McpParametersReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource"
+      ],
+      "Resource": "arn:aws:ssm:us-west-2:570035913370:parameter/clockchain/mcp/*"
+    },
+    {
+      "Sid": "ReadOnlyDescribes",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeParameters",
+        "ssm:DescribeInstanceInformation",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyRootShellSessionsAndAssociations",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:SendCommand"
+      ],
+      "Resource": [
+        "arn:aws:ssm:*::document/AWS-*",
+        "arn:aws:ssm:*:*:document/AWS-*",
+        "arn:aws:ssm:*:*:document/SSM-*",
+        "arn:aws:ssm:*:*:document/ClockchainSinkAdmin-*"
+      ]
+    },
+    {
+      "Sid": "DenyInteractiveAndScheduledAccess",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:StartSession",
+        "ssm:ResumeSession",
+        "ssm:CreateAssociation",
+        "ssm:CreateAssociationBatch",
+        "ssm:UpdateAssociation",
+        "ssm:StartAssociationsOnce",
+        "ssm:StartAutomationExecution",
+        "ssm:SendAutomationSignal",
+        "ec2-instance-connect:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyDocumentWrites",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:CreateDocument",
+        "ssm:UpdateDocument",
+        "ssm:DeleteDocument",
+        "ssm:UpdateDocumentDefaultVersion",
+        "ssm:ModifyDocumentPermission"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyIdentityAdmin",
+      "Effect": "Deny",
+      "Action": [
+        "iam:*",
+        "organizations:*",
+        "sso:*",
+        "identitystore:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyAssumingTheSinkAdminRole",
+      "Effect": "Deny",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
+    },
+    {
+      "Sid": "DenyAlertingAndAuditTamper",
+      "Effect": "Deny",
+      "Action": [
+        "events:*",
+        "sns:*",
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
+        "cloudtrail:PutInsightSelectors",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucket",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutObjectLockConfiguration"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyInstanceAndVolumeTamper",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:ModifyInstanceAttribute",
+        "ec2:AssociateIamInstanceProfile",
+        "ec2:ReplaceIamInstanceProfileAssociation",
+        "ec2:DisassociateIamInstanceProfile",
+        "ec2:CreateSnapshot",
+        "ec2:CreateSnapshots",
+        "ec2:CreateImage",
+        "ec2:StopInstances",
+        "ec2:GetConsoleOutput",
+        "ec2:GetConsoleScreenshot",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:ModifySecurityGroupRules"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyWritingTheCloseAuthority",
+      "Effect": "Deny",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:LabelParameterVersion"
+      ],
+      "Resource": [
+        "arn:aws:ssm:us-west-2:570035913370:parameter/clockchain/mcp/TELEMETRY_CONTRACT_KEYS",
+        "arn:aws:ssm:us-west-2:570035913370:parameter/clockchain/mcp/TELEMETRY_CONTRACT_KEYS_*"
+      ]
+    }
+  ]
+}

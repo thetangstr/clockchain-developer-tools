@@ -1,0 +1,81 @@
+{
+  "detail-type": [
+    "AWS API Call via CloudTrail"
+  ],
+  "detail": {
+    "$or": [
+      {
+        "eventSource": [
+          "iam.amazonaws.com"
+        ],
+        "eventName": [
+          "CreateRole",
+          "UpdateAssumeRolePolicy",
+          "UpdateRole",
+          "UpdateRoleDescription",
+          "PutRolePolicy",
+          "AttachRolePolicy",
+          "DetachRolePolicy",
+          "DeleteRolePolicy",
+          "PutRolePermissionsBoundary",
+          "DeleteRolePermissionsBoundary",
+          "DeleteRole"
+        ],
+        "requestParameters": {
+          "roleName": [
+            "clockchain-telemetry-sink-admin"
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "iam.amazonaws.com"
+        ],
+        "eventName": [
+          "EnableMFADevice",
+          "DeactivateMFADevice",
+          "ResyncMFADevice",
+          "CreateAccessKey",
+          "UpdateAccessKey",
+          "DeleteAccessKey",
+          "CreateLoginProfile",
+          "UpdateLoginProfile",
+          "DeleteLoginProfile",
+          "PutUserPolicy",
+          "AttachUserPolicy",
+          "DetachUserPolicy",
+          "DeleteUserPolicy",
+          "AddUserToGroup",
+          "RemoveUserFromGroup",
+          "DeleteUser"
+        ],
+        "requestParameters": {
+          "userName": [
+            "Yang"
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "iam.amazonaws.com"
+        ],
+        "eventName": [
+          "DeleteVirtualMFADevice"
+        ]
+      },
+      {
+        "eventSource": [
+          "sts.amazonaws.com"
+        ],
+        "eventName": [
+          "AssumeRole"
+        ],
+        "requestParameters": {
+          "roleArn": [
+            "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
+          ]
+        }
+      }
+    ]
+  }
+}

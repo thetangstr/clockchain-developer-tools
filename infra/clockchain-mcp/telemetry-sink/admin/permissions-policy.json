@@ -2,16 +2,18 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "MintIngestOnTheSinkBoxOnly",
+      "Sid": "SinkAdminCommandDocsOnTheSinkBoxOnly",
       "Effect": "Allow",
       "Action": "ssm:SendCommand",
       "Resource": [
         "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-MintIngest",
+        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-ListTokens",
+        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-SessionCleanup",
         "arn:aws:ec2:us-west-2:570035913370:instance/i-0d6765d143da7e1ea"
       ]
     },
     {
-      "Sid": "ReadMintIngestResults",
+      "Sid": "ReadCommandResults",
       "Effect": "Allow",
       "Action": [
         "ssm:GetCommandInvocation",
@@ -29,7 +31,9 @@
         "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-MintQuery"
       ],
       "Condition": {
-        "BoolIfExists": { "ssm:SessionDocumentAccessCheck": "true" }
+        "BoolIfExists": {
+          "ssm:SessionDocumentAccessCheck": "true"
+        }
       }
     },
     {
@@ -42,7 +46,7 @@
       "Resource": "arn:aws:ssm:us-west-2:570035913370:session/${aws:userid}-*"
     },
     {
-      "Sid": "ReviewTheTwoDocuments",
+      "Sid": "ReviewTheSinkAdminDocuments",
       "Effect": "Allow",
       "Action": [
         "ssm:GetDocument",
@@ -50,7 +54,9 @@
       ],
       "Resource": [
         "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-MintIngest",
-        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-MintQuery"
+        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-MintQuery",
+        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-ListTokens",
+        "arn:aws:ssm:us-west-2:570035913370:document/ClockchainSinkAdmin-SessionCleanup"
       ]
     }
   ]

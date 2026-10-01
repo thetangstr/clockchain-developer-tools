@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "description": "Telemetry sink admin (D22): mint a verifier query token (per-run 'query' or verifier-wide 'global-query'). Interactive session: the plaintext token streams to the founder's terminal only and never lands in Run Command history. Session Manager logging (S3/CloudWatch) must be OFF for the account. Sink admin only.",
+  "description": "Telemetry sink admin (D22): mint a verifier query token (per-run 'query' or verifier-wide 'global-query') in an interactive session so the plaintext token is not stored in Run Command history. It still transits the SSM service and, unless the box agent has SessionLogsDestination=none, is written to ipcTempFile.log on the box (readable by root) until ClockchainSinkAdmin-SessionCleanup removes it. Session Manager S3/CloudWatch logging must be OFF. Sink admin only.",
   "sessionType": "InteractiveCommands",
   "parameters": {
     "kind": {
@@ -15,7 +15,7 @@
       "type": "String",
       "description": "Run id for kind=query; empty for global-query",
       "default": "",
-      "allowedPattern": "^([A-Za-z0-9_-]{1,64})?$"
+      "allowedPattern": "^([A-Za-z0-9][A-Za-z0-9_-]{0,63})?$"
     }
   },
   "properties": {
