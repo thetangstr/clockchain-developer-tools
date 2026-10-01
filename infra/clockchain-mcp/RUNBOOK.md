@@ -106,6 +106,9 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
      containers before and after; `caddy` and `host` `created=` must not change
      (`host` restarts itself every ~121s by design, so its `started=` moves).
      In-memory `mcp` state is still lost, so the notice/freeze rule still applies.
+     The profile-gated `telemetry-sink` is never touched by either mode's
+     start path; a full restart (compose `down`) removes it and it must be
+     started again with `sink-up.sh up` — see `telemetry-sink/RUNBOOK.md`.
      Before checking anything out, it **refuses** (box untouched) when:
      - the target's installer or `compose-up.sh` predates code-only deploys (no
        `deploy-box: supports ...` marker). Older versions ignore `--no-restart`

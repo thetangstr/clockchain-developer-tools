@@ -122,7 +122,7 @@ box "bash $SINK up"
 `up` reads the public key set, validates it, builds the image, runs
 `docker compose --profile telemetry up -d --no-deps --wait telemetry-sink`,
 and refuses if the sink is already running. GATE: `== Success`;
-`caddy/host/mcp unchanged`; `telemetry-sink … Up (healthy)`; the ready line
+`caddy/host/mcp unchanged` (compares `created=`; host's `started=` moves by design); `telemetry-sink … Up (healthy)`; the ready line
 shows `"keyCreated":true` (first boot), `"contractKeyIds":["contract-server-v1"]`,
 `"peerEnv":"none"`; `mcp -> telemetry-sink:8081/v1/health 200`.
 
@@ -151,7 +151,7 @@ echo "close at root:     $(c -X POST -d '{}' $B/v1/runs/x/close)   (expect mcp's
 echo "health:            $(c $B/health)   (200)"
 echo "mcp no creds:      $(c -X POST -H 'content-type: application/json' -d '{}' $B/mcp)   (401)"
 echo "acm4 pinned:       $(c $B/acm4/health)   (unchanged from before)"
-box "bash $SINK status"   # caddy/host/mcp/acm4 times == the step-2/3 values
+box "bash $SINK status"   # caddy/host/mcp/acm4 created= == step 3 AFTER (host started= moves every ~121 s by design)
 ```
 
 **7. Archive the sink public key** (the verifier's pin; also the evidence if

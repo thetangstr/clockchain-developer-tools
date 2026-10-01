@@ -43,6 +43,8 @@ container_times() {
   done
 }
 
+created_only() { sed -E 's/ started=[^ ]*//'; }
+
 ready_line() {
   "${SDC[@]}" logs --no-log-prefix telemetry-sink </dev/null 2>/dev/null | grep '"telemetry-sink-ready"' | tail -1 || true
 }
@@ -102,8 +104,10 @@ case "$MODE" in
     "${SDC[@]}" up -d --no-deps --wait --wait-timeout "$WAIT_TIMEOUT" telemetry-sink </dev/null
     AFTER=$(container_times)
     printf '%s\n' "$AFTER"
-    if [[ "$BEFORE" != "$AFTER" ]]; then
-      echo "WARNING: caddy/host/mcp/acm4 container times CHANGED — investigate"
+    # Compare created= only: host restarts itself every ~121 s by design, so started= moves.
+    if [[ "$(created_only <<<"$BEFORE")" != "$(created_only <<<"$AFTER")" ]]; then
+      echo "WARNING: a caddy/host/mcp/acm4 container was RECREATED (created= changed) — investigate"
+      printf 'before:\n%s\n' "$BEFORE"
       exit 1
     fi
     echo "caddy/host/mcp unchanged"

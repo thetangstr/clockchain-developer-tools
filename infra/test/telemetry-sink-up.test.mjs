@@ -14,7 +14,7 @@ const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
 const script = path.join(repoRoot, "infra", "clockchain-mcp", "telemetry-sink", "sink-up.sh");
 const PROD_KEYS = '{"contract-server-v1":{"kty":"OKP","crv":"Ed25519","x":"J3iURWKkx4kAg-leW-NDKp7AUZQNdowUfLb5HHlQ0xU"}}';
 
-function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, sinkRunning = false } = {}) {
+function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, sinkRunning = false, inspect = 'echo "/c created=2026-10-01T00:00:00Z started=2026-10-01T00:00:00Z"' } = {}) {
   const temp = mkdtempSync(path.join(tmpdir(), "sink-up-"));
   const bin = path.join(temp, "bin");
   const app = path.join(temp, "app");
@@ -38,7 +38,7 @@ case "$*" in
   *"ps -q mcp"*) echo mcpcid ;;
   *"ps -aq caddy host mcp"*) printf 'caddycid\\nhostcid\\nmcpcid\\n' ;;
   *"logs"*) echo '{"event":"telemetry-sink-ready","keyId":"sink-ed25519-x","keyCreated":true,"contractKeyIds":["contract-server-v1"],"peerEnv":"none"}' ;;
-  inspect*) echo "/c created=2026-10-01T00:00:00Z started=2026-10-01T00:00:00Z" ;;
+  inspect*) ${inspect} ;;
   *) true ;;
 esac`);
   fake("sudo", 'shift 2; exec "$@"');
@@ -142,4 +142,17 @@ test("stop keeps the volume; unknown modes are rejected", () => {
   assertNeverTouchesOthers(r.calls);
   const bad = runScript(fixture(), ["down"]);
   assert.equal(bad.status, 64);
+});
+
+test("up tolerates host's self-restart (started= moves) but fails on a recreate (created= moves)", () => {
+  const counter = (field) => `n=$(cat "$0.n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$0.n"; ` +
+    (field === "started"
+      ? 'echo "/host created=2026-10-01T00:00:00Z started=2026-10-01T00:00:0${n}Z"'
+      : 'echo "/caddy created=2026-10-01T00:00:0${n}Z started=2026-10-01T00:00:00Z"');
+  const ok = runScript(fixture({ inspect: counter("started") }), ["up"]);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /caddy\/host\/mcp unchanged/);
+  const bad = runScript(fixture({ inspect: counter("created") }), ["up"]);
+  assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+  assert.match(bad.stdout, /RECREATED/);
 });
