@@ -1,0 +1,183 @@
+{
+  "schema": "agent-contract.mandate-vectors/v2.2",
+  "generator": "orchestrator independent generator (not N5/N4b code), 2026-09-29",
+  "contract": "docs/travel-mvp/design/CONTRACT-PAYLOADS-v2.md rev 6.10 (D12)",
+  "scheme": "EIP-191 signMessage({message:{raw: mandateDigest}}), mandateDigest = canonicalDigest({domain:'agent-contract.mandate/v1', ...mandate})",
+  "testOnlyPrincipal": {
+    "address": "0x20A8263C419340C3B225646b6262aBFC8c93C819",
+    "note": "TEST-ONLY deterministic key (seed string in generator); never deploy"
+  },
+  "supersedes": "nothing — ADDITIVE (v2 and v2.1 files unchanged)",
+  "vectors": [
+    {
+      "name": "rome-family-4",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-rome-family-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": 4
+      },
+      "mandateDigest": "0xe2ecfa473d30c3f257370f28418eeda2c91edcd3656a5471c6aea63166c78e6f",
+      "signature": "0xf5ded72837bf83452f6c492b0906f1af7acc600b6b57e0d39db1efa3a0143f362d05971ad044986935c203078bb0b338220aef58497d8f1deae8b40668e62a1c1b",
+      "expect": "valid"
+    },
+    {
+      "name": "solo-1",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-solo-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": 1
+      },
+      "mandateDigest": "0x08e4f285bf681748250fe73cfb7a69f2ad730ef6786ae8680b3fa0ef4ee2ce6f",
+      "signature": "0xe384928f81ea0a8f942bf91cf72539bea983c9bf56c62e62438b45ca44ef80187df0095090ecce95ff40701e912e6f9f641b4f9980caf1caed068991b5a5dbfe1b",
+      "expect": "valid"
+    },
+    {
+      "name": "max-9",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-max-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": 9
+      },
+      "mandateDigest": "0x41e5c0ed12dd67570dc08830260b58532eb16010c1f1c86a99bfda50447becf1",
+      "signature": "0x61638239f427c0c5a82d26c05c1c30a0024c884c5f2afb47c341c73e93a126b24dbad7f0b81c12cd211db36b43cde4f1169126526bcde2894cdefe186e94e3e61b",
+      "expect": "valid"
+    },
+    {
+      "name": "partySize-missing",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-rome-family-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z"
+      },
+      "mandateDigest": "0x912ec380f01ac25e86554dfec2a8aaa68a78243a59b2781a0c6db22a0f37b1a6",
+      "signature": "0x88ef620af2bd25e17619b963a6b90753b3cb6f6807449b3fc7c3aa65a9ff6dfe1b30df0519efdd359228f85ad7bad90e225cb01a4652100f85b95dc99e8e472b1b",
+      "expect": "MANDATE_INVALID"
+    },
+    {
+      "name": "partySize-zero",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-rome-family-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": 0
+      },
+      "mandateDigest": "0xca724241e7f51bfcd09b529c03e620c606fae02ea4d20e1dfdae19103ef39fbe",
+      "signature": "0x306426335fec4bc7aeeec6a1a26900db2b3ce7f848e2f6924bd6235c36dd22175bdd7dca3e422c739ac073d339d7f7726953017c4b7db69bb27bdf5031930d0f1b",
+      "expect": "MANDATE_INVALID"
+    },
+    {
+      "name": "partySize-ten",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-rome-family-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": 10
+      },
+      "mandateDigest": "0x8d3ea6786202d0f117d04887bde5da9ff33a8d2043ff04a21c0e91ca479c9d7e",
+      "signature": "0x87575d2613e060a041cc415b880385704d397fd3f02f28d3fbc466f67086f6982b1580c925dc564e68c4e7acd0a992e1da01457723a5cde1e98209fa5debcf601b",
+      "expect": "MANDATE_INVALID"
+    },
+    {
+      "name": "partySize-fraction",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-rome-family-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": 2.5
+      },
+      "mandateDigest": "0x34144764d34d2b792f35d13be691a01005427978a2f0e9d39a17fbd35c0137a7",
+      "signature": "0xb98727e2091ac449178b5c398573c2dd38feea69732de50c1e2b87f5000887be44215c0766dc930e567e51bd0613f7a3a74414b3350a829cc81e69483d34cd9c1c",
+      "expect": "MANDATE_INVALID"
+    },
+    {
+      "name": "partySize-string",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-rome-family-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": "4"
+      },
+      "mandateDigest": "0x53d172d01a1c30f7543bc5282b135e09ba72de55a3026bca3c1e1df00da8e587",
+      "signature": "0xd67c8530a9a0c64b7598f669a22a7f800db7643083a0c8ea039f51579ba6b1b9143139fd89bbe0994e33160f090bebcbcc3d420ca1870a7a7ddfcb76e103fd6f1b",
+      "expect": "MANDATE_INVALID"
+    },
+    {
+      "name": "tampered-partySize",
+      "mandate": {
+        "kind": "mandate",
+        "mandateId": "mnd-rome-family-0001",
+        "capMinor": 680000,
+        "currency": "USD",
+        "allowedItineraryIds": [
+          "IT-ROME-ZX118-ECON",
+          "IT-ROME-ZX118-PREM",
+          "IT-ROME-QW-ONESTOP"
+        ],
+        "expiresAt": "2030-01-01T00:00:00.000Z",
+        "partySize": 2
+      },
+      "mandateDigest": "0x5d1d5652cb7bee5e509c53e2241411c8e3b219dc74e2f64565c3559c3a24f713",
+      "signature": "0xf5ded72837bf83452f6c492b0906f1af7acc600b6b57e0d39db1efa3a0143f362d05971ad044986935c203078bb0b338220aef58497d8f1deae8b40668e62a1c1b",
+      "expect": "MANDATE_INVALID"
+    }
+  ]
+}

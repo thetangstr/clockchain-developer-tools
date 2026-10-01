@@ -33,3 +33,6 @@ scripts/slides-created.json
 
 # SDD scratch workspaces (skill artifact, never committed)
 .superpowers/
+
+# Local runtime state (contract surface dev/testing)
+packages/mcp-server/state/

@@ -1,0 +1,44 @@
+{
+  "schema": "agent-contract.settlement-role-sig-vectors/v2.3",
+  "generator": "orchestrator independent generator (not N5/N4b code), 2026-09-29",
+  "contract": "docs/travel-mvp/design/CONTRACT-PAYLOADS-v2.md rev 6.11 (D13)",
+  "supersedes": "nothing — ADDITIVE (settlement gains paymentRail + paymentIntentId; v2/v2.1/v2.2 unchanged)",
+  "scheme": "EIP-191 signMessage({message:{raw: roleSigDigest}}), roleSigDigest = canonicalDigest({domain:'agent-contract.role-sig/v1', runId, role, tool, nonce, payloadDigest})",
+  "testOnlySigners": {
+    "buyer": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+    "provider": "0x5C5111597c31145047F45840d1ABAa1ED4Ad14A8",
+    "note": "TEST-ONLY deterministic keys (seed strings in generator); never deploy"
+  },
+  "vectors": [
+    {
+      "tool": "settlement_prepare",
+      "role": "buyer",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "buyer",
+        "tool": "settlement_prepare",
+        "nonce": "0x91f1a6fa1749041fa8b83a2c5dc33d6e",
+        "payloadDigest": "0x03261498a624c984d1ceca3e238445d5a0a976973c44f5e5860839455d58f0a4"
+      },
+      "roleSigDigest": "0xf182b7705223c8ec2d45b25a0b4d587502e2c89259f149fd65d4a88ce3b9d4ff",
+      "signerAddress": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+      "signature": "0xce198658ff0f2b7165e926b40ecf760b05a43c4b0b804d2fb5b111ace8d8da0f1a4a94d469d402f67e3d00054f07cff64acc0969711b109ae0ee7ab5c3f50d851b"
+    },
+    {
+      "tool": "settlement_prepare",
+      "role": "buyer",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "buyer",
+        "tool": "settlement_prepare",
+        "nonce": "0x1ef523c1f162a6f3ba94a1b612ed5409",
+        "payloadDigest": "0x395d9ca1d9d8c4d2b3f9a75f7163c019720dce32bd7bb4be50c21629ba52c689"
+      },
+      "roleSigDigest": "0xf3d6868f4440216fadf5ef9e45772ed064a48d3dcd6b544dbcb11d00896e76aa",
+      "signerAddress": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+      "signature": "0x9f32d5e6119bb4aec7a9e52cdfad884e0ab3e519fa1773772f942600f8902c6924c2fef141ab691fe80e01ace0b891755b9a97142ad9acee0f8bb51ac5dfa33b1b"
+    }
+  ]
+}

@@ -1,0 +1,104 @@
+{
+  "schema": "agent-contract.role-sig-vectors/v2",
+  "generator": "orchestrator independent generator (not N5/N4b code), 2026-09-28",
+  "contract": "docs/travel-mvp/design/CONTRACT-PAYLOADS-v2.md",
+  "supersedes": "v1 prepare-envelope-vectors.json (3 envelopes) and N5 role-sig-vectors.json",
+  "scheme": "EIP-191 signMessage({message:{raw: roleSigDigest}}), roleSigDigest = canonicalDigest({domain:'agent-contract.role-sig/v1', runId, role, tool, nonce, payloadDigest})",
+  "testOnlySigners": {
+    "buyer": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+    "provider": "0x5C5111597c31145047F45840d1ABAa1ED4Ad14A8",
+    "note": "TEST-ONLY deterministic keys (seed strings in generator); never deploy"
+  },
+  "vectors": [
+    {
+      "tool": "offer_prepare",
+      "role": "buyer",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "buyer",
+        "tool": "offer_prepare",
+        "nonce": "0xb53a57cedb84bf9bd200b0ce1161c5e4",
+        "payloadDigest": "0xc43b4f69b0db8c2ed2e5481b52b4377dc51e1080685b7ac84ca37a40a181247c"
+      },
+      "roleSigDigest": "0x144258a2a565c7da71879da3ac5ddfb584f5d5357dbc96260e43e1c3fc98dbe1",
+      "signerAddress": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+      "signature": "0x35820db4837890f340383106500a5d2aeaed0c73356d57d95f141638142f717d593f88f25bcb09771996c1ef285ec6c012b495d82df691c683099cb27310a40a1b"
+    },
+    {
+      "tool": "offer_prepare",
+      "role": "provider",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "provider",
+        "tool": "offer_prepare",
+        "nonce": "0x026d5d2798044332a27047e7442f8732",
+        "payloadDigest": "0x0f54a5e28325492485d609d169466ab82ed73488d9a692903d6f03fc3947a7f2"
+      },
+      "roleSigDigest": "0x24b1d8ca8f9cf2ad05da94a1c9c6e82fd199b2170b469264062f50633342eed5",
+      "signerAddress": "0x5C5111597c31145047F45840d1ABAa1ED4Ad14A8",
+      "signature": "0xb0dd617dda2e03d0ead3e61acb852bc7c86e6169d02f294371299db8b3c7401a3933d5bd96ca46323260db686f7905bf996a54d6f19f25bf1b2970c3b2f5f1ff1c"
+    },
+    {
+      "tool": "offer_accept_prepare",
+      "role": "buyer",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "buyer",
+        "tool": "offer_accept_prepare",
+        "nonce": "0x2aed7af85be02e08ae48f824c8c529a1",
+        "payloadDigest": "0x185b0cf11aad7a1ebede1c3b06158fb3dcdc3b68f4610b4b62122d74a3d87a5c"
+      },
+      "roleSigDigest": "0xbcda108579fb51902fa28a1d375a7c93a97fd1b3b0a79ae7ace02282ef878e6e",
+      "signerAddress": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+      "signature": "0x1239dd7c53c4f8ef04bb385fd9e46f84a3d0a511fab9cdad00373d9a7e4ceb4c2fd259efd48dd2217a980f26919bde405accfe23e894172c731ef23d7492594c1c"
+    },
+    {
+      "tool": "booking_prepare",
+      "role": "provider",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "provider",
+        "tool": "booking_prepare",
+        "nonce": "0x3b3fc0673fd0e53ff4fdddba0fe07ffe",
+        "payloadDigest": "0x6f82e4a8d765406243445311ca95ea57374eb2c7f357c342529ab54b0a30d9c5"
+      },
+      "roleSigDigest": "0x4a584609b40e04b48c8f42c935de267759195762f51d5e56eb61db86c5b0d2d2",
+      "signerAddress": "0x5C5111597c31145047F45840d1ABAa1ED4Ad14A8",
+      "signature": "0x5f213fddfad2fd1421ac275848097683199513ffb7107afcd8483c77c889251246b8983b9ca38d4bbeaa247cf0724534bbef4b7e3840bcb9061ab6a5981fd1f31c"
+    },
+    {
+      "tool": "verification_prepare",
+      "role": "buyer",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "buyer",
+        "tool": "verification_prepare",
+        "nonce": "0x57e9bc317871abb4e2f242006ca1be96",
+        "payloadDigest": "0x0987893b9654b7c715398efb2f427a8aeb36dab2cdb678f811636633bf43a7c3"
+      },
+      "roleSigDigest": "0xd7123893ca5ca9edf997e14c9b123d429283d125b2a41885f7aa99d02c5c33fe",
+      "signerAddress": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+      "signature": "0x3713b894d5fcab8fe1e1a783eb5abb595c96a077bb2f9afc4d19f576ec1ac3b036de1e45f9625c821bfa008dbf717e60f33416a6e257f3a00186db6330b80f591b"
+    },
+    {
+      "tool": "settlement_prepare",
+      "role": "buyer",
+      "tuple": {
+        "domain": "agent-contract.role-sig/v1",
+        "runId": "run-test-0002",
+        "role": "buyer",
+        "tool": "settlement_prepare",
+        "nonce": "0x752b5b742cb685d52aec102b4892a01d",
+        "payloadDigest": "0x74819a9ebbe732c936ff8c87ea4336b6a452e98fba44ab6b68108a7b1030157a"
+      },
+      "roleSigDigest": "0x46206b1fec95106629caf764a98308445e93a21c8435a88af1d9c3eb5f0d55ce",
+      "signerAddress": "0x5d7131EF80e449697839d79d69F9ACB21c71AB0f",
+      "signature": "0x4d76068df50b54bc94c39d9dc7d514b3ddf6e7119386a0403a487e928660726c5c07103637e08f2e84ed9101614d950af340f2636820310023c0a4f6e83446681b"
+    }
+  ]
+}

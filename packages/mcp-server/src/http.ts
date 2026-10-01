@@ -4,6 +4,7 @@ import {
   createServer,
   type IncomingHttpHeaders,
   type IncomingMessage,
+  type Server,
   type ServerResponse,
 } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -67,6 +68,14 @@ import { createStatusCache, type PerformanceSnapshot, type StatusDeps } from "./
 import { renderStatusPage } from "./status-page.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 import { V2RoleAccessError } from "./agent-handshake/v2/access.js";
+import { createContractHttpHandler } from "./agent-contract/http-handler.js";
+import { loadContractConfig } from "./agent-contract/config.js";
+import {
+  buildServerCard,
+  buildServerKeysDoc,
+  SERVER_CARD_PATH,
+} from "./agent-contract/server-card.js";
+import { createContractEvidenceRoutes } from "./agent-contract/evidence-routes.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -424,7 +433,7 @@ export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promis
   });
 }
 
-export async function runHttp(): Promise<void> {
+export async function runHttp(): Promise<Server> {
   // PORT is injected by Cloud Run / most PaaS hosts (8080); MCP_PORT is our own
   // override; 3000 is the local default. Honor them in that order.
   const port = Number(process.env.PORT ?? process.env.MCP_PORT ?? "3000");
@@ -498,6 +507,55 @@ export async function runHttp(): Promise<void> {
   const chainVerifyCache = new Map<string, unknown>();
   const allowChainVerify = keyedWindowLimiter(Number(process.env.STANDALONE_HANDSHAKE_VERIFY_PER_MINUTE ?? "60"), 60_000, Date.now);
 
+  // ---- /contract/mcp (agent-contract business surface, N4b) ---------------
+  // Off by default: the route only exists when CONTRACT_MCP_ENABLED=1.
+  // Config is loaded EAGERLY here (startup), never per request: enabled with
+  // a broken CONTRACT_AUTH_TOKENS/CONTRACT_HOST_ROOTS or a missing
+  // CONTRACT_SERVER_ED25519_SEED (and no CONTRACT_ALLOW_EPHEMERAL_KEY=1)
+  // verdicts "misconfigured" → the route refuses with a deterministic 503.
+  const contractConfig = loadContractConfig(process.env);
+  if (contractConfig.kind === "misconfigured") {
+    console.error(`[clockchain-mcp] /contract/mcp misconfigured (closed): ${contractConfig.reason}`);
+  } else if (contractConfig.kind === "ready" && contractConfig.signerEphemeral) {
+    console.warn(JSON.stringify({ event: "contract_ephemeral_signer", note: "ephemeral dev signer in use — receipts are not durably verifiable", keyId: contractConfig.signer.keyId }));
+  }
+  let contractHandler: ReturnType<typeof createContractHttpHandler> | undefined;
+  const getContractHandler = () => {
+    if (contractHandler) return contractHandler;
+    if (contractConfig.kind !== "ready") throw new Error("contract route is not configured");
+    contractHandler = createContractHttpHandler({
+      authenticate: contractConfig.authenticate,
+      hostRoots: contractConfig.hostRoots,
+      signer: contractConfig.signer,
+      service: contractConfig.service,
+      callsPerMinute: contractConfig.callsPerMinute,
+      trustProxy: contractConfig.trustProxy,
+      sessionTtlMs: contractConfig.sessionTtlMs,
+      onRateLimited: () => rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) }),
+    });
+    return contractHandler;
+  };
+  // The observer receipt feed is a low-rate surface (default 30/min).
+  // `||` not `??`: compose injects "" when the host var is unset (N7c) —
+  // empty must mean the default, not 0.
+  const allowObserverFeed = keyedWindowLimiter(Number(process.env.CONTRACT_OBSERVER_PER_MINUTE || "30"), 60_000, Date.now);
+
+  // N4b-6: the evidence routes are ONE exported code path — shared with the
+  // l-stack so nothing can drift (receipts feed, keys doc, run-salt). The
+  // server card itself stays here (it's a host-level .well-known document).
+  const contractEvidenceRoutes = createContractEvidenceRoutes({
+    service: contractConfig.kind === "ready" ? contractConfig.service : undefined,
+    observerToken: contractConfig.kind === "ready" ? contractConfig.observerToken : undefined,
+    verifierToken: contractConfig.kind === "ready" ? contractConfig.verifierToken : undefined,
+    keysDoc: contractConfig.kind === "ready"
+      ? buildServerKeysDoc(contractConfig.serverKeys, {
+          simFaultsEnabled: contractConfig.simFaultsEnabled,
+        })
+      : undefined,
+    allowFeed: (scope) => allowObserverFeed(scope),
+    onRateLimited: () => rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) }),
+  });
+
   let standaloneHandshakeHandler: ReturnType<typeof createStandaloneHttpHandler> | undefined;
   let standaloneHandshakeCoordinator: ReturnType<typeof createRuntimeStandaloneCoordinator> | undefined;
   const getStandaloneHandshakeHandler = () => {
@@ -521,7 +579,7 @@ export async function runHttp(): Promise<void> {
   const ROUTE_CLASSES = [
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
     "llms", "manifest", "handshake_manifest", "standalone_manifest", "connect_verify",
-    "connect_mcp", "handshake_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
+    "connect_mcp", "handshake_mcp", "contract_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
     "landing", "asset", "mcp_rpc", "keeper", "other",
   ] as const;
   const STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
@@ -538,7 +596,7 @@ export async function runHttp(): Promise<void> {
     "sign_evidence", "evidence_submitted", "certificate_available",
   ] as const;
   const DEP_NAMES = ["relay_discovery", "relay_result", "gateway_pool", "evm_rpc"] as const;
-  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call"] as const;
+  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call"] as const;
 
   const httpRequests = metrics.counter("clockchain_http_requests_total", "HTTP requests by route class and status class.");
   const httpDuration = metrics.histogram("clockchain_http_request_duration_seconds", "HTTP request duration by route class.");
@@ -572,6 +630,7 @@ export async function runHttp(): Promise<void> {
     if (method === "GET" && p === "/connect/verify") return "connect_verify";
     if (p === "/connect/mcp") return "connect_mcp";
     if (p === "/handshake/mcp") return "handshake_mcp";
+    if (p === "/contract/mcp") return "contract_mcp";
     if (p.startsWith("/handshake/local-action")) return "handshake_local_action";
     if (p === "/handshake/invitations/exchange") return "invitation_exchange";
     if (method === "POST" && p === "/token") return "token";
@@ -1089,6 +1148,53 @@ export async function runHttp(): Promise<void> {
       return;
     }
 
+    // Agent-contract business surface (LLD §3). Off unless explicitly enabled;
+    // enabled-but-misconfigured refuses closed instead of half-serving.
+    if (pathOf(req.url) === "/contract/mcp") {
+      if (contractConfig.kind === "disabled") {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      if (contractConfig.kind === "misconfigured") {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "contract_unavailable" }));
+        return;
+      }
+      try {
+        await getContractHandler()(req, res);
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "contract_unavailable" }));
+        }
+      }
+      return;
+    }
+
+    // M3: public key discovery — the server card and the standalone key
+    // document carry the receipt/envelope signing key(s) with rotation
+    // metadata so agents can pin a keyId+publicKey before any run. Public
+    // (public-key material only); closed (404) when the surface is off.
+    if (pathOf(req.url) === SERVER_CARD_PATH) {
+      if (req.method !== "GET" || contractConfig.kind !== "ready") {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });
+      res.end(JSON.stringify(buildServerCard(contractConfig.serverKeys, {
+        simFaultsEnabled: contractConfig.simFaultsEnabled,
+      })));
+      return;
+    }
+    // N4b-6: `GET /contract/keys`, `GET /contract/receipts`, and
+    // `GET /contract/run-salt` are served by the exported evidence-routes
+    // handler — the same code path the l-stack mounts, so behavior cannot
+    // drift between the two mounts. Auth (observer/verifier bearer, sha256
+    // constant-time), method gates, rate limits and filtering are identical.
+    if (contractEvidenceRoutes(req, res)) return;
+
     // A Responder exchanges the URL-fragment capability exactly once. The
     // capability is never sent in a query string and the response is never
     // cacheable. All public failures intentionally collapse to one code.
@@ -1463,14 +1569,18 @@ export async function runHttp(): Promise<void> {
     }
   });
 
-  httpServer.listen(port, () => {
-    console.error(`[clockchain-mcp] http server listening on :${port}`);
-    console.error(
-      `[clockchain-mcp] self-serve tokens: ${
-        selfServeEnabled
-          ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
-          : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
-      }`,
-    );
+  await new Promise<void>((resolve) => {
+    httpServer.listen(port, () => {
+      console.error(`[clockchain-mcp] http server listening on :${port}`);
+      console.error(
+        `[clockchain-mcp] self-serve tokens: ${
+          selfServeEnabled
+            ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
+            : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
+        }`,
+      );
+      resolve();
+    });
   });
+  return httpServer;
 }
