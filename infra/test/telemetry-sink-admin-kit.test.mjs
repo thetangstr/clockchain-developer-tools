@@ -159,8 +159,10 @@ test("us-west-2 alert: associations, docs, instance connect, instance attrs, SG,
   assert.ok(has(doc, "events.amazonaws.com", ["DisableRule", "DeleteRule", "PutRule", "RemoveTargets", "PutTargets"]));
   assert.ok(has(doc, "sns.amazonaws.com", ["Unsubscribe", "SetTopicAttributes", "DeleteTopic", "Subscribe"]));
   assert.ok(has(doc, "cloudtrail.amazonaws.com", ["StopLogging", "DeleteTrail", "UpdateTrail", "PutEventSelectors"]));
-  const assume = branches(doc).find((b) => b.eventSource[0] === "sts.amazonaws.com");
-  assert.deepEqual(assume.requestParameters.roleArn, [ADMIN_ROLE]);
+  const sts = branches(doc).filter((b) => b.eventSource[0] === "sts.amazonaws.com");
+  assert.equal(sts.length, 1, "only the not-Yang AssumeRole branch (routine logins send no email)");
+  assert.deepEqual(sts[0].requestParameters.roleArn, [ADMIN_ROLE]);
+  assert.deepEqual(sts[0].userIdentity.principalId, [{ "anything-but": "__YANG_USER_ID__" }, { exists: false }]);
 });
 
 test("us-west-2 alert (N3): stop/image/volume ops on the box by instance or volume id; snapshots unfiltered", async () => {
@@ -206,6 +208,11 @@ test("FOUNDER-STEPS renders every placeholder and pins every Command doc", () =>
   assert.match(steps, /992aef4/);
   assert.match(steps, /--role-session-name yang-sink-admin /);
   assert.doesNotMatch(steps, /not in the alert pattern yet|other region's rule is unaffected/);
+  // Both safety checks HALT: the failure branch ends in `false` and the next command is &&-chained.
+  assert.match(steps, /\|\| \{ echo "STOP: unrendered placeholder or empty pattern"; false; \}; \} \\\n\s+&& alert_rule us-west-2 [^\n]*\\\n\s+&& alert_rule us-east-1 /);
+  assert.match(steps, /\|\| \{ echo "STOP: MintQuery differs from the recorded pin"; false; \}; \} \\\n\s+&& aws ssm start-session /);
+  assert.doesNotMatch(steps, /\|\| echo "STOP/);
+  assert.doesNotMatch(steps, /\(a notice\)/);
 });
 
 test("us-east-1 alert: IAM changes on the role and on user Yang, plus role assumption", async () => {
@@ -221,8 +228,10 @@ test("us-east-1 alert: IAM changes on the role and on user Yang, plus role assum
     assert.ok(user.eventName.includes(n), n);
   }
   assert.ok(has(doc, "iam.amazonaws.com", ["CreateVirtualMFADevice", "DeleteVirtualMFADevice"]));
-  const assume = branches(doc).find((b) => b.eventSource[0] === "sts.amazonaws.com");
-  assert.deepEqual(assume.requestParameters.roleArn, [ADMIN_ROLE]);
+  const sts = branches(doc).filter((b) => b.eventSource[0] === "sts.amazonaws.com");
+  assert.equal(sts.length, 1, "only the not-Yang AssumeRole branch (routine logins send no email)");
+  assert.deepEqual(sts[0].requestParameters.roleArn, [ADMIN_ROLE]);
+  assert.deepEqual(sts[0].userIdentity.principalId, [{ "anything-but": "__YANG_USER_ID__" }, { exists: false }]);
 });
 
 test("orchestrator scoped role (Tier 2 draft): no root shell, no IAM/doc/alerting write", async () => {

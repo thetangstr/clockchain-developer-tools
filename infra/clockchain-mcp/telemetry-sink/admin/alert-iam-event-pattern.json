@@ -111,19 +111,6 @@
           "roleArn": [
             "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
           ]
-        }
-      },
-      {
-        "eventSource": [
-          "sts.amazonaws.com"
-        ],
-        "eventName": [
-          "AssumeRole"
-        ],
-        "requestParameters": {
-          "roleArn": [
-            "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
-          ]
         },
         "userIdentity": {
           "principalId": [

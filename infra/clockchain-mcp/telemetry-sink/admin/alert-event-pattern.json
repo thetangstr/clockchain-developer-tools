@@ -183,19 +183,6 @@
       },
       {
         "eventSource": [
-          "sts.amazonaws.com"
-        ],
-        "eventName": [
-          "AssumeRole"
-        ],
-        "requestParameters": {
-          "roleArn": [
-            "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
-          ]
-        }
-      },
-      {
-        "eventSource": [
           "ec2.amazonaws.com"
         ],
         "eventName": [

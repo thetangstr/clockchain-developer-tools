@@ -69,7 +69,6 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
    render() { jq --arg yid "$YID" --argjson vols "$VOLS" \
      'walk(if . == ["__BOX_VOLUME_IDS__"] then $vols elif . == "__YANG_USER_ID__" then $yid else . end)' "$1"; }
    render alert-event-pattern.json > /tmp/alert-usw2.json && render alert-iam-event-pattern.json > /tmp/alert-use1.json
-   ! grep -l '__[A-Z_]*__' /tmp/alert-usw2.json /tmp/alert-use1.json || echo "STOP: unrendered placeholder"
    alert_rule() {  # $1 region  $2 rule/topic name  $3 pattern file
      local T
      T=$(aws sns create-topic --region $1 --name $2 --query TopicArn --output text) || return 1
@@ -79,8 +78,12 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
      aws events put-rule --region $1 --name $2 --event-pattern file://$3 --state ENABLED || return 1
      aws events put-targets --region $1 --rule $2 --targets "Id=sns,Arn=$T"
    }
-   alert_rule us-west-2 clockchain-sink-box-access /tmp/alert-usw2.json
-   alert_rule us-east-1 clockchain-sink-iam /tmp/alert-use1.json
+   # Halts (nothing is created) if rendering failed or left a placeholder:
+   { [ -s /tmp/alert-usw2.json ] && [ -s /tmp/alert-use1.json ] \
+       && ! grep -q '__[A-Z_]*__' /tmp/alert-usw2.json /tmp/alert-use1.json \
+       || { echo "STOP: unrendered placeholder or empty pattern"; false; }; } \
+     && alert_rule us-west-2 clockchain-sink-box-access /tmp/alert-usw2.json \
+     && alert_rule us-east-1 clockchain-sink-iam /tmp/alert-use1.json
    ```
    Confirm both subscription emails. **Test** (as yourself; an email should arrive within a
    few minutes):
@@ -102,13 +105,14 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
      ever change, re-record `VOLS` and re-run `put-rule`.
    - Any EventBridge rule or target change, any SNS subscribe, unsubscribe, topic-policy
      change or delete, and any CloudTrail stop, delete, update or selector change.
-   - Assumption of the admin role (a notice), and separately when the caller's `principalId`
-     is not Yang's recorded unique ID (a deleted-and-recreated "Yang" has a new ID).
+   - Assumption of the admin role by any caller whose `principalId` is not Yang's recorded
+     unique ID (a deleted-and-recreated "Yang" has a new ID). Yang's own routine role
+     assumptions send no email; they remain in the trail.
 
    The us-east-1 rule alerts on any change to the role (trust, policies, boundary, delete,
    re-create); on `UpdateUser` and MFA, access-key, login-profile, policy or group changes for
    user Yang; on any virtual MFA device create or delete (those events carry no user name);
-   on the same role-assumption checks; and on the same EventBridge/SNS/CloudTrail tamper
+   on the same not-Yang role-assumption check; and on the same EventBridge/SNS/CloudTrail tamper
    events as us-west-2, so tampering in one region is reported by the other region's rule too.
 
 4. **Stop the box keeping session copies.** By default the SSM agent writes every session's
@@ -210,9 +214,9 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
    ```bash
    live=$(aws ssm describe-document --region $R --name ClockchainSinkAdmin-MintQuery \
      --query 'Document.[Name,DocumentVersion,HashType,Hash]' --output text)
-   [ "$live" = "$(awk '$1 == "ClockchainSinkAdmin-MintQuery"' ~/sink-admin-doc-pins.txt)" ] \
-     || echo "STOP: MintQuery differs from the recorded pin"
-   aws ssm start-session --region $R --target $I \
+   { [ -n "$live" ] && [ "$live" = "$(awk '$1 == "ClockchainSinkAdmin-MintQuery"' ~/sink-admin-doc-pins.txt)" ] \
+       || { echo "STOP: MintQuery differs from the recorded pin"; false; }; } \
+   && aws ssm start-session --region $R --target $I \
      --document-name ClockchainSinkAdmin-MintQuery --parameters 'kind=global-query'
    # or, after the run has ingested:  --parameters 'kind=query,runId=<runId>'
    # start-session prints "Starting session with SessionId: yang-sink-admin-<id>": note it.
