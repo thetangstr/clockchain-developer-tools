@@ -131,7 +131,7 @@ function isTokenRecord(v: unknown): v is TokenRecord {
     && (r.revokedAtMs === null || typeof r.revokedAtMs === "number");
 }
 
-function readTokenFile(file: string): TokenFileDoc {
+export function readTokenFile(file: string): TokenFileDoc {
   const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
   if (typeof raw !== "object" || raw === null || (raw as TokenFileDoc).schema !== TOKEN_FILE_SCHEMA) {
     throw new Error(`corrupt ${file}: not a ${TOKEN_FILE_SCHEMA} document`);
