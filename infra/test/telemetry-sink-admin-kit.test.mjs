@@ -45,6 +45,9 @@ test("permissions: only the ClockchainSinkAdmin docs on the box; no AWS-*/SSM-* 
   assert.equal(start.length, 1);
   assert.deepEqual([...start[0].Resource].sort(), [BOX, docArn("MintQuery")].sort());
   assert.equal(start[0].Condition.BoolIfExists["ssm:SessionDocumentAccessCheck"], "true");
+  // N7: assumed-role session ids are "<role-session-name>-<id>"; FOUNDER-STEPS uses yang-sink-admin.
+  const own = doc.Statement.find((s) => s.Sid === "OwnSessionsOnly");
+  assert.equal(own.Resource, "arn:aws:ssm:us-west-2:570035913370:session/yang-sink-admin-*");
   const starRes = doc.Statement.filter((s) => s.Resource === "*").flatMap((s) => [].concat(s.Action));
   for (const a of starRes) assert.match(a, /^ssm:(Get|List)/, `only read actions on *: ${a}`);
   assert.ok(!actions.some((a) => /^(iam|sts|ec2|s3|events|sns|cloudtrail):/.test(a)));
@@ -160,6 +163,51 @@ test("us-west-2 alert: associations, docs, instance connect, instance attrs, SG,
   assert.deepEqual(assume.requestParameters.roleArn, [ADMIN_ROLE]);
 });
 
+test("us-west-2 alert (N3): stop/image/volume ops on the box by instance or volume id; snapshots unfiltered", async () => {
+  const doc = await json("alert-event-pattern.json");
+  const ec2 = branches(doc).filter((b) => b.eventSource[0] === "ec2.amazonaws.com");
+  const stop = ec2.find((b) => b.eventName.includes("StopInstances"));
+  assert.deepEqual(stop.requestParameters.instancesSet.items.instanceId, [BOX_ID]);
+  const byInstance = ec2.find((b) => b.eventName.includes("CreateImage"));
+  for (const n of ["CreateImage", "AttachVolume", "DetachVolume"]) assert.ok(byInstance.eventName.includes(n), n);
+  assert.deepEqual(byInstance.requestParameters.instanceId, [BOX_ID]);
+  const byVolume = ec2.find((b) => b.requestParameters?.volumeId);
+  assert.deepEqual(byVolume.eventName.sort(), ["AttachVolume", "DetachVolume"]);
+  assert.deepEqual(byVolume.requestParameters.volumeId, ["__BOX_VOLUME_IDS__"]);
+  const unfiltered = ec2.find((b) => b.eventName.includes("CreateSnapshot"));
+  for (const n of ["CreateSnapshots", "CreateReplaceRootVolumeTask"]) assert.ok(unfiltered.eventName.includes(n), n);
+  assert.equal(unfiltered.requestParameters, undefined);
+});
+
+for (const file of ["alert-event-pattern.json", "alert-iam-event-pattern.json"]) {
+  test(`${file} (N1/N2): role assumption by a principalId other than Yang's; alerting/trail tamper`, async () => {
+    const doc = await json(file);
+    const byId = branches(doc).find((b) => b.userIdentity?.principalId);
+    assert.deepEqual(byId.requestParameters.roleArn, [ADMIN_ROLE]);
+    assert.deepEqual(byId.userIdentity.principalId, [{ "anything-but": "__YANG_USER_ID__" }, { exists: false }]);
+    assert.ok(has(doc, "events.amazonaws.com", ["DisableRule", "DeleteRule", "PutRule", "RemoveTargets", "PutTargets"]));
+    assert.ok(has(doc, "sns.amazonaws.com", ["Unsubscribe", "SetTopicAttributes", "DeleteTopic", "Subscribe"]));
+    assert.ok(has(doc, "cloudtrail.amazonaws.com", ["StopLogging", "DeleteTrail", "UpdateTrail", "PutEventSelectors"]));
+  });
+}
+
+test("FOUNDER-STEPS renders every placeholder and pins every Command doc", () => {
+  const steps = readFileSync(new URL("FOUNDER-STEPS.md", dir), "utf8");
+  assert.match(steps, /aws iam get-user --user-name Yang --query User\.UserId/);
+  assert.match(steps, /BlockDeviceMappings\[\]\.Ebs\.VolumeId/);
+  for (const ph of ["__BOX_VOLUME_IDS__", "__YANG_USER_ID__"]) assert.ok(steps.includes(ph), ph);
+  assert.match(steps, /--event-pattern file:\/\/\$3/);
+  assert.match(steps, /alert_rule us-west-2 clockchain-sink-box-access \/tmp\/alert-usw2\.json/);
+  assert.match(steps, /alert_rule us-east-1 clockchain-sink-iam \/tmp\/alert-use1\.json/);
+  assert.match(steps, /--document-name ClockchainSinkAdmin-MintIngest \\\n\s+--document-version "\$INGEST_VER" --document-hash "\$INGEST_HASH" --document-hash-type Sha256/);
+  assert.match(steps, /ClockchainSinkAdmin-ListTokens \$\(pin ListTokens\)/);
+  assert.match(steps, /ClockchainSinkAdmin-SessionCleanup \$\(pin SessionCleanup\)/);
+  assert.match(steps, /MintQuery differs from the recorded pin/);
+  assert.match(steps, /992aef4/);
+  assert.match(steps, /--role-session-name yang-sink-admin /);
+  assert.doesNotMatch(steps, /not in the alert pattern yet|other region's rule is unaffected/);
+});
+
 test("us-east-1 alert: IAM changes on the role and on user Yang, plus role assumption", async () => {
   const doc = await json("alert-iam-event-pattern.json");
   const role = branches(doc).find((b) => b.requestParameters?.roleName);
@@ -169,9 +217,10 @@ test("us-east-1 alert: IAM changes on the role and on user Yang, plus role assum
   }
   const user = branches(doc).find((b) => b.requestParameters?.userName);
   assert.deepEqual(user.requestParameters.userName, ["Yang"]);
-  for (const n of ["EnableMFADevice", "DeactivateMFADevice", "CreateAccessKey", "UpdateAccessKey", "DeleteAccessKey", "CreateLoginProfile", "UpdateLoginProfile"]) {
+  for (const n of ["UpdateUser", "EnableMFADevice", "DeactivateMFADevice", "CreateAccessKey", "UpdateAccessKey", "DeleteAccessKey", "CreateLoginProfile", "UpdateLoginProfile"]) {
     assert.ok(user.eventName.includes(n), n);
   }
+  assert.ok(has(doc, "iam.amazonaws.com", ["CreateVirtualMFADevice", "DeleteVirtualMFADevice"]));
   const assume = branches(doc).find((b) => b.eventSource[0] === "sts.amazonaws.com");
   assert.deepEqual(assume.requestParameters.roleArn, [ADMIN_ROLE]);
 });
@@ -185,7 +234,9 @@ test("orchestrator scoped role (Tier 2 draft): no root shell, no IAM/doc/alertin
   const send = allow.find((s) => [].concat(s.Action).includes("ssm:SendCommand"));
   assert.doesNotMatch(JSON.stringify(send.Resource), /AWS-|SSM-|ClockchainSinkAdmin/);
   const denied = deny.flatMap((s) => [].concat(s.Action));
-  for (const a of ["iam:*", "events:*", "sns:*", "ssm:CreateDocument", "ssm:UpdateDocument", "ssm:StartSession", "cloudtrail:StopLogging", "ec2:ModifyInstanceAttribute", "ec2-instance-connect:*"]) {
+  for (const a of ["iam:*", "events:*", "sns:*", "ssm:CreateDocument", "ssm:UpdateDocument", "ssm:StartSession", "cloudtrail:StopLogging", "ec2:ModifyInstanceAttribute", "ec2-instance-connect:*",
+    "ssm:CreateMaintenanceWindow", "ssm:RegisterTaskWithMaintenanceWindow", "ssm:UpdateMaintenanceWindowTask",
+    "ec2:StopInstances", "ec2:CreateImage", "ec2:AttachVolume", "ec2:DetachVolume", "ec2:CreateReplaceRootVolumeTask", "ec2:CreateSnapshot", "ec2:CreateSnapshots"]) {
     assert.ok(denied.includes(a), a);
   }
   const shell = deny.find((s) => s.Sid === "DenyRootShellSessionsAndAssociations");

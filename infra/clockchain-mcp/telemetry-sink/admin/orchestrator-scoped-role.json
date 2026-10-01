@@ -69,7 +69,12 @@
         "ssm:StartAssociationsOnce",
         "ssm:StartAutomationExecution",
         "ssm:SendAutomationSignal",
-        "ec2-instance-connect:*"
+        "ec2-instance-connect:*",
+        "ssm:CreateMaintenanceWindow",
+        "ssm:UpdateMaintenanceWindow",
+        "ssm:RegisterTaskWithMaintenanceWindow",
+        "ssm:UpdateMaintenanceWindowTask",
+        "ssm:RegisterTargetWithMaintenanceWindow"
       ],
       "Resource": "*"
     },
@@ -135,7 +140,10 @@
         "ec2:GetConsoleOutput",
         "ec2:GetConsoleScreenshot",
         "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:ModifySecurityGroupRules"
+        "ec2:ModifySecurityGroupRules",
+        "ec2:AttachVolume",
+        "ec2:DetachVolume",
+        "ec2:CreateReplaceRootVolumeTask"
       ],
       "Resource": "*"
     },

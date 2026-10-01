@@ -32,6 +32,7 @@
           "iam.amazonaws.com"
         ],
         "eventName": [
+          "UpdateUser",
           "EnableMFADevice",
           "DeactivateMFADevice",
           "ResyncMFADevice",
@@ -60,7 +61,43 @@
           "iam.amazonaws.com"
         ],
         "eventName": [
+          "CreateVirtualMFADevice",
           "DeleteVirtualMFADevice"
+        ]
+      },
+      {
+        "eventSource": [
+          "events.amazonaws.com"
+        ],
+        "eventName": [
+          "DisableRule",
+          "DeleteRule",
+          "PutRule",
+          "RemoveTargets",
+          "PutTargets"
+        ]
+      },
+      {
+        "eventSource": [
+          "sns.amazonaws.com"
+        ],
+        "eventName": [
+          "Unsubscribe",
+          "SetTopicAttributes",
+          "DeleteTopic",
+          "Subscribe"
+        ]
+      },
+      {
+        "eventSource": [
+          "cloudtrail.amazonaws.com"
+        ],
+        "eventName": [
+          "StopLogging",
+          "DeleteTrail",
+          "UpdateTrail",
+          "PutEventSelectors",
+          "PutInsightSelectors"
         ]
       },
       {
@@ -73,6 +110,29 @@
         "requestParameters": {
           "roleArn": [
             "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "sts.amazonaws.com"
+        ],
+        "eventName": [
+          "AssumeRole"
+        ],
+        "requestParameters": {
+          "roleArn": [
+            "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
+          ]
+        },
+        "userIdentity": {
+          "principalId": [
+            {
+              "anything-but": "__YANG_USER_ID__"
+            },
+            {
+              "exists": false
+            }
           ]
         }
       }

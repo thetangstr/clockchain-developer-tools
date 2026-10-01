@@ -43,7 +43,7 @@
         "ssm:TerminateSession",
         "ssm:ResumeSession"
       ],
-      "Resource": "arn:aws:ssm:us-west-2:570035913370:session/${aws:userid}-*"
+      "Resource": "arn:aws:ssm:us-west-2:570035913370:session/yang-sink-admin-*"
     },
     {
       "Sid": "ReviewTheSinkAdminDocuments",
