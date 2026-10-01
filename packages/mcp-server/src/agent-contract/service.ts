@@ -856,7 +856,7 @@ export function normalizePolicyDigests(
   const one = (pin: PolicyDigestPin | undefined): ReadonlySet<string> => {
     const list = typeof pin === "string" ? [pin] : pin === undefined ? [] : [...pin];
     if (list.length === 0 || list.length > MAX_POLICY_DIGESTS_PER_ROLE) return fail();
-    for (const d of list) if (typeof d !== "string" || !/^0x[0-9a-f]{64}$/.test(d)) return fail();
+    for (const d of list) if (typeof d !== "string" || !/^0x[0-9a-f]{64}$/.test(d) || /^0x0{64}$/.test(d)) return fail();
     return new Set(list);
   };
   return Object.freeze({ buyer: one(raw.buyer), provider: one(raw.provider) });

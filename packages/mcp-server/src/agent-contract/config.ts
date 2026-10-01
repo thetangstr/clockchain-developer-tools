@@ -227,7 +227,10 @@ export function loadContractConfig(
       if ((role !== "buyer" && role !== "provider") || extra.length > 0 || digestList === undefined) {
         throw new Error("malformed CONTRACT_POLICY_DIGESTS entry (want buyer:0xA|0xB,provider:0xC)");
       }
-      const set = policyDigests[role] ?? new Set<string>();
+      if (policyDigests[role] !== undefined) {
+        throw new Error(`CONTRACT_POLICY_DIGESTS lists ${role} more than once (put the set in one entry: ${role}:0xA|0xB)`);
+      }
+      const set = new Set<string>();
       for (const digest of digestList.split("|")) {
         if (!DIGEST.test(digest) || /^0x0{64}$/.test(digest)) { // the zero digest is not a pin
           throw new Error("malformed CONTRACT_POLICY_DIGESTS entry (want buyer:0xA|0xB,provider:0xC)");
@@ -403,14 +406,19 @@ export function loadContractConfig(
   const erc8004RegistryRaw = (env.CONTRACT_ERC8004_REGISTRY_ADDRESS ?? "").trim();
   let erc8004ChainId = "";
   if (erc8004ChainIdRaw !== "") {
-    const m = /^(?:eip155:)?([0-9]+)$/.exec(erc8004ChainIdRaw);
+    const m = /^(?:eip155:)?([1-9][0-9]{0,19})$/.exec(erc8004ChainIdRaw);
     if (m === null) {
-      return misconfigured("CONTRACT_ERC8004_CHAIN_ID must be eip155:<n> or a decimal chain id");
+      return misconfigured("CONTRACT_ERC8004_CHAIN_ID must be eip155:<n> or a positive decimal chain id (no leading zeros, max 20 digits)");
     }
     erc8004ChainId = `eip155:${m[1]}`;
   }
   if (erc8004RegistryRaw !== "" && !/^0x[0-9a-fA-F]{40}$/.test(erc8004RegistryRaw)) {
     return misconfigured("CONTRACT_ERC8004_REGISTRY_ADDRESS must be a 0x + 40 hex address");
+  }
+  if ((erc8004ChainIdRaw === "") !== (erc8004RegistryRaw === "")) {
+    return misconfigured(
+      "CONTRACT_ERC8004_CHAIN_ID and CONTRACT_ERC8004_REGISTRY_ADDRESS must be set together (both or neither)",
+    );
   }
   const erc8004Registry = erc8004RegistryRaw.toLowerCase();
   const expectedErc8004 =

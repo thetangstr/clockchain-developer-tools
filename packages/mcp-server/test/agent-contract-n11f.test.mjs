@@ -168,29 +168,29 @@ test("end to end: a digest inside the set approves, an unknown digest is refused
 // ---- item 2: N7C parser/doc hazards ----------------------------------------
 
 test("CONTRACT_ERC8004_CHAIN_ID accepts eip155:<n> or a bare decimal", () => {
-  const eip = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "eip155:11155111" }));
+  const eip = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "eip155:11155111", CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e" }));
   assert.equal(eip.kind, "ready");
   eip.service.close();
   assert.equal(eip.expectedErc8004.chainId, "eip155:11155111");
 
-  const dec = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "11155111" }));
+  const dec = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "11155111", CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e" }));
   assert.equal(dec.kind, "ready");
   dec.service.close();
   assert.equal(dec.expectedErc8004.chainId, "eip155:11155111", "decimal input normalizes to eip155:<n>");
 
-  for (const bad of ["mainnet", "eip155:", "0x1", "eip155:abc", "155111.5"]) {
-    const cfg = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: bad }));
+  for (const bad of ["mainnet", "eip155:", "0x1", "eip155:abc", "155111.5", "0", "eip155:0", "011155111", "eip155:007", "1".repeat(21)]) {
+    const cfg = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: bad, CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e" }));
     assert.equal(cfg.kind, "misconfigured", bad);
   }
 });
 
 test("CONTRACT_ERC8004_REGISTRY_ADDRESS normalizes case to lowercase", () => {
   const checksummed = "0x8004A818BFB912233c491871b3d84c89A494BD9e";
-  const cfg = loadContractConfig(baseEnv({ CONTRACT_ERC8004_REGISTRY_ADDRESS: checksummed }));
+  const cfg = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "eip155:11155111", CONTRACT_ERC8004_REGISTRY_ADDRESS: checksummed }));
   assert.equal(cfg.kind, "ready");
   cfg.service.close();
   assert.equal(cfg.expectedErc8004.registryAddress, checksummed.toLowerCase());
-  const bad = loadContractConfig(baseEnv({ CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x1234" }));
+  const bad = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "eip155:11155111", CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x1234" }));
   assert.equal(bad.kind, "misconfigured");
 });
 
@@ -276,4 +276,50 @@ test("missingDefaultHostRoots names the default root when CONTRACT_HOST_ROOTS dr
   assert.equal(both.kind, "ready");
   both.service.close();
   assert.deepEqual(missingDefaultHostRoots(both.hostRoots), []);
+});
+
+// ---- review LOWs (L1-L4) ---------------------------------------------------
+
+test("L1: a repeated role in CONTRACT_POLICY_DIGESTS is refused, not merged", () => {
+  const cfg = loadContractConfig(baseEnv({
+    CONTRACT_POLICY_DIGESTS: `buyer:${D_A},buyer:${D_B},provider:${D_C}`,
+  }));
+  assert.equal(cfg.kind, "misconfigured");
+  assert.match(cfg.reason, /buyer/);
+});
+
+test("L2: chain id is a canonical positive decimal of at most 20 digits", () => {
+  const ok = loadContractConfig(baseEnv({
+    CONTRACT_ERC8004_CHAIN_ID: "1".repeat(20),
+    CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+  }));
+  assert.equal(ok.kind, "ready");
+  ok.service.close();
+  assert.equal(ok.expectedErc8004.chainId, `eip155:${"1".repeat(20)}`);
+});
+
+test("L3: the ERC-8004 pins are both set or both unset", () => {
+  const onlyChain = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "11155111" }));
+  assert.equal(onlyChain.kind, "misconfigured");
+  assert.match(onlyChain.reason, /ERC8004/);
+  const onlyReg = loadContractConfig(baseEnv({ CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004A818BFB912233c491871b3d84c89A494BD9e" }));
+  assert.equal(onlyReg.kind, "misconfigured");
+  assert.match(onlyReg.reason, /ERC8004/);
+  const neither = loadContractConfig(baseEnv());
+  assert.equal(neither.kind, "ready");
+  neither.service.close();
+  // compose-injected empty strings count as unset
+  const empties = loadContractConfig(baseEnv({ CONTRACT_ERC8004_CHAIN_ID: "", CONTRACT_ERC8004_REGISTRY_ADDRESS: "" }));
+  assert.equal(empties.kind, "ready");
+  empties.service.close();
+});
+
+test("L4: the service refuses the zero digest in any pin form", () => {
+  const zero = `0x${"0".repeat(64)}`;
+  for (const pin of [zero, [D_A, zero], new Set([zero])]) {
+    assert.throws(() => createContractService({
+      hostRoots: HOST_ROOTS, signer: SIGNER, stateDir: mkdtempSync(path.join(tmpdir(), "n11f-z-")),
+      policyDigests: { buyer: pin, provider: D_C },
+    }), /policyDigests/);
+  }
 });
