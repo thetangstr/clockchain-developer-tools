@@ -131,6 +131,47 @@ services:
       - host_runs:/app/runs
     restart: unless-stopped
 
+  # Agent-contract telemetry sink (N4c/N7a, D22): separate authority in its own
+  # container. Behind the `telemetry` profile, so the default `docker compose up`,
+  # compose-up.sh (systemd + deploy-box code-only) and `--only mcp` never build,
+  # start or recreate it; start it with
+  #   docker compose --profile telemetry up -d --no-deps telemetry-sink
+  # (infra/clockchain-mcp/telemetry-sink/RUNBOOK.md). Any sink restart marks every
+  # open run RUN_LOST.
+  telemetry-sink:
+    profiles: ["telemetry"]
+    build:
+      context: ../..
+      dockerfile: packages/telemetry-sink/Dockerfile
+    # uid 10001 (image user `sink`). The sink signing key + token records are
+    # generated in-container on telemetry_state — never an env var or a mount.
+    user: "10001:10001"
+    environment:
+      TELEMETRY_ENV: "production"
+      TELEMETRY_STATE_DIR: /telemetry/state
+      # PUBLIC contract-server keys ({keyId: JWK}) = the only close authority.
+      # Read from /clockchain/mcp/TELEMETRY_CONTRACT_KEYS at start; empty refuses boot.
+      TELEMETRY_CONTRACT_KEYS: "${TELEMETRY_CONTRACT_KEYS:-}"
+      TELEMETRY_PEER_CONTRACT_KEYS: "${TELEMETRY_CONTRACT_KEYS_STAGING:-}"
+      # No staging sink / staging contract server exists (D22): explicit no-peer.
+      # When one is added, drop this line and supply TELEMETRY_CONTRACT_KEYS_STAGING
+      # (the sink refuses "none" together with a non-empty peer set).
+      TELEMETRY_PEER_ENV: "none"
+      TELEMETRY_RUN_WINDOW_MS: "${TELEMETRY_RUN_WINDOW_MS:-21600000}"
+      TELEMETRY_FLUSH_GRACE_MS: "${TELEMETRY_FLUSH_GRACE_MS:-30000}"
+    volumes:
+      - telemetry_state:/telemetry/state
+    # 8081 ingest (/telemetry/v1/*), 8082 query + keys (/telemetry/query/*,
+    # /telemetry/keys), 8083 close: compose network only, NEVER routed by Caddy —
+    # mcp reaches it as http://telemetry-sink:8083.
+    expose:
+      - "8081"
+      - "8082"
+      - "8083"
+    networks:
+      - clockchain_edge
+    restart: unless-stopped
+
   caddy:
     image: caddy:2.8-alpine
     depends_on:
@@ -153,6 +194,7 @@ volumes:
   caddy_config:
   host_runs:
   mcp_state:
+  telemetry_state:
 
 networks:
   clockchain_edge:
