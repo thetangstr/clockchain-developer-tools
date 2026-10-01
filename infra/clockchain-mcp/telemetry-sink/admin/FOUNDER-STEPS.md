@@ -21,7 +21,7 @@ them, it would control the path it is meant to be kept out of. Run everything as
 | `ClockchainSinkAdmin-MintQuery.json` | Session doc (InteractiveCommands): query / global-query token |
 | `ClockchainSinkAdmin-ListTokens.json` | Command doc: read-only listing of minted-token records (reconciliation) |
 | `ClockchainSinkAdmin-SessionCleanup.json` | Command doc: delete the agent's on-disk copy of a MintQuery session |
-| `alert-event-pattern.json` | us-west-2 rule: box access, sink docs, alerting/trail tamper, role assumption |
+| `alert-event-pattern-1.json`, `alert-event-pattern-2.json` | us-west-2 rules `clockchain-sink-box-access` (box access, associations, sink docs, instance connect, instance attributes, SG) and `clockchain-sink-box-access-2` (alerting/trail tamper, role assumption, stop/image/volume/snapshot). Split because EventBridge caps a pattern at 2048 characters |
 | `alert-iam-event-pattern.json` | us-east-1 rule: IAM changes to the role or to user Yang, role assumption |
 | `cloudtrail-bucket-policy.json` | lets CloudTrail write the trail bucket |
 | `ssm-agent-no-session-logs.params.json` | step 4: one-time root command that sets `SessionLogsDestination=none` |
@@ -55,8 +55,10 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
    aws cloudtrail start-logging --region $R --name clockchain-org-trail
    ```
 
-3. **Alerts: two rules, each with an SNS topic in its own region.** IAM events are delivered
-   only in us-east-1, so the second rule lives there. STS `AssumeRole` lands in the region of
+3. **Alerts: three rules and one SNS topic per region.** In us-west-2 there are two rules,
+   because EventBridge caps an event pattern at 2048 characters and one rule did not fit.
+   Both share the topic `clockchain-sink-box-access`, and the topic policy allows both rule
+   ARNs. IAM events are delivered only in us-east-1, so the IAM rule lives there. STS `AssumeRole` lands in the region of
    the STS endpoint used, so it is in both rules.
    ```bash
    EMAIL=you@example.com   # where alerts go
@@ -66,24 +68,31 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
      --query 'Reservations[0].Instances[0].BlockDeviceMappings[].Ebs.VolumeId' --output json)
    printf 'YangUserId=%s\nBoxVolumes=%s\n' "$YID" "$(jq -c . <<<"$VOLS")" | tee ~/sink-admin-ids.txt
    # Render the placeholders (__YANG_USER_ID__, __BOX_VOLUME_IDS__) into the patterns:
-   render() { jq --arg yid "$YID" --argjson vols "$VOLS" \
+   render() { jq -c --arg yid "$YID" --argjson vols "$VOLS" \
      'walk(if . == ["__BOX_VOLUME_IDS__"] then $vols elif . == "__YANG_USER_ID__" then $yid else . end)' "$1"; }
-   render alert-event-pattern.json > /tmp/alert-usw2.json && render alert-iam-event-pattern.json > /tmp/alert-use1.json
-   alert_rule() {  # $1 region  $2 rule/topic name  $3 pattern file
-     local T
-     T=$(aws sns create-topic --region $1 --name $2 --query TopicArn --output text) || return 1
-     aws sns subscribe --region $1 --topic-arn "$T" --protocol email --notification-endpoint "$EMAIL" || return 1
-     aws sns set-topic-attributes --region $1 --topic-arn "$T" --attribute-name Policy --attribute-value \
-       "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"events.amazonaws.com\"},\"Action\":\"sns:Publish\",\"Resource\":\"$T\",\"Condition\":{\"ArnEquals\":{\"aws:SourceArn\":\"arn:aws:events:$1:$A:rule/$2\"}}}]}" || return 1
-     aws events put-rule --region $1 --name $2 --event-pattern file://$3 --state ENABLED || return 1
-     aws events put-targets --region $1 --rule $2 --targets "Id=sns,Arn=$T"
+   render alert-event-pattern-1.json > /tmp/alert-usw2-1.json \
+     && render alert-event-pattern-2.json > /tmp/alert-usw2-2.json \
+     && render alert-iam-event-pattern.json > /tmp/alert-use1.json
+   alert_rules() {  # $1 region  $2 topic name  then pairs: <rule name> <compact pattern file> ...
+     local reg=$1 topic=$2 T arns="" i; shift 2
+     local args=("$@")
+     for ((i = 0; i < ${#args[@]}; i += 2)); do arns+="${arns:+,}\"arn:aws:events:$reg:$A:rule/${args[i]}\""; done
+     T=$(aws sns create-topic --region $reg --name $topic --query TopicArn --output text) || return 1
+     aws sns subscribe --region $reg --topic-arn "$T" --protocol email --notification-endpoint "$EMAIL" || return 1
+     aws sns set-topic-attributes --region $reg --topic-arn "$T" --attribute-name Policy --attribute-value \
+       "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"events.amazonaws.com\"},\"Action\":\"sns:Publish\",\"Resource\":\"$T\",\"Condition\":{\"ArnEquals\":{\"aws:SourceArn\":[$arns]}}}]}" || return 1
+     for ((i = 0; i < ${#args[@]}; i += 2)); do
+       aws events put-rule --region $reg --name "${args[i]}" --event-pattern "file://${args[i+1]}" --state ENABLED || return 1
+       aws events put-targets --region $reg --rule "${args[i]}" --targets "Id=sns,Arn=$T" || return 1
+     done
    }
-   # Halts (nothing is created) if rendering failed or left a placeholder:
-   { [ -s /tmp/alert-usw2.json ] && [ -s /tmp/alert-use1.json ] \
-       && ! grep -q '__[A-Z_]*__' /tmp/alert-usw2.json /tmp/alert-use1.json \
-       || { echo "STOP: unrendered placeholder or empty pattern"; false; }; } \
-     && alert_rule us-west-2 clockchain-sink-box-access /tmp/alert-usw2.json \
-     && alert_rule us-east-1 clockchain-sink-iam /tmp/alert-use1.json
+   # Halts (nothing is created) if a pattern is empty, over 2048 chars, or has a placeholder left:
+   check_patterns() { local f; for f in "$@"; do [ -s "$f" ] && [ "$(wc -c < "$f")" -le 2048 ] && ! grep -q '__[A-Z_]*__' "$f" \
+     || { echo "STOP: $f is empty, over 2048 chars, or has an unrendered placeholder"; return 1; }; done; }
+   check_patterns /tmp/alert-usw2-1.json /tmp/alert-usw2-2.json /tmp/alert-use1.json \
+     && alert_rules us-west-2 clockchain-sink-box-access \
+          clockchain-sink-box-access /tmp/alert-usw2-1.json clockchain-sink-box-access-2 /tmp/alert-usw2-2.json \
+     && alert_rules us-east-1 clockchain-sink-iam clockchain-sink-iam /tmp/alert-use1.json
    ```
    Confirm both subscription emails. **Test** (as yourself; an email should arrive within a
    few minutes):
@@ -91,7 +100,7 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
    aws ssm send-command --region $R --instance-ids $I --document-name AWS-RunShellScript \
      --parameters 'commands=["true"]' --comment "sink alert test"
    ```
-   The us-west-2 rule alerts on:
+   The two us-west-2 rules together alert on:
    - `SendCommand`/`StartSession` to the box (including tag-targeted SendCommand) by anyone
      except the admin role. Every `deploy-box.sh` run triggers it, which is intended.
    - Any SSM association create, update or run.
@@ -127,8 +136,13 @@ R=us-west-2; A=570035913370; I=i-0d6765d143da7e1ea; cd infra/clockchain-mcp/tele
    aws ssm send-command --region $R --instance-ids $I --document-name AWS-RunShellScript \
      --comment "ssm agent: SessionLogsDestination=none" --parameters file://ssm-agent-no-session-logs.params.json
    ```
+   On the Ubuntu snap install `/etc/amazon/ssm/` may not exist, so the command creates it and
+   copies the snap template (`/snap/amazon-ssm-agent/current/amazon-ssm-agent.json.template`).
+   Applied 2026-10-01 on agent 3.3.4793: the config reads `"SessionLogsDestination": "none"`.
+
    Also confirm that Session Manager S3/CloudWatch logging is off. Both values should be
-   `""`, or the document should not exist:
+   `""`, or the document should not exist. As of 2026-10-01, `SSM-SessionManagerRunShell`
+   does not exist in this account, so S3/CloudWatch session logging is off:
    ```bash
    aws ssm get-document --region $R --name SSM-SessionManagerRunShell --query Content --output text 2>/dev/null \
      | jq '.inputs | {s3BucketName, cloudWatchLogGroupName}'
