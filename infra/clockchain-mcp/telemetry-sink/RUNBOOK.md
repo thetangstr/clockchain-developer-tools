@@ -30,8 +30,10 @@ until the close path is wired (step 8).
   key: boot refuses any `TELEMETRY_*`/`SINK_*`/`AC_*` variable carrying key
   material. Deleting the volume mints a new key.
 - **`TELEMETRY_CONTRACT_KEYS`** (required in production; empty refuses boot):
-  public keys only, a JWK with `d` refuses boot. Value for `contract-server-v1`:
-  `{"contract-server-v1":{"kty":"OKP","crv":"Ed25519","x":"J3iURWKkx4kAg-leW-NDKp7AUZQNdowUfLb5HHlQ0xU"}}`
+  public keys only, a JWK with `d` refuses boot. The keyId MUST equal the
+  contract server's `CONTRACT_SERVER_KEY_ID` (the sink looks up the close
+  signature's keyId in this set). Value for `contract-server-2026-10`:
+  `{"contract-server-2026-10":{"kty":"OKP","crv":"Ed25519","x":"J3iURWKkx4kAg-leW-NDKp7AUZQNdowUfLb5HHlQ0xU"}}`
   (raw pub `0x2778…d315`, the key derived from `/clockchain/mcp/CONTRACT_SERVER_ED25519_SEED`).
 - **No staging key is needed.** The sink refuses a production boot without a
   non-empty peer (staging) key set *unless* `TELEMETRY_PEER_ENV=none`, the
@@ -88,9 +90,9 @@ box() {
 ```bash
 aws --region $R ssm put-parameter --type String --overwrite \
   --name /clockchain/mcp/TELEMETRY_CONTRACT_KEYS \
-  --value '{"contract-server-v1":{"kty":"OKP","crv":"Ed25519","x":"J3iURWKkx4kAg-leW-NDKp7AUZQNdowUfLb5HHlQ0xU"}}'
+  --value '{"contract-server-2026-10":{"kty":"OKP","crv":"Ed25519","x":"J3iURWKkx4kAg-leW-NDKp7AUZQNdowUfLb5HHlQ0xU"}}'
 aws --region $R ssm get-parameter --name /clockchain/mcp/TELEMETRY_CONTRACT_KEYS \
-  --query Parameter.Value --output text | jq -e 'keys == ["contract-server-v1"]'
+  --query Parameter.Value --output text | jq -e 'keys == ["contract-server-2026-10"]'
 ```
 
 **2. Pre-flight (read-only).** `sink-up.sh` is not on the box until step 3, so
@@ -123,7 +125,7 @@ box "bash $SINK up"
 `docker compose --profile telemetry up -d --no-deps --wait telemetry-sink`,
 and refuses if the sink is already running. GATE: `== Success`;
 `caddy/host/mcp unchanged` (compares `created=`; host's `started=` moves by design); `telemetry-sink … Up (healthy)`; the ready line
-shows `"keyCreated":true` (first boot), `"contractKeyIds":["contract-server-v1"]`,
+shows `"keyCreated":true` (first boot), `"contractKeyIds":["contract-server-2026-10"]`,
 `"peerEnv":"none"`; `mcp -> telemetry-sink:8081/v1/health 200`.
 
 **5. Caddy routes: in-place reload, no recreate.** `git checkout` replaced the
