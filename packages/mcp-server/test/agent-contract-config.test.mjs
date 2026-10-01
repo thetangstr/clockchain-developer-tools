@@ -305,6 +305,7 @@ test("empty CONTRACT_ERC8004_* values create no pin; a set pin still verifies", 
     ...readyBase(),
     CONTRACT_HOST_ROOTS: `root-test:${HOST_ROOTS[0].fingerprint}`,
     CONTRACT_ERC8004_CHAIN_ID: "eip155:1",
+    CONTRACT_ERC8004_REGISTRY_ADDRESS: "0x8004a818bfb912233c491871b3d84c89a494bd9e",
   });
   assert.equal(mismatchedPin.kind, "ready");
   const mismatchRes = bind(mismatchedPin);

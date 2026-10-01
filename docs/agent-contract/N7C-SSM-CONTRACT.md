@@ -36,13 +36,13 @@ marked required falls back to the shown default or stays off.
 | `CONTRACT_SERVER_KEY_VALID_FROM` | String | **yes** | ISO-8601 timestamp parseable by `Date.parse` — pinned, never boot time |
 | `CONTRACT_SERVER_KEY_VALID_UNTIL` | String | no | ISO-8601; absent = no expiry. Boot refuses if already past |
 | `CONTRACT_ALLOW_EPHEMERAL_KEY` | String | **do not set** | `1` permits a disposable dev signer when the seed is absent. Never set on the box — check-config refuses it at S/P and D20 wants a pinned key |
-| `CONTRACT_POLICY_DIGESTS` | String | **yes** | `buyer:0x<64-hex>,provider:0x<64-hex>` — BOTH required; lowercase hex; `0x00…00` is refused |
+| `CONTRACT_POLICY_DIGESTS` | String | **yes** | `buyer:0x<64-hex>,provider:0x<64-hex>` — BOTH required; lowercase hex; `0x00…00` is refused. Each role also takes a `\|`-separated SET (`buyer:0xA\|0xB,provider:0xC`, max 64 per role); an approval is accepted if its digest is any member |
 | `CONTRACT_PRINCIPALS` | String | **yes** (demo) | comma-separated `keyId:0x<40-hex-address>` buyer-family pins; the mandate's EIP-191 signature must recover to the pinned address. keyId must equal the keyId in the buyer's token entry |
 | `CONTRACT_OBSERVER_TOKEN` | SecureString | no | bearer for the read-only observer receipt feed; if set MUST differ from `CONTRACT_VERIFIER_TOKEN` |
 | `CONTRACT_VERIFIER_TOKEN` | SecureString | no | bearer for verifier-scoped run-salt disclosure; if set MUST differ from `CONTRACT_OBSERVER_TOKEN` |
-| `CONTRACT_HOST_ROOTS` | String | no | comma-separated `kid:<64-hex-fingerprint>`; absent = the published production root set (`root-2026-08`). At S/P every pinned root must be a published production root |
-| `CONTRACT_ERC8004_CHAIN_ID` | String | no | decimal chain id; when either ERC8004 pin is set, certs must attest exactly this deployment. Pair with `CONTRACT_ERC8004_REGISTRY_ADDRESS` (both or neither) |
-| `CONTRACT_ERC8004_REGISTRY_ADDRESS` | String | no | `0x<40-hex>` — Sepolia registry `0x8004A818BFB912233c491871b3d84c89A494BD9e` for D20 |
+| `CONTRACT_HOST_ROOTS` | String | no | comma-separated `kid:<64-hex-fingerprint>`; absent = the published production root set (`root-2026-08`). A value REPLACES the default list: it must include `root-2026-08` (startup logs a `contract_default_host_root_missing` warning, kid only, when it does not). At S/P every pinned root must be a published production root |
+| `CONTRACT_ERC8004_CHAIN_ID` | String | no | `eip155:<n>` (the certificate's wire format) or a bare decimal, normalized to `eip155:<n>`; when either ERC8004 pin is set, certs must attest exactly this deployment. Pair with `CONTRACT_ERC8004_REGISTRY_ADDRESS` (both or neither) |
+| `CONTRACT_ERC8004_REGISTRY_ADDRESS` | String | no | `0x<40-hex>`, compared case-insensitively (checksummed or lowercase both work) — Sepolia registry `0x8004A818BFB912233c491871b3d84c89A494BD9e` for D20 |
 | `CONTRACT_ANCHOR_ENABLED` | String | no | `1` = anchor agreement digest + terminal chain head via the in-process `tsa_issue` path (no extra secret; uses the server's Clockchain client config) |
 | `CONTRACT_SETTLEMENT_RAIL` | String | no | `simulated` (default) \| `stripe_test_mode`. The Stripe rail resolves `agentcontract/travel-stripe-test-key` (Secrets Manager, `us-west-2`) at call time, TEST-mode keys only; absent key ⇒ honest `awaiting_stripe_test_key`, non-test ⇒ refused |
 | `CONTRACT_ALLOW_SIM_FAULTS` | String | no | `1` gates `CONTRACT_SIM_FAULTS`; card/keys disclose `simFaultsEnabled` |
@@ -111,8 +111,12 @@ principals are not pinned here — this map is buyer-side only.
 buyer:0x<64-hex-sha256>,provider:0x<64-hex-sha256>
 ```
 
-The exact §13 policy digest each role's approvals must carry. Both entries
-required; lowercase `0x`-prefixed sha256; the all-zero digest is refused.
+The §13 policy digest each role's approvals must carry. Both entries
+required; each role may list several digests joined by `|`
+(`buyer:0xA|0xB,provider:0xC`, at most 64 per role) — the buyer digest changes
+every run, so a pre-pinned batch avoids an SSM write per run. An approval is
+accepted when its digest is ANY member of its role's set; a single value per
+role keeps working; lowercase `0x`-prefixed sha256; the all-zero digest is refused.
 Values come from the policy document the orchestrator ships with the demo —
 compute them out-of-band and provision verbatim.
 

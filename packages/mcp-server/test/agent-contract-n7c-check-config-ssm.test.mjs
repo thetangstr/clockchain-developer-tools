@@ -69,13 +69,12 @@ function ssmFixture(stateDir, overrides = {}) {
   );
 }
 
-/** fetchParameters stub: records every call, answers from `found`. */
+/** fetchParameter stub (N11f: per-name GetParameter): records every call,
+ *  answers the single parameter's value or undefined when absent. */
 function recordingFetch(found, calls = []) {
-  return async ({ region, names }) => {
-    calls.push({ region, names: [...names] });
-    const out = new Map();
-    for (const n of names) if (found.has(n)) out.set(n, found.get(n));
-    return out;
+  return async ({ region, name }) => {
+    calls.push({ region, name });
+    return found.get(name);
   };
 }
 
@@ -88,7 +87,7 @@ test("check-config-from-ssm loads SSM values into env and reports ready (exit 0)
     region: "us-west-2",
     prefix: PREFIX,
     env,
-    fetchParameters: recordingFetch(found, calls),
+    fetchParameter: recordingFetch(found, calls),
   });
   assert.equal(out.exitCode, 0);
   assert.equal(out.report.status, "ready");
@@ -102,7 +101,7 @@ test("check-config-from-ssm loads SSM values into env and reports ready (exit 0)
   for (const name of ENV_PARAMETERS) {
     assert.equal(out.report.parameters[name], "present", name);
   }
-  const fetched = calls.flatMap((c) => c.names);
+  const fetched = calls.map((c) => c.name);
   assert.deepEqual(fetched.sort(), ENV_PARAMETERS.map((n) => `${PREFIX}/${n}`).sort());
 });
 
@@ -118,7 +117,7 @@ test("absent parameters leave env untouched and report absent", async () => {
   };
   const out = await checkConfigFromSsm({
     env,
-    fetchParameters: recordingFetch(found),
+    fetchParameter: recordingFetch(found),
   });
   assert.equal(out.exitCode, 0);
   // Untouched: the pre-existing values survived; the unset one stays unset.
@@ -136,7 +135,7 @@ test("the printed report carries no secret bytes", async () => {
   const found = ssmFixture(stateDir);
   const out = await checkConfigFromSsm({
     env: {},
-    fetchParameters: recordingFetch(found),
+    fetchParameter: recordingFetch(found),
   });
   const text = JSON.stringify(out.report);
   for (const secret of [SEED_B64, "tb1", "tp1", OBS_TOKEN, VER_TOKEN]) {
@@ -155,13 +154,13 @@ test("--region/--prefix reach the fetcher; parseArgs honors flags and defaults",
     region: "eu-west-1",
     prefix: "/custom/pfx",
     env,
-    fetchParameters: recordingFetch(new Map(), calls),
+    fetchParameter: recordingFetch(new Map(), calls),
   });
   assert.equal(out.exitCode, 2); // disabled — nothing was loaded
   assert.ok(calls.length > 0);
   for (const c of calls) {
     assert.equal(c.region, "eu-west-1");
-    for (const n of c.names) assert.ok(n.startsWith("/custom/pfx/"), n);
+    assert.ok(c.name.startsWith("/custom/pfx/"), c.name);
   }
 
   const parsed = parseArgs(["--region", "ap-south-1", "--prefix", "/p2"]);
@@ -187,26 +186,24 @@ test("--region/--prefix reach the fetcher; parseArgs honors flags and defaults",
   assert.equal(parseArgs(["--help"]).help, true);
 });
 
-test("the SSM fetch is chunked at 10 parameters per call", async () => {
-  assert.ok(ENV_PARAMETERS.length > 10, "surface must exceed one batch");
+test("the SSM fetch is one GetParameter per name (the box role has no GetParameters grant)", async () => {
   const calls = [];
   await loadEnvFromSsm({
     env: {},
-    fetchParameters: recordingFetch(new Map(), calls),
+    fetchParameter: recordingFetch(new Map(), calls),
   });
-  assert.equal(calls.length, Math.ceil(ENV_PARAMETERS.length / 10));
-  for (const c of calls) assert.ok(c.names.length <= 10);
+  assert.equal(calls.length, ENV_PARAMETERS.length);
   assert.deepEqual(
-    calls.flatMap((c) => c.names),
+    calls.map((c) => c.name),
     ENV_PARAMETERS.map((n) => `${PREFIX}/${n}`),
   );
 });
 
-test("a ParameterNotFound-style batch is absent, not fatal", async () => {
+test("a ParameterNotFound per-name miss is absent, not fatal", async () => {
   const env = {};
   const parameters = await loadEnvFromSsm({
     env,
-    fetchParameters: async () => {
+    fetchParameter: async () => {
       const err = new Error("not here");
       err.name = "ParameterNotFound";
       throw err;
@@ -222,11 +219,34 @@ test("a fetcher failure is a clean misconfigured verdict — never a secret dump
   const failing = async () => {
     throw new Error(`SSM exploded while reading seed=${SEED_B64}`);
   };
-  const out = await checkConfigFromSsm({ env: {}, fetchParameters: failing });
+  const out = await checkConfigFromSsm({ env: {}, fetchParameter: failing });
   assert.equal(out.exitCode, 1);
   assert.equal(out.report.status, "misconfigured");
   assert.match(out.report.reason, /ssm/i);
   const text = JSON.stringify(out.report);
   assert.equal(text.includes(SEED_B64), false);
   assert.equal(text.includes("SSM exploded"), false, "error message must not be echoed");
+});
+
+test("--state-dir overrides the SSM-pulled CONTRACT_STATE_DIR (reviewer MEDIUM-1)", async () => {
+  // The checker must be able to point its readiness probe at a scratch dir —
+  // the SSM value targets the live service's dir, which the running mcp
+  // container already holds the lockfile for.
+  const ssmDir = mkdtempSync(path.join(tmpdir(), "n7c-ssm-live-"));
+  const scratchDir = mkdtempSync(path.join(tmpdir(), "n7c-ssm-scratch-"));
+  const found = ssmFixture(ssmDir);
+  const env = {};
+  const out = await checkConfigFromSsm({
+    env,
+    fetchParameter: recordingFetch(found),
+    stateDir: scratchDir,
+  });
+  assert.equal(out.exitCode, 0);
+  assert.equal(env.CONTRACT_STATE_DIR, scratchDir, "stateDir wins over the pulled value");
+  assert.equal(out.report.stateDir, scratchDir);
+
+  // parseArgs: both spellings
+  assert.equal(parseArgs(["--state-dir", "/tmp/x"]).stateDir, "/tmp/x");
+  assert.equal(parseArgs(["--state-dir=/tmp/y"]).stateDir, "/tmp/y");
+  assert.equal(parseArgs([]).stateDir, undefined);
 });
