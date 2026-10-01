@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "2.2",
+  "description": "Telemetry sink admin (D22): after a MintQuery session, report and delete the SSM agent's on-disk session copy (ipcTempFile.log under /var/lib/amazon/ssm/<instance>/session/orchestration/<sessionId>/). Root on the box can read that file until it is deleted; SessionLogsDestination=none (FOUNDER-STEPS step 4) stops it being written at all. Also prints the agent's SessionLogsDestination setting.",
+  "parameters": {
+    "sessionId": {
+      "type": "String",
+      "description": "The MintQuery session id (printed by start-session)",
+      "allowedPattern": "^yang-sink-admin-[A-Za-z0-9]{1,64}$"
+    }
+  },
+  "mainSteps": [
+    {
+      "action": "aws:runShellScript",
+      "name": "cleanupSession",
+      "inputs": {
+        "timeoutSeconds": "60",
+        "runCommand": [
+          "set -u",
+          "CFG=/etc/amazon/ssm/amazon-ssm-agent.json",
+          "if [ -f \"$CFG\" ] && grep -q '\"SessionLogsDestination\"[[:space:]]*:[[:space:]]*\"none\"' \"$CFG\"; then echo 'SessionLogsDestination=none'; else echo 'WARNING: SessionLogsDestination is not none: the agent writes ipcTempFile.log for every session'; fi",
+          "FOUND=0",
+          "for d in /var/lib/amazon/ssm/*/session/orchestration/'{{sessionId}}'; do [ -d \"$d\" ] || continue; FOUND=1; find \"$d\" -name ipcTempFile.log -exec echo removing {} \\;; rm -rf -- \"$d\"; done",
+          "[ \"$FOUND\" = 1 ] || echo 'no on-disk copy of {{sessionId}} found'"
+        ]
+      }
+    }
+  ]
+}

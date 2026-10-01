@@ -1,0 +1,265 @@
+{
+  "detail-type": [
+    "AWS API Call via CloudTrail"
+  ],
+  "detail": {
+    "$or": [
+      {
+        "userIdentity": {
+          "arn": [
+            {
+              "anything-but": {
+                "prefix": "arn:aws:sts::570035913370:assumed-role/clockchain-telemetry-sink-admin/"
+              }
+            },
+            {
+              "exists": false
+            }
+          ]
+        },
+        "eventSource": [
+          "ssm.amazonaws.com"
+        ],
+        "eventName": [
+          "SendCommand"
+        ],
+        "requestParameters": {
+          "instanceIds": [
+            "i-0d6765d143da7e1ea"
+          ]
+        }
+      },
+      {
+        "userIdentity": {
+          "arn": [
+            {
+              "anything-but": {
+                "prefix": "arn:aws:sts::570035913370:assumed-role/clockchain-telemetry-sink-admin/"
+              }
+            },
+            {
+              "exists": false
+            }
+          ]
+        },
+        "eventSource": [
+          "ssm.amazonaws.com"
+        ],
+        "eventName": [
+          "SendCommand"
+        ],
+        "requestParameters": {
+          "targets": {
+            "key": [
+              {
+                "exists": true
+              }
+            ]
+          }
+        }
+      },
+      {
+        "userIdentity": {
+          "arn": [
+            {
+              "anything-but": {
+                "prefix": "arn:aws:sts::570035913370:assumed-role/clockchain-telemetry-sink-admin/"
+              }
+            },
+            {
+              "exists": false
+            }
+          ]
+        },
+        "eventSource": [
+          "ssm.amazonaws.com"
+        ],
+        "eventName": [
+          "StartSession"
+        ],
+        "requestParameters": {
+          "target": [
+            "i-0d6765d143da7e1ea"
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "ssm.amazonaws.com"
+        ],
+        "eventName": [
+          "CreateAssociation",
+          "CreateAssociationBatch",
+          "UpdateAssociation",
+          "StartAssociationsOnce"
+        ]
+      },
+      {
+        "eventSource": [
+          "ssm.amazonaws.com"
+        ],
+        "eventName": [
+          "CreateDocument",
+          "UpdateDocument",
+          "DeleteDocument",
+          "UpdateDocumentDefaultVersion",
+          "ModifyDocumentPermission"
+        ],
+        "requestParameters": {
+          "name": [
+            {
+              "prefix": "ClockchainSinkAdmin-"
+            }
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "ec2-instance-connect.amazonaws.com"
+        ],
+        "eventName": [
+          "SendSSHPublicKey",
+          "SendSerialConsoleSSHPublicKey"
+        ]
+      },
+      {
+        "eventSource": [
+          "ec2.amazonaws.com"
+        ],
+        "eventName": [
+          "ModifyInstanceAttribute",
+          "AssociateIamInstanceProfile",
+          "ReplaceIamInstanceProfileAssociation"
+        ],
+        "requestParameters": {
+          "instanceId": [
+            "i-0d6765d143da7e1ea"
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "ec2.amazonaws.com"
+        ],
+        "eventName": [
+          "AuthorizeSecurityGroupIngress",
+          "ModifySecurityGroupRules"
+        ]
+      },
+      {
+        "eventSource": [
+          "events.amazonaws.com"
+        ],
+        "eventName": [
+          "DisableRule",
+          "DeleteRule",
+          "PutRule",
+          "RemoveTargets",
+          "PutTargets"
+        ]
+      },
+      {
+        "eventSource": [
+          "sns.amazonaws.com"
+        ],
+        "eventName": [
+          "Unsubscribe",
+          "SetTopicAttributes",
+          "DeleteTopic",
+          "Subscribe"
+        ]
+      },
+      {
+        "eventSource": [
+          "cloudtrail.amazonaws.com"
+        ],
+        "eventName": [
+          "StopLogging",
+          "DeleteTrail",
+          "UpdateTrail",
+          "PutEventSelectors",
+          "PutInsightSelectors"
+        ]
+      },
+      {
+        "eventSource": [
+          "ec2.amazonaws.com"
+        ],
+        "eventName": [
+          "StopInstances"
+        ],
+        "requestParameters": {
+          "instancesSet": {
+            "items": {
+              "instanceId": [
+                "i-0d6765d143da7e1ea"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "eventSource": [
+          "ec2.amazonaws.com"
+        ],
+        "eventName": [
+          "CreateImage",
+          "AttachVolume",
+          "DetachVolume"
+        ],
+        "requestParameters": {
+          "instanceId": [
+            "i-0d6765d143da7e1ea"
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "ec2.amazonaws.com"
+        ],
+        "eventName": [
+          "AttachVolume",
+          "DetachVolume"
+        ],
+        "requestParameters": {
+          "volumeId": [
+            "__BOX_VOLUME_IDS__"
+          ]
+        }
+      },
+      {
+        "eventSource": [
+          "ec2.amazonaws.com"
+        ],
+        "eventName": [
+          "CreateReplaceRootVolumeTask",
+          "CreateSnapshot",
+          "CreateSnapshots"
+        ]
+      },
+      {
+        "eventSource": [
+          "sts.amazonaws.com"
+        ],
+        "eventName": [
+          "AssumeRole"
+        ],
+        "requestParameters": {
+          "roleArn": [
+            "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin"
+          ]
+        },
+        "userIdentity": {
+          "principalId": [
+            {
+              "anything-but": "__YANG_USER_ID__"
+            },
+            {
+              "exists": false
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FounderIamUserWithFreshMfaOnly",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::570035913370:user/Yang" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "Bool": { "aws:MultiFactorAuthPresent": "true" },
+        "NumericLessThan": { "aws:MultiFactorAuthAge": "3600" }
+      }
+    }
+  ]
+}

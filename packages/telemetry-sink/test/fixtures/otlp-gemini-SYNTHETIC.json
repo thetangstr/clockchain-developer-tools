@@ -1,0 +1,36 @@
+{
+  "_comment": "SYNTHETIC hand-made OTLP/JSON fixture — NOT a real capture. Follows the Gemini CLI attribute names from the runtime research note: the `gemini_cli.tool_call` log carries `function_name` and `function_args`; the output arrives via traces or the inference log.",
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [{ "key": "service.name", "value": { "stringValue": "gemini-cli" } }]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "gemini_cli.telemetry" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1798761600300000000",
+              "severityNumber": 9,
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "gemini_cli.tool_call" } },
+                { "key": "function_name", "value": { "stringValue": "contract__settlement_status" } },
+                {
+                  "key": "function_args",
+                  "value": { "stringValue": "{}" }
+                },
+                {
+                  "key": "function_response",
+                  "value": {
+                    "stringValue": "{\"state\":\"released\",\"transferId\":\"sandbox-transfer:ab12\",\"simulated\":true,\"serverNonce\":\"0xccccddddeeeeffff3333444455556666\"}"
+                  }
+                },
+                { "key": "success", "value": { "boolValue": true } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

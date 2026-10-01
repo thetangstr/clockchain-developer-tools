@@ -1,0 +1,26 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudTrailAclCheck",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudtrail.amazonaws.com" },
+      "Action": "s3:GetBucketAcl",
+      "Resource": "arn:aws:s3:::clockchain-cloudtrail-570035913370",
+      "Condition": { "StringEquals": { "aws:SourceArn": "arn:aws:cloudtrail:us-west-2:570035913370:trail/clockchain-org-trail" } }
+    },
+    {
+      "Sid": "CloudTrailWrite",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudtrail.amazonaws.com" },
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::clockchain-cloudtrail-570035913370/AWSLogs/570035913370/*",
+      "Condition": {
+        "StringEquals": {
+          "s3:x-amz-acl": "bucket-owner-full-control",
+          "aws:SourceArn": "arn:aws:cloudtrail:us-west-2:570035913370:trail/clockchain-org-trail"
+        }
+      }
+    }
+  ]
+}

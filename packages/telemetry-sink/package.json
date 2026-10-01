@@ -1,0 +1,45 @@
+{
+  "name": "@clockchain/telemetry-sink",
+  "version": "0.1.0",
+  "description": "Agent-contract telemetry sink (N4c): OTLP/HTTP ingest under separate authority, per-(runId,role) write-only tokens, hash-chained append-only records, signed chain head, and a loopback OTLP forwarder (ac-otlp-forward).",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "ac-otlp-forward": "bin/ac-otlp-forward"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "keywords": [
+    "clockchain",
+    "agent-contract",
+    "telemetry",
+    "otlp",
+    "opentelemetry"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thetangstr/clockchain-developer-tools.git",
+    "directory": "packages/telemetry-sink"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "tsc -b && node --test",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

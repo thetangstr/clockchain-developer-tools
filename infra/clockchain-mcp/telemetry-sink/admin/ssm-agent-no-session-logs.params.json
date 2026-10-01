@@ -1,0 +1,10 @@
+{
+  "commands": [
+    "amazon-ssm-agent -version || snap list amazon-ssm-agent",
+    "F=/etc/amazon/ssm/amazon-ssm-agent.json; [ -f \"$F\" ] || cp \"$(ls /snap/amazon-ssm-agent/current/amazon-ssm-agent.json.template /etc/amazon/ssm/amazon-ssm-agent.json.template 2>/dev/null | head -1)\" \"$F\"",
+    "grep -n SessionLogsDestination /etc/amazon/ssm/amazon-ssm-agent.json || { echo 'NO SessionLogsDestination key: agent too old (< 3.2.2086), stop here'; exit 1; }",
+    "sed -i -E 's/(\"SessionLogsDestination\"[[:space:]]*:[[:space:]]*)\"[a-z]*\"/\\1\"none\"/' /etc/amazon/ssm/amazon-ssm-agent.json",
+    "grep -n SessionLogsDestination /etc/amazon/ssm/amazon-ssm-agent.json",
+    "(sleep 2; snap restart amazon-ssm-agent 2>/dev/null || systemctl restart amazon-ssm-agent) >/dev/null 2>&1 &"
+  ]
+}

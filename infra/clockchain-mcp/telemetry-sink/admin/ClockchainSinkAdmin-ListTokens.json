@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "2.2",
+  "description": "Telemetry sink admin (D22): READ-ONLY reconciliation listing of minted-token records (runId, role, kind, tokenId digest, createdAt, revokedAt) from the sink's tokens.json. No plaintext exists in that file; nothing is written. Diff against the founder's mint log after each run.",
+  "parameters": {
+    "runId": {
+      "type": "String",
+      "description": "Optional run id filter (empty = all records)",
+      "default": "",
+      "allowedPattern": "^([A-Za-z0-9][A-Za-z0-9_-]{0,63})?$"
+    }
+  },
+  "mainSteps": [
+    {
+      "action": "aws:runShellScript",
+      "name": "listTokens",
+      "inputs": {
+        "timeoutSeconds": "60",
+        "runCommand": [
+          "set -eu",
+          "CID=$(docker ps -q --filter label=com.docker.compose.project=clockchain-mcp --filter label=com.docker.compose.service=telemetry-sink)",
+          "[ -n \"$CID\" ] || { echo 'telemetry-sink is not running' >&2; exit 2; }",
+          "R='{{runId}}'",
+          "if [ -n \"$R\" ]; then exec docker exec \"$CID\" node dist/list-tokens-cli.js --runId \"$R\"; else exec docker exec \"$CID\" node dist/list-tokens-cli.js; fi"
+        ]
+      }
+    }
+  ]
+}

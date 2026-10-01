@@ -1,0 +1,59 @@
+{
+  "_comment": "SYNTHETIC hand-made OTLP/JSON fixture — NOT a real capture. Follows the Codex attribute names from the runtime research note: the `codex.tool_result` log event carries arguments and output; traces never carry content.",
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [{ "key": "service.name", "value": { "stringValue": "codex-cli" } }]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "codex_core::otel" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1798761600200000000",
+              "severityNumber": 9,
+              "body": { "stringValue": "codex.tool_result" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "codex.tool_result" } },
+                { "key": "call_id", "value": { "stringValue": "call_abc123" } },
+                { "key": "tool_name", "value": { "stringValue": "booking_lookup" } },
+                {
+                  "key": "arguments",
+                  "value": {
+                    "stringValue": "{\"server\":\"contract\",\"tool\":\"booking_lookup\",\"arguments\":{\"orderRef\":\"ORD-0M8K2N4Q\"}}"
+                  }
+                },
+                {
+                  "key": "output",
+                  "value": {
+                    "stringValue": "{\"observation\":{\"status\":\"ISSUED\",\"ticketCount\":2},\"simulated\":true,\"serverNonce\":\"0xbbbbccccddddeeee2222333344445555\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "timeUnixNano": "1798761611000000000",
+              "severityNumber": 9,
+              "body": { "stringValue": "codex.tool_result" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "codex.tool_result" } },
+                { "key": "call_id", "value": { "stringValue": "call_def456" } },
+                { "key": "tool_name", "value": { "stringValue": "contract_status" } },
+                {
+                  "key": "arguments",
+                  "value": {
+                    "stringValue": "{\"server\":\"contract\",\"tool\":\"contract_status\",\"arguments\":{}}"
+                  }
+                },
+                {
+                  "key": "output",
+                  "value": { "stringValue": "{\"stage\":\"agreed\"}" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

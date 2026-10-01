@@ -35,5 +35,23 @@ mcp.clockchain.network {
 			header_up X-Forwarded-Prefix /next
 		}
 	}
+	# Telemetry sink (D22): separate authority in its own container (compose
+	# profile `telemetry`). Ingest /telemetry/v1/* -> write listener (per-role
+	# ingest tokens); /telemetry/query/* -> read listener (query tokens);
+	# /telemetry/keys -> the sink's PUBLIC signing key. The close listener is
+	# never routed here: only mcp reaches it on clockchain_edge. handle + uri
+	# rewrites (not handle_path) so the sink sees its native /v1/* paths.
+	handle /telemetry/v1/* {
+		uri strip_prefix /telemetry
+		reverse_proxy telemetry-sink:8081
+	}
+	handle /telemetry/keys {
+		uri replace /telemetry/keys /v1/keys
+		reverse_proxy telemetry-sink:8082
+	}
+	handle /telemetry/query/* {
+		uri replace /telemetry/query /v1
+		reverse_proxy telemetry-sink:8082
+	}
 	reverse_proxy mcp:8080
 }
