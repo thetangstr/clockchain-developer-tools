@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 
 import {
   createStripeTestRail, createSecretsManagerStripeTestKeyResolver,
@@ -11,6 +11,14 @@ import {
 // N4b-10 (D13) — the ported Stripe TEST rail, unit-level: recording
 // transport + injected resolver only. No network, no Secrets Manager,
 // and no key material ever leaves the seams (asserted below).
+
+// Node 20's runner abandons a pending test once the event loop empties, and
+// the rail's deadline timer is deliberately unref'd — a never-resolving
+// transport leaves only unref'd work. A ref'd keep-alive per test lets the
+// deadline actually fire on every Node version.
+let keepAlive;
+beforeEach(() => { keepAlive = setInterval(() => {}, 60_000); });
+afterEach(() => { clearInterval(keepAlive); });
 
 const PI = (over = {}) => ({
   id: "pi_test000000000000001",

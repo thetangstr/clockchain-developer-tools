@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 
 import { createCloseEmitter } from "../dist/agent-contract/close-emitter.js";
 import { SIGNER } from "./n4b9-harness.mjs";
@@ -7,6 +7,14 @@ import { SIGNER } from "./n4b9-harness.mjs";
 // N4b-9 — F12: a per-attempt deadline covering connection, headers AND body,
 // plus a total delivery deadline; attempts counted at dispatch; bounded
 // final failure. All stalls are fake — no network.
+
+// Node 20's runner abandons a pending test once the event loop empties, and
+// the emitter's deadline timers are deliberately unref'd — a stalled fake
+// fetch leaves only unref'd work. A ref'd keep-alive per test lets the
+// deadline actually fire on every Node version.
+let keepAlive;
+beforeEach(() => { keepAlive = setInterval(() => {}, 60_000); });
+afterEach(() => { clearInterval(keepAlive); });
 
 test("F12: a stalled fetch (headers never arrive) counts the attempt and fails bounded", async () => {
   const states = new Map();
