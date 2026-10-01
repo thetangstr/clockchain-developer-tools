@@ -9,7 +9,14 @@ import test from "node:test";
 // Phase F kit (founder-applied). Lints the drafted JSON so a later edit cannot
 // quietly widen the admin role, open a plaintext ingest path, or drop an alert.
 const dir = new URL("../clockchain-mcp/telemetry-sink/admin/", import.meta.url);
-const json = async (name) => JSON.parse(await readFile(new URL(name, dir), "utf8"));
+const json = async (name) => {
+  if (name === "alert-event-pattern.json") {
+    // us-west-2 is shipped as two rules (EventBridge 2048-char limit); assert on their union.
+    const [a, b] = await Promise.all([json("alert-event-pattern-1.json"), json("alert-event-pattern-2.json")]);
+    return { ...a, detail: { $or: [...a.detail.$or, ...b.detail.$or] } };
+  }
+  return JSON.parse(await readFile(new URL(name, dir), "utf8"));
+};
 const BOX_ID = "i-0d6765d143da7e1ea";
 const BOX = `arn:aws:ec2:us-west-2:570035913370:instance/${BOX_ID}`;
 const ADMIN_ROLE = "arn:aws:iam::570035913370:role/clockchain-telemetry-sink-admin";
@@ -198,9 +205,11 @@ test("FOUNDER-STEPS renders every placeholder and pins every Command doc", () =>
   assert.match(steps, /aws iam get-user --user-name Yang --query User\.UserId/);
   assert.match(steps, /BlockDeviceMappings\[\]\.Ebs\.VolumeId/);
   for (const ph of ["__BOX_VOLUME_IDS__", "__YANG_USER_ID__"]) assert.ok(steps.includes(ph), ph);
-  assert.match(steps, /--event-pattern file:\/\/\$3/);
-  assert.match(steps, /alert_rule us-west-2 clockchain-sink-box-access \/tmp\/alert-usw2\.json/);
-  assert.match(steps, /alert_rule us-east-1 clockchain-sink-iam \/tmp\/alert-use1\.json/);
+  assert.match(steps, /--event-pattern "file:\/\/\$\{args\[i\+1\]\}"/);
+  assert.match(steps, /render\(\) \{ jq -c /);
+  assert.match(steps, /alert_rules us-west-2 clockchain-sink-box-access \\\n\s+clockchain-sink-box-access \/tmp\/alert-usw2-1\.json clockchain-sink-box-access-2 \/tmp\/alert-usw2-2\.json/);
+  assert.match(steps, /alert_rules us-east-1 clockchain-sink-iam clockchain-sink-iam \/tmp\/alert-use1\.json/);
+  assert.match(steps, /"aws:SourceArn\\":\[\$arns\]/, "topic policy allows every rule ARN of the region");
   assert.match(steps, /--document-name ClockchainSinkAdmin-MintIngest \\\n\s+--document-version "\$INGEST_VER" --document-hash "\$INGEST_HASH" --document-hash-type Sha256/);
   assert.match(steps, /ClockchainSinkAdmin-ListTokens \$\(pin ListTokens\)/);
   assert.match(steps, /ClockchainSinkAdmin-SessionCleanup \$\(pin SessionCleanup\)/);
@@ -209,7 +218,8 @@ test("FOUNDER-STEPS renders every placeholder and pins every Command doc", () =>
   assert.match(steps, /--role-session-name yang-sink-admin /);
   assert.doesNotMatch(steps, /not in the alert pattern yet|other region's rule is unaffected/);
   // Both safety checks HALT: the failure branch ends in `false` and the next command is &&-chained.
-  assert.match(steps, /\|\| \{ echo "STOP: unrendered placeholder or empty pattern"; false; \}; \} \\\n\s+&& alert_rule us-west-2 [^\n]*\\\n\s+&& alert_rule us-east-1 /);
+  assert.match(steps, /\|\| \{ echo "STOP: \$f is empty, over 2048 chars, or has an unrendered placeholder"; return 1; \}; done; \}/);
+  assert.match(steps, /check_patterns \/tmp\/alert-usw2-1\.json \/tmp\/alert-usw2-2\.json \/tmp\/alert-use1\.json \\\n\s+&& alert_rules us-west-2 [^\n]*\\\n[^\n]*\\\n\s+&& alert_rules us-east-1 /);
   assert.match(steps, /\|\| \{ echo "STOP: MintQuery differs from the recorded pin"; false; \}; \} \\\n\s+&& aws ssm start-session /);
   assert.doesNotMatch(steps, /\|\| echo "STOP/);
   assert.doesNotMatch(steps, /\(a notice\)/);
@@ -255,4 +265,31 @@ test("orchestrator scoped role (Tier 2 draft): no root shell, no IAM/doc/alertin
   // Every statement is cited in FOUNDER-STEPS.md.
   const steps = readFileSync(new URL("FOUNDER-STEPS.md", dir), "utf8");
   for (const s of doc.Statement) assert.ok(steps.includes(`\`${s.Sid}\``), `FOUNDER-STEPS cites ${s.Sid}`);
+});
+
+test("every alert pattern, rendered with realistic ids and compacted, fits EventBridge's 2048-char limit", async () => {
+  const vols = ["vol-0123456789abcdef0", "vol-0123456789abcdef1", "vol-0123456789abcdef2"];
+  const yid = "AIDAABCDEFGHIJKLMNOPQ";
+  const render = (v) => (Array.isArray(v) && v.length === 1 && v[0] === "__BOX_VOLUME_IDS__" ? vols
+    : v === "__YANG_USER_ID__" ? yid
+      : Array.isArray(v) ? v.map(render)
+        : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, render(x)])) : v);
+  const files = ["alert-event-pattern-1.json", "alert-event-pattern-2.json", "alert-iam-event-pattern.json"];
+  for (const f of files) {
+    const compact = JSON.stringify(render(JSON.parse(await readFile(new URL(f, dir), "utf8"))));
+    assert.doesNotMatch(compact, /__[A-Z_]+__/, f);
+    assert.ok(compact.length <= 2048, `${f}: ${compact.length} chars > 2048`);
+  }
+  await assert.rejects(readFile(new URL("alert-event-pattern.json", dir)), /ENOENT/, "the unsplit pattern is gone");
+});
+
+test("agent-config params: mkdir -p first, snap template, honest failure messages", async () => {
+  const { commands } = await json("ssm-agent-no-session-logs.params.json");
+  const text = commands.join("\n");
+  const mk = commands.findIndex((c) => c === "mkdir -p /etc/amazon/ssm");
+  const cp = commands.findIndex((c) => c.includes("cp "));
+  assert.ok(mk >= 0 && cp > mk, "mkdir -p /etc/amazon/ssm precedes the copy");
+  assert.match(commands[cp], /\/snap\/amazon-ssm-agent\/current\/amazon-ssm-agent\.json\.template/);
+  assert.match(text, /no template found/, "a missing template is not reported as an old agent");
+  assert.match(text, /SessionLogsDestination/);
 });
