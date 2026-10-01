@@ -180,7 +180,7 @@ export function createBusinessOps(options: {
    */
   signingOpen?: () => boolean;
   /** Required per-role §13 policy pins (`CONTRACT_POLICY_DIGESTS`). */
-  policyDigests: Readonly<Record<ContractRole, string>>;
+  policyDigests: Readonly<Record<ContractRole, ReadonlySet<string>>>;
   /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
   principals?: ReadonlyMap<string, string>;
   /**

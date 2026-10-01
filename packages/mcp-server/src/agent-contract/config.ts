@@ -12,7 +12,7 @@ import {
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
 import { createCloseEmitter } from "./close-emitter.js";
-import { createContractService, type ContractRun, type ContractService } from "./service.js";
+import { createContractService, MAX_POLICY_DIGESTS_PER_ROLE, type ContractRun, type ContractService } from "./service.js";
 import type { SimFaults } from "./sim/index.js";
 import type { ContractSigner } from "./envelope.js";
 import type { IncomingHttpHeaders } from "node:http";
@@ -63,7 +63,7 @@ export type ContractRouteConfig =
        */
       readonly verifierToken?: string;
       /** §13 pins: the exact policy digest each role's approvals must carry. */
-      readonly policyDigests: Readonly<{ buyer: string; provider: string }>;
+      readonly policyDigests: Readonly<{ buyer: ReadonlySet<string>; provider: ReadonlySet<string> }>;
       /** Family-principal pin per buyer keyId (`CONTRACT_PRINCIPALS`). */
       readonly principals: ReadonlyMap<string, string>;
       /** M3: the published receipt/envelope signing keys (card + /contract/keys). */
@@ -86,10 +86,22 @@ export type ContractRouteConfig =
        */
       readonly settlementRailId: "simulated" | "stripe_test_mode";
       readonly settlementRail?: SettlementRail;
+      /** Normalized ERC-8004 pin (`eip155:<n>` chain id, lowercase registry), if configured. */
+      readonly expectedErc8004?: { readonly chainId: string; readonly registryAddress: string };
       readonly service: ContractService;
     };
 
 const ED25519_PKCS8_PREFIX = "302e020100300506032b657004220420";
+
+/**
+ * N11f: CONTRACT_HOST_ROOTS REPLACES the default root list. Returns the
+ * published default root kids absent from `hostRoots` (names only) so startup
+ * can warn — dropping root-2026-08 silently refuses every real certificate.
+ */
+export function missingDefaultHostRoots(hostRoots: readonly HostRootPin[]): string[] {
+  const have = new Set(hostRoots.map((r) => `${r.kid}:${r.fingerprint}`));
+  return PUBLISHED_HOST_ROOTS.filter((r) => !have.has(`${r.kid}:${r.fingerprint}`)).map((r) => r.kid);
+}
 
 function misconfigured(reason: string): ContractRouteConfig {
   return { kind: "misconfigured", reason };
@@ -205,19 +217,30 @@ export function loadContractConfig(
   // §13 approval policy pins are REQUIRED (N4b-2b): `buyer:0x…,provider:0x…`.
   // A missing pin is a startup error — the route refuses, never half-serves.
   const DIGEST = /^0x[0-9a-f]{64}$/;
-  const policyDigests: { buyer?: string; provider?: string } = {};
+  // N11f: each role takes a `|`-separated SET (`buyer:0xA|0xB,provider:0xC`);
+  // a single value is the one-element set. Cap 64 per role, exact lowercase hex.
+  const policyDigests: { buyer?: Set<string>; provider?: Set<string> } = {};
   const policyRaw = (env.CONTRACT_POLICY_DIGESTS ?? "").trim();
   try {
     for (const entry of policyRaw.split(",").map((s) => s.trim()).filter(Boolean)) {
-      const [role, digest] = entry.split(":", 2);
-      if (
-        (role !== "buyer" && role !== "provider") ||
-        !DIGEST.test(digest ?? "") ||
-        /^0x0{64}$/.test(digest ?? "") // the zero digest is not a pin
-      ) {
-        throw new Error("malformed CONTRACT_POLICY_DIGESTS entry (want buyer:0x…,provider:0x…)");
+      const [role, digestList, ...extra] = entry.split(":");
+      if ((role !== "buyer" && role !== "provider") || extra.length > 0 || digestList === undefined) {
+        throw new Error("malformed CONTRACT_POLICY_DIGESTS entry (want buyer:0xA|0xB,provider:0xC)");
       }
-      policyDigests[role] = digest;
+      if (policyDigests[role] !== undefined) {
+        throw new Error(`CONTRACT_POLICY_DIGESTS lists ${role} more than once (put the set in one entry: ${role}:0xA|0xB)`);
+      }
+      const set = new Set<string>();
+      for (const digest of digestList.split("|")) {
+        if (!DIGEST.test(digest) || /^0x0{64}$/.test(digest)) { // the zero digest is not a pin
+          throw new Error("malformed CONTRACT_POLICY_DIGESTS entry (want buyer:0xA|0xB,provider:0xC)");
+        }
+        set.add(digest);
+      }
+      if (set.size > MAX_POLICY_DIGESTS_PER_ROLE) {
+        throw new Error(`CONTRACT_POLICY_DIGESTS: more than ${MAX_POLICY_DIGESTS_PER_ROLE} digests for ${role}`);
+      }
+      policyDigests[role] = set;
     }
   } catch (err) {
     return misconfigured((err as Error).message);
@@ -376,8 +399,28 @@ export function loadContractConfig(
   // attest exactly this deployment, not just the agent id. An injected "" must
   // not create a {chainId:"",registryAddress:""} pin — that would refuse every
   // certificate — so the pin exists only when at least one value is non-empty.
-  const erc8004ChainId = (env.CONTRACT_ERC8004_CHAIN_ID ?? "").trim();
-  const erc8004Registry = (env.CONTRACT_ERC8004_REGISTRY_ADDRESS ?? "").trim();
+  // N11f: the chain id is the certificate's wire value `eip155:<n>`; a bare
+  // decimal is normalized to it. The registry address compares
+  // case-insensitively, so it is pinned lowercase.
+  const erc8004ChainIdRaw = (env.CONTRACT_ERC8004_CHAIN_ID ?? "").trim();
+  const erc8004RegistryRaw = (env.CONTRACT_ERC8004_REGISTRY_ADDRESS ?? "").trim();
+  let erc8004ChainId = "";
+  if (erc8004ChainIdRaw !== "") {
+    const m = /^(?:eip155:)?([1-9][0-9]{0,19})$/.exec(erc8004ChainIdRaw);
+    if (m === null) {
+      return misconfigured("CONTRACT_ERC8004_CHAIN_ID must be eip155:<n> or a positive decimal chain id (no leading zeros, max 20 digits)");
+    }
+    erc8004ChainId = `eip155:${m[1]}`;
+  }
+  if (erc8004RegistryRaw !== "" && !/^0x[0-9a-fA-F]{40}$/.test(erc8004RegistryRaw)) {
+    return misconfigured("CONTRACT_ERC8004_REGISTRY_ADDRESS must be a 0x + 40 hex address");
+  }
+  if ((erc8004ChainIdRaw === "") !== (erc8004RegistryRaw === "")) {
+    return misconfigured(
+      "CONTRACT_ERC8004_CHAIN_ID and CONTRACT_ERC8004_REGISTRY_ADDRESS must be set together (both or neither)",
+    );
+  }
+  const erc8004Registry = erc8004RegistryRaw.toLowerCase();
   const expectedErc8004 =
     erc8004ChainId !== "" || erc8004Registry !== ""
       ? { chainId: erc8004ChainId, registryAddress: erc8004Registry }
@@ -466,7 +509,7 @@ export function loadContractConfig(
       runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
       graceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
       expectedErc8004,
-      policyDigests: policyDigests as { buyer: string; provider: string },
+      policyDigests: policyDigests as { buyer: Set<string>; provider: Set<string> },
       principals,
       // N4b-4: the service refuses to sign once the published window closes.
       signerValidUntilMs: keyValidUntilMs,
@@ -528,7 +571,7 @@ export function loadContractConfig(
     sessionTtlMs: Number.isFinite(sessionTtlMs) ? sessionTtlMs : 30 * 60_000,
     ...(observerTokenRaw !== "" ? { observerToken: observerTokenRaw } : {}),
     ...(verifierTokenRaw !== "" ? { verifierToken: verifierTokenRaw } : {}),
-    policyDigests: policyDigests as { buyer: string; provider: string },
+    policyDigests: policyDigests as { buyer: Set<string>; provider: Set<string> },
     principals,
     serverKeys,
     simFaultsEnabled: simFaultsAllowed,
@@ -537,6 +580,7 @@ export function loadContractConfig(
     anchorEnabled,
     settlementRailId,
     ...(settlementRail !== undefined ? { settlementRail } : {}),
+    ...(expectedErc8004 !== undefined ? { expectedErc8004 } : {}),
     service,
   };
 }

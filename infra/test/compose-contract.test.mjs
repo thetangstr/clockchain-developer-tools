@@ -91,8 +91,8 @@ test("the mcp service carries the full /contract/mcp environment surface", async
   for (const name of CONTRACT_ENV_NAMES) {
     assert.match(
       mcpBlock,
-      new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}\\}"\\s*$`, "m"),
-      `mcp environment must carry ${name}: "\${${name}}"`,
+      new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"),
+      `mcp environment must carry ${name}: "\${${name}:-}" (the :- default silences unset-var warnings)`,
     );
   }
 });

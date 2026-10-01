@@ -7,7 +7,7 @@
  * map of NAME → "present"|"absent".
  *
  *   node scripts/agent-contract/check-config-from-ssm.mjs \
- *     [--region us-west-2] [--prefix /clockchain/mcp]
+ *     [--region us-west-2] [--prefix /clockchain/mcp] [--state-dir <dir>]
  *
  * Exit codes:  0 ready · 1 misconfigured/refused/ssm-failure · 2 disabled.
  *
@@ -39,65 +39,51 @@ export const ENV_PARAMETERS = [
   "CONTRACT_ANCHOR_ENABLED", "CONTRACT_SETTLEMENT_RAIL", "CONTRACT_TRUST_PROXY",
 ];
 
-/** GetParameters is capped at 10 names per call. */
-const SSM_BATCH = 10;
-
 /**
- * AWS-backed fetch: ONE GetParametersCommand for `names` (≤10) with
- * WithDecryption. Lazily imports the SDK so loading this module performs no
- * AWS calls — tests inject `fetchParameters` and never need the package.
- * Returns Map<parameterName, value>; names in InvalidParameters are simply
- * absent from the map.
+ * AWS-backed fetch: ONE GetParameterCommand for `name` with WithDecryption
+ * (N11f: per-name, because the box role is granted ssm:GetParameter on the
+ * prefix but not ssm:GetParameters). Lazily imports the SDK so loading this
+ * module performs no AWS calls — tests inject `fetchParameter` and never
+ * need the package. Returns the value, or undefined when the parameter does
+ * not exist.
  */
-async function fetchParametersAws({ region, names }) {
-  const { SSMClient, GetParametersCommand } = await import("@aws-sdk/client-ssm");
+async function fetchParameterAws({ region, name }) {
+  const { SSMClient, GetParameterCommand } = await import("@aws-sdk/client-ssm");
   const client = new SSMClient({ region });
-  const res = await client.send(
-    new GetParametersCommand({ Names: names, WithDecryption: true }),
-  );
-  const found = new Map();
-  for (const p of res.Parameters ?? []) {
-    if (typeof p.Name === "string" && typeof p.Value === "string") {
-      found.set(p.Name, p.Value);
-    }
+  try {
+    const res = await client.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
+    return typeof res.Parameter?.Value === "string" ? res.Parameter.Value : undefined;
+  } catch (err) {
+    if (err instanceof Error && err.name === "ParameterNotFound") return undefined;
+    throw err;
   }
-  return found;
 }
 
 /**
- * Fetch `${prefix}/<NAME>` for every name in ENV_PARAMETERS (chunked at
- * SSM_BATCH) and write the present ones into `env`. Values are never logged.
- * Returns { NAME: "present" | "absent" } for the full surface. A batch that
- * fails with ParameterNotFound counts as absent; any other error propagates.
+ * Fetch `${prefix}/<NAME>` for every name in ENV_PARAMETERS (one
+ * GetParameter each) and write the present ones into `env`. Values are never
+ * logged. Returns { NAME: "present" | "absent" } for the full surface. A
+ * ParameterNotFound counts as absent; any other error propagates.
  */
 export async function loadEnvFromSsm({
   region,
   prefix = "/clockchain/mcp",
   env = process.env,
-  fetchParameters = fetchParametersAws,
+  fetchParameter = fetchParameterAws,
 } = {}) {
-  const names = ENV_PARAMETERS.map((n) => `${prefix}/${n}`);
-  const found = new Map();
-  for (let i = 0; i < names.length; i += SSM_BATCH) {
-    try {
-      const batch = await fetchParameters({
-        region,
-        names: names.slice(i, i + SSM_BATCH),
-      });
-      for (const [k, v] of batch) found.set(k, v);
-    } catch (err) {
-      if (err instanceof Error && err.name === "ParameterNotFound") continue;
-      throw err;
-    }
-  }
   const parameters = {};
-  for (let i = 0; i < ENV_PARAMETERS.length; i++) {
-    const value = found.get(names[i]);
+  for (const name of ENV_PARAMETERS) {
+    let value;
+    try {
+      value = await fetchParameter({ region, name: `${prefix}/${name}` });
+    } catch (err) {
+      if (!(err instanceof Error && err.name === "ParameterNotFound")) throw err;
+    }
     if (value !== undefined) {
-      env[ENV_PARAMETERS[i]] = value;
-      parameters[ENV_PARAMETERS[i]] = "present";
+      env[name] = value;
+      parameters[name] = "present";
     } else {
-      parameters[ENV_PARAMETERS[i]] = "absent";
+      parameters[name] = "absent";
     }
   }
   return parameters;
@@ -108,11 +94,11 @@ export async function loadEnvFromSsm({
  * checker's own convention (exit 1, status misconfigured) and carries only
  * the error NAME — SDK messages can echo request detail we keep off stdout.
  */
-export async function checkConfigFromSsm({ region, prefix, env, fetchParameters } = {}) {
+export async function checkConfigFromSsm({ region, prefix, env, fetchParameter, stateDir } = {}) {
   const target = env ?? process.env;
   let parameters;
   try {
-    parameters = await loadEnvFromSsm({ region, prefix, env: target, fetchParameters });
+    parameters = await loadEnvFromSsm({ region, prefix, env: target, fetchParameter });
   } catch (err) {
     const name = err instanceof Error ? err.name : "Error";
     return {
@@ -120,13 +106,17 @@ export async function checkConfigFromSsm({ region, prefix, env, fetchParameters 
       report: { status: "misconfigured", reason: `ssm fetch failed (${name})` },
     };
   }
+  // N11f: --state-dir wins over the pulled CONTRACT_STATE_DIR so the probe can
+  // use a scratch dir (the live dir is lock-held by the running service).
+  if (stateDir !== undefined) target.CONTRACT_STATE_DIR = stateDir;
   const { exitCode, report } = await checkConfig(target);
   return { exitCode, report: { ...report, parameters } };
 }
 
-const USAGE = `usage: node check-config-from-ssm.mjs [--region <r>] [--prefix <p>]
+const USAGE = `usage: node check-config-from-ssm.mjs [--region <r>] [--prefix <p>] [--state-dir <d>]
   --region   AWS region (default $AWS_REGION else us-west-2)
   --prefix   SSM parameter prefix (default /clockchain/mcp)
+  --state-dir  override CONTRACT_STATE_DIR (probe a scratch dir, not the live one)
 Reads <prefix>/<NAME> for the contract env surface into process.env,
 then prints the same redacted report as check-config.mjs.
 `;
@@ -137,12 +127,14 @@ export function parseArgs(argv, env = process.env) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
       out.help = true;
-    } else if (a === "--region" || a === "--prefix") {
+    } else if (a === "--region" || a === "--prefix" || a === "--state-dir") {
       const value = argv[++i];
       if (value === undefined) return { error: `${a} wants a value` };
-      out[a.slice(2)] = value;
+      out[a === "--state-dir" ? "stateDir" : a.slice(2)] = value;
     } else if (a.startsWith("--region=")) {
       out.region = a.slice("--region=".length);
+    } else if (a.startsWith("--state-dir=")) {
+      out.stateDir = a.slice("--state-dir=".length);
     } else if (a.startsWith("--prefix=")) {
       out.prefix = a.slice("--prefix=".length);
     } else {
@@ -167,6 +159,7 @@ if (isMain) {
   const { exitCode, report } = await checkConfigFromSsm({
     region: args.region,
     prefix: args.prefix,
+    stateDir: args.stateDir,
     env: process.env,
   });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

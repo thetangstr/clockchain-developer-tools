@@ -830,6 +830,38 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/** N11f: registry addresses compare case-insensitively (checksummed vs lowercase). */
+function sameAddress(a: unknown, b: unknown): boolean {
+  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+}
+
+/** N11f: a role's policy pin — one digest, or a set (the buyer digest rotates per run). */
+export type PolicyDigestPin = string | readonly string[] | ReadonlySet<string>;
+/** Hard cap on digests per role. */
+export const MAX_POLICY_DIGESTS_PER_ROLE = 64;
+
+/**
+ * Validate and normalize `policyDigests` to a Set per role. Every digest must
+ * be exact lowercase `0x` + 64 hex; each role needs 1..64 distinct digests.
+ */
+export function normalizePolicyDigests(
+  raw: Readonly<Record<ContractRole, PolicyDigestPin>> | undefined,
+): Readonly<Record<ContractRole, ReadonlySet<string>>> {
+  const fail = (): never => {
+    throw new Error(
+      `policyDigests {buyer,provider} are required (1..${MAX_POLICY_DIGESTS_PER_ROLE} per role, each 0x + 64 lower hex)`,
+    );
+  };
+  if (raw === undefined || raw === null) return fail();
+  const one = (pin: PolicyDigestPin | undefined): ReadonlySet<string> => {
+    const list = typeof pin === "string" ? [pin] : pin === undefined ? [] : [...pin];
+    if (list.length === 0 || list.length > MAX_POLICY_DIGESTS_PER_ROLE) return fail();
+    for (const d of list) if (typeof d !== "string" || !/^0x[0-9a-f]{64}$/.test(d) || /^0x0{64}$/.test(d)) return fail();
+    return new Set(list);
+  };
+  return Object.freeze({ buyer: one(raw.buyer), provider: one(raw.provider) });
+}
+
 export function createContractService(options: {
   hostRoots: readonly HostRootPin[];
   signer: ContractSigner;
@@ -873,7 +905,7 @@ export function createContractService(options: {
    * `buyer:0x…,provider:0x…`. Approval records must carry exactly the role's
    * pinned digest; no pin means no consequential action can ever pass.
    */
-  policyDigests: Readonly<Record<ContractRole, string>>;
+  policyDigests: Readonly<Record<ContractRole, PolicyDigestPin>>;
   /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
   principals?: ReadonlyMap<string, string>;
   /**
@@ -936,15 +968,9 @@ export function createContractService(options: {
   const maxReceiptsPerRun = options.maxReceiptsPerRun ?? DEFAULT_MAX_RECEIPTS_PER_RUN;
   const maxReceiptsPerPrincipal = options.maxReceiptsPerPrincipal ?? DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL;
   const runTtlMs = options.runTtlMs ?? RUN_TTL_MS;
-  if (
-    options.policyDigests === undefined ||
-    !/^0x[0-9a-f]{64}$/.test(options.policyDigests.buyer ?? "") ||
-    !/^0x[0-9a-f]{64}$/.test(options.policyDigests.provider ?? "")
-  ) {
-    // Fail closed at construction: without the policy pins every approval
-    // check would be ambiguous — never silently degrade.
-    throw new Error("policyDigests {buyer,provider} are required (0x + 64 lower hex)");
-  }
+  // Fail closed at construction: without the policy pins every approval
+  // check would be ambiguous — never silently degrade.
+  const policyDigests = normalizePolicyDigests(options.policyDigests);
   const runs = new Map<string, ContractRun>();
   const principalRuns = new Map<string, string>();
   /** M1/N4b-3: per-principal SEGMENTED pre-bind chains — the run genesis
@@ -1264,9 +1290,9 @@ export function createContractService(options: {
       erc8004 === null || policy === null ||
       (!lateBinding && erc8004.agentId !== principal.agentId) ||
       erc8004.chainId !== policy.chainId ||
-      erc8004.registryAddress !== policy.registryAddress ||
+      !sameAddress(erc8004.registryAddress, policy.registryAddress) ||
       (pinned !== undefined &&
-        (policy.chainId !== pinned.chainId || policy.registryAddress !== pinned.registryAddress))
+        (policy.chainId !== pinned.chainId || !sameAddress(policy.registryAddress, pinned.registryAddress)))
     ) {
       return { ok: false, code: "CERTIFICATE_INVALID" };
     }
@@ -1830,7 +1856,7 @@ export function createContractService(options: {
     now,
     sim,
     signingOpen,
-    policyDigests: options.policyDigests,
+    policyDigests,
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
     claimMandate,
     endRun,
