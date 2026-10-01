@@ -109,11 +109,28 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
   // carries the OTHER environment's set in TELEMETRY_PEER_CONTRACT_KEYS so
   // the overlap check runs locally on both boxes.
   const peerKeys = parseContractKeys(env.TELEMETRY_PEER_CONTRACT_KEYS, "TELEMETRY_PEER_CONTRACT_KEYS");
+  const peerKeyCount = peerKeys === undefined ? 0 : Object.keys(peerKeys).length;
+  // TELEMETRY_PEER_ENV="none" (D22): the explicit, literal statement that no
+  // peer environment (staging sink / staging contract server) exists, so the
+  // disjoint-key check has nothing to compare against. It is the ONLY way a
+  // production sink boots with an empty peer set; it never relaxes the
+  // TELEMETRY_CONTRACT_KEYS requirement and contradicts a non-empty peer set.
+  const peerEnv = env.TELEMETRY_PEER_ENV;
+  if (peerEnv !== undefined && peerEnv !== "" && peerEnv !== "none") {
+    throw new Error(`TELEMETRY_PEER_ENV must be unset or "none", got ${peerEnv}`);
+  }
+  const noPeerEnv = peerEnv === "none";
+  if (noPeerEnv && peerKeyCount > 0) {
+    throw new Error(
+      "TELEMETRY_PEER_ENV=none contradicts a non-empty TELEMETRY_PEER_CONTRACT_KEYS — refused to boot",
+    );
+  }
   // Production must carry the peer set — an empty compose default would
   // otherwise disable the disjoint-key check silently.
-  if (environment === "production"
-    && (peerKeys === undefined || Object.keys(peerKeys).length === 0)) {
-    throw new Error("TELEMETRY_PEER_CONTRACT_KEYS is required in production — refused to boot");
+  if (environment === "production" && peerKeyCount === 0 && !noPeerEnv) {
+    throw new Error(
+      "TELEMETRY_PEER_CONTRACT_KEYS is required in production (or TELEMETRY_PEER_ENV=none when no peer environment exists) — refused to boot",
+    );
   }
   if (contractKeys !== undefined && peerKeys !== undefined) {
     const mine = new Set(Object.values(contractKeys).map(publicKeyBytes));
@@ -180,6 +197,10 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
     keyCreated: sinkKey.created,
     ports: { write: writePort, read: readPort, close: closePort },
     anchor: anchorUrl !== undefined,
+    environment,
+    contractKeyIds: Object.keys(contractKeys ?? {}),
+    peerKeyIds: Object.keys(peerKeys ?? {}),
+    peerEnv: noPeerEnv ? "none" : "present",
   }) + "\n");
   return servers;
 }
