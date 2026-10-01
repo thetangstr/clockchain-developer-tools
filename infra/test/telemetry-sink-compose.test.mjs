@@ -88,13 +88,13 @@ test("the sink is decoupled from mcp/host/caddy: no depends_on either way", asyn
   assert.doesNotMatch(serviceBlock(source, "telemetry-sink"), /depends_on/);
 });
 
-test("the mcp service keeps the PR #168 close-path wiring unchanged", async () => {
+test("the mcp service keeps the PR #168/#169 close-path wiring unchanged", async () => {
   const source = await readFile(composeFile, "utf8");
   const mcp = serviceBlock(source, "mcp");
   for (const name of [
     "TELEMETRY_CLOSE_URL", "TELEMETRY_CLOSE_BACKOFF_MS",
     "TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS", "TELEMETRY_CLOSE_DEADLINE_MS",
-  ]) assert.match(mcp, new RegExp(`^      ${name}:\\s*"\\$\\{${name}\\}"\\s*$`, "m"));
+  ]) assert.match(mcp, new RegExp(`^      ${name}:\\s*"\\$\\{${name}(?::-)?\\}"\\s*$`, "m"));
 });
 
 test("compose-up.sh (systemd + deploy-box) never activates the telemetry profile", async () => {

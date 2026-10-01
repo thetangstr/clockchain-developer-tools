@@ -169,11 +169,14 @@ with it. GATE: mcp healthy; first real run's close lands (sink log `close`).
 
 ## Rollback
 
+`PRE` = the pre-merge `origin/main`, i.e. the merge commit's first parent:
+`PRE=$(git rev-parse "$SHA^1")` (full 40-char sha; deploy-box needs it on origin/main).
+
 | Undo | Command |
 |---|---|
-| Caddy routes (5) | `box "bash $SINK reload-caddy c6e6846"` (reloads the pre-sink Caddyfile in place; never recreate caddy) |
+| Caddy routes (5) | `box "bash $SINK reload-caddy $PRE"` (reloads the pre-sink Caddyfile in place; never recreate caddy) |
 | Sink (4) | `box "bash $SINK stop"` — keeps `telemetry_state`; never delete the volume (new key, archived pin orphaned) |
-| mcp/code (3) | `scripts/deploy-box.sh c6e6846 --allow-infra-drift` (the checkout's Caddyfile/compose revert on disk, consistent with the caddy rollback; reload caddy from the checkout afterwards or before) |
+| mcp/code (3) | `scripts/deploy-box.sh "$PRE" --allow-infra-drift` (the checkout's Caddyfile/compose revert on disk, consistent with the caddy rollback; reload caddy from the checkout afterwards or before) |
 | Config (1) | `aws --region $R ssm delete-parameter --name /clockchain/mcp/TELEMETRY_CONTRACT_KEYS` |
 | Close path (8) | delete `/clockchain/mcp/TELEMETRY_CLOSE_URL`, re-run `scripts/deploy-box.sh <sha>` |
 
@@ -209,10 +212,23 @@ see `packages/telemetry-sink/README.md`). Anyone with root on the box or
 `deploy-box.sh`. The separation plan (founder-only MFA role, fixed SSM
 documents for sealed ingest mints and interactive query mints, CloudTrail
 alerting, and the Tier-2 operator permission set) is in the travel repo,
-`.omc/state/n7/SINK-DEPLOY-PLAN.md` §3. Until Tier 2, state it as "sink admin
-is a separate, MFA-gated founder path; the operator retains technical root on
-the box". Query tokens are plaintext and must not travel through SSM Run
-Command output.
+`.omc/state/n7/SINK-DEPLOY-PLAN.md` §3; the founder-applied kit is in
+`admin/` (`admin/FOUNDER-STEPS.md`).
+
+What may be claimed depends on how far that has gone:
+
+- **Until Phase F1 is complete** (the founder-only, MFA-gated
+  `clockchain-telemetry-sink-admin` role and its documents exist, AND the
+  CloudTrail trail + alert on `ssm:SendCommand`/`ssm:StartSession` to this box
+  are live): there is **no** separate sink-admin authority. Anyone with root on
+  the box or `ssm:SendCommand` to it — including the orchestrator and every
+  agent running as SSO AdministratorAccess — can mint ingest and query tokens.
+  Say exactly that.
+- **After F1, until Tier 2:** "sink admin is a separate, MFA-gated founder
+  path with alerting; the operator retains technical root on the box and could
+  still mint (detectable, not prevented)".
+
+Query tokens are plaintext and must not travel through SSM Run Command output.
 
 Smoke after admin is set up (founder): mint an ingest token for
 `smoke-<date>-1` role buyer sealed to a throwaway x25519 key, POST one OTLP/JSON
