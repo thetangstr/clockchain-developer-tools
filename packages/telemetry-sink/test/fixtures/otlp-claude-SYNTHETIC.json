@@ -1,0 +1,63 @@
+{
+  "_comment": "SYNTHETIC hand-made OTLP/JSON fixture — NOT a real capture. Follows the Claude Code attribute names from docs/travel-mvp/reports/agent-pairing/2026-09-28-runtime-research.md: span `claude_code.mcp.rpc` + `tool.output` event carrying tool output.",
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "claude-code" } },
+          { "key": "service.version", "value": { "stringValue": "2.1.284" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "com.anthropic.claude_code" },
+          "spans": [
+            {
+              "traceId": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+              "spanId": "1111222233334444",
+              "name": "claude_code.mcp.rpc",
+              "kind": 1,
+              "startTimeUnixNano": "1798761600000000000",
+              "endTimeUnixNano": "1798761600100000000",
+              "attributes": [
+                { "key": "mcp.server", "value": { "stringValue": "contract" } },
+                { "key": "tool.name", "value": { "stringValue": "mcp__contract__catalog_quote" } },
+                { "key": "mcp.method", "value": { "stringValue": "tools/call" } }
+              ],
+              "events": [
+                {
+                  "name": "tool.output",
+                  "timeUnixNano": "1798761600100000000",
+                  "attributes": [
+                    {
+                      "key": "output",
+                      "value": {
+                        "stringValue": "{\"itineraries\":[{\"itineraryId\":\"IT-QW-ONESTOP\",\"fareMinor\":429000}],\"simulated\":true,\"serverNonce\":\"0xaaaabbbbccccdddd1111222233334444\"}"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": { "code": 1 }
+            },
+            {
+              "traceId": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d7",
+              "spanId": "5555666677778888",
+              "name": "claude_code.mcp.rpc",
+              "kind": 1,
+              "startTimeUnixNano": "1798761610000000000",
+              "endTimeUnixNano": "1798761610050000000",
+              "attributes": [
+                { "key": "mcp.server", "value": { "stringValue": "contract" } },
+                { "key": "tool.name", "value": { "stringValue": "mcp__contract__rendezvous_inbox" } },
+                { "key": "mcp.method", "value": { "stringValue": "tools/call" } }
+              ],
+              "events": [],
+              "status": { "code": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

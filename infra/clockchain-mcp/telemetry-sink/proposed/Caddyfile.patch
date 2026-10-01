@@ -1,0 +1,40 @@
+--- a/infra/clockchain-mcp/Caddyfile
++++ b/infra/clockchain-mcp/Caddyfile
+@@ -35,5 +35,37 @@
+ 			header_up X-Forwarded-Prefix /next
+ 		}
+ 	}
++	# Telemetry sink (N7a) — separate authority, two public listeners only.
++	# Writes: /telemetry/v1/* -> write port (per-role ingest tokens). Queries:
++	# /telemetry/query/* -> read port (verifier query tokens). /telemetry/keys
++	# publishes the sink's PUBLIC signing key. The close listener is never
++	# routed here — only the mcp service reaches it on clockchain_edge.
++	# These use handle + explicit rewrites (not handle_path) so the sink sees
++	# its native /v1/* paths.
++	handle /telemetry/v1/* {
++		uri strip_prefix /telemetry
++		reverse_proxy telemetry-sink:8081
++	}
++	handle /telemetry/keys {
++		uri replace /telemetry/keys /v1/keys
++		reverse_proxy telemetry-sink:8082
++	}
++	handle /telemetry/query/* {
++		uri replace /telemetry/query /v1
++		reverse_proxy telemetry-sink:8082
++	}
++	# Staging sink: isolated container + volume, /staging/telemetry/* only.
++	handle /staging/telemetry/v1/* {
++		uri strip_prefix /staging/telemetry
++		reverse_proxy telemetry-sink-staging:8081
++	}
++	handle /staging/telemetry/keys {
++		uri replace /staging/telemetry/keys /v1/keys
++		reverse_proxy telemetry-sink-staging:8082
++	}
++	handle /staging/telemetry/query/* {
++		uri replace /staging/telemetry/query /v1
++		reverse_proxy telemetry-sink-staging:8082
++	}
+ 	reverse_proxy mcp:8080
+ }

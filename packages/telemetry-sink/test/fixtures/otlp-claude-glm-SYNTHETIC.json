@@ -1,0 +1,71 @@
+{
+  "_comment": "SYNTHETIC fixture matching the OBSERVED N4e-2 capture: Claude Code 2.1.202 on the Z.AI/GLM backend emits claude_code.tool spans with tool_name + OpenAI-style call_* tool_use_id and EMPTY events (no tool.output). Extraction must still yield the span row — with no serverNonce.",
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "claude-code" } },
+          { "key": "service.version", "value": { "stringValue": "2.1.202" } }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": { "name": "com.anthropic.claude_code" },
+          "spans": [
+            {
+              "traceId": "b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+              "spanId": "2222333344445555",
+              "name": "claude_code.tool",
+              "kind": 1,
+              "startTimeUnixNano": "1798761600000000000",
+              "endTimeUnixNano": "1798761600005000000",
+              "attributes": [
+                { "key": "session.id", "value": { "stringValue": "sess-0001" } },
+                { "key": "terminal.type", "value": { "stringValue": "ssh-session" } },
+                { "key": "span.type", "value": { "stringValue": "tool" } },
+                { "key": "tool_name", "value": { "stringValue": "mcp__pairingstub__echo" } },
+                { "key": "tool_use_id", "value": { "stringValue": "call_822d8ec858f647febfc1c500" } },
+                { "key": "gen_ai.tool.call.id", "value": { "stringValue": "call_822d8ec858f647febfc1c500" } },
+                { "key": "duration_ms", "value": { "intValue": 5 } }
+              ],
+              "events": [],
+              "status": { "code": 1 }
+            },
+            {
+              "traceId": "b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d7",
+              "spanId": "6666777788889999",
+              "name": "claude_code.tool",
+              "kind": 1,
+              "startTimeUnixNano": "1798761601000000000",
+              "endTimeUnixNano": "1798761601002000000",
+              "attributes": [
+                { "key": "session.id", "value": { "stringValue": "sess-0001" } },
+                { "key": "span.type", "value": { "stringValue": "tool" } },
+                { "key": "tool_name", "value": { "stringValue": "mcp__pairingstub__echo" } },
+                { "key": "tool_use_id", "value": { "stringValue": "call_bcf73310cbb84264bb36759d" } },
+                { "key": "duration_ms", "value": { "intValue": 2 } }
+              ],
+              "events": [],
+              "status": { "code": 1 }
+            },
+            {
+              "traceId": "b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d8",
+              "spanId": "aaaabbbbccccdddd",
+              "name": "claude_code.llm_request",
+              "kind": 1,
+              "startTimeUnixNano": "1798761599000000000",
+              "endTimeUnixNano": "1798761600000000000",
+              "attributes": [
+                { "key": "span.type", "value": { "stringValue": "llm_request" } },
+                { "key": "model", "value": { "stringValue": "glm-5" } },
+                { "key": "gen_ai.system", "value": { "stringValue": "anthropic" } }
+              ],
+              "events": [],
+              "status": { "code": 1 }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

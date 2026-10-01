@@ -1,0 +1,100 @@
+{
+  "_comment": "SYNTHETIC hand-made OTLP/JSON fixture — NOT a real capture. Copied from the N4d plugin's record shape pinned in travel_mvp/.worktrees/hermes-telemetry-n4d/integrations/hermes-ac-telemetry/tests/n4c_compat.test.mjs @ 6707767: ac_telemetry emits one logRecord per Hermes post_tool_call with event.name=hermes.tool_call, runtime=hermes, tool_name (dedicated attr), mcp_server, function_args + args_digest (canonical JSON), output (raw result JSON — serverNonce is structurally extracted), call_id/session_id/task_id/duration_ms/status, error_type on failures.",
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "ac-telemetry" } },
+          { "key": "deployment.environment.name", "value": { "stringValue": "agent-contract" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "ac-telemetry/hermes" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1798761600300000000",
+              "observedTimeUnixNano": "1798761600300000000",
+              "severityNumber": 9,
+              "body": { "stringValue": "hermes.tool_call" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "hermes.tool_call" } },
+                { "key": "runtime", "value": { "stringValue": "hermes" } },
+                { "key": "tool_name", "value": { "stringValue": "mcp__contract__submit_offer" } },
+                { "key": "mcp_server", "value": { "stringValue": "contract" } },
+                {
+                  "key": "function_args",
+                  "value": { "stringValue": "{\"name\":\"arg-trap\",\"price\":42}" }
+                },
+                {
+                  "key": "args_digest",
+                  "value": { "stringValue": "0x0000000000000000000000000000000000000000000000000000000000000000" }
+                },
+                {
+                  "key": "output",
+                  "value": {
+                    "stringValue": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"accepted\\\":true,\\\"serverNonce\\\":\\\"0xddddccccbbbbaaaa4444555566667777\\\"}\"}]}"
+                  }
+                },
+                { "key": "call_id", "value": { "stringValue": "call-n4d-1" } },
+                { "key": "session_id", "value": { "stringValue": "sess-h1" } },
+                { "key": "task_id", "value": { "stringValue": "task-h1" } },
+                { "key": "duration_ms", "value": { "intValue": 37 } },
+                { "key": "status", "value": { "stringValue": "ok" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1798761612300000000",
+              "observedTimeUnixNano": "1798761612300000000",
+              "severityNumber": 9,
+              "body": { "stringValue": "hermes.tool_call" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "hermes.tool_call" } },
+                { "key": "runtime", "value": { "stringValue": "hermes" } },
+                { "key": "tool_name", "value": { "stringValue": "mcp__contract__bad_call" } },
+                { "key": "mcp_server", "value": { "stringValue": "contract" } },
+                { "key": "function_args", "value": { "stringValue": "{}" } },
+                {
+                  "key": "output",
+                  "value": {
+                    "stringValue": "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"serverNonce\\\":\\\"0x11112222333344445555666677778888\\\"}\"}]}"
+                  }
+                },
+                { "key": "call_id", "value": { "stringValue": "call-n4d-2" } },
+                { "key": "duration_ms", "value": { "intValue": 5 } },
+                { "key": "status", "value": { "stringValue": "error" } },
+                { "key": "error_type", "value": { "stringValue": "tool_error" } },
+                { "key": "error_message", "value": { "stringValue": "rejected by contract server" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1798761623400000000",
+              "observedTimeUnixNano": "1798761623400000000",
+              "severityNumber": 9,
+              "body": { "stringValue": "hermes.tool_call" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "hermes.tool_call" } },
+                { "key": "runtime", "value": { "stringValue": "hermes" } },
+                { "key": "tool_name", "value": { "stringValue": "local_shell" } },
+                { "key": "function_args", "value": { "stringValue": "{\"cmd\":\"ls\"}" } },
+                { "key": "output", "value": { "stringValue": "{\"isError\":true,\"serverNonce\":\"0x99998888777766665555444433332222\"}" } },
+                { "key": "call_id", "value": { "stringValue": "call-n4d-3" } },
+                { "key": "duration_ms", "value": { "intValue": 2 } },
+                { "key": "status", "value": { "stringValue": "error" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1798761634500000000",
+              "severityNumber": 9,
+              "body": { "stringValue": "unrelated.log" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "hermes.session" } },
+                { "key": "note", "value": { "stringValue": "not a tool call — must be ignored" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

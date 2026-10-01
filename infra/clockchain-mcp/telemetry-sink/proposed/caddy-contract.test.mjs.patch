@@ -1,0 +1,22 @@
+--- a/infra/test/caddy-contract.test.mjs
++++ b/infra/test/caddy-contract.test.mjs
+@@ -39,8 +39,17 @@
+   assert.ok(next, "handle_path /next/* block exists");
+   assert.match(next[1], /reverse_proxy\s+mcp:8080/);
+   assert.match(next[1], /header_up\s+X-Forwarded-Prefix\s+\/next/);
++  // Telemetry sink (N7a): the sink's write/query/keys prefixes route to the
++  // sink listeners by compose DNS name; the close listener is never routed.
++  const telemetry = block.match(/\t# Telemetry sink[\s\S]*?\n\t\}(?=\n\treverse_proxy mcp:8080)/);
++  assert.ok(telemetry, "telemetry sink routes exist");
++  assert.match(telemetry[0], /reverse_proxy\s+telemetry-sink:8081/);
++  assert.match(telemetry[0], /reverse_proxy\s+telemetry-sink:8082/);
++  assert.match(telemetry[0], /reverse_proxy\s+telemetry-sink-staging:8081/);
++  assert.match(telemetry[0], /reverse_proxy\s+telemetry-sink-staging:8082/);
++  assert.doesNotMatch(telemetry[0], /:8083/, "the close listener is never routed");
+   // Everything outside those blocks must proxy unchanged to production.
+-  const rest = block.replace(staging[0], "").replace(acm4[0], "").replace(handshake[0], "").replace(next[0], "");
++  const rest = block.replace(staging[0], "").replace(acm4[0], "").replace(handshake[0], "").replace(next[0], "").replace(telemetry[0], "");
+   assert.match(rest, /reverse_proxy\s+mcp:8080/);
+   assert.doesNotMatch(rest, /handle_path|handle\s|uri\s+(?:strip_prefix|replace)|rewrite|mcp-staging|mcp-acm4/);
+   assert.doesNotMatch(source, /role-access|responderAccess|initiatorAccess|capability/i);
+

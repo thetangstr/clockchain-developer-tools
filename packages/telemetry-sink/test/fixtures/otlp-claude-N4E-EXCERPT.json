@@ -1,0 +1,184 @@
+{
+  "_comment": "REAL sanitized excerpt — copied from N4e live proof excerpts/claude/span-excerpt.json (travel_mvp feat/hermes-telemetry-n4d @ 5a7a679, run n4e-claude-mulry40d, Claude Code 2.1.284). Identity attrs (user.email, account_uuid, org, session) stripped source-side; span/attribute values verbatim.",
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "claude-code"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "claude-code"
+          },
+          "spans": [
+            {
+              "name": "claude_code.tool",
+              "startTimeUnixNano": "1790631814000000000",
+              "endTimeUnixNano": "1790631814003000000",
+              "attributes": [
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "tool_name",
+                  "value": {
+                    "stringValue": "ToolSearch"
+                  }
+                },
+                {
+                  "key": "tool_name_safe",
+                  "value": {
+                    "stringValue": "ToolSearch"
+                  }
+                },
+                {
+                  "key": "tool_use_id",
+                  "value": {
+                    "stringValue": "toolu_015JJASBdWGYppYEfstHLtnM"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_015JJASBdWGYppYEfstHLtnM"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": 2
+                  }
+                }
+              ],
+              "events": []
+            },
+            {
+              "name": "claude_code.tool",
+              "startTimeUnixNano": "1790631814000000000",
+              "endTimeUnixNano": "1790631814003000000",
+              "attributes": [
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "tool_name",
+                  "value": {
+                    "stringValue": "mcp__pairingstub__echo"
+                  }
+                },
+                {
+                  "key": "tool_name_safe",
+                  "value": {
+                    "stringValue": "mcp_other"
+                  }
+                },
+                {
+                  "key": "tool_use_id",
+                  "value": {
+                    "stringValue": "toolu_015DbqcAWCh7vkm3E8dXq5xX"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_015DbqcAWCh7vkm3E8dXq5xX"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": 3
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "name": "tool.output",
+                  "timeUnixNano": "1790631814003000000",
+                  "attributes": [
+                    {
+                      "key": "output",
+                      "value": {
+                        "stringValue": "{\"echoed\":\"n4e-alpha\",\"serverNonce\":\"0xdede34efb163409308fae015ce07eab2\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "claude_code.tool",
+              "startTimeUnixNano": "1790631814000000000",
+              "endTimeUnixNano": "1790631814003000000",
+              "attributes": [
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "tool_name",
+                  "value": {
+                    "stringValue": "mcp__pairingstub__echo"
+                  }
+                },
+                {
+                  "key": "tool_name_safe",
+                  "value": {
+                    "stringValue": "mcp_other"
+                  }
+                },
+                {
+                  "key": "tool_use_id",
+                  "value": {
+                    "stringValue": "toolu_01B2Hg5HVoAFfhNWvJ5m8ADM"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_01B2Hg5HVoAFfhNWvJ5m8ADM"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": 2
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "name": "tool.output",
+                  "timeUnixNano": "1790631814003000000",
+                  "attributes": [
+                    {
+                      "key": "output",
+                      "value": {
+                        "stringValue": "{\"echoed\":\"n4e-beta\",\"serverNonce\":\"0x572c0cdf43b2cf25534de6e9cec9982d\"}"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "_comment": "SYNTHETIC fixture matching the OBSERVED N4e-2 capture: codex 0.148 emits codex.api_request / conversation_starts / startup_phase / user_prompt log records (here: a failed auth exchange). None are tool results — the extractor must produce NO rows and NO refusals.",
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "codex" } },
+          { "key": "service.version", "value": { "stringValue": "0.148.0" } }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": { "name": "codex-cli" },
+          "logRecords": [
+            {
+              "timeUnixNano": "1798761600000000000",
+              "body": { "stringValue": "codex.startup_phase" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "codex.startup_phase" } },
+                { "key": "phase", "value": { "stringValue": "init" } }
+              ]
+            },
+            {
+              "timeUnixNano": "1798761600100000000",
+              "body": { "stringValue": "codex.user_prompt" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "codex.user_prompt" } },
+                { "key": "prompt", "value": { "stringValue": "[REDACTED]" } },
+                { "key": "prompt_length", "value": { "intValue": 243 } }
+              ]
+            },
+            {
+              "timeUnixNano": "1798761600200000000",
+              "body": { "stringValue": "codex.api_request" },
+              "attributes": [
+                { "key": "event.name", "value": { "stringValue": "codex.api_request" } },
+                { "key": "endpoint", "value": { "stringValue": "responses" } },
+                { "key": "http.response.status_code", "value": { "intValue": 401 } },
+                { "key": "error.message", "value": { "stringValue": "refresh_token_reused" } },
+                { "key": "auth.error_code", "value": { "stringValue": "token_expired" } },
+                { "key": "auth.mode", "value": { "stringValue": "chatgpt" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
