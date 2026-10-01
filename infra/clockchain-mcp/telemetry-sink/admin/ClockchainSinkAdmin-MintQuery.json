@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "description": "Telemetry sink admin (D22): mint a verifier query token (per-run 'query' or verifier-wide 'global-query'). Interactive session: the plaintext token streams to the founder's terminal only and never lands in Run Command history. Session Manager logging (S3/CloudWatch) must be OFF for the account. Sink admin only.",
+  "sessionType": "InteractiveCommands",
+  "parameters": {
+    "kind": {
+      "type": "String",
+      "description": "query (needs runId) or global-query (runId must be empty)",
+      "allowedValues": [
+        "query",
+        "global-query"
+      ]
+    },
+    "runId": {
+      "type": "String",
+      "description": "Run id for kind=query; empty for global-query",
+      "default": "",
+      "allowedPattern": "^([A-Za-z0-9_-]{1,64})?$"
+    }
+  },
+  "properties": {
+    "linux": {
+      "commands": "sh -c 'CID=$(docker ps -q --filter label=com.docker.compose.project=clockchain-mcp --filter label=com.docker.compose.service=telemetry-sink); [ -n \"$CID\" ] || { echo telemetry-sink is not running; exit 2; }; K={{kind}}; R={{runId}}; if [ \"$K\" = global-query ]; then [ -z \"$R\" ] || { echo runId must be empty for global-query; exit 64; }; exec docker exec \"$CID\" node dist/mint-cli.js global-query; else [ -n \"$R\" ] || { echo runId is required for query; exit 64; }; exec docker exec \"$CID\" node dist/mint-cli.js query --runId \"$R\"; fi'",
+      "runAsElevated": true
+    }
+  }
+}

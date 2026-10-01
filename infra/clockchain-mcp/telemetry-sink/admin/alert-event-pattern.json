@@ -1,0 +1,16 @@
+{
+  "source": ["aws.ssm"],
+  "detail-type": ["AWS API Call via CloudTrail"],
+  "detail": {
+    "eventSource": ["ssm.amazonaws.com"],
+    "eventName": ["SendCommand", "StartSession"],
+    "userIdentity": {
+      "arn": [{ "anything-but": { "prefix": "arn:aws:sts::570035913370:assumed-role/clockchain-telemetry-sink-admin/" } }]
+    },
+    "$or": [
+      { "requestParameters": { "instanceIds": ["i-0d6765d143da7e1ea"] } },
+      { "requestParameters": { "target": ["i-0d6765d143da7e1ea"] } },
+      { "requestParameters": { "targets": { "key": [{ "exists": true }] } } }
+    ]
+  }
+}
