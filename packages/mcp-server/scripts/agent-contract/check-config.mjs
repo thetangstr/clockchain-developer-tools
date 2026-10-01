@@ -81,7 +81,10 @@ export async function checkConfig(env, deps) {
     },
     principals: [...cfg.principals.entries()].map(([keyId, address]) => ({ keyId, address })),
     tokens,
-    policyDigests: { ...cfg.policyDigests },
+    // N11f: a single pin reports as the bare digest (back-compat); a set as a sorted array.
+    policyDigests: Object.fromEntries(
+      Object.entries(cfg.policyDigests).map(([role, set]) => [role, set.size === 1 ? [...set][0] : [...set].sort()]),
+    ),
     observerToken: cfg.observerToken === undefined ? "absent" : "configured",
     verifierToken: cfg.verifierToken === undefined ? "absent" : "configured",
     // N4b-8 (gap 3): terminal close delivery — mandatory at S|P (the config

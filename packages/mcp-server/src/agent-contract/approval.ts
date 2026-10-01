@@ -59,7 +59,8 @@ export function verifyApprovalRecord(fields: {
   envelopeDigest: string;
   expiresAt: string;
   approvalKey: { keyId: string; publicKeyHex: string };
-  expectedPolicyDigest: string;
+  /** N11f: one pinned digest, or the role's set of acceptable digests. */
+  expectedPolicyDigest: string | ReadonlySet<string>;
   nowMs?: number;
 }): boolean {
   return checkApprovalRecord(fields) === "allow";
@@ -82,7 +83,8 @@ export function checkApprovalRecord(fields: {
   envelopeDigest: string;
   expiresAt: string;
   approvalKey: { keyId: string; publicKeyHex: string };
-  expectedPolicyDigest: string;
+  /** N11f: one pinned digest, or the role's set of acceptable digests. */
+  expectedPolicyDigest: string | ReadonlySet<string>;
   nowMs?: number;
 }): "allow" | "deny" | null {
   const a = fields.approval;
@@ -103,7 +105,12 @@ export function checkApprovalRecord(fields: {
       expiresAt: fields.expiresAt,
     })
   ) return null;
-  if (a.policyDigest !== fields.expectedPolicyDigest) return null;
+  const pinnedDigests = fields.expectedPolicyDigest;
+  if (
+    typeof pinnedDigests === "string"
+      ? a.policyDigest !== pinnedDigests
+      : !pinnedDigests.has(a.policyDigest)
+  ) return null;
   const sigDigest = computeApprovalSigDigest({
     runId: fields.runId,
     role: fields.role,

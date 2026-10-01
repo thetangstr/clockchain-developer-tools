@@ -69,7 +69,7 @@ import { renderStatusPage } from "./status-page.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
 import { V2RoleAccessError } from "./agent-handshake/v2/access.js";
 import { createContractHttpHandler } from "./agent-contract/http-handler.js";
-import { loadContractConfig } from "./agent-contract/config.js";
+import { loadContractConfig, missingDefaultHostRoots } from "./agent-contract/config.js";
 import {
   buildServerCard,
   buildServerKeysDoc,
@@ -518,6 +518,14 @@ export async function runHttp(): Promise<Server> {
     console.error(`[clockchain-mcp] /contract/mcp misconfigured (closed): ${contractConfig.reason}`);
   } else if (contractConfig.kind === "ready" && contractConfig.signerEphemeral) {
     console.warn(JSON.stringify({ event: "contract_ephemeral_signer", note: "ephemeral dev signer in use — receipts are not durably verifiable", keyId: contractConfig.signer.keyId }));
+  }
+  if (contractConfig.kind === "ready") {
+    // N11f: CONTRACT_HOST_ROOTS replaces the default list — warn (kids only)
+    // when the published default root is no longer pinned.
+    const missingRoots = missingDefaultHostRoots(contractConfig.hostRoots);
+    if (missingRoots.length > 0) {
+      console.warn(JSON.stringify({ event: "contract_default_host_root_missing", missing: missingRoots, note: "CONTRACT_HOST_ROOTS replaces the default root list; real certificates minted under the missing root will be refused" }));
+    }
   }
   let contractHandler: ReturnType<typeof createContractHttpHandler> | undefined;
   const getContractHandler = () => {
