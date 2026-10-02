@@ -103,6 +103,8 @@ export async function checkConfig(env, deps) {
     stateDir: cfg.stateDir,
     hostRoots,
     simFaultsEnabled: cfg.simFaultsEnabled,
+    // A2 live: the mandateIds CONTRACT_SIM_FAULTS_BY_MANDATE seeds (ids, not secrets).
+    simFaultMandateIds: cfg.simFaultMandateIds,
     limits: {
       callsPerMinute: cfg.callsPerMinute,
       maxRuns: cfg.maxRuns,

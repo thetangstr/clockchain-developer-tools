@@ -45,8 +45,9 @@ marked required falls back to the shown default or stays off.
 | `CONTRACT_ERC8004_REGISTRY_ADDRESS` | String | no | `0x<40-hex>`, compared case-insensitively (checksummed or lowercase both work) — Sepolia registry `0x8004A818BFB912233c491871b3d84c89A494BD9e` for D20 |
 | `CONTRACT_ANCHOR_ENABLED` | String | no | `1` = anchor agreement digest + terminal chain head via the in-process `tsa_issue` path (no extra secret; uses the server's Clockchain client config) |
 | `CONTRACT_SETTLEMENT_RAIL` | String | no | `simulated` (default) \| `stripe_test_mode`. The Stripe rail resolves `agentcontract/travel-stripe-test-key` (Secrets Manager, `us-west-2`) at call time, TEST-mode keys only; absent key ⇒ honest `awaiting_stripe_test_key`, non-test ⇒ refused |
-| `CONTRACT_ALLOW_SIM_FAULTS` | String | no | `1` gates `CONTRACT_SIM_FAULTS`; card/keys disclose `simFaultsEnabled` |
+| `CONTRACT_ALLOW_SIM_FAULTS` | String | no | `1` gates `CONTRACT_SIM_FAULTS` and `CONTRACT_SIM_FAULTS_BY_MANDATE`; card/keys disclose `simFaultsEnabled` |
 | `CONTRACT_SIM_FAULTS` | String | no | JSON `{"<runId>":{"issueMismatch":"fare"\|"travellers"}}`, runIds 1..128 chars; requires `CONTRACT_ALLOW_SIM_FAULTS=1` |
+| `CONTRACT_SIM_FAULTS_BY_MANDATE` | String | no | JSON `{"<mandateId>":{"issueMismatch":"fare"\|"travellers"}}`, mandateIds 1..128 chars; requires `CONTRACT_ALLOW_SIM_FAULTS=1`. `mandate_submit` attaches a listed mandate's fault to its run (same effect as a runId seed; receipts from `mandate_submit` on carry `simFault`). For the A2 live case, whose runId (the handshake sessionId) is unknown before the bind window. `check-config` reports the seeded `simFaultMandateIds` |
 | `CONTRACT_REQUIRE_BIND_STATEMENT` | String | yes iff any `*` token | `1` mandates the bind-statement possession proof. REQUIRED at S/P and at ANY level when a token uses late-binding `agentId=*` |
 | `CONTRACT_TRUST_PROXY` | String | no | `1` trusts `X-Forwarded-For` for evidence `sourceIp` (edge = Caddy only) |
 | `CONTRACT_STATE_DIR` | String | no | run/receipt/binding state dir. Container default is `cwd/state/contract` = `/app/state/contract` (the `mcp_state` volume); pin it anyway for clarity |

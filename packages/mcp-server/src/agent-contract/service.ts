@@ -894,6 +894,13 @@ export function createContractService(options: {
    * injected world carries its own seeds. Never reachable via tool args.
    */
   simFaults?: Readonly<Record<string, SimFaults>>;
+  /**
+   * A2 live (`CONTRACT_SIM_FAULTS_BY_MANDATE`): config-only fault seeds keyed
+   * by mandateId. `mandate_submit` attaches a listed mandate's fault to its
+   * run (after the single-use claim, before any booking can exist). Applies
+   * to injected sim worlds too. Never reachable via tool args.
+   */
+  simFaultsByMandate?: Readonly<Record<string, SimFaults>>;
   /** N4b-3: receipts per pre-bind chain segment before it rolls (default 256). */
   preBindSegmentMax?: number;
   /** N4b-3: retained pre-bind segments per principal (default 8). */
@@ -1884,6 +1891,7 @@ export function createContractService(options: {
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
     claimMandate,
     endRun,
+    ...(options.simFaultsByMandate !== undefined ? { simFaultsByMandate: options.simFaultsByMandate } : {}),
     allowLegacySealV2: options.allowLegacySealV2 === true,
     // N4b-8 (gap 4): business fires the anchor at agreement formation;
     // the service owns the async call + the outcome receipt.
