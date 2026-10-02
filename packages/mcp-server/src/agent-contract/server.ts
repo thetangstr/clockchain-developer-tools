@@ -4,12 +4,13 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { z } from "zod";
 
 import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
-import { canonicalDigest, containsAmountField, isCapBearingCall, saltedCanonicalDigest } from "./canonical.js";
+import { canonicalDigest, canonicalJson, containsAmountField, isCapBearingCall, saltedCanonicalDigest } from "./canonical.js";
 import { toolsListForRole, CONTRACT_SERVER_INSTRUCTIONS } from "./tools-list.js";
 import { contractToolDef, toolDefsForRole } from "./schemas.js";
 import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
 import { newServerNonce, type ReceiptFields, type ServerReceipt } from "./receipts.js";
 import type { ContractService, ContractPrincipal, ContractRun } from "./service.js";
+import type { CertificateResolver } from "./certificate-resolver.js";
 
 /**
  * The `/contract/mcp` MCP server: `contract_bind`/`contract_status` are
@@ -35,11 +36,28 @@ interface CallOutcome {
   readonly isError: boolean;
 }
 
-function refusal(code: ContractRefusalCode, serverNonce: string): CallOutcome {
+function refusal(
+  code: ContractRefusalCode,
+  serverNonce: string,
+  transient?: { retryable: boolean; retryAfterMs?: number },
+): CallOutcome {
   return {
-    body: contractRefusalSchema.parse({ error: code, retryable: false, serverNonce }),
+    body: contractRefusalSchema.parse({
+      error: code,
+      retryable: transient?.retryable ?? false,
+      ...(transient?.retryable === true && transient.retryAfterMs !== undefined ? { retryAfterMs: transient.retryAfterMs } : {}),
+      serverNonce,
+    }),
     isError: true,
   };
+}
+
+function sameCanonical(a: unknown, b: unknown): boolean {
+  try {
+    return canonicalJson(a) === canonicalJson(b);
+  } catch {
+    return false;
+  }
 }
 
 function ok(body: Record<string, unknown>): CallOutcome {
@@ -49,6 +67,12 @@ function ok(body: Record<string, unknown>): CallOutcome {
 export function buildContractServer(options: {
   principal: ContractPrincipal;
   service: ContractService;
+  /**
+   * contract_bind by reference: resolves a handshake sessionId to its
+   * closing certificate envelope (production: the handshake relay). Absent,
+   * a bind by session id refuses CONTRACT_UNAVAILABLE.
+   */
+  resolveCertificate?: CertificateResolver;
   sourceIp?: string;
   /**
    * N4b-3: polling tools (`rendezvous_inbox`, `contract_status`) get their
@@ -187,15 +211,49 @@ export function buildContractServer(options: {
       // N4b-7 closes it behind CONTRACT_REQUIRE_BIND_STATEMENT=1: the DRAFT
       // bindStatement (challenge-bound, EIP-191 over its canonical digest)
       // must recover to the certificate party's sessionKeyAddress.
+      //
+      // By reference: `handshakeSessionId` makes the SERVER resolve the
+      // closing certificate (a model never carries the signed object). The
+      // resolved envelope then takes the exact certificate path below —
+      // same verification, plus sessionId equality. A certificate presented
+      // alongside must equal the resolved one canonically.
+      const bindData = parsed.data as {
+        handshakeSessionId?: string;
+        certificate?: unknown;
+        signerKey: unknown;
+        approvalKey: unknown;
+        listingId?: unknown;
+        bindStatement?: unknown;
+        bindStatementSignature?: unknown;
+      };
+      const { handshakeSessionId, ...bindRest } = bindData;
+      const preRefuse = (code: ContractRefusalCode, transient?: { retryable: boolean; retryAfterMs?: number }) =>
+        asResult(recordAny(run, name, argsDigest, refusal(code, serverNonce, transient), serverNonce, argsScheme));
+      let certificate: unknown = bindRest.certificate;
+      if (handshakeSessionId === undefined) {
+        if (certificate === undefined) return preRefuse("PAYLOAD_INVALID");
+      } else {
+        if (options.resolveCertificate === undefined) return preRefuse("CONTRACT_UNAVAILABLE");
+        let resolved: Awaited<ReturnType<CertificateResolver>>;
+        try {
+          resolved = await options.resolveCertificate(handshakeSessionId);
+        } catch {
+          resolved = { ok: false, code: "CONTRACT_UNAVAILABLE", retryable: true };
+        }
+        if (!resolved.ok) {
+          return preRefuse(resolved.code, { retryable: resolved.retryable, retryAfterMs: resolved.retryAfterMs });
+        }
+        if (certificate !== undefined && !sameCanonical(certificate, resolved.certificate)) {
+          return preRefuse("CERTIFICATE_INVALID");
+        }
+        certificate = resolved.certificate;
+      }
       const bound = service.bind(
         principal,
-        parsed.data as {
-          certificate: unknown;
-          signerKey: unknown;
-          approvalKey: unknown;
-          listingId?: unknown;
-          bindStatement?: unknown;
-          bindStatementSignature?: unknown;
+        {
+          ...bindRest,
+          certificate,
+          ...(handshakeSessionId !== undefined ? { expectedSessionId: handshakeSessionId } : {}),
         },
         { argsDigest, serverNonce, tool: name, ...sessionFields() },
       );

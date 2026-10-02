@@ -2,7 +2,8 @@ import { z } from "zod";
 
 /**
  * Generic refusal codes for the `/contract/mcp` surface (LLD §3: "Refusals
- * use generic codes"). The refusal body is strict — `error`, `retryable` and
+ * use generic codes"). The refusal body is strict — `error`, `retryable` (true only for a
+ * transient condition) and
  * an optional `retryAfterMs` only — so a `MANDATE_REFUSED` reply can never
  * carry the mandate cap value, and no refusal leaks internals.
  */
@@ -14,6 +15,10 @@ export const CONTRACT_REFUSAL_CODES = Object.freeze([
   "ROLE_REFUSED",
   "NOT_FOUND",
   "CERTIFICATE_INVALID",
+  // contract_bind by reference: the named handshake session has not closed
+  // yet (retryable), or the handshake host does not know it.
+  "CERTIFICATE_NOT_READY",
+  "HANDSHAKE_SESSION_UNKNOWN",
   "BIND_STATEMENT_INVALID",
   "ENVELOPE_INVALID",
   "ENVELOPE_EXPIRED",
@@ -41,7 +46,8 @@ export const contractRefusalCodeSchema = z.enum([
 
 export const contractRefusalSchema = z.object({
   error: contractRefusalCodeSchema,
-  retryable: z.literal(false),
+  // true only for a transient condition (e.g. CERTIFICATE_NOT_READY).
+  retryable: z.boolean(),
   retryAfterMs: z.number().int().positive().max(3_600_000).optional(),
   // The per-call nonce rides refusals too — the caller can correlate a
   // refused call to its receipt without a side channel (R8).
