@@ -158,8 +158,8 @@ type Mandate = z.infer<typeof mandateSchema>;
 const LISTING_TTL_MS = 60 * 60_000;
 /** Global safety cap — the real quota is per-provider. */
 const MAX_LISTINGS = 512;
-/** One provider can hold at most this many live listings. */
-const MAX_LISTINGS_PER_PROVIDER = 32;
+/** Superseded listing ids remembered (for a clear refusal) at most. */
+const MAX_SUPERSEDED = 1024;
 /** Pending sealed deliveries a single listing holds at once. */
 const MAX_PENDING_PER_LISTING = 16;
 const MAX_INBOX_MESSAGES = 256;
@@ -231,6 +231,13 @@ export function createBusinessOps(options: {
   });
   const serverPublicKeys = { [options.signer.keyId]: publicKeyOf(options.signer.privateKey) };
   const listings = new Map<string, Listing>();
+  /**
+   * Listing ids superseded by a newer publish from the same provider keyId
+   * (live run p6-l-2026-10-01-8), kept until their original expiry so a late
+   * invitation is refused LISTING_UNAVAILABLE ("re-search") rather than
+   * NOT_FOUND. Bounded: superseded ids never count toward the listing caps.
+   */
+  const superseded = new Map<string, number>();
   const inbox = new Map<string, InboxMessage[]>();
   /** Deliveries per sender per rolling minute (rendezvous abuse cap). */
   const deliveries = new Map<string, number[]>();
@@ -581,6 +588,7 @@ export function createBusinessOps(options: {
   function purgeListings(): void {
     const t = now();
     for (const [id, l] of listings) if (t >= l.expiresAtMs) listings.delete(id);
+    for (const [id, exp] of superseded) if (t >= exp) superseded.delete(id);
     for (const [k, ts] of deliveries) {
       const fresh = ts.filter((x) => t - x < 60_000);
       if (fresh.length === 0) deliveries.delete(k); else deliveries.set(k, fresh);
@@ -657,13 +665,28 @@ export function createBusinessOps(options: {
           return refuse("LISTING_UNAVAILABLE");
         }
         if (existing === undefined) {
-          // Per-provider quota first, then the global safety cap — one
-          // provider can never lock the others out.
-          let mine = 0;
-          for (const l of listings.values()) {
-            if (l.providerKeyId === principal.keyId) mine += 1;
+          // Live run p6-l-2026-10-01-8: a NEW listing from this provider keyId
+          // SUPERSEDES every listing it published before. Each run's signer
+          // holds a fresh seal key (→ a new listing id), so an older listing
+          // is sealed to a key the provider no longer holds: search must not
+          // offer it, and invitations sealed to it can never be opened. They
+          // are dropped from the inbox (not kept "deliverable" — nobody can
+          // open them) and any later send/bind on that id is refused
+          // LISTING_UNAVAILABLE, telling the buyer to search again.
+          for (const [id, l] of listings) {
+            if (l.providerKeyId !== principal.keyId) continue;
+            for (const message of l.pending.values()) {
+              removeFromInbox(principal.keyId, message.messageId);
+            }
+            listings.delete(id);
+            superseded.set(id, l.expiresAtMs);
           }
-          if (mine >= MAX_LISTINGS_PER_PROVIDER || listings.size >= MAX_LISTINGS) {
+          while (superseded.size > MAX_SUPERSEDED) {
+            const oldest = superseded.keys().next().value as string;
+            superseded.delete(oldest);
+          }
+          // Global safety cap (the provider now holds zero live listings).
+          if (listings.size >= MAX_LISTINGS) {
             return refuse("RATE_LIMITED");
           }
         }
@@ -698,6 +721,7 @@ export function createBusinessOps(options: {
             title: l.title,
             summary: l.summary,
             sealedBoxPublicKeyHex: l.sealedBoxPublicKeyHex,
+            publishedAt: iso(l.publishedAtMs),
           }));
         return ok({ listings: out, serverNonce });
       }
@@ -730,7 +754,9 @@ export function createBusinessOps(options: {
         const sent = (deliveries.get(principal.keyId) ?? []).filter((x) => t - x < 60_000);
         if (sent.length >= MAX_DELIVERIES_PER_MINUTE) return refuse("RATE_LIMITED");
         const listing = listings.get(args.listingId as string);
-        if (listing === undefined) return refuse("NOT_FOUND");
+        if (listing === undefined) {
+          return refuse(superseded.has(args.listingId as string) ? "LISTING_UNAVAILABLE" : "NOT_FOUND");
+        }
         if (listing.consumed) return refuse("LISTING_UNAVAILABLE");
         // One pending delivery per sender: a resend REPLACES the sender's old
         // one (and its inbox entry) rather than stacking.

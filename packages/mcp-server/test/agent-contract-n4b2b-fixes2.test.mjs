@@ -384,7 +384,7 @@ test("a listing holds multiple pending deliveries; consumed only when the provid
 
 // === caps: pending per listing + per-provider listing cap =====================
 
-test("a listing holds at most 16 pending deliveries; listing caps are per-provider", () => {
+test("a listing holds at most 16 pending deliveries; one live listing per provider", () => {
   const ops = createBusinessOps({
     signer: SIGNER, sim: createSimWorld({ now: Date.now }),
     policyDigests: POLICY_DIGESTS, endRun() {},
@@ -420,15 +420,22 @@ test("a listing holds at most 16 pending deliveries; listing caps are per-provid
   assert.equal(box.length, 16);
   assert.ok(box.some((m) => m.sealedPayload.ct === seal(0xaa).ct));
 
-  // Per-provider listing cap (32): provider A already has 1 live listing —
-  // 31 more are fine, the 33rd is refused — and provider B can still publish.
-  for (let i = 0; i < 31; i++) {
+  // One live listing per provider (live run p6-l-2026-10-01-8): a NEW
+  // listing from provider A supersedes its previous one, so republishing
+  // never runs into a per-provider cap and A always holds exactly one
+  // listing — and provider B can still publish.
+  let lastA;
+  for (let i = 0; i < 40; i++) {
     const r = pub(providerA, `provider A listing ${i}`);
     assert.equal(r.ok, true, `listing ${i}: ${JSON.stringify(r)}`);
+    lastA = r.result.listingId;
   }
-  const over = pub(providerA, "provider A over the cap");
-  assert.equal(over.ok, false);
-  assert.equal(over.code, "RATE_LIMITED");
+  const searchA = ops.dispatch(sender(99), undefined, "rendezvous_search", { origin: "ZRH", destination: "JFK" }, nonce());
+  assert.deepEqual(searchA.result.listings.map((x) => x.listingId), [lastA]);
+  // The superseded first listing (with its 16 pendings) is closed and its
+  // pendings are gone from A's inbox.
+  assert.equal(send(sender(1), listingId, 0xbb).code, "LISTING_UNAVAILABLE");
+  assert.equal(read(providerA).result.messages.filter((m) => m.listingId === listingId).length, 0);
   const other = pub(providerB, "provider B listing");
   assert.equal(other.ok, true, "one provider can't lock out another");
 });

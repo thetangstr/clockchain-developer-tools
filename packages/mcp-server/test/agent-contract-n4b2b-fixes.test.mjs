@@ -702,7 +702,15 @@ test("PROBE E replay: a junk seal can't burn a listing; only the owner resets; c
   const afterRepublish = await callTool("tb5", "rendezvous_send_invitation", { listingId: l.listingId, sealedInvitation: V2_SEAL });
   assert.equal(afterRepublish.delivered, true, JSON.stringify(afterRepublish));
 
+  // search filters actually filter (terms-declaring listing only on match)
+  const hit = await callTool("tb5", "rendezvous_search", { origin: "ZRH", destination: "JFK" });
+  assert.ok(hit.listings.some((x) => x.listingId === l.listingId));
+  const miss = await callTool("tb5", "rendezvous_search", { origin: "SFO", destination: "JFK" });
+  assert.ok(!miss.listings.some((x) => x.listingId === l.listingId));
+
   // malformed-but-schema-shaped seals are refused without burning a fresh listing
+  // (l2 is a NEW listing from tp6, so it supersedes l — one live listing per
+  // provider, live run p6-l-2026-10-01-8.)
   const l2 = await callTool("tp6", "rendezvous_publish_listing", {
     title: "Second listing", summary: "x", sealedBoxPublicKeyHex: `0x${"22".repeat(32)}`,
   });
@@ -713,11 +721,6 @@ test("PROBE E replay: a junk seal can't burn a listing; only the owner resets; c
   const l2Legit = await callTool("tb5", "rendezvous_send_invitation", { listingId: l2.listingId, sealedInvitation: V2_SEAL });
   assert.equal(l2Legit.delivered, true, JSON.stringify(l2Legit));
 
-  // search filters actually filter (terms-declaring listing only on match)
-  const hit = await callTool("tb5", "rendezvous_search", { origin: "ZRH", destination: "JFK" });
-  assert.ok(hit.listings.some((x) => x.listingId === l.listingId));
-  const miss = await callTool("tb5", "rendezvous_search", { origin: "SFO", destination: "JFK" });
-  assert.ok(!miss.listings.some((x) => x.listingId === l.listingId));
 });
 
 // === also-fix: withdraw-after-booking, verification write-once =================

@@ -425,11 +425,12 @@ function signMandate(privHex, mandate) {
 }
 
 test("LOW: inbox deliveries carry the sender's agentId; a bind consumes ONLY that listing", async () => {
-  // kp6 publishes two listings; two buyers each deliver to one of them.
+  // kp6 and kp7 each publish a listing (a provider holds ONE live listing —
+  // a newer publish supersedes the old one); two buyers each deliver to one.
   const l1 = await callTool("tp6", "rendezvous_publish_listing", {
     title: "Listing One", summary: "s", sealedBoxPublicKeyHex: `0x${"11".repeat(32)}`,
   });
-  const l2 = await callTool("tp6", "rendezvous_publish_listing", {
+  const l2 = await callTool("tp7", "rendezvous_publish_listing", {
     title: "Listing Two", summary: "s", sealedBoxPublicKeyHex: `0x${"22".repeat(32)}`,
   });
   const d1 = await callTool("tb8", "rendezvous_send_invitation", { listingId: l1.listingId, sealedInvitation: V2_SEAL });
@@ -576,11 +577,13 @@ test("rendezvous: a new publish from the same provider keyId SUPERSEDES its prev
   assert.notEqual(newL.listingId, oldL.listingId);
 
   // Search returns ONLY the latest listing for this provider, with publishedAt.
+  // (Earlier tests' term-less listings match any route — look at ours only.)
   const s = await callTool("tb12", "rendezvous_search", { origin: "OPO", destination: "MAD" });
-  const ids = s.listings.map((l) => l.listingId);
-  assert.deepEqual(ids, [newL.listingId], JSON.stringify(s));
-  assert.equal(s.listings[0].sealedBoxPublicKeyHex, `0x${"b2".repeat(32)}`);
-  assert.equal(s.listings[0].publishedAt, newL.publishedAt, "search exposes publishedAt");
+  const mine = s.listings.filter((l) => l.title === "Stale Run Listing");
+  assert.deepEqual(mine.map((l) => l.listingId), [newL.listingId], JSON.stringify(s));
+  assert.equal(mine[0].sealedBoxPublicKeyHex, `0x${"b2".repeat(32)}`);
+  assert.equal(mine[0].publishedAt, newL.publishedAt, "search exposes publishedAt");
+  assert.ok(s.listings.every((l) => typeof l.publishedAt === "string"));
 
   // A late invitation to the superseded listing is refused clearly — never
   // silently delivered to a seal key the provider no longer holds.
@@ -612,7 +615,7 @@ test("rendezvous: supersession is per provider — another provider's listing is
     terms: { origin: "BCN", destination: "LIS" },
   });
   const s = await callTool("tb12", "rendezvous_search", { origin: "BCN", destination: "LIS" });
-  const ids = s.listings.map((l) => l.listingId).sort();
+  const ids = s.listings.filter((l) => l.title.startsWith("Provider ")).map((l) => l.listingId).sort();
   assert.deepEqual(ids, [a.listingId, b2.listingId].sort(), JSON.stringify(s));
   assert.ok(!ids.includes(b1.listingId));
   // Republishing the SAME listing (same id) is a refresh, not a supersession.
