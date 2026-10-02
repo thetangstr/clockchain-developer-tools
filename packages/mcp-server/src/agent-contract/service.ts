@@ -277,6 +277,8 @@ export interface ContractService {
       signerKey: unknown;
       approvalKey: unknown;
       listingId?: unknown;
+      /** Bind by reference: the certificate must name exactly this session. */
+      expectedSessionId?: string;
       /** N4b-7 (DRAFT): optional session-key possession statement + sig. */
       bindStatement?: unknown;
       bindStatementSignature?: unknown;
@@ -1223,6 +1225,7 @@ export function createContractService(options: {
       signerKey: unknown;
       approvalKey: unknown;
       listingId?: unknown;
+      expectedSessionId?: string;
       bindStatement?: unknown;
       bindStatementSignature?: unknown;
     },
@@ -1272,6 +1275,12 @@ export function createContractService(options: {
       graceMs: options.graceMs,
     });
     if (!verdict.ok) return { ok: false, code: "CERTIFICATE_INVALID" };
+    // Bind by reference: a resolved certificate must name the presented
+    // session — a relay answering with another session's (valid) envelope
+    // can never seat the caller in a different run.
+    if (args.expectedSessionId !== undefined && verdict.sessionId !== args.expectedSessionId) {
+      return { ok: false, code: "CERTIFICATE_INVALID" };
+    }
 
     // C2 + LOW: the certificate's party on the principal's claimed side must
     // carry the provisioned {agentId, chainId, registryAddress} — the FULL

@@ -536,6 +536,7 @@ export async function runHttp(): Promise<Server> {
       hostRoots: contractConfig.hostRoots,
       signer: contractConfig.signer,
       service: contractConfig.service,
+      ...(contractConfig.resolveCertificate !== undefined ? { resolveCertificate: contractConfig.resolveCertificate } : {}),
       callsPerMinute: contractConfig.callsPerMinute,
       trustProxy: contractConfig.trustProxy,
       sessionTtlMs: contractConfig.sessionTtlMs,

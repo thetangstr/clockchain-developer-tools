@@ -221,7 +221,10 @@ test("tools/list wire schemas render strict objects with required fields", () =>
   const bind = tools.find((t) => t.name === "contract_bind");
   assert.equal(bind.inputSchema.type, "object");
   assert.equal(bind.inputSchema.additionalProperties, false);
-  assert.deepEqual(bind.inputSchema.required.sort(), ["approvalKey", "certificate", "signerKey"]);
+  // Bind by reference: certificate OR handshakeSessionId — neither is wire-required.
+  assert.deepEqual(bind.inputSchema.required.sort(), ["approvalKey", "signerKey"]);
+  assert.ok(bind.inputSchema.properties.certificate);
+  assert.ok(bind.inputSchema.properties.handshakeSessionId);
   const search = tools.find((t) => t.name === "rendezvous_search");
   assert.deepEqual(search.inputSchema.required.sort(), ["destination", "origin"]);
   // optional fields must not appear in required

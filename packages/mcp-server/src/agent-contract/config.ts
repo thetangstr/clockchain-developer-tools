@@ -12,6 +12,7 @@ import {
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
 import { createCloseEmitter } from "./close-emitter.js";
+import { createRelayCertificateResolver, type CertificateResolver } from "./certificate-resolver.js";
 import { createContractService, MAX_POLICY_DIGESTS_PER_ROLE, type ContractRun, type ContractService } from "./service.js";
 import type { SimFaults } from "./sim/index.js";
 import type { ContractSigner } from "./envelope.js";
@@ -89,6 +90,11 @@ export type ContractRouteConfig =
       /** Normalized ERC-8004 pin (`eip155:<n>` chain id, lowercase registry), if configured. */
       readonly expectedErc8004?: { readonly chainId: string; readonly registryAddress: string };
       readonly service: ContractService;
+      /**
+       * contract_bind by reference: present whenever HANDSHAKE_RELAY is set
+       * (the same relay the v2 coordinator reads certificates from).
+       */
+      readonly resolveCertificate?: CertificateResolver;
     };
 
 const ED25519_PKCS8_PREFIX = "302e020100300506032b657004220420";
@@ -581,6 +587,9 @@ export function loadContractConfig(
     settlementRailId,
     ...(settlementRail !== undefined ? { settlementRail } : {}),
     ...(expectedErc8004 !== undefined ? { expectedErc8004 } : {}),
+    ...(typeof env.HANDSHAKE_RELAY === "string" && env.HANDSHAKE_RELAY.trim() !== ""
+      ? { resolveCertificate: createRelayCertificateResolver({ relayUrl: env.HANDSHAKE_RELAY.trim() }) }
+      : {}),
     service,
   };
 }

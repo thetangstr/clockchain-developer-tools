@@ -231,7 +231,16 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     name: "contract_bind",
     role: "both",
     schema: {
-      certificate: opaqueRecord,
+      /**
+       * By reference (preferred): the handshake session id. The server
+       * resolves that session's closing certificate itself and verifies it
+       * exactly as a presented one — the caller never carries the signed
+       * object. At least one of handshakeSessionId / certificate is required;
+       * when both are given they must name the same certificate.
+       */
+      handshakeSessionId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/).optional(),
+      /** Legacy: the full certificate envelope, byte-for-byte. */
+      certificate: opaqueRecord.optional(),
       signerKey: registeredKey,
       approvalKey: registeredKey,
       /** LOW (N4b-3): providers name the listing the handshake came through —
