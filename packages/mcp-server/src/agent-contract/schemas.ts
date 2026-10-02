@@ -169,6 +169,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         title: z.string(),
         summary: z.string(),
         sealedBoxPublicKeyHex: z.string(),
+        /** When this listing was first published — at most one live listing
+         *  per provider (a newer publish supersedes the old one). */
+        publishedAt: isoDateTime,
       }).strict()),
       serverNonce,
     }).strict(),

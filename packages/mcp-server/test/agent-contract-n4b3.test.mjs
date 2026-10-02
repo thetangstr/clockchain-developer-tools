@@ -425,11 +425,12 @@ function signMandate(privHex, mandate) {
 }
 
 test("LOW: inbox deliveries carry the sender's agentId; a bind consumes ONLY that listing", async () => {
-  // kp6 publishes two listings; two buyers each deliver to one of them.
+  // kp6 and kp7 each publish a listing (a provider holds ONE live listing —
+  // a newer publish supersedes the old one); two buyers each deliver to one.
   const l1 = await callTool("tp6", "rendezvous_publish_listing", {
     title: "Listing One", summary: "s", sealedBoxPublicKeyHex: `0x${"11".repeat(32)}`,
   });
-  const l2 = await callTool("tp6", "rendezvous_publish_listing", {
+  const l2 = await callTool("tp7", "rendezvous_publish_listing", {
     title: "Listing Two", summary: "s", sealedBoxPublicKeyHex: `0x${"22".repeat(32)}`,
   });
   const d1 = await callTool("tb8", "rendezvous_send_invitation", { listingId: l1.listingId, sealedInvitation: V2_SEAL });
@@ -553,4 +554,76 @@ test("LOW: used-mandates prunes entries past expiresAt + grace; live and legacy 
     await new Promise((r) => h.close(r));
     svc.close();
   }
+});
+// -- Live run p6-l-2026-10-01-8: stale listings across runs --------------------
+// The server keeps listings in memory across runs; each run's provider signer
+// has a FRESH seal key, so the deterministic listing id (keyId + title + seal
+// key) changes per run. Search used to return every earlier run's listing too,
+// and the buyer sealed to an OLD key the provider could no longer open.
+
+test("rendezvous: a new publish from the same provider keyId SUPERSEDES its previous listing(s)", async () => {
+  const oldL = await callTool("tp10", "rendezvous_publish_listing", {
+    title: "Stale Run Listing", summary: "run 7", sealedBoxPublicKeyHex: `0x${"a1".repeat(32)}`,
+    terms: { origin: "OPO", destination: "MAD" },
+  });
+  // A buyer delivered to the old listing before the provider republished.
+  const pre = await callTool("tb12", "rendezvous_send_invitation", { listingId: oldL.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(pre.delivered, true, JSON.stringify(pre));
+  // Next run: same provider keyId, same title, FRESH seal key → new listing id.
+  const newL = await callTool("tp10", "rendezvous_publish_listing", {
+    title: "Stale Run Listing", summary: "run 8", sealedBoxPublicKeyHex: `0x${"b2".repeat(32)}`,
+    terms: { origin: "OPO", destination: "MAD" },
+  });
+  assert.notEqual(newL.listingId, oldL.listingId);
+
+  // Search returns ONLY the latest listing for this provider, with publishedAt.
+  // (Earlier tests' term-less listings match any route — look at ours only.)
+  const s = await callTool("tb12", "rendezvous_search", { origin: "OPO", destination: "MAD" });
+  const mine = s.listings.filter((l) => l.title === "Stale Run Listing");
+  assert.deepEqual(mine.map((l) => l.listingId), [newL.listingId], JSON.stringify(s));
+  assert.equal(mine[0].sealedBoxPublicKeyHex, `0x${"b2".repeat(32)}`);
+  assert.equal(mine[0].publishedAt, newL.publishedAt, "search exposes publishedAt");
+  assert.ok(s.listings.every((l) => typeof l.publishedAt === "string"));
+
+  // A late invitation to the superseded listing is refused clearly — never
+  // silently delivered to a seal key the provider no longer holds.
+  const late = await callTool("tb12", "rendezvous_send_invitation", { listingId: oldL.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(late.error, "LISTING_UNAVAILABLE", JSON.stringify(late));
+  // The pending delivery sealed to the old key is dropped from the inbox.
+  const inbox = await callTool("tp10", "rendezvous_inbox", {});
+  assert.equal(inbox.messages.filter((m) => m.listingId === oldL.listingId).length, 0, JSON.stringify(inbox));
+  // The provider can no longer bind through the superseded listing.
+  const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(611) });
+  const bind = await callTool("tp10", "contract_bind", bindArgs(cert, "provider", { listingId: oldL.listingId }));
+  assert.equal(bind.error, "LISTING_UNAVAILABLE", JSON.stringify(bind));
+  // The new listing accepts deliveries.
+  const fresh = await callTool("tb12", "rendezvous_send_invitation", { listingId: newL.listingId, sealedInvitation: V2_SEAL });
+  assert.equal(fresh.delivered, true, JSON.stringify(fresh));
+});
+
+test("rendezvous: supersession is per provider — another provider's listing is untouched", async () => {
+  const a = await callTool("tp11", "rendezvous_publish_listing", {
+    title: "Provider Eleven", summary: "s", sealedBoxPublicKeyHex: `0x${"c3".repeat(32)}`,
+    terms: { origin: "BCN", destination: "LIS" },
+  });
+  const b1 = await callTool("tp12", "rendezvous_publish_listing", {
+    title: "Provider Twelve", summary: "s", sealedBoxPublicKeyHex: `0x${"d4".repeat(32)}`,
+    terms: { origin: "BCN", destination: "LIS" },
+  });
+  const b2 = await callTool("tp12", "rendezvous_publish_listing", {
+    title: "Provider Twelve", summary: "s", sealedBoxPublicKeyHex: `0x${"e5".repeat(32)}`,
+    terms: { origin: "BCN", destination: "LIS" },
+  });
+  const s = await callTool("tb12", "rendezvous_search", { origin: "BCN", destination: "LIS" });
+  const ids = s.listings.filter((l) => l.title.startsWith("Provider ")).map((l) => l.listingId).sort();
+  assert.deepEqual(ids, [a.listingId, b2.listingId].sort(), JSON.stringify(s));
+  assert.ok(!ids.includes(b1.listingId));
+  // Republishing the SAME listing (same id) is a refresh, not a supersession.
+  const again = await callTool("tp11", "rendezvous_publish_listing", {
+    title: "Provider Eleven", summary: "s", sealedBoxPublicKeyHex: `0x${"c3".repeat(32)}`,
+  });
+  assert.equal(again.listingId, a.listingId);
+  assert.equal(again.publishedAt, a.publishedAt);
+  const s2 = await callTool("tb12", "rendezvous_search", { origin: "BCN", destination: "LIS" });
+  assert.ok(s2.listings.some((l) => l.listingId === a.listingId));
 });
