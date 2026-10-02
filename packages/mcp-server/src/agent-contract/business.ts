@@ -16,7 +16,7 @@ import type { ContractRefusalCode } from "./refusals.js";
 import type {
   AgreementRecord, ContractPrincipal, ContractRun, OfferRecord,
 } from "./service.js";
-import type { SimWorld } from "./sim/index.js";
+import type { SimFaults, SimWorld } from "./sim/index.js";
 
 /**
  * The `/contract/mcp` business semantics (N4b-2b, LLD §3/§13 + rev 6.5):
@@ -190,6 +190,11 @@ export function createBusinessOps(options: {
    * Absent this hook an in-memory ledger still enforces single-use.
    */
   claimMandate?(principalAddress: string, mandateId: string, runId: string, expiresAtMs: number): "ok" | "used" | "unavailable";
+  /**
+   * A2 live (`CONTRACT_SIM_FAULTS_BY_MANDATE`): config-only fault seeds keyed
+   * by mandateId, attached to the run at mandate_submit. Never tool-reachable.
+   */
+  simFaultsByMandate?: Readonly<Record<string, SimFaults>>;
   endRun: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => void;
   /**
    * N4b-8 (gap 4): anchor a run subject — called with "agreement" right
@@ -215,6 +220,7 @@ export function createBusinessOps(options: {
   const now = options.now ?? Date.now;
   const sim = options.sim;
   const signingOpen = options.signingOpen ?? (() => true);
+  const simFaultsByMandate = options.simFaultsByMandate;
   const principals = options.principals ?? new Map<string, string>();
   // In-memory fallback ledger (no state dir): keeps the mandate's expiry so
   // entries past expiresAt can be pruned — same rule as the durable ledger,
@@ -846,6 +852,21 @@ export function createBusinessOps(options: {
         );
         if (claim === "used") return refuse("MANDATE_INVALID");
         if (claim === "unavailable") return refuse("CONTRACT_UNAVAILABLE");
+        // A2 live: a mandate listed in CONTRACT_SIM_FAULTS_BY_MANDATE carries
+        // its fault onto THIS run — exactly as a runId-keyed seed would. The
+        // mandate is principal-signed and single-use (claimed just above), so
+        // the fault reaches one run; offer_prepare requires the mandate, so it
+        // is always in place before any booking. Recorded on the run so every
+        // receipt from this one on (and the observer feed) carries simFault.
+        if (simFaultsByMandate !== undefined && Object.hasOwn(simFaultsByMandate, mandate.mandateId)) {
+          const fault = simFaultsByMandate[mandate.mandateId]!;
+          if (liveRun.simRun === undefined || !liveRun.simRun.setFaults(fault)) {
+            // Unreachable in practice (no booking can precede the mandate);
+            // fail closed rather than run a configured fault run honest.
+            return refuse("CONTRACT_UNAVAILABLE");
+          }
+          liveRun.simFault = liveRun.simRun.faults;
+        }
         liveRun.mandate = {
           digest: mandateDigest,
           mandateId: mandate.mandateId,

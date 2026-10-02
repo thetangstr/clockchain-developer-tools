@@ -183,6 +183,56 @@ test("N4b-5: CONTRACT_SIM_FAULTS is config-only JSON keyed by runId", () => {
   ok.service.close();
 });
 
+test("CONTRACT_SIM_FAULTS_BY_MANDATE is config-only JSON keyed by mandateId", () => {
+  const base = {
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: TOKENS,
+    CONTRACT_SERVER_ED25519_SEED: SEED_B64,
+    CONTRACT_POLICY_DIGESTS: POLICIES,
+    ...KEY_WINDOW,
+  };
+  for (const raw of [
+    "not-json",
+    '["fare"]',
+    "null",
+    '{"mand-x": {"issueMismatch": "seats"}}',
+    '{"mand-x": {"issueMismatch": "fare", "extra": true}}',
+    '{"mand-x": "fare"}',
+    '{"mand-x": null}',
+    `{"${"m".repeat(129)}": {"issueMismatch": "fare"}}`,
+    '{"": {"issueMismatch": "fare"}}',
+  ]) {
+    const cfg = loadContractConfig({
+      ...base, ...stateDirEnv(), CONTRACT_ALLOW_SIM_FAULTS: "1", CONTRACT_SIM_FAULTS_BY_MANDATE: raw,
+    });
+    assert.equal(cfg.kind, "misconfigured", raw);
+    assert.match(cfg.reason, /CONTRACT_SIM_FAULTS_BY_MANDATE/, raw);
+  }
+  // Not behind the allow flag → misconfigured (closed).
+  const gated = loadContractConfig({
+    ...base, ...stateDirEnv(),
+    CONTRACT_SIM_FAULTS_BY_MANDATE: '{"mand-a2": {"issueMismatch": "fare"}}',
+  });
+  assert.equal(gated.kind, "misconfigured");
+  assert.match(gated.reason, /CONTRACT_SIM_FAULTS_BY_MANDATE requires CONTRACT_ALLOW_SIM_FAULTS=1/);
+  // "" is absent (compose injects "" for an unset parameter).
+  const empty = loadContractConfig({ ...base, ...stateDirEnv(), CONTRACT_SIM_FAULTS_BY_MANDATE: "" });
+  assert.equal(empty.kind, "ready");
+  assert.equal(empty.simFaultsEnabled, false);
+  assert.deepEqual(empty.simFaultMandateIds, []);
+  empty.service.close();
+  // Valid → ready behind the flag; the mandateIds are reported (not secret).
+  const ok = loadContractConfig({
+    ...base, ...stateDirEnv(),
+    CONTRACT_ALLOW_SIM_FAULTS: "1",
+    CONTRACT_SIM_FAULTS_BY_MANDATE: '{"mand-b": {"issueMismatch": "travellers"}, "mand-a": {"issueMismatch": "fare"}}',
+  });
+  assert.equal(ok.kind, "ready");
+  assert.equal(ok.simFaultsEnabled, true);
+  assert.deepEqual(ok.simFaultMandateIds, ["mand-a", "mand-b"]);
+  ok.service.close();
+});
+
 // N7c: docker compose map-form `environment: VAR: "${VAR}"` injects "" into the
 // container for every var the host left unset (an absent SSM parameter). Empty
 // string is not a valid value for any contract knob, so loadContractConfig must

@@ -42,6 +42,7 @@ function ssmFixture(stateDir, overrides = {}) {
     CONTRACT_VERIFIER_TOKEN: VER_TOKEN,
     CONTRACT_ALLOW_SIM_FAULTS: "0",
     CONTRACT_SIM_FAULTS: "",
+    CONTRACT_SIM_FAULTS_BY_MANDATE: "",
     CONTRACT_LEVEL: "L",
     CONTRACT_REQUIRE_BIND_STATEMENT: "0",
     TELEMETRY_CLOSE_URL: "http://telemetry-sink:8083",
@@ -249,4 +250,34 @@ test("--state-dir overrides the SSM-pulled CONTRACT_STATE_DIR (reviewer MEDIUM-1
   assert.equal(parseArgs(["--state-dir", "/tmp/x"]).stateDir, "/tmp/x");
   assert.equal(parseArgs(["--state-dir=/tmp/y"]).stateDir, "/tmp/y");
   assert.equal(parseArgs([]).stateDir, undefined);
+});
+
+test("CONTRACT_SIM_FAULTS_BY_MANDATE is on the SSM surface; the A2 values report ready + disclosed", async () => {
+  assert.ok(ENV_PARAMETERS.includes("CONTRACT_SIM_FAULTS_BY_MANDATE"));
+  const stateDir = mkdtempSync(path.join(tmpdir(), "n7c-ssm-a2-"));
+  const out = await checkConfigFromSsm({
+    env: {},
+    fetchParameter: recordingFetch(ssmFixture(stateDir, {
+      CONTRACT_ALLOW_SIM_FAULTS: "1",
+      CONTRACT_SIM_FAULTS_BY_MANDATE: '{"mand-202610020057df96-2":{"issueMismatch":"fare"}}',
+    })),
+  });
+  assert.equal(out.exitCode, 0, JSON.stringify(out.report));
+  assert.equal(out.report.simFaultsEnabled, true);
+  assert.deepEqual(out.report.simFaultMandateIds, ["mand-202610020057df96-2"]);
+  assert.equal(out.report.parameters.CONTRACT_SIM_FAULTS_BY_MANDATE, "present");
+});
+
+test("check-config-from-ssm refuses a malformed or ungated CONTRACT_SIM_FAULTS_BY_MANDATE (exit 1)", async () => {
+  for (const [overrides, reason] of [
+    [{ CONTRACT_ALLOW_SIM_FAULTS: "1", CONTRACT_SIM_FAULTS_BY_MANDATE: "{not json" }, /CONTRACT_SIM_FAULTS_BY_MANDATE/],
+    [{ CONTRACT_ALLOW_SIM_FAULTS: "1", CONTRACT_SIM_FAULTS_BY_MANDATE: '{"m":{"issueMismatch":"seats"}}' }, /CONTRACT_SIM_FAULTS_BY_MANDATE/],
+    [{ CONTRACT_ALLOW_SIM_FAULTS: "0", CONTRACT_SIM_FAULTS_BY_MANDATE: '{"m":{"issueMismatch":"fare"}}' }, /requires CONTRACT_ALLOW_SIM_FAULTS=1/],
+  ]) {
+    const stateDir = mkdtempSync(path.join(tmpdir(), "n7c-ssm-a2-bad-"));
+    const out = await checkConfigFromSsm({ env: {}, fetchParameter: recordingFetch(ssmFixture(stateDir, overrides)) });
+    assert.equal(out.exitCode, 1, JSON.stringify(overrides));
+    assert.equal(out.report.status, "misconfigured");
+    assert.match(out.report.reason, reason);
+  }
 });

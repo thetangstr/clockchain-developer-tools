@@ -137,6 +137,13 @@ export interface SimRun {
   itinerary(itineraryId: string): SimItinerary | undefined;
   /** Config-seeded fault active on this run (undefined when none). */
   readonly faults: SimFaults | undefined;
+  /**
+   * A2 live (CONTRACT_SIM_FAULTS_BY_MANDATE): attach a config-seeded fault
+   * after the run exists. Refused (false) once `bookOrder` has run, or when a
+   * DIFFERENT fault is already active; re-setting the same fault is a no-op
+   * true. Server-internal only — no tool reaches it.
+   */
+  setFaults(faults: SimFaults): boolean;
   readonly payments: SimPaymentRail;
 }
 
@@ -295,6 +302,9 @@ function createSimRun(
 ): SimRun {
   const now = deps.now;
   const draw = mulberry32(seedFromName(`agent-contract-sim:${runId}`));
+  /** The active fault — read at issue time, so a late (pre-booking) set applies. */
+  let faults: SimFaults | undefined = deps.faults;
+  let bookAttempted = false;
 
   const pick = (n: number): string =>
     Array.from({ length: n }, () => ID_ALPHABET[Math.floor(draw() * ID_ALPHABET.length)]).join("");
@@ -359,6 +369,7 @@ function createSimRun(
     },
 
     bookOrder(input) {
+      bookAttempted = true;
       const parsed = bookInputSchema.safeParse(input);
       if (!parsed.success) return { ok: false, code: "REQUEST_INVALID" };
       const req = parsed.data;
@@ -412,12 +423,12 @@ function createSimRun(
       // A2 fault: the issued record deviates from the booked order. The
       // mutation lands on the order record so `lookupOrder` exposes it to
       // buyer verification.
-      if (deps.faults?.issueMismatch === "fare") {
+      if (faults?.issueMismatch === "fare") {
         order.fareMinor += ISSUE_MISMATCH_FARE_DELTA_MINOR;
         order.totalMinor += ISSUE_MISMATCH_FARE_DELTA_MINOR;
       }
       const ticketCount =
-        deps.faults?.issueMismatch === "travellers" ? order.travelerCount + 1 : order.travelerCount;
+        faults?.issueMismatch === "travellers" ? order.travelerCount + 1 : order.travelerCount;
 
       const tickets: SimTicket[] = Array.from({ length: ticketCount }, (_, i) => ({
         travelerId: `PAX-${i + 1}`,
@@ -484,7 +495,15 @@ function createSimRun(
     itinerary(itineraryId) {
       return knownItineraries.get(itineraryId);
     },
-    faults: deps.faults,
+    get faults() {
+      return faults;
+    },
+    setFaults(next) {
+      if (bookAttempted) return false;
+      if (faults !== undefined) return faults.issueMismatch === next.issueMismatch;
+      faults = { ...next };
+      return true;
+    },
     payments: createSimPaymentRail({ runId, now }),
   };
 }

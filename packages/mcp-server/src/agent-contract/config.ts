@@ -70,6 +70,8 @@ export type ContractRouteConfig =
       readonly serverKeys: readonly PublishedServerKey[];
       /** N4b-6: CONTRACT_ALLOW_SIM_FAULTS=1 — the card/keys must say so. */
       readonly simFaultsEnabled: boolean;
+      /** A2 live: mandateIds seeded by CONTRACT_SIM_FAULTS_BY_MANDATE (sorted; ids are not secret). */
+      readonly simFaultMandateIds: readonly string[];
       /** N4b-7: CONTRACT_REQUIRE_BIND_STATEMENT=1 (mandatory at level S|P). */
       readonly requireBindStatement: boolean;
       /**
@@ -281,36 +283,52 @@ export function loadContractConfig(
   // explicit CONTRACT_ALLOW_SIM_FAULTS=1 — a server that can inject faults
   // must say so (simFaultsEnabled on the card/keys, simFault on receipts).
   const simFaultsAllowed = env.CONTRACT_ALLOW_SIM_FAULTS === "1";
-  const simFaultsRaw = (env.CONTRACT_SIM_FAULTS ?? "").trim();
-  let simFaults: Record<string, SimFaults> | undefined;
-  if (simFaultsRaw !== "" && !simFaultsAllowed) {
-    return misconfigured("CONTRACT_SIM_FAULTS requires CONTRACT_ALLOW_SIM_FAULTS=1");
-  }
-  if (simFaultsRaw !== "") {
+  // Shared grammar for both seed maps: `{"<key>": {"issueMismatch": …}}`,
+  // keys 1..128 chars. Blank → no seeds; anything malformed (or ungated) is
+  // a misconfigured reason — fail closed, never a throw.
+  type SeedParse = { ok: true; seeds: Record<string, SimFaults> | undefined } | { ok: false; reason: string };
+  const parseSimFaultSeeds = (name: string, keyLabel: string, raw: string): SeedParse => {
+    if (raw === "") return { ok: true, seeds: undefined };
+    if (!simFaultsAllowed) return { ok: false, reason: `${name} requires CONTRACT_ALLOW_SIM_FAULTS=1` };
     try {
-      const parsed: unknown = JSON.parse(simFaultsRaw);
+      const parsed: unknown = JSON.parse(raw);
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        throw new Error("want an object keyed by runId");
+        throw new Error(`want an object keyed by ${keyLabel}`);
       }
-      simFaults = {};
-      for (const [runId, fault] of Object.entries(parsed)) {
-        if (typeof runId !== "string" || runId.length === 0 || runId.length > 128) {
-          throw new Error("runId keys must be 1..128 chars");
+      const seeds: Record<string, SimFaults> = {};
+      for (const [key, fault] of Object.entries(parsed)) {
+        if (typeof key !== "string" || key.length === 0 || key.length > 128) {
+          throw new Error(`${keyLabel} keys must be 1..128 chars`);
         }
-        const issueMismatch = (fault as { issueMismatch?: unknown }).issueMismatch;
+        const issueMismatch = (fault as { issueMismatch?: unknown } | null)?.issueMismatch;
         if (
           typeof fault !== "object" || fault === null || Array.isArray(fault) ||
           !Object.keys(fault).every((k) => k === "issueMismatch") ||
           (issueMismatch !== undefined && issueMismatch !== "fare" && issueMismatch !== "travellers")
         ) {
-          throw new Error('want {"issueMismatch": "fare"|"travellers"} per runId');
+          throw new Error(`want {"issueMismatch": "fare"|"travellers"} per ${keyLabel}`);
         }
-        simFaults[runId] = fault as SimFaults;
+        seeds[key] = { ...(fault as SimFaults) };
       }
+      return { ok: true, seeds };
     } catch (err) {
-      return misconfigured(`CONTRACT_SIM_FAULTS: ${(err as Error).message}`);
+      return { ok: false, reason: `${name}: ${(err as Error).message}` };
     }
-  }
+  };
+  const simFaultsParsed = parseSimFaultSeeds(
+    "CONTRACT_SIM_FAULTS", "runId", (env.CONTRACT_SIM_FAULTS ?? "").trim(),
+  );
+  if (!simFaultsParsed.ok) return misconfigured(simFaultsParsed.reason);
+  const simFaults = simFaultsParsed.seeds;
+  // A2 live: the runId (the handshake sessionId) is unknowable before the
+  // bind window, so a fault can also be keyed by the pre-signed, single-use
+  // mandateId — attached to the run at mandate_submit (same allow gate, same
+  // disclosure: simFaultsEnabled on card/keys, simFault on receipts).
+  const simFaultsByMandateParsed = parseSimFaultSeeds(
+    "CONTRACT_SIM_FAULTS_BY_MANDATE", "mandateId", (env.CONTRACT_SIM_FAULTS_BY_MANDATE ?? "").trim(),
+  );
+  if (!simFaultsByMandateParsed.ok) return misconfigured(simFaultsByMandateParsed.reason);
+  const simFaultsByMandate = simFaultsByMandateParsed.seeds;
 
   // N4b-7 (P-GAP): CONTRACT_LEVEL selects the deployment tier. At S|P the
   // bind-statement possession proof is MANDATORY — startup refuses without
@@ -515,6 +533,8 @@ export function loadContractConfig(
       signerValidUntilMs: keyValidUntilMs,
       // N4b-5: config-only sim fault seeds (A2) — never settable by a tool.
       ...(simFaults !== undefined ? { simFaults } : {}),
+      // A2 live: mandate-keyed seeds, attached at mandate_submit.
+      ...(simFaultsByMandate !== undefined ? { simFaultsByMandate } : {}),
       // N4b-7: session-key possession proof at bind (mandatory at S|P).
       requireBindStatement,
       // N4b-8 (gap 2): the unbound v:2 seal wire exists only at level L.
@@ -575,6 +595,7 @@ export function loadContractConfig(
     principals,
     serverKeys,
     simFaultsEnabled: simFaultsAllowed,
+    simFaultMandateIds: Object.keys(simFaultsByMandate ?? {}).sort(),
     requireBindStatement,
     ...(telemetryCloseUrl !== undefined ? { telemetryCloseUrl } : {}),
     anchorEnabled,

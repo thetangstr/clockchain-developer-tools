@@ -58,6 +58,7 @@ const expectedContractEnv = {
   CONTRACT_VERIFIER_TOKEN: "verifier-salt-token\n",
   CONTRACT_ALLOW_SIM_FAULTS: "1\n",
   CONTRACT_SIM_FAULTS: '{"run-fixture":{"issueMismatch":"fare"}}\n',
+  CONTRACT_SIM_FAULTS_BY_MANDATE: '{"mand-fixture":{"issueMismatch":"fare"}}\n',
   CONTRACT_LEVEL: "L\n",
   CONTRACT_REQUIRE_BIND_STATEMENT: "disabled\n",
   TELEMETRY_CLOSE_URL: "http://telemetry-sink-staging:8083\n",
@@ -308,6 +309,7 @@ case "$name" in
   /clockchain/mcp/CONTRACT_VERIFIER_TOKEN) value=$'verifier-salt-token\\n' ;;
   /clockchain/mcp/CONTRACT_ALLOW_SIM_FAULTS) value=$'1\\n' ;;
   /clockchain/mcp/CONTRACT_SIM_FAULTS) value=$'{"run-fixture":{"issueMismatch":"fare"}}\\n' ;;
+  /clockchain/mcp/CONTRACT_SIM_FAULTS_BY_MANDATE) value=$'{"mand-fixture":{"issueMismatch":"fare"}}\\n' ;;
   /clockchain/mcp/CONTRACT_LEVEL) value=$'L\\n' ;;
   /clockchain/mcp/CONTRACT_REQUIRE_BIND_STATEMENT) value=$'disabled\\n' ;;
   /clockchain/mcp/TELEMETRY_CLOSE_URL) value=$'http://telemetry-sink-staging:8083\\n' ;;

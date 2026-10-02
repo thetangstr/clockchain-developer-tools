@@ -245,7 +245,7 @@ const ENV_KEYS = [
   "CONTRACT_POLICY_DIGESTS", "CONTRACT_PRINCIPALS", "CONTRACT_OBSERVER_PER_MINUTE",
   "CONTRACT_SERVER_KEY_VALID_FROM", "CONTRACT_SERVER_KEY_VALID_UNTIL",
   "CONTRACT_SESSION_TTL_MS", "CONTRACT_VERIFIER_TOKEN", "CONTRACT_SIM_FAULTS",
-  "CONTRACT_ALLOW_SIM_FAULTS",
+  "CONTRACT_ALLOW_SIM_FAULTS", "CONTRACT_SIM_FAULTS_BY_MANDATE",
 ];
 const SEED_B64 = Buffer.alloc(32, 7).toString("base64");
 const POLICIES_ENV = `buyer:0x${"77".repeat(32)},provider:0x${"88".repeat(32)}`;
@@ -284,14 +284,14 @@ async function signedSubmit(rpc, { token, role, prepared, submitTool, extraArgs 
 }
 
 /** bind → mandate → offer → accept → book. Returns {runId, agreementId, orderRef, pnr}. */
-async function bookedPair(rpc, sessionN, buyerToken, providerToken) {
+async function bookedPair(rpc, sessionN, buyerToken, providerToken, mandateOverrides = {}) {
   const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(sessionN) });
   const b = await rpc(buyerToken, "contract_bind", bindArgs(cert, "buyer"));
   assert.equal(b.bound, true, `buyer bind: ${JSON.stringify(b)}`);
   const p = await rpc(providerToken, "contract_bind", bindArgs(cert, "provider"));
   assert.equal(p.bound, true, `provider bind: ${JSON.stringify(p)}`);
 
-  const mandate = goodMandate();
+  const mandate = goodMandate(mandateOverrides);
   const prepM = await rpc(buyerToken, "mandate_prepare", {
     mandate, mandateSignature: signMandate(PRINCIPAL_PRIV, mandate),
   });
@@ -424,6 +424,133 @@ test("an honest run carries no simFault field anywhere", async () => {
   } finally {
     await app.close();
   }
+});
+
+// === 1b. CONTRACT_SIM_FAULTS_BY_MANDATE (A2 live) ============================
+// The runId is the handshake sessionId — unknowable before the bind window —
+// so the A2 live case keys its fault by the pre-signed, single-use mandateId.
+
+test("CONTRACT_SIM_FAULTS_BY_MANDATE without CONTRACT_ALLOW_SIM_FAULTS=1 → misconfigured (closed)", async () => {
+  const faults = JSON.stringify({ "mand-a2": { issueMismatch: "fare" } });
+  const cfg = loadContractConfig({
+    ...READY_ENV,
+    CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "contract-n4b6-cfg-")),
+    CONTRACT_SIM_FAULTS_BY_MANDATE: faults,
+  });
+  assert.equal(cfg.kind, "misconfigured");
+  assert.match(cfg.reason, /CONTRACT_SIM_FAULTS_BY_MANDATE requires CONTRACT_ALLOW_SIM_FAULTS=1/);
+
+  const app = await bootHttp({ ...READY_ENV, CONTRACT_SIM_FAULTS_BY_MANDATE: faults });
+  try {
+    const res = await fetch(`${app.url}/contract/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tb1" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: CLIENT_INFO } }),
+    });
+    assert.equal(res.status, 503);
+  } finally {
+    await app.close();
+  }
+});
+
+test("CONTRACT_SIM_FAULTS_BY_MANDATE alone (allowed) publishes simFaultsEnabled on the card and /contract/keys", async () => {
+  const faults = JSON.stringify({ "mand-a2": { issueMismatch: "fare" } });
+  const app = await bootHttp({ ...READY_ENV, CONTRACT_ALLOW_SIM_FAULTS: "1", CONTRACT_SIM_FAULTS_BY_MANDATE: faults });
+  try {
+    const card = await (await fetch(`${app.url}/.well-known/mcp/server-card.json`)).json();
+    assert.equal(card.simFaultsEnabled, true);
+    const keysDoc = await (await fetch(`${app.url}/contract/keys`)).json();
+    assert.equal(keysDoc.simFaultsEnabled, true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a mandate listed in simFaultsByMandate attaches the fault to its run at mandate_submit", async () => {
+  const app = await boot({ serviceOptions: { simFaultsByMandate: { "mand-a2-live": { issueMismatch: "fare" } } } });
+  try {
+    const { runId, orderRef } = await bookedPair(app.rpc, 905, "tb1", "tp1", { mandateId: "mand-a2-live" });
+    const feed = app.service.receiptFeed(runId);
+    assert.ok(feed, "run feed exists");
+    assert.deepEqual(feed.simFault, { issueMismatch: "fare" });
+    // Receipts from mandate_submit onward carry the marker (the fault did not
+    // exist before the mandate was claimed); the bind receipts do not.
+    const tools = feed.receipts.map((r) => r.tool);
+    const mIdx = tools.indexOf("mandate_submit");
+    assert.ok(mIdx > 0, "mandate_submit receipt");
+    for (const r of feed.receipts.slice(mIdx)) {
+      assert.deepEqual(r.simFault, { issueMismatch: "fare" }, `${r.tool} lacks simFault`);
+    }
+    for (const r of feed.receipts.slice(0, mIdx)) assert.ok(!("simFault" in r), `${r.tool} pre-mandate simFault`);
+    const execReceipt = feed.receipts.find((r) => r.tool === "booking_execute");
+    assert.deepEqual(execReceipt.simFault, { issueMismatch: "fare" });
+
+    // The issued order really drifted: buyer verification fails the run.
+    const prepV = await app.rpc("tb1", "verification_prepare", {
+      orderRef, result: "match", findingsDigest: `0x${"aa".repeat(32)}`,
+    });
+    const verified = await signedSubmit(app.rpc, { token: "tb1", role: "buyer", prepared: prepV, submitTool: "verification_submit" });
+    assert.equal(verified.terminalState, "verification_failed", JSON.stringify(verified));
+    const termReceipt = app.service.receiptFeed(runId).receipts.at(-1);
+    assert.deepEqual(termReceipt.simFault, { issueMismatch: "fare" });
+  } finally {
+    await app.close();
+  }
+});
+
+test("a mandate NOT listed in simFaultsByMandate runs honest on the same server", async () => {
+  const app = await boot({ serviceOptions: { simFaultsByMandate: { "mand-a2-other": { issueMismatch: "fare" } } } });
+  try {
+    const { runId, orderRef } = await bookedPair(app.rpc, 906, "tb1", "tp1", { mandateId: "mand-honest" });
+    const feed = app.service.receiptFeed(runId);
+    assert.ok(!("simFault" in feed));
+    for (const r of feed.receipts) assert.ok(!("simFault" in r), `${r.tool} leaked a simFault`);
+    const prepV = await app.rpc("tb1", "verification_prepare", {
+      orderRef, result: "match", findingsDigest: `0x${"aa".repeat(32)}`,
+    });
+    const verified = await signedSubmit(app.rpc, { token: "tb1", role: "buyer", prepared: prepV, submitTool: "verification_submit" });
+    assert.notEqual(verified.terminalState, "verification_failed", JSON.stringify(verified));
+  } finally {
+    await app.close();
+  }
+});
+
+test("travellers fault by mandate issues one extra ticket", async () => {
+  const app = await boot({ serviceOptions: { simFaultsByMandate: { "mand-a2-trav": { issueMismatch: "travellers" } } } });
+  try {
+    const { runId } = await bookedPair(app.rpc, 907, "tb1", "tp1", { mandateId: "mand-a2-trav" });
+    const feed = app.service.receiptFeed(runId);
+    assert.deepEqual(feed.simFault, { issueMismatch: "travellers" });
+  } finally {
+    await app.close();
+  }
+});
+
+test("sim: setFaults is refused once bookOrder has run; issueTickets reads the current fault", () => {
+  const world = createSimWorld({});
+  const run = world.forRun("run-setfaults");
+  assert.equal(run.faults, undefined);
+  assert.equal(run.setFaults({ issueMismatch: "fare" }), true);
+  assert.deepEqual(run.faults, { issueMismatch: "fare" });
+  const it = run.itinerary("IT-QW-ONESTOP");
+  const booked = run.bookOrder({ agreementId: "agr-1", itineraryId: it.itineraryId, totalMinor: it.fareMinor + 100, feeMinor: 100 });
+  assert.equal(booked.ok, true, JSON.stringify(booked));
+  // Too late: a fault must be in place before any booking.
+  assert.equal(run.setFaults({ issueMismatch: "travellers" }), false);
+  assert.deepEqual(run.faults, { issueMismatch: "fare" });
+  const issued = run.issueTickets({ orderRef: booked.orderRef });
+  assert.equal(issued.ok, true);
+  const seen = run.lookupOrder({ orderRef: booked.orderRef });
+  assert.equal(seen.totalMinor, it.fareMinor + 100 + 9_600, JSON.stringify(seen));
+});
+
+test("sim: setFaults never replaces a different already-seeded fault", () => {
+  const world = createSimWorld({ faults: { "run-seeded": { issueMismatch: "travellers" } } });
+  const run = world.forRun("run-seeded");
+  assert.equal(run.setFaults({ issueMismatch: "fare" }), false);
+  assert.deepEqual(run.faults, { issueMismatch: "travellers" });
+  assert.equal(run.setFaults({ issueMismatch: "travellers" }), true, "same fault is idempotent");
 });
 
 // === 2. the evidence routes are one exported code path =======================
