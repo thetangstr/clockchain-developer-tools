@@ -1,3 +1,34 @@
+# Secret redaction for every Caddy log (security fix, 2026-10-02). Caddy's
+# reverse_proxy/error loggers serialize the full request, headers included; its
+# built-in redaction covers Authorization/Cookie only, so an X-Api-Key MCP token
+# reached the box's docker json log in plaintext. The default logger (error and
+# handler logs, plus any access log that does not set its own output) runs
+# through a filter encoder that deletes credential headers before encoding. The
+# keys are Go-canonical header names (the filter match is case-sensitive).
+# Reload-only: `sink-up.sh reload-caddy` (caddy validate + caddy reload in the
+# running container), never a caddy recreate.
+(redact_credentials) {
+	format filter {
+		wrap json
+		fields {
+			request>headers>X-Api-Key delete
+			request>headers>Authorization delete
+			request>headers>Proxy-Authorization delete
+			request>headers>Cookie delete
+			request>headers>X-Clockchain-Api-Key delete
+			request>headers>Mcp-Session-Id delete
+			resp_headers>Set-Cookie delete
+		}
+	}
+}
+
+{
+	log default {
+		output stderr
+		import redact_credentials
+	}
+}
+
 mcp-aws.clockchain.network {
 	reverse_proxy mcp:8080
 }
