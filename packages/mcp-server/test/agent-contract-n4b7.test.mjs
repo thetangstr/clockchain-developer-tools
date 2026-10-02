@@ -244,9 +244,9 @@ function bindReceipt(service, runId) {
  * challenge, build the statement for this exact bind, sign with the
  * certificate side's session key (or an override for adversarial tests).
  */
-async function bindLate(rpc, token, { keyId, role, side, certificate, runId, priv }) {
+async function bindLate(rpc, token, { keyId, role, side, certificate, runId, priv, issuedAt }) {
   const { challenge } = await rpc(token, "contract_bind_challenge", {});
-  const st = makeStatement({ runId, side, tokenKeyId: keyId, challenge });
+  const st = makeStatement({ runId, side, tokenKeyId: keyId, challenge, issuedAt });
   return rpc(token, "contract_bind", bindArgs(certificate, role, {
     bindStatement: st,
     bindStatementSignature: signStatement(priv ?? sessionEvm[side].priv, st),
@@ -322,7 +322,7 @@ test("a static token with a verified statement reports session-key-possession", 
   } finally { await env.close(); }
 });
 
-test("late binding is write-once — a different agentId or run refuses, durably", async () => {
+test("late binding holds for the live run — a different agentId or run refuses while it is live", async () => {
   const stateDir = mkdtempSync(path.join(tmpdir(), "contract-n4b7-"));
   const env = await boot({ stateDir });
   try {
@@ -330,29 +330,127 @@ test("late binding is write-once — a different agentId or run refuses, durably
       keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(4), runId: uuid(4),
     });
     assert.equal(bound.bound, true);
-    // Same token, a DIFFERENT handshake certificate (different run): a valid
-    // statement reaches the write-once gate → STATE_REFUSED.
+    // Same token, a DIFFERENT handshake certificate (different run) while run
+    // 1 is still live: a valid statement reaches the binding gate → refused.
     const other = await bindLate(env.rpc, "tlb1", {
       keyId: "klb1", role: "buyer", side: "initiator",
       certificate: cert(5, { initiator: { agentId: "9601" } }), runId: uuid(5),
     });
     assert.equal(other.error, "STATE_REFUSED");
-    // End the first run — the seat frees but the write-once record holds.
-    env.service.endRun(env.service.runFor(bound.runId), "cancelled");
-    const afterEnd = await bindLate(env.rpc, "tlb1", {
-      keyId: "klb1", role: "buyer", side: "initiator",
-      certificate: cert(6, { initiator: { agentId: "9601" } }), runId: uuid(6),
+    // ... and the same agentId on a different live-run certificate refuses too.
+    const sameAgent = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(8), runId: uuid(8),
     });
-    assert.equal(afterEnd.error, "STATE_REFUSED");
+    assert.equal(sameAgent.error, "STATE_REFUSED");
+    // The live run is untouched.
+    assert.equal(env.service.runFor(bound.runId).bound.buyer.agentId, "9501");
   } finally { await env.close(); }
-  // Across a restart the record survives — same stateDir, fresh service.
+});
+
+// Late-bind release (P7/P8 fix): a `*` keyId's binding is RUN-scoped. When the
+// bound run reaches a terminal state, or its TTL lapses, the keyId may bind a
+// NEW run with a new certificate + a freshly verified bind statement. One live
+// run per keyId still holds; a released binding never re-opens the old run.
+for (const terminalState of ["settled", "cancelled", "no_agreement", "verification_failed", "blocked_by_policy", "withdrawn"]) {
+  test(`late binding is released when the run ends (${terminalState}) — run 2 binds a new certificate`, async () => {
+    const stateDir = mkdtempSync(path.join(tmpdir(), "contract-n4b7-rel-"));
+    const env = await boot({ stateDir });
+    const base = 200 + ["settled", "cancelled", "no_agreement", "verification_failed", "blocked_by_policy", "withdrawn"].indexOf(terminalState) * 3;
+    try {
+      const run1 = await bindLate(env.rpc, "tlb1", {
+        keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(base), runId: uuid(base),
+      });
+      assert.equal(run1.bound, true);
+      env.service.endRun(env.service.runFor(run1.runId), terminalState);
+      // Run 2: a different certificate (and a different, freshly registered
+      // agentId) — binds OK with its own verified statement.
+      const run2 = await bindLate(env.rpc, "tlb1", {
+        keyId: "klb1", role: "buyer", side: "initiator",
+        certificate: cert(base + 1, { initiator: { agentId: "9611" } }), runId: uuid(base + 1),
+      });
+      assert.equal(run2.bound, true, JSON.stringify(run2));
+      assert.equal(run2.runId, uuid(base + 1));
+      assert.equal(env.service.runFor(run2.runId).bound.buyer.agentId, "9611");
+      assert.equal(bindReceipt(env.service, run2.runId).bindMode, "late");
+      // The old run stays terminal — the release never re-opens it.
+      assert.equal(env.service.runFor(run1.runId).terminalState, terminalState);
+      // Run 3 while run 2 is live is still refused.
+      const run3 = await bindLate(env.rpc, "tlb1", {
+        keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(base + 2), runId: uuid(base + 2),
+      });
+      assert.equal(run3.error, "STATE_REFUSED");
+    } finally { await env.close(); }
+  });
+}
+
+test("released late binding: still needs the statement, and a stranger's key cannot claim the agentId", async () => {
+  const env = await boot();
+  try {
+    const run1 = await bindLate(env.rpc, "tlb2", {
+      keyId: "klb2", role: "buyer", side: "initiator", certificate: cert(230), runId: uuid(230),
+    });
+    assert.equal(run1.bound, true);
+    env.service.endRun(env.service.runFor(run1.runId), "settled");
+    const c = cert(231, { initiator: { agentId: "9999" } });
+    const statementless = await env.rpc("tlb2", "contract_bind", bindArgs(c, "buyer"));
+    assert.equal(statementless.error, "BIND_STATEMENT_INVALID");
+    const forged = await bindLate(env.rpc, "tlb2", {
+      keyId: "klb2", role: "buyer", side: "initiator", certificate: c, runId: uuid(231),
+      priv: sessionEvm.stranger.priv,
+    });
+    assert.equal(forged.error, "BIND_STATEMENT_INVALID");
+  } finally { await env.close(); }
+});
+
+test("a late-bound run that never reached terminal is released at TTL", async () => {
+  let now = Date.now();
+  const env = await boot({ serviceOptions: { runTtlMs: 60_000, now: () => now } });
+  try {
+    const run1 = await bindLate(env.rpc, "tlb3", {
+      keyId: "klb3", role: "buyer", side: "initiator", certificate: cert(240), runId: uuid(240),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(run1.bound, true);
+    // Before TTL: refused.
+    const early = await bindLate(env.rpc, "tlb3", {
+      keyId: "klb3", role: "buyer", side: "initiator", certificate: cert(241), runId: uuid(241),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(early.error, "STATE_REFUSED");
+    now += 61_000; // past the run TTL — the cert window (10 min) still holds
+    const run2 = await bindLate(env.rpc, "tlb3", {
+      keyId: "klb3", role: "buyer", side: "initiator",
+      certificate: cert(242, { initiator: { agentId: "9622" } }), runId: uuid(242),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(run2.bound, true, JSON.stringify(run2));
+    assert.equal(env.service.runFor(run2.runId).bound.buyer.agentId, "9622");
+  } finally { await env.close(); }
+});
+
+test("late binding across a restart: the dropped run releases; its session can never re-open", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "contract-n4b7-rs-"));
+  const env = await boot({ stateDir });
+  try {
+    const run1 = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(250), runId: uuid(250),
+    });
+    assert.equal(run1.bound, true);
+  } finally { await env.close(); }
   const env2 = await boot({ stateDir });
   try {
-    const replayed = await bindLate(env2.rpc, "tlb1", {
-      keyId: "klb1", role: "buyer", side: "initiator",
-      certificate: cert(7, { initiator: { agentId: "9701" } }), runId: uuid(7),
+    // The in-flight run did not survive the restart — re-binding its
+    // certificate is refused (used-session guard)...
+    const replay = await bindLate(env2.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(250), runId: uuid(250),
     });
-    assert.equal(replayed.error, "STATE_REFUSED");
+    assert.equal(replay.error, "STATE_REFUSED");
+    // ... but a NEW run binds — the keyId is not stranded forever.
+    const run2 = await bindLate(env2.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(251, { initiator: { agentId: "9651" } }), runId: uuid(251),
+    });
+    assert.equal(run2.bound, true, JSON.stringify(run2));
   } finally { await env2.close(); }
 });
 

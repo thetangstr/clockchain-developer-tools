@@ -511,9 +511,11 @@ function loadUsedSessions(stateDir: string): Map<string, string> {
 }
 
 /**
- * N4b-7 late binding: the agentId a `*`-token keyId was bound to, write-once
- * and durable — `{keyId: {agentId, runId}}`. A second bind of the same token
- * to a different agentId or a different run refuses STATE_REFUSED.
+ * N4b-7 late binding: the agentId a `*`-token keyId was bound to, durable —
+ * `{keyId: {agentId, runId}}`. While that run is live, a second bind of the
+ * same token to a different agentId or a different run refuses
+ * STATE_REFUSED; once the run is terminal / TTL-expired / dropped, the next
+ * run's bind replaces the record (late-bind release).
  */
 interface AgentBinding {
   agentId: string;
@@ -1311,16 +1313,28 @@ export function createContractService(options: {
       return { ok: false, code: "BIND_STATEMENT_INVALID" };
     }
 
-    // N4b-7 write-once: the token keyId's first bind records {agentId, runId}
-    // durably. A second bind to a different agentId or a different run is
-    // refused — including a replay of another handshake's certificate.
+    // N4b-7: the token keyId's bind records {agentId, runId} durably. While
+    // that run is LIVE, a bind to a different agentId or a different run is
+    // refused — including a replay of another handshake's certificate. The
+    // record is RUN-scoped (late-bind release): once the recorded run is
+    // terminal, TTL-expired, or gone from memory (dropped/evicted/restart —
+    // a dropped run can never re-open: usedSessions refuses its genesis),
+    // the keyId may bind a NEW run. That bind still passes the mandatory
+    // statement check above (HIGH-1), so it can only claim the agentId whose
+    // session key it proves — never another party's.
+    let releasesBinding = false;
     if (lateBinding) {
       const recorded = agentBindings.get(principal.keyId);
-      if (
-        recorded !== undefined &&
-        (recorded.agentId !== boundAgentId || recorded.runId !== verdict.sessionId)
-      ) {
-        return { ok: false, code: "STATE_REFUSED" };
+      if (recorded !== undefined) {
+        if (recorded.runId === verdict.sessionId) {
+          if (recorded.agentId !== boundAgentId) return { ok: false, code: "STATE_REFUSED" };
+        } else {
+          const recordedRun = runs.get(recorded.runId);
+          if (recordedRun !== undefined && !runEnded(recordedRun)) {
+            return { ok: false, code: "STATE_REFUSED" };
+          }
+          releasesBinding = true;
+        }
       }
     }
 
@@ -1484,8 +1498,9 @@ export function createContractService(options: {
     // state change and no receipt — never a run the restart guard forgot.
     // N4b-7: the late-binding record is written FIRST — a crash between the
     // two writes then leaves an unused binding, not an unrecorded session.
+    // Late-bind release: a binding whose run ended is REPLACED by this run's.
     const newBinding: AgentBinding | undefined =
-      lateBinding && !agentBindings.has(principal.keyId)
+      lateBinding && (!agentBindings.has(principal.keyId) || releasesBinding)
         ? { agentId: boundAgentId, runId: verdict.sessionId }
         : undefined;
     if (options.stateDir !== undefined && (existing === undefined || newBinding !== undefined)) {
