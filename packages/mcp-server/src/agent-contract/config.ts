@@ -1,4 +1,4 @@
-import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import path from "node:path";
 
 import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
@@ -270,7 +270,14 @@ export function loadContractConfig(
   // credential both read the feed AND disclose the salts that unlock it.
   const observerTokenRaw = (env.CONTRACT_OBSERVER_TOKEN ?? "").trim();
   const verifierTokenRaw = (env.CONTRACT_VERIFIER_TOKEN ?? "").trim();
-  if (observerTokenRaw !== "" && verifierTokenRaw !== "" && observerTokenRaw === verifierTokenRaw) {
+  // Either token may be configured as `sha256:<hex>` (evidence-routes.ts);
+  // compare the effective bearer digests so a hashed form can't hide reuse.
+  const bearerDigest = (t: string): string =>
+    t.startsWith("sha256:") ? t.slice(7) : createHash("sha256").update(t, "utf8").digest("hex");
+  if (
+    observerTokenRaw !== "" && verifierTokenRaw !== "" &&
+    (observerTokenRaw === verifierTokenRaw || bearerDigest(observerTokenRaw) === bearerDigest(verifierTokenRaw))
+  ) {
     return misconfigured("CONTRACT_VERIFIER_TOKEN must differ from CONTRACT_OBSERVER_TOKEN");
   }
 

@@ -39,7 +39,7 @@ marked required falls back to the shown default or stays off.
 | `CONTRACT_POLICY_DIGESTS` | String | **yes** | `buyer:0x<64-hex>,provider:0x<64-hex>` — BOTH required; lowercase hex; `0x00…00` is refused. Each role also takes a `\|`-separated SET (`buyer:0xA\|0xB,provider:0xC`, max 64 per role); an approval is accepted if its digest is any member |
 | `CONTRACT_PRINCIPALS` | String | **yes** (demo) | comma-separated `keyId:0x<40-hex-address>` buyer-family pins; the mandate's EIP-191 signature must recover to the pinned address. keyId must equal the keyId in the buyer's token entry |
 | `CONTRACT_OBSERVER_TOKEN` | SecureString | no | bearer for the read-only observer receipt feed; if set MUST differ from `CONTRACT_VERIFIER_TOKEN` |
-| `CONTRACT_VERIFIER_TOKEN` | SecureString | no | bearer for verifier-scoped run-salt disclosure; if set MUST differ from `CONTRACT_OBSERVER_TOKEN` |
+| `CONTRACT_VERIFIER_TOKEN` | SecureString | no | bearer for verifier-scoped run-salt disclosure; if set MUST differ from `CONTRACT_OBSERVER_TOKEN`. Either the plaintext bearer (legacy) or, preferred, `sha256:<64 lowercase hex>` of it — see §Hashed verifier token |
 | `CONTRACT_HOST_ROOTS` | String | no | comma-separated `kid:<64-hex-fingerprint>`; absent = the published production root set (`root-2026-08`). A value REPLACES the default list: it must include `root-2026-08` (startup logs a `contract_default_host_root_missing` warning, kid only, when it does not). At S/P every pinned root must be a published production root |
 | `CONTRACT_ERC8004_CHAIN_ID` | String | no | `eip155:<n>` (the certificate's wire format) or a bare decimal, normalized to `eip155:<n>`; when either ERC8004 pin is set, certs must attest exactly this deployment. Pair with `CONTRACT_ERC8004_REGISTRY_ADDRESS` (both or neither) |
 | `CONTRACT_ERC8004_REGISTRY_ADDRESS` | String | no | `0x<40-hex>`, compared case-insensitively (checksummed or lowercase both work) — Sepolia registry `0x8004A818BFB912233c491871b3d84c89A494BD9e` for D20 |
@@ -150,3 +150,18 @@ The contract route ships **disabled**: `CONTRACT_MCP_ENABLED` is itself an SSM
 parameter — the safe bring-up is to provision every other parameter first, run
 the checker (expect exit 2), then write `CONTRACT_MCP_ENABLED=1` and re-run
 (expect exit 0) before restarting the service.
+
+## Hashed verifier token
+
+Put only the digest of the verifier's bearer in SSM, so nobody who can read
+SSM (the orchestrator included) can present it. The founder generates the
+bearer locally, installs the plaintext only into the `ac-verifier` OS user's
+0600 token file, and writes `sha256:` + the lowercase hex sha256 of its UTF-8
+bytes (no trailing newline) to `/clockchain/mcp/CONTRACT_VERIFIER_TOKEN`, e.g.
+`printf %s "$TOKEN" | shasum -a 256 | cut -d' ' -f1` → `sha256:<that hex>`.
+The server hashes each presented bearer and compares in constant time
+(`evidence-routes.ts`). A value starting with `sha256:` that is not exactly 64
+lowercase hex logs `CONTRACT_VERIFIER_TOKEN is a malformed sha256: digest` at
+startup and every `/contract/run-salt` request answers 401. Any other value is
+treated as the plaintext bearer, as before. `CONTRACT_OBSERVER_TOKEN` accepts
+the same two forms.
