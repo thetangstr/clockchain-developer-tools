@@ -86,3 +86,31 @@ test("every telemetry upstream Caddy routes to is a compose service on the edge 
     assert.match(svc[1], /clockchain_edge/);
   }
 });
+
+test("every Caddy log deletes credential headers before encoding (X-Api-Key leak fix)", async () => {
+  const source = await readFile(caddyFile, "utf8");
+  // The global options block must be the first non-comment, non-snippet block.
+  const global = source.match(/^\{\n([\s\S]*?)\n\}/m);
+  assert.ok(global, "global options block exists");
+  assert.match(global[1], /^\tlog default \{\n\t\toutput stderr\n\t\timport redact_credentials\n\t\}$/m);
+  const snippet = source.match(/^\(redact_credentials\)\s*\{\n([\s\S]*?)\n\}/m);
+  assert.ok(snippet, "redact_credentials snippet exists");
+  assert.match(snippet[1], /format filter \{/);
+  assert.match(snippet[1], /wrap json/);
+  // Go-canonical header keys: the filter field match is case-sensitive.
+  for (const field of [
+    "request>headers>X-Api-Key",
+    "request>headers>Authorization",
+    "request>headers>Proxy-Authorization",
+    "request>headers>Cookie",
+    "request>headers>X-Clockchain-Api-Key",
+    "resp_headers>Set-Cookie",
+  ]) {
+    assert.match(snippet[1], new RegExp(`^\\t\\t\\t${field.replace(/[>-]/g, "\\$&")} delete$`, "m"), field);
+  }
+  // Any site-level access log must import the same filter (its own output bypasses default).
+  for (const m of source.matchAll(/^\t+log(?:\s+[\w.-]+)?\s*\{([\s\S]*?)\n\t+\}/gm)) {
+    assert.match(m[1], /import redact_credentials/, "site log imports redact_credentials");
+  }
+  assert.doesNotMatch(source, /log_credentials/, "never re-enable credential logging");
+});
