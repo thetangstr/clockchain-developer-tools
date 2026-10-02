@@ -32,20 +32,47 @@ function refuse(res: ServerResponse, status: number, error: string): void {
   res.end(JSON.stringify({ error }));
 }
 
-/** sha256 + timingSafeEqual bearer check — same pattern as the metrics token. */
-function bearerOk(req: IncomingMessage, token: string): boolean {
-  const expected = createHash("sha256").update(token).digest();
-  const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
-  const presented = bearer ? createHash("sha256").update(bearer[1].trim()).digest() : null;
-  return presented !== null && timingSafeEqual(presented, expected);
+const SHA256_PREFIX = "sha256:";
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+type BearerCheck = (req: IncomingMessage) => boolean;
+
+/**
+ * sha256 + timingSafeEqual bearer check — same pattern as the metrics token.
+ *
+ * The configured token is either the plaintext bearer (legacy) or
+ * `sha256:<64 lowercase hex>`, the sha256 of the bearer's UTF-8 bytes, so
+ * whoever can read the configured value cannot present it. A malformed
+ * `sha256:` value fails closed on every request and logs once at startup.
+ */
+function bearerCheck(token: string, envName: string, route: string): BearerCheck {
+  let expected: Buffer;
+  if (token.startsWith(SHA256_PREFIX)) {
+    const hex = token.slice(SHA256_PREFIX.length);
+    if (!SHA256_HEX.test(hex)) {
+      console.error(
+        `agent-contract: ${envName} is a malformed sha256: digest (want sha256:<64 lowercase hex>); ` +
+          `${route} will fail closed (401) on every request`,
+      );
+      return () => false;
+    }
+    expected = Buffer.from(hex, "hex");
+  } else {
+    expected = createHash("sha256").update(token, "utf8").digest();
+  }
+  return (req) => {
+    const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization));
+    const presented = bearer ? createHash("sha256").update(bearer[1].trim(), "utf8").digest() : null;
+    return presented !== null && timingSafeEqual(presented, expected);
+  };
 }
 
 export interface ContractEvidenceRoutesOptions {
   /** The contract service; when absent every route answers 404. */
   service?: ContractService;
-  /** Observer-feed bearer token (`CONTRACT_OBSERVER_TOKEN`); unset → closed. */
+  /** Observer-feed bearer (`CONTRACT_OBSERVER_TOKEN`), plaintext or `sha256:<hex>`; unset → closed. */
   observerToken?: string;
-  /** Salt-disclosure bearer token (`CONTRACT_VERIFIER_TOKEN`); unset → closed. */
+  /** Salt-disclosure bearer (`CONTRACT_VERIFIER_TOKEN`), plaintext or `sha256:<hex>`; unset → closed. */
   verifierToken?: string;
   /** Prebuilt `GET /contract/keys` document; absent → the route 404s. */
   keysDoc?: ReturnType<typeof buildServerKeysDoc>;
@@ -65,6 +92,12 @@ export function createContractEvidenceRoutes(
 ): ContractEvidenceRoutes {
   const allowFeed = options.allowFeed ?? keyedWindowLimiter(30, 60_000, Date.now);
   const onRateLimited = options.onRateLimited ?? (() => {});
+  const observerOk = options.observerToken === undefined
+    ? undefined
+    : bearerCheck(options.observerToken, "CONTRACT_OBSERVER_TOKEN", "/contract/receipts");
+  const verifierOk = options.verifierToken === undefined
+    ? undefined
+    : bearerCheck(options.verifierToken, "CONTRACT_VERIFIER_TOKEN", "/contract/run-salt");
 
   return (req, res) => {
     const path = pathOf(req.url);
@@ -83,8 +116,7 @@ export function createContractEvidenceRoutes(
 
     // `GET /contract/receipts?runId=` — the read-only observer receipt feed.
     if (path === "/contract/receipts") {
-      const token = options.observerToken;
-      if (options.service === undefined || token === undefined) {
+      if (options.service === undefined || observerOk === undefined) {
         refuse(res, 404, "not_found");
         return true;
       }
@@ -92,7 +124,7 @@ export function createContractEvidenceRoutes(
         refuse(res, 403, "forbidden");
         return true;
       }
-      if (!bearerOk(req, token)) {
+      if (!observerOk(req)) {
         refuse(res, 401, "unauthorized");
         return true;
       }
@@ -121,8 +153,7 @@ export function createContractEvidenceRoutes(
     // `GET /contract/run-salt?runId=…|keyId=…` — verifier-scoped salt
     // disclosure; deliberately a different credential from the observer token.
     if (path === "/contract/run-salt") {
-      const token = options.verifierToken;
-      if (options.service === undefined || token === undefined) {
+      if (options.service === undefined || verifierOk === undefined) {
         refuse(res, 404, "not_found");
         return true;
       }
@@ -130,7 +161,7 @@ export function createContractEvidenceRoutes(
         refuse(res, 403, "forbidden");
         return true;
       }
-      if (!bearerOk(req, token)) {
+      if (!verifierOk(req)) {
         refuse(res, 401, "unauthorized");
         return true;
       }
