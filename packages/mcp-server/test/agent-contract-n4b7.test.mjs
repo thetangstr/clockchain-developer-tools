@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { canonicalJson, canonicalDigest } from "../dist/agent-contract/canonical.js";
+import { canonicalJson, canonicalDigest, saltedCanonicalDigest } from "../dist/agent-contract/canonical.js";
 import { parseContractTokens, tokenAuthenticator, createContractHttpHandler } from "../dist/agent-contract/http-handler.js";
 import { createContractService } from "../dist/agent-contract/service.js";
 import { loadContractConfig } from "../dist/agent-contract/config.js";
@@ -186,7 +186,7 @@ function signStatement(priv, statement) {
 
 const CLIENT_INFO = { name: "n4b7-test-client", version: "1.0.0" };
 
-async function boot({ serviceOptions = {}, stateDir, tokens } = {}) {
+async function boot({ serviceOptions = {}, stateDir, tokens, resolveCertificate } = {}) {
   const service = createContractService({
     hostRoots: HOST_ROOTS, signer: SIGNER,
     policyDigests: POLICY_DIGESTS,
@@ -197,6 +197,7 @@ async function boot({ serviceOptions = {}, stateDir, tokens } = {}) {
   const handler = createContractHttpHandler({
     authenticate: tokens ?? tokenAuthenticator(parseContractTokens(TOKENS_RAW)),
     hostRoots: HOST_ROOTS, signer: SIGNER, service,
+    ...(resolveCertificate !== undefined ? { resolveCertificate } : {}),
   });
   const srv = createServer(handler);
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
@@ -880,5 +881,306 @@ test("D8: an unbound `*` principal CAN invite pre-bind — disclosed as unproven
     msg = inbox.messages.find((m) => m.listingId === listing2.listingId && m.senderKeyId === "kb1");
     assert.equal(msg.senderAgentId, "9452");
     assert.equal(msg.senderProof, "token-pinned");
+  } finally { await env.close(); }
+});
+
+// --- pre-bind routing after terminal (live: p6-l-2026-10-03-1) ---------------
+// Once a keyId had bound a run, runIdForPrincipal kept resolving that run for
+// its full 24 h TTL — terminal or not — and every PRE-BIND call of the keyId
+// (rendezvous_*, contract_bind_challenge, contract_status, a refused bind) was
+// receipted on the OLD run's chain. The next run's pre-bind evidence was then
+// unmatchable (R8): the AI run's receipts landed on scripted run a5f8a36a.
+// Expected: an ended run (terminal, or released per #176/#179) no longer
+// captures the keyId's pre-bind calls; they go to its pre-bind chain, whose
+// head the next run's bind receipt links. The ended run's chain is untouched.
+
+const PRE_BIND_TOOLS = new Set(["rendezvous_inbox", "contract_bind_challenge", "contract_status", "contract_bind"]);
+
+function chainSnapshot(service, runId) {
+  const receipts = service.receiptFeed(runId).receipts;
+  return { length: receipts.length, digests: receipts.map((r) => canonicalDigest(r)) };
+}
+
+/** Make the pre-bind calls an agent makes before its next bind. */
+async function preBindCalls(rpc, token) {
+  const nonces = [];
+  const inbox = await rpc(token, "rendezvous_inbox", {});
+  assert.ok(Array.isArray(inbox.messages), JSON.stringify(inbox));
+  nonces.push(inbox.serverNonce);
+  const ch = await rpc(token, "contract_bind_challenge", {});
+  assert.equal(typeof ch.challenge, "string", JSON.stringify(ch));
+  nonces.push(ch.serverNonce);
+  const status = await rpc(token, "contract_status", {});
+  nonces.push(status.serverNonce);
+  return { nonces, status };
+}
+
+async function bindBoth(env, n) {
+  const c = cert(n);
+  const b = await bindLate(env.rpc, "tlb1", { keyId: "klb1", role: "buyer", side: "initiator", certificate: c, runId: uuid(n) });
+  assert.equal(b.bound, true, JSON.stringify(b));
+  const p = await bindLate(env.rpc, "tlp1", { keyId: "klp1", role: "provider", side: "responder", certificate: c, runId: uuid(n) });
+  assert.equal(p.bound, true, JSON.stringify(p));
+  return b.runId;
+}
+
+test("pre-bind routing: a TERMINAL run no longer captures the keyId's pre-bind calls; the next bind links them", async () => {
+  const env = await boot();
+  try {
+    const runA = await bindBoth(env, 300);
+    const withdrawn = await env.rpc("tlb1", "contract_withdraw", {});
+    assert.equal(withdrawn.state, "withdrawn", JSON.stringify(withdrawn));
+    assert.equal(env.service.runFor(runA).terminalState, "no_agreement");
+    const before = chainSnapshot(env.service, runA);
+    const preBefore = env.service.preBindFeed("klb1")?.receipts.length ?? 0;
+
+    const { nonces, status } = await preBindCalls(env.rpc, "tlb1");
+    // Observability is kept: the caller still reads run A's terminal state ...
+    assert.equal(status.terminalState, "no_agreement", JSON.stringify(status));
+    // ... but run A's chain is immutable after terminal: nothing appended,
+    // nothing rewritten.
+    assert.deepEqual(chainSnapshot(env.service, runA), before);
+    for (const r of env.service.receiptFeed(runA).receipts) {
+      assert.ok(!nonces.includes(r.serverNonce), `pre-bind ${r.tool} landed on terminal run A`);
+    }
+    // Every pre-bind call is on klb1's pre-bind chain — each exactly once.
+    const pre = env.service.preBindFeed("klb1");
+    assert.equal(pre.receipts.length, preBefore + nonces.length);
+    for (const nonce of nonces) {
+      assert.equal(pre.receipts.filter((r) => r.serverNonce === nonce).length, 1, `nonce ${nonce} not on pre-bind chain once`);
+    }
+    // The next run's bind links the pre-bind head — R8 can match the evidence.
+    const runB = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(301, { initiator: { agentId: "9701" } }), runId: uuid(301),
+    });
+    assert.equal(runB.bound, true, JSON.stringify(runB));
+    const preAtBind = env.service.preBindFeed("klb1");
+    assert.equal(bindReceipt(env.service, runB.runId).preBindHead, preAtBind.head);
+    assert.ok(preAtBind.receipts.some((r) => r.tool === "contract_bind_challenge" && nonces.includes(r.serverNonce)));
+    // Run A is still intact after run B bound.
+    assert.deepEqual(chainSnapshot(env.service, runA), before);
+    assert.equal(env.service.terminalJobFor(runA).terminalState, "no_agreement");
+  } finally { await env.close(); }
+});
+
+test("pre-bind routing: a refused bind after terminal lands on the pre-bind chain, not the terminal run", async () => {
+  const env = await boot();
+  try {
+    const runA = await bindBoth(env, 310);
+    await env.rpc("tlb1", "contract_withdraw", {});
+    const before = chainSnapshot(env.service, runA);
+    // A statementless late bind is refused BIND_STATEMENT_INVALID.
+    const refused = await env.rpc("tlb1", "contract_bind", bindArgs(cert(311), "buyer"));
+    assert.ok(refused.error, JSON.stringify(refused));
+    assert.deepEqual(chainSnapshot(env.service, runA), before);
+    const last = env.service.preBindFeed("klb1").receipts.at(-1);
+    assert.equal(last.tool, "contract_bind");
+    assert.equal(last.outcome, refused.error);
+  } finally { await env.close(); }
+});
+
+test("pre-bind routing: a LIVE bound run still captures the keyId's calls on its own chain", async () => {
+  const env = await boot();
+  try {
+    const runA = await bindBoth(env, 320);
+    const before = chainSnapshot(env.service, runA);
+    const preBefore = env.service.preBindFeed("klb1")?.receipts.length ?? 0;
+    const { nonces, status } = await preBindCalls(env.rpc, "tlb1");
+    assert.equal(status.stage, "bound", JSON.stringify(status));
+    const after = env.service.receiptFeed(runA).receipts;
+    assert.equal(after.length, before.length + nonces.length);
+    for (const nonce of nonces) {
+      assert.equal(after.filter((r) => r.serverNonce === nonce).length, 1, `nonce ${nonce} not on live run once`);
+    }
+    // The prefix is untouched (append-only).
+    assert.deepEqual(after.slice(0, before.length).map((r) => canonicalDigest(r)), before.digests);
+    assert.equal(env.service.preBindFeed("klb1")?.receipts.length ?? 0, preBefore);
+  } finally { await env.close(); }
+});
+
+test("pre-bind routing: post-terminal business replays/reads still use the terminal run (not pre-bind tools)", async () => {
+  const env = await boot();
+  try {
+    const runA = await bindBoth(env, 330);
+    await env.rpc("tlb1", "contract_withdraw", {});
+    const before = chainSnapshot(env.service, runA);
+    // A business call after terminal is refused on run A's own chain, as before.
+    const again = await env.rpc("tlb1", "contract_withdraw", {});
+    assert.equal(again.error, "ALREADY_TERMINAL", JSON.stringify(again));
+    const after = env.service.receiptFeed(runA).receipts;
+    assert.equal(after.length, before.length + 1);
+    assert.equal(after.at(-1).tool, "contract_withdraw");
+    assert.ok(!PRE_BIND_TOOLS.has(after.at(-1).tool));
+  } finally { await env.close(); }
+});
+
+test("pre-bind routing + #179: a half-bound run captures calls until its bind deadline, then releases them to pre-bind", async () => {
+  let now = Date.now();
+  const t0 = now;
+  const env = await boot({ serviceOptions: { now: () => now } });
+  try {
+    const runA = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(340, { t: t0 }), runId: uuid(340),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(runA.bound, true, JSON.stringify(runA));
+    // Before the deadline the half-bound run is live: it captures the calls.
+    const live = chainSnapshot(env.service, runA.runId);
+    await env.rpc("tlb1", "rendezvous_inbox", {});
+    assert.equal(chainSnapshot(env.service, runA.runId).length, live.length + 1);
+
+    // Past validUntil + grace: run A ends expired_unbound (#179).
+    now = t0 + CERT_WINDOW_MS + GRACE_MS + 1_000;
+    const status = await env.rpc("tlb1", "contract_status", {});
+    assert.equal(status.terminalState, "expired_unbound", JSON.stringify(status));
+    const before = chainSnapshot(env.service, runA.runId);
+    const { nonces } = await preBindCalls(env.rpc, "tlb1");
+    assert.deepEqual(chainSnapshot(env.service, runA.runId), before);
+    const pre = env.service.preBindFeed("klb1");
+    for (const nonce of [status.serverNonce, ...nonces]) {
+      assert.equal(pre.receipts.filter((r) => r.serverNonce === nonce).length, 1);
+    }
+    // #176: the late token binds a new run; its bind links the pre-bind head.
+    const runB = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(341, { t: now, initiator: { agentId: "9741" } }), runId: uuid(341),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(runB.bound, true, JSON.stringify(runB));
+    assert.equal(bindReceipt(env.service, runB.runId).preBindHead, env.service.preBindFeed("klb1").head);
+    assert.deepEqual(chainSnapshot(env.service, runA.runId), before);
+    assert.equal(env.service.terminalJobFor(runA.runId).terminalState, "expired_unbound");
+  } finally { await env.close(); }
+});
+
+test("pre-bind routing + #179: a withdrawn half-bound run releases the bound party's pre-bind calls", async () => {
+  const env = await boot();
+  try {
+    const runA = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(350), runId: uuid(350),
+    });
+    assert.equal(runA.bound, true, JSON.stringify(runA));
+    const w = await env.rpc("tlb1", "contract_withdraw", {});
+    assert.equal(w.state, "withdrawn", JSON.stringify(w));
+    const before = chainSnapshot(env.service, runA.runId);
+    const { nonces } = await preBindCalls(env.rpc, "tlb1");
+    assert.deepEqual(chainSnapshot(env.service, runA.runId), before);
+    const pre = env.service.preBindFeed("klb1");
+    for (const nonce of nonces) assert.equal(pre.receipts.filter((r) => r.serverNonce === nonce).length, 1);
+    // The withdraw receipt itself stays on run A.
+    assert.ok(env.service.receiptFeed(runA.runId).receipts.some((r) => r.tool === "contract_withdraw" && r.outcome === "ok"));
+  } finally { await env.close(); }
+});
+
+// --- PR #180 review follow-ups ------------------------------------------------
+
+const TEST_SEAL = {
+  v: 2, epk: `0x${"ab".repeat(32)}`, iv: `0x${"cd".repeat(12)}`,
+  ct: `0x${"ef".repeat(32)}`, tag: `0x${"01".repeat(16)}`,
+};
+
+test("F1: an invitation sent after the sender's run ended is stamped unproven-pre-bind, not the released agentId", async () => {
+  const env = await boot();
+  try {
+    const listing = await env.rpc("tp1", "rendezvous_publish_listing", {
+      title: "SFO-FCO managed travel", summary: "desk", sealedBoxPublicKeyHex: `0x${"ab".repeat(32)}`,
+    });
+    const runA = await bindBoth(env, 360);
+    await env.rpc("tlb1", "contract_withdraw", {});
+    assert.equal(env.service.runFor(runA).terminalState, "no_agreement");
+    const sent = await env.rpc("tlb1", "rendezvous_send_invitation", {
+      listingId: listing.listingId, sealedInvitation: TEST_SEAL,
+    });
+    assert.equal(sent.delivered, true, JSON.stringify(sent));
+    assert.equal(sent.senderAgentId, null);
+    assert.equal(sent.senderProof, "unproven-pre-bind");
+    const inbox = await env.rpc("tp1", "rendezvous_inbox", {});
+    const msg = inbox.messages.find((m) => m.listingId === listing.listingId && m.senderKeyId === "klb1");
+    assert.equal(msg.senderAgentId, null);
+    assert.equal(msg.senderProof, "unproven-pre-bind");
+    const receipt = env.service.preBindFeed("klb1").receipts.at(-1);
+    assert.equal(receipt.tool, "rendezvous_send_invitation");
+    assert.equal(receipt.runId, "pre-bind");
+    assert.equal(receipt.senderProof, "unproven-pre-bind");
+  } finally { await env.close(); }
+});
+
+test("F2: a bind refused after the caller's live run ended DURING certificate resolution lands on the pre-bind chain", async () => {
+  let env;
+  let runA;
+  const resolver = async () => {
+    // The caller's live run ends while the bind awaits resolution.
+    env.service.endRun(env.service.runFor(runA), "no_agreement");
+    return { ok: false, code: "CERTIFICATE_INVALID", retryable: false };
+  };
+  env = await boot({ resolveCertificate: resolver });
+  try {
+    runA = await bindBoth(env, 370);
+    assert.equal(env.service.runFor(runA).terminalState, null);
+    const before = chainSnapshot(env.service, runA);
+    const preBefore = env.service.preBindFeed("klb1")?.receipts.length ?? 0;
+    const refused = await env.rpc("tlb1", "contract_bind", {
+      handshakeSessionId: uuid(371),
+      ...(() => { const { certificate, ...rest } = bindArgs(cert(371), "buyer"); return rest; })(),
+    });
+    assert.equal(refused.error, "CERTIFICATE_INVALID", JSON.stringify(refused));
+    assert.equal(env.service.runFor(runA).terminalState, "no_agreement");
+    assert.deepEqual(chainSnapshot(env.service, runA), before, "refused bind landed on the now-terminal run");
+    assert.equal(env.service.preBindFeed("klb1").receipts.length, preBefore + 1);
+    const last = env.service.preBindFeed("klb1").receipts.at(-1);
+    assert.equal(last.tool, "contract_bind");
+    assert.equal(last.outcome, "CERTIFICATE_INVALID");
+  } finally { await env.close(); }
+});
+
+test("F5: an amount-bearing pre-bind call after terminal is HMAC'd under the PRE-BIND salt, not the ended run's", async () => {
+  const env = await boot();
+  try {
+    const runA = await bindBoth(env, 380);
+    env.service.endRun(env.service.runFor(runA), "no_agreement");
+    const before = chainSnapshot(env.service, runA);
+    const args = {
+      title: "SFO-FCO priced desk", summary: "desk", sealedBoxPublicKeyHex: `0x${"ab".repeat(32)}`,
+      terms: { feeMinor: 2500, currency: "USD" },
+    };
+    const published = await env.rpc("tlp1", "rendezvous_publish_listing", args);
+    assert.ok(published.listingId, JSON.stringify(published));
+    assert.deepEqual(chainSnapshot(env.service, runA), before);
+    const receipt = env.service.preBindFeed("klp1").receipts.at(-1);
+    assert.equal(receipt.tool, "rendezvous_publish_listing");
+    assert.equal(receipt.argsDigestScheme, "hmac-sha256");
+    const salt = env.service.saltFor({ keyId: "klp1" }).salt;
+    assert.equal(receipt.argsDigest, saltedCanonicalDigest(salt, args));
+    assert.notEqual(receipt.argsDigest, saltedCanonicalDigest(env.service.saltFor({ runId: runA }).salt, args));
+  } finally { await env.close(); }
+});
+
+test("F4/F5: a pre-bind status read after a SETTLED run discloses priorRun + canBind; receipt on the pre-bind chain", async () => {
+  const env = await boot();
+  try {
+    const runA = await bindBoth(env, 390);
+    env.service.endRun(env.service.runFor(runA), "settled");
+    const before = chainSnapshot(env.service, runA);
+    const status = await env.rpc("tlb1", "contract_status", {});
+    assert.equal(status.terminalState, "settled", JSON.stringify(status));
+    assert.equal(status.priorRun, true);
+    assert.equal(status.canBind, true);
+    assert.deepEqual(chainSnapshot(env.service, runA), before);
+    const receipt = env.service.preBindFeed("klb1").receipts.at(-1);
+    assert.equal(receipt.tool, "contract_status");
+    assert.equal(receipt.serverNonce, status.serverNonce);
+    // The caller really can bind: run B binds, linking the pre-bind head.
+    const runB = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(391, { initiator: { agentId: "9791" } }), runId: uuid(391),
+    });
+    assert.equal(runB.bound, true, JSON.stringify(runB));
+    assert.equal(bindReceipt(env.service, runB.runId).preBindHead, env.service.preBindFeed("klb1").head);
+    // A LIVE run's status carries neither marker.
+    const live = await env.rpc("tlb1", "contract_status", {});
+    assert.equal(live.terminalState, null);
+    assert.equal(live.priorRun, undefined);
+    assert.equal(live.canBind, undefined);
   } finally { await env.close(); }
 });

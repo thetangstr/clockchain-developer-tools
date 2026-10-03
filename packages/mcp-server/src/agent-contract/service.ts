@@ -334,6 +334,13 @@ export interface ContractService {
   canReceipt(run: ContractRun, principalKeyId: string): boolean;
   runFor(runId: string): ContractRun | undefined;
   runIdForPrincipal(keyId: string): string | undefined;
+  /**
+   * Pre-bind routing: true once the run has ended — terminal, TTL-expired, or
+   * half-bound past its bind deadline (#179). The run stays observable, but
+   * its seats are released (#176) and its chain no longer captures the bound
+   * keyIds' pre-bind calls.
+   */
+  runEnded(run: ContractRun): boolean;
   /** N4b-8 (gap 4): whether a run anchor is configured (contract_status uses it for the "disabled" summary). */
   readonly anchorConfigured: boolean;
   /** N4b-10 (D13): the configured settlement rail id — "simulated" or "stripe_test_mode" (contract_status reports it). */
@@ -2211,13 +2218,16 @@ export function createContractService(options: {
     },
     preBindSaltFor,
     endRun,
+    runEnded,
     runIdForPrincipal(keyId) {
       evictEnded();
       const runId = principalRuns.get(keyId);
       if (runId !== undefined) {
         const run = runs.get(runId);
         // Terminal-but-unexpired runs still resolve: contract_status and the
-        // receipt feed remain observable until the run's TTL evicts it.
+        // receipt feed remain observable until the run's TTL evicts it. The
+        // transport receipts an ENDED run's pre-bind calls on the keyId's
+        // pre-bind chain instead (see PRE_BIND_TOOLS in server.ts).
         if (run !== undefined) return runId;
       }
       // N4b-9 (F14): a terminal run whose in-memory record is gone (restart)

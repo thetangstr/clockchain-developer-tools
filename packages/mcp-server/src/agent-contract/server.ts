@@ -103,6 +103,14 @@ export function buildContractServer(options: {
 }): Server {
   const { principal, service } = options;
   const POLL_TOOLS = new Set(["rendezvous_inbox", "contract_status"]);
+  /**
+   * Calls an agent makes BEFORE it binds its next run. When the keyId's
+   * resolved run has ended, these are receipted on its pre-bind chain.
+   */
+  const PRE_BIND_TOOLS = new Set([
+    "rendezvous_publish_listing", "rendezvous_search", "rendezvous_send_invitation", "rendezvous_inbox",
+    "contract_bind_challenge", "contract_bind", "contract_status",
+  ]);
   const allowPoll = options.pollGate
     ?? keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
   const sessionFields = () => ({
@@ -130,6 +138,17 @@ export function buildContractServer(options: {
     const callArgs = request.params.arguments ?? {};
     const runId = service.runIdForPrincipal(principal.keyId);
     const run = runId === undefined ? undefined : service.runFor(runId);
+    // Pre-bind routing (live p6-l-2026-10-03-1): runIdForPrincipal keeps
+    // resolving an ENDED run (terminal, or released per #176/#179) until its
+    // TTL so contract_status stays observable — but that run must not capture
+    // the keyId's PRE-BIND calls for the next run. Those are receipted on the
+    // keyId's pre-bind chain (fresh segment after the bind seal), whose head
+    // the next run's bind receipt links. The ended run's chain is never
+    // appended to by them. Business tools (reads, terminal replays,
+    // ALREADY_TERMINAL refusals) keep using the run as before.
+    const receiptTargetFor = (r: ContractRun | undefined): ContractRun | undefined =>
+      r !== undefined && PRE_BIND_TOOLS.has(name) && service.runEnded(r) ? undefined : r;
+    let receiptRun = receiptTargetFor(run);
 
     // M4: cap-bearing calls (mandate_*, any amount-like argument key) carry
     // HMAC-SHA256(scopeSalt, canonicalJson(args)) — the observer feed cannot
@@ -137,15 +156,16 @@ export function buildContractServer(options: {
     // `runSalt`, or the principal's pre-bind salt when no run exists yet;
     // either is disclosed ONLY through the verifier-scoped endpoint.
     const argsScheme = isCapBearingCall(name, callArgs) ? "hmac-sha256" as const : "canonical" as const;
-    const argsDigest = argsScheme === "hmac-sha256"
-      ? saltedCanonicalDigest(run?.runSalt ?? service.preBindSaltFor(principal.keyId), callArgs)
+    const argsDigestFor = (target: ContractRun | undefined): string => argsScheme === "hmac-sha256"
+      ? saltedCanonicalDigest(target?.runSalt ?? service.preBindSaltFor(principal.keyId), callArgs)
       : canonicalDigest(callArgs);
+    let argsDigest = argsDigestFor(receiptRun);
 
     // N4b-3 receipts-first: the receipt is built AND schema-validated BEFORE
     // any dispatch — if it can't be built (bad session evidence, exhausted
     // budget) the action never runs. The refusal carries a generic code +
     // the serverNonce; internals never reach the agent.
-    const preflight = service.checkReceiptEvidence(run, principal, {
+    const preflight = service.checkReceiptEvidence(receiptRun, principal, {
       tool: name,
       argsDigest,
       argsDigestScheme: argsScheme,
@@ -158,18 +178,18 @@ export function buildContractServer(options: {
 
     const def = contractToolDef(name);
     if (def === undefined) {
-      return asResult(withReceipt(run, name, argsDigest, refusal("NOT_FOUND", serverNonce), serverNonce));
+      return asResult(withReceipt(receiptRun, name, argsDigest, refusal("NOT_FOUND", serverNonce), serverNonce));
     }
     if (!visible.has(name)) {
-      return asResult(withReceipt(run, name, argsDigest, refusal("ROLE_REFUSED", serverNonce), serverNonce));
+      return asResult(withReceipt(receiptRun, name, argsDigest, refusal("ROLE_REFUSED", serverNonce), serverNonce));
     }
 
     const parsed = z.object(def.schema).strict().safeParse(request.params.arguments ?? {});
     if (!parsed.success) {
       // Schema-invalid calls are receipted where a principal is known — the
       // malformed call is evidence too — then fail as JSON-RPC -32602.
-      if (run !== undefined && service.canReceipt(run, principal.keyId)) {
-        service.recordReceipt(run, {
+      if (receiptRun !== undefined && service.canReceipt(receiptRun, principal.keyId)) {
+        service.recordReceipt(receiptRun, {
           tool: name,
           argsDigest,
           principal: { role: principal.role, keyId: principal.keyId },
@@ -179,7 +199,7 @@ export function buildContractServer(options: {
           serverNonce,
           ...sessionFields(),
         });
-      } else if (run === undefined) {
+      } else if (receiptRun === undefined) {
         service.recordPreBind(principal, {
           tool: name,
           argsDigest,
@@ -203,7 +223,7 @@ export function buildContractServer(options: {
       outcome = issued.ok
         ? ok({ challenge: issued.challenge, expiresAt: issued.expiresAt, serverNonce })
         : refusal(issued.code, serverNonce);
-      return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
+      return asResult(recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme));
     }
 
     if (name === "contract_bind") {
@@ -229,7 +249,7 @@ export function buildContractServer(options: {
       };
       const { handshakeSessionId, ...bindRest } = bindData;
       const preRefuse = (code: ContractRefusalCode, transient?: { retryable: boolean; retryAfterMs?: number }) =>
-        asResult(recordAny(run, name, argsDigest, refusal(code, serverNonce, transient), serverNonce, argsScheme));
+        asResult(recordAny(receiptRun, name, argsDigest, refusal(code, serverNonce, transient), serverNonce, argsScheme));
       let certificate: unknown = bindRest.certificate;
       if (handshakeSessionId === undefined) {
         if (certificate === undefined) return preRefuse("PAYLOAD_INVALID");
@@ -240,6 +260,14 @@ export function buildContractServer(options: {
           resolved = await options.resolveCertificate(handshakeSessionId);
         } catch {
           resolved = { ok: false, code: "CONTRACT_UNAVAILABLE", retryable: true };
+        }
+        // PR #180 F2: the caller's live run may have ENDED during the await —
+        // re-resolve the receipt target (and the salt-scoped argsDigest) so
+        // a refusal never lands on a run that is now terminal.
+        const retarget = receiptTargetFor(receiptRun);
+        if (retarget !== receiptRun) {
+          receiptRun = retarget;
+          argsDigest = argsDigestFor(receiptRun);
         }
         if (!resolved.ok) {
           return preRefuse(resolved.code, { retryable: resolved.retryable, retryAfterMs: resolved.retryAfterMs });
@@ -262,7 +290,7 @@ export function buildContractServer(options: {
         outcome = refusal(bound.code, serverNonce);
         // A refused bind never creates or alters run state — with no run
         // the refusal lands on the principal's pre-bind chain (M1).
-        outcome = recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme);
+        outcome = recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme);
       } else {
         outcome = ok(bound.result);
       }
@@ -273,7 +301,7 @@ export function buildContractServer(options: {
     // that exceeds it is refused RATE_LIMITED (still receipted — the refusal
     // is evidence too).
     if (POLL_TOOLS.has(name) && !allowPoll(principal.keyId)) {
-      return asResult(recordAny(run, name, argsDigest, refusal("RATE_LIMITED", serverNonce), serverNonce, argsScheme));
+      return asResult(recordAny(receiptRun, name, argsDigest, refusal("RATE_LIMITED", serverNonce), serverNonce, argsScheme));
     }
 
     if (name === "contract_status") {
@@ -320,6 +348,9 @@ export function buildContractServer(options: {
                 error: job.anchors.terminal.error ?? null,
               },
             },
+            // PR #180 F4: the recovered terminal run is the caller's PRIOR run.
+            priorRun: true,
+            canBind: true,
             serverNonce,
           });
           return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
@@ -395,9 +426,14 @@ export function buildContractServer(options: {
         // responseDigest salted (responseEvidence) — never brute-forceable
         // from the observer feed.
         ...contractStatusReadView(run, principal.role),
+        // PR #180 F4: an ENDED run read pre-bind is the caller's PRIOR run —
+        // its terminalState is not the next run's; the caller may bind now.
+        ...(receiptRun === undefined ? { priorRun: true as const, canBind: true as const } : {}),
         serverNonce,
       });
-      outcome = recordCall(run, name, argsDigest, outcome, serverNonce, argsScheme);
+      // An ended run's status is still READ above; the receipt goes to
+      // the pre-bind chain (receiptRun undefined) — never appended to it.
+      outcome = recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme);
       return asResult(outcome);
     }
 
@@ -411,8 +447,11 @@ export function buildContractServer(options: {
     // filesystem error (and its stateDir path) verbatim.
     let dispatched: Awaited<ReturnType<typeof service.business.dispatch>>;
     try {
+      // PR #180 F1: dispatch with the receipt target — for a pre-bind tool
+      // whose run ENDED that is no run, so a `*` sender's invitation is
+      // stamped unproven-pre-bind, never the released binding's agentId.
       dispatched = await service.business.dispatch(
-        principal, run, name, parsed.data, serverNonce,
+        principal, receiptRun, name, parsed.data, serverNonce,
       );
     } catch {
       dispatched = { ok: false as const, code: "CONTRACT_UNAVAILABLE" as const };
@@ -420,7 +459,7 @@ export function buildContractServer(options: {
     outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
     // D8: the dispatch may carry extra server-derived receipt fields (e.g.
     // an invitation's senderProof disclosure).
-    return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme,
+    return asResult(recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme,
       dispatched.ok ? dispatched.receiptFields : undefined));
   });
 
