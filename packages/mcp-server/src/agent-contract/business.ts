@@ -169,6 +169,79 @@ function pad4(n: number): string {
   return String(n).padStart(4, "0");
 }
 
+/** The counterparty's LATEST live offer — the only acceptable one. */
+export function latestCounterpartyOffer(run: ContractRun, role: ContractRole): OfferRecord | undefined {
+  let latest: OfferRecord | undefined;
+  for (const offer of run.offers.values()) {
+    if (offer.state === "live" && offer.role !== role &&
+      (latest === undefined || offer.seq > latest.seq)) {
+      latest = offer;
+    }
+  }
+  return latest;
+}
+
+/** Offers `contract_status` lists, newest first. */
+export const STATUS_MAX_OFFERS = 8;
+
+/**
+ * AGENT-TOOLS-BY-REFERENCE S1 + S2: the read-only negotiation, agreement,
+ * booking and cancellation views `contract_status` adds for a bound caller.
+ * Scoped to the caller's own run (the run is resolved from its token) and
+ * role (`acceptable` is the counterparty's latest live offer — exactly what
+ * `offer_accept_prepare` would take, with no cap check, so it never hints at
+ * the mandate cap). Short typed values only: no envelopes, digests,
+ * signatures, payload objects or ticket details.
+ */
+export function contractStatusReadView(run: ContractRun, role: ContractRole): Record<string, unknown> {
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const offers = [...run.offers.values()]
+    .sort((a, b) => b.seq - a.seq)
+    .slice(0, STATUS_MAX_OFFERS)
+    .map((o) => ({
+      offerId: o.offerId,
+      by: o.role,
+      kind: o.payload.kind === "counter" ? "counter" : "offer",
+      inReplyTo: str(o.payload.inReplyTo),
+      itineraryId: str(o.payload.itineraryId),
+      currency: str(o.payload.currency),
+      fareMinor: o.payload.fareMinor,
+      feeMinor: o.payload.feeMinor,
+      totalMinor: o.payload.totalMinor,
+      note: str(o.payload.note),
+      state: o.state,
+      submittedAt: o.submittedAt,
+    }));
+  const open = run.terminalState === null && run.agreement === undefined;
+  const a = run.agreement;
+  const b = run.booking;
+  return {
+    negotiation: {
+      acceptable: open ? latestCounterpartyOffer(run, role)?.offerId ?? null : null,
+      offers,
+    },
+    agreement: a === undefined ? null : {
+      agreementId: a.agreementId,
+      offerId: a.offerId,
+      itineraryId: a.itineraryId,
+      currency: a.currency,
+      totalMinor: a.totalMinor,
+      formedAt: a.formedAt,
+    },
+    booking: b === undefined ? null : {
+      orderRef: b.orderRef,
+      pnr: b.pnr,
+      ticketCount: b.tickets.length,
+      bookedAt: b.bookedAt,
+      simulated: true,
+    },
+    cancellation: run.cancellation === undefined ? null : {
+      orderRef: run.cancellation.orderRef,
+      cancelledAt: run.cancellation.cancelledAt,
+    },
+  };
+}
+
 export function createBusinessOps(options: {
   signer: ContractSigner;
   now?: () => number;
@@ -451,18 +524,6 @@ export function createBusinessOps(options: {
       { payload, runId: run.runId, tool, role, nowMs: now() },
       options.signer,
     );
-  }
-
-  /** The counterparty's LATEST live offer — the only acceptable one. */
-  function latestCounterpartyOffer(run: ContractRun, role: ContractRole): OfferRecord | undefined {
-    let latest: OfferRecord | undefined;
-    for (const offer of run.offers.values()) {
-      if (offer.state === "live" && offer.role !== role &&
-        (latest === undefined || offer.seq > latest.seq)) {
-        latest = offer;
-      }
-    }
-    return latest;
   }
 
   /** The offer terms the v2 accept/booking/settlement payloads flatten. */
