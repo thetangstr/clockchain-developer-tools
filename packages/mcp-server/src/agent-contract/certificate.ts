@@ -56,6 +56,12 @@ export type CertificateVerdict =
       sessionKeyId: string;
       sessionPublicKey: string;
       result: Readonly<Record<string, unknown>>;
+      /**
+       * The last instant (ms epoch) this certificate still verifies:
+       * validUntilMs + the effective grace. Past it no bind can name this
+       * session — a run still missing a party then can never complete.
+       */
+      acceptUntilMs: number;
     }
   | { ok: false; code: "CERTIFICATE_INVALID" };
 
@@ -154,7 +160,8 @@ export function verifyCertificateEnvelope(
     const now = options.now ?? Date.now;
     const graceMs = Math.min(Math.max(options.graceMs ?? MAX_CERT_GRACE_MS, 0), MAX_CERT_GRACE_MS);
     if (now() < Number(BigInt(certificate.validFromMs as string))) return INVALID;
-    if (now() > Number(BigInt(certificate.validUntilMs as string)) + graceMs) return INVALID;
+    const acceptUntilMs = Number(BigInt(certificate.validUntilMs as string)) + graceMs;
+    if (now() > acceptUntilMs) return INVALID;
 
     const rootSignature = exactKeys(hskc.rootSignature, ["algorithm", "keyId", "publicKey", "signature"]);
     if (
@@ -204,6 +211,7 @@ export function verifyCertificateEnvelope(
       sessionKeyId: signer.keyId,
       sessionPublicKey: signer.publicKey,
       result,
+      acceptUntilMs,
     };
   } catch {
     return INVALID;
