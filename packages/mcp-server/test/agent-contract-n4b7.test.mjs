@@ -41,8 +41,7 @@ const HOST_ROOTS = Object.freeze([
   { kid: "root-test", fingerprint: createHash("sha256").update(Buffer.from(rawPublicKeyBase64(rootKey.publicKey), "base64")).digest("hex") },
 ]);
 
-function mintCertificate({ session, sessionId, parties }) {
-  const t = Date.now();
+function mintCertificate({ session, sessionId, parties, t = Date.now() }) {
   const certificate = {
     schema: "clockchain.host-session-key/v1",
     rootKid: "root-test",
@@ -151,6 +150,7 @@ function cert(sessionN, overrides = {}) {
   return mintCertificate({
     session: sessionKeys.get(sessionN),
     sessionId: uuid(sessionN),
+    ...(overrides.t !== undefined ? { t: overrides.t } : {}),
     parties: {
       initiator: { sessionKeyAddress: sessionEvm.initiator.address, agentId: "9501", ...overrides.initiator },
       responder: { sessionKeyAddress: sessionEvm.responder.address, agentId: "9502", ...overrides.responder },
@@ -452,6 +452,128 @@ test("late binding across a restart: the dropped run releases; its session can n
     });
     assert.equal(run2.bound, true, JSON.stringify(run2));
   } finally { await env2.close(); }
+});
+
+// Half-bound run release (live: scripted-2026-10-03-9/-10). The buyer bound
+// late, the provider's bind refused, and the buyer's token stayed seated on a
+// run that could never finish: no business tool (incl. contract_withdraw)
+// works until BOTH sides bind, so only the 24 h run TTL freed it. A run that
+// is still missing a party once its certificate window (validUntil + grace)
+// has passed can never complete — no bind can verify that certificate any
+// more — so it ends `expired_unbound` and releases its seats. The bound party
+// may also withdraw its own half-bound run before then.
+const CERT_WINDOW_MS = 10 * 60_000; // mintCertificate: validUntil = t + 10 min
+const GRACE_MS = 600_000;           // default (and maximum) certificate grace
+
+test("half-bound run: the bound buyer's token is released once the bind deadline passes (expired_unbound)", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "contract-n4b7-hb-"));
+  let now = Date.now();
+  const t0 = now;
+  const env = await boot({ stateDir, serviceOptions: { now: () => now } });
+  try {
+    const certA = cert(260, { t: t0 });
+    const runA = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: certA, runId: uuid(260),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(runA.bound, true, JSON.stringify(runA));
+    const status0 = await env.rpc("tlb1", "contract_status", {});
+    assert.equal(status0.stage, "handshake");
+    assert.equal(status0.terminalState, null);
+
+    // Inside the bind window the provider could still bind: the seat holds.
+    now = t0 + CERT_WINDOW_MS + GRACE_MS - 1_000;
+    const early = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: cert(261, { t: now }), runId: uuid(261),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(early.error, "STATE_REFUSED");
+    assert.equal(env.service.runFor(runA.runId).terminalState, null);
+
+    // Past validUntil + grace no bind can ever verify run A's certificate.
+    now = t0 + CERT_WINDOW_MS + GRACE_MS + 1_000;
+    const status1 = await env.rpc("tlb1", "contract_status", {});
+    assert.equal(status1.stage, "terminal", JSON.stringify(status1));
+    assert.equal(status1.terminalState, "expired_unbound");
+    // The provider can never join the dead run.
+    const lateProvider = await bindLate(env.rpc, "tlp1", {
+      keyId: "klp1", role: "provider", side: "responder", certificate: certA, runId: uuid(260),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(lateProvider.error, "CERTIFICATE_INVALID");
+    assert.equal(env.service.runFor(runA.runId).bound.provider, undefined);
+    // The buyer token binds a NEW run with no client action.
+    const runB = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(262, { t: now, initiator: { agentId: "9662" } }), runId: uuid(262),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(runB.bound, true, JSON.stringify(runB));
+    assert.equal(env.service.runFor(runB.runId).bound.buyer.agentId, "9662");
+    // Receipts stay intact: run A keeps its bind receipt and is terminal.
+    const runAState = env.service.runFor(runA.runId);
+    assert.equal(runAState.terminalState, "expired_unbound");
+    assert.equal(bindReceipt(env.service, runA.runId).principal.keyId, "klb1");
+    assert.equal(env.service.terminalJobFor(runA.runId).terminalState, "expired_unbound");
+  } finally { await env.close(); }
+});
+
+test("a fully bound run is NOT expired by the bind deadline", async () => {
+  let now = Date.now();
+  const t0 = now;
+  const env = await boot({ serviceOptions: { now: () => now } });
+  try {
+    const c = cert(270, { t: t0 });
+    const b = await bindLate(env.rpc, "tlb2", {
+      keyId: "klb2", role: "buyer", side: "initiator", certificate: c, runId: uuid(270),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(b.bound, true, JSON.stringify(b));
+    const p = await bindLate(env.rpc, "tlp2", {
+      keyId: "klp2", role: "provider", side: "responder", certificate: c, runId: uuid(270),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(p.bound, true, JSON.stringify(p));
+    now = t0 + CERT_WINDOW_MS + GRACE_MS + 60_000;
+    const status = await env.rpc("tlb2", "contract_status", {});
+    assert.equal(status.stage, "bound", JSON.stringify(status));
+    assert.equal(status.terminalState, null);
+    assert.equal(env.service.runFor(uuid(270)).terminalState, null);
+  } finally { await env.close(); }
+});
+
+test("half-bound run: the bound party may withdraw its own run; the counterparty can no longer join it", async () => {
+  const env = await boot();
+  try {
+    const certA = cert(280);
+    const runA = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: certA, runId: uuid(280),
+    });
+    assert.equal(runA.bound, true, JSON.stringify(runA));
+    // A different principal has no run — it cannot withdraw someone else's seat.
+    const stranger = await env.rpc("tlb2", "contract_withdraw", {});
+    assert.equal(stranger.error, "STATE_REFUSED");
+    assert.equal(env.service.runFor(runA.runId).terminalState, null);
+
+    const withdrawn = await env.rpc("tlb1", "contract_withdraw", {});
+    assert.equal(withdrawn.state, "withdrawn", JSON.stringify(withdrawn));
+    assert.equal(env.service.runFor(runA.runId).terminalState, "no_agreement");
+    // The provider's certificate is still inside its window, but the run
+    // ended: joining a terminal run is refused (no post-terminal seat).
+    const provider = await bindLate(env.rpc, "tlp1", {
+      keyId: "klp1", role: "provider", side: "responder", certificate: certA, runId: uuid(280),
+    });
+    assert.equal(provider.error, "STATE_REFUSED");
+    assert.equal(env.service.runFor(runA.runId).bound.provider, undefined);
+    // The buyer token is free for a new run right away.
+    const runB = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator",
+      certificate: cert(281, { initiator: { agentId: "9681" } }), runId: uuid(281),
+    });
+    assert.equal(runB.bound, true, JSON.stringify(runB));
+    // The withdraw receipt is on run A's chain.
+    assert.ok(env.service.receiptFeed(runA.runId).receipts.some((r) => r.tool === "contract_withdraw" && r.outcome === "ok"));
+  } finally { await env.close(); }
 });
 
 test("a late token cannot bind a certificate for someone else's agentId (HIGH-1)", async () => {

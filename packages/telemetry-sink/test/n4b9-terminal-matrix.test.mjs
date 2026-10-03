@@ -22,6 +22,7 @@ const PRODUCER_TERMINAL_STATES = [
   "budget_exhausted",
   "harness_error",
   "cancelled",
+  "expired_unbound",
 ];
 
 const sinkKeys = generateKeyPairSync("ed25519");

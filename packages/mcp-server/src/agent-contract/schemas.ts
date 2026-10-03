@@ -99,6 +99,9 @@ export const CONTRACT_TERMINAL_STATES = Object.freeze([
   "budget_exhausted",
   "harness_error",
   "cancelled",
+  // Half-bound run release: a run still missing a party once its handshake
+  // certificate can no longer verify (validUntil + grace) can never complete.
+  "expired_unbound",
 ] as const);
 
 const terminalState = z.enum(CONTRACT_TERMINAL_STATES);

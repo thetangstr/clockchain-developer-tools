@@ -157,6 +157,9 @@ export const TERMINAL_STATES = new Set([
   // "cancelled" — the close receipt must be accepted or a cancelled run can
   // never close on receipt authority.
   "cancelled",
+  // Half-bound run release: the contract server ends a run that never got
+  // both parties bound before its certificate expired with "expired_unbound".
+  "expired_unbound",
 ]);
 export type TerminalState =
   | "settled"
@@ -165,7 +168,8 @@ export type TerminalState =
   | "blocked_by_policy"
   | "budget_exhausted"
   | "harness_error"
-  | "cancelled";
+  | "cancelled"
+  | "expired_unbound";
 
 export type SinkRefusalCode =
   | "UNAUTHORIZED"

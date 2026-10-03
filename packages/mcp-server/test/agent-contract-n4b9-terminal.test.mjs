@@ -28,7 +28,7 @@ test("F10: every producer terminal state mints a receipt the sink vocabulary acc
   // duplicated here verbatim so producer-side drift is caught on this side.
   const sinkStates = new Set([
     "settled", "no_agreement", "verification_failed", "blocked_by_policy",
-    "budget_exhausted", "harness_error", "cancelled",
+    "budget_exhausted", "harness_error", "cancelled", "expired_unbound",
   ]);
   assert.deepEqual(new Set(CONTRACT_TERMINAL_STATES), sinkStates);
   for (const terminalState of CONTRACT_TERMINAL_STATES) {

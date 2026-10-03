@@ -867,6 +867,20 @@ export function createBusinessOps(options: {
         break;
     }
 
+    // Half-bound run release: the one party that DID bind may withdraw its
+    // own run while the counterparty never bound — otherwise its token stays
+    // seated until the bind deadline. `run` is the caller's own run
+    // (principalRuns), and the seat must be this principal's: no one can
+    // release another principal's seat.
+    if (
+      tool === "contract_withdraw" && run !== undefined && run.terminalState === null &&
+      (run.bound.buyer === undefined || run.bound.provider === undefined) &&
+      run.bound[principal.role]?.principalKeyId === principal.keyId
+    ) {
+      options.endRun(run, "no_agreement", principal);
+      return ok({ state: "withdrawn", serverNonce });
+    }
+
     // -- everything below needs a fully-bound live run -------------------------
     const gate = requireRun(run, tool);
     if (gate !== null) return gate;

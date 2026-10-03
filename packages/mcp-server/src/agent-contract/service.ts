@@ -138,6 +138,13 @@ export interface ContractRun {
   readonly resultDigest: string;
   readonly sessionPublicKey: string;
   readonly createdAtMs: number;
+  /**
+   * Half-bound run release: the run certificate's acceptUntilMs (validUntil +
+   * grace). Past it no bind can verify this session, so a run still missing a
+   * party can never complete — it ends `expired_unbound`, freeing its seats.
+   * Absent on runs built outside bind (never expires this way).
+   */
+  readonly bindDeadlineMs?: number;
   readonly bound: Partial<Record<ContractRole, BoundRole>>;
   readonly receipts: ServerReceipt[];
   /** N3: each principal has its OWN receipt budget within a run. */
@@ -1120,8 +1127,36 @@ export function createContractService(options: {
     return "ok";
   }
 
+  /**
+   * Half-bound run release: the run is still missing a party and its
+   * certificate's bind window (validUntil + grace) has closed — no bind can
+   * ever verify it again, so the run can never become fully bound.
+   */
+  function unboundPastDeadline(run: ContractRun): boolean {
+    return run.terminalState === null &&
+      run.bindDeadlineMs !== undefined &&
+      now() > run.bindDeadlineMs &&
+      (run.bound.buyer === undefined || run.bound.provider === undefined);
+  }
+
   function runEnded(run: ContractRun): boolean {
-    return run.terminalState !== null || now() >= run.createdAtMs + runTtlMs;
+    return run.terminalState !== null || now() >= run.createdAtMs + runTtlMs || unboundPastDeadline(run);
+  }
+
+  /**
+   * Half-bound run release: make every dead half-bound run terminal
+   * `expired_unbound` (receipted terminal job, close + anchor like any other
+   * terminal transition). The seat release itself does not depend on this
+   * succeeding — runEnded already treats such a run as ended — so a failed
+   * durable enqueue only defers the terminal record to the next sweep.
+   */
+  function expireUnboundRuns(): void {
+    for (const run of runs.values()) {
+      if (!unboundPastDeadline(run)) continue;
+      try {
+        endRun(run, "expired_unbound");
+      } catch { /* fail-closed enqueue: retried on the next sweep */ }
+    }
   }
 
   /**
@@ -1188,6 +1223,7 @@ export function createContractService(options: {
    * capacity pressure — evidence survives the terminal transition.
    */
   function evictEnded(): void {
+    expireUnboundRuns();
     for (const [runId, run] of runs) {
       if (now() >= run.createdAtMs + runTtlMs) dropRun(runId);
     }
@@ -1406,6 +1442,10 @@ export function createContractService(options: {
         if (occupant.principalKeyId !== principal.keyId) return { ok: false, code: "SEAT_TAKEN" };
         return idempotentOutcome(existing, principal.role, occupant.boundAt, evidence.serverNonce);
       }
+      // Half-bound run release: an ended run (withdrawn, expired_unbound, …)
+      // never takes a new seat — no post-terminal bind, no receipt appended
+      // after the terminal transition.
+      if (runEnded(existing)) return { ok: false, code: "STATE_REFUSED" };
       const otherRole: ContractRole = principal.role === "buyer" ? "provider" : "buyer";
       const other = existing.bound[otherRole];
       if (other !== undefined && (other.side === principal.side || other.principalKeyId === principal.keyId)) {
@@ -1451,6 +1491,7 @@ export function createContractService(options: {
       resultDigest: verdict.resultDigest,
       sessionPublicKey: verdict.sessionPublicKey,
       createdAtMs: now(),
+      bindDeadlineMs: verdict.acceptUntilMs,
       bound: {},
       receipts: [],
       receiptsByPrincipal: new Map(),
