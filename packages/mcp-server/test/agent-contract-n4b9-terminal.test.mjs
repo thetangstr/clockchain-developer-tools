@@ -204,6 +204,9 @@ test("F14: a service restart recovers pending anchor + close jobs and mints thei
     assert.equal(service.runIdForPrincipal("kb1"), runId);
     const st = await envB.callTool("tb1", "contract_status", {});
     assert.equal(st.terminalState, "no_agreement");
+    // PR #180 F4: the recovered terminal run is disclosed as the PRIOR run.
+    assert.equal(st.priorRun, true);
+    assert.equal(st.canBind, true);
     assert.equal(st.telemetryClose.status, "delivered");
     assert.equal(st.anchors.terminal.status, "anchored");
     assert.equal(statusSchema.safeParse(st).success, true, JSON.stringify(statusSchema.safeParse(st).error));

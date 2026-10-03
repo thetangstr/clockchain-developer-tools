@@ -146,9 +146,9 @@ export function buildContractServer(options: {
     // the next run's bind receipt links. The ended run's chain is never
     // appended to by them. Business tools (reads, terminal replays,
     // ALREADY_TERMINAL refusals) keep using the run as before.
-    const receiptRun = run !== undefined && PRE_BIND_TOOLS.has(name) && service.runEnded(run)
-      ? undefined
-      : run;
+    const receiptTargetFor = (r: ContractRun | undefined): ContractRun | undefined =>
+      r !== undefined && PRE_BIND_TOOLS.has(name) && service.runEnded(r) ? undefined : r;
+    let receiptRun = receiptTargetFor(run);
 
     // M4: cap-bearing calls (mandate_*, any amount-like argument key) carry
     // HMAC-SHA256(scopeSalt, canonicalJson(args)) — the observer feed cannot
@@ -156,9 +156,10 @@ export function buildContractServer(options: {
     // `runSalt`, or the principal's pre-bind salt when no run exists yet;
     // either is disclosed ONLY through the verifier-scoped endpoint.
     const argsScheme = isCapBearingCall(name, callArgs) ? "hmac-sha256" as const : "canonical" as const;
-    const argsDigest = argsScheme === "hmac-sha256"
-      ? saltedCanonicalDigest(receiptRun?.runSalt ?? service.preBindSaltFor(principal.keyId), callArgs)
+    const argsDigestFor = (target: ContractRun | undefined): string => argsScheme === "hmac-sha256"
+      ? saltedCanonicalDigest(target?.runSalt ?? service.preBindSaltFor(principal.keyId), callArgs)
       : canonicalDigest(callArgs);
+    let argsDigest = argsDigestFor(receiptRun);
 
     // N4b-3 receipts-first: the receipt is built AND schema-validated BEFORE
     // any dispatch — if it can't be built (bad session evidence, exhausted
@@ -260,6 +261,14 @@ export function buildContractServer(options: {
         } catch {
           resolved = { ok: false, code: "CONTRACT_UNAVAILABLE", retryable: true };
         }
+        // PR #180 F2: the caller's live run may have ENDED during the await —
+        // re-resolve the receipt target (and the salt-scoped argsDigest) so
+        // a refusal never lands on a run that is now terminal.
+        const retarget = receiptTargetFor(receiptRun);
+        if (retarget !== receiptRun) {
+          receiptRun = retarget;
+          argsDigest = argsDigestFor(receiptRun);
+        }
         if (!resolved.ok) {
           return preRefuse(resolved.code, { retryable: resolved.retryable, retryAfterMs: resolved.retryAfterMs });
         }
@@ -339,6 +348,9 @@ export function buildContractServer(options: {
                 error: job.anchors.terminal.error ?? null,
               },
             },
+            // PR #180 F4: the recovered terminal run is the caller's PRIOR run.
+            priorRun: true,
+            canBind: true,
             serverNonce,
           });
           return asResult(recordAny(run, name, argsDigest, outcome, serverNonce, argsScheme));
@@ -414,6 +426,9 @@ export function buildContractServer(options: {
         // responseDigest salted (responseEvidence) — never brute-forceable
         // from the observer feed.
         ...contractStatusReadView(run, principal.role),
+        // PR #180 F4: an ENDED run read pre-bind is the caller's PRIOR run —
+        // its terminalState is not the next run's; the caller may bind now.
+        ...(receiptRun === undefined ? { priorRun: true as const, canBind: true as const } : {}),
         serverNonce,
       });
       // An ended run's status is still READ above; the receipt goes to
@@ -432,8 +447,11 @@ export function buildContractServer(options: {
     // filesystem error (and its stateDir path) verbatim.
     let dispatched: Awaited<ReturnType<typeof service.business.dispatch>>;
     try {
+      // PR #180 F1: dispatch with the receipt target — for a pre-bind tool
+      // whose run ENDED that is no run, so a `*` sender's invitation is
+      // stamped unproven-pre-bind, never the released binding's agentId.
       dispatched = await service.business.dispatch(
-        principal, run, name, parsed.data, serverNonce,
+        principal, receiptRun, name, parsed.data, serverNonce,
       );
     } catch {
       dispatched = { ok: false as const, code: "CONTRACT_UNAVAILABLE" as const };

@@ -627,6 +627,11 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         "terminal",
       ]),
       terminalState: terminalState.nullable(),
+      // PR #180 F4: present (true) only when the status is read pre-bind
+      // from an ENDED run — that run is the caller's PRIOR run, and the
+      // caller may bind a new one.
+      priorRun: z.literal(true).optional(),
+      canBind: z.literal(true).optional(),
       // N4b-10 (D13): settlement rail visibility — absent on pre-bind and
       // recovered-terminal statuses (the durable job carries no rail state).
       settlement: z.object({
