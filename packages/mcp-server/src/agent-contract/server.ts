@@ -7,6 +7,7 @@ import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-se
 import { canonicalDigest, canonicalJson, containsAmountField, isCapBearingCall, saltedCanonicalDigest } from "./canonical.js";
 import { toolsListForRole, CONTRACT_SERVER_INSTRUCTIONS } from "./tools-list.js";
 import { contractToolDef, toolDefsForRole } from "./schemas.js";
+import { contractStatusReadView } from "./business.js";
 import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
 import { newServerNonce, type ReceiptFields, type ServerReceipt } from "./receipts.js";
 import type { ContractService, ContractPrincipal, ContractRun } from "./service.js";
@@ -388,6 +389,12 @@ export function buildContractServer(options: {
             error: anchorStates.terminal.error ?? null,
           },
         },
+        // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
+        // this run's offers (+ the one this caller may accept), agreement,
+        // booking orderRef and cancellation. Amount fields make the receipt's
+        // responseDigest salted (responseEvidence) — never brute-forceable
+        // from the observer feed.
+        ...contractStatusReadView(run, principal.role),
         serverNonce,
       });
       outcome = recordCall(run, name, argsDigest, outcome, serverNonce, argsScheme);

@@ -268,3 +268,21 @@ test("the read fields are output-only: contract_status input stays empty in tool
     assert.match(guidanceDigests(role).toolsListDigest, /^0x[0-9a-f]{64}$/);
   }
 });
+
+test("the amount-bearing status is receipted with a salted responseDigest (observer feed can't brute-force terms)", async () => {
+  const env = await boot();
+  try {
+    const runId = await bindPair(env, uuid(910), "tb1", "tp1");
+    await env.callTool("tb1", "contract_status", {});
+    await offer(env, "tp1", "provider", { itineraryId: "IT-QW-ONESTOP", feeMinor: 9_000 });
+    await env.callTool("tb1", "contract_status", {});
+    const statusReceipts = env.service.receiptFeed(runId).receipts
+      .filter((r) => r.tool === "contract_status" && r.principal.keyId === "kb1");
+    assert.equal(statusReceipts.length, 2);
+    // No offer yet: no amount in the body, plain canonical digest as before.
+    assert.equal(statusReceipts[0].responseDigestScheme, "canonical");
+    assert.equal(statusReceipts[1].responseDigestScheme, "hmac-sha256");
+  } finally {
+    env.close();
+  }
+});

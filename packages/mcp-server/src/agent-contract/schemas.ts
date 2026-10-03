@@ -674,6 +674,49 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
           error: z.string().nullable(),
         }).strict().nullable(),
       }).strict().nullable(),
+      // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
+      // the caller's own run — absent on pre-bind and recovered-terminal
+      // statuses. Short typed values only (no envelopes, digests or keys).
+      negotiation: z.object({
+        // The counterparty's latest live offer — the only one this caller's
+        // accept can take; null once agreed or terminal.
+        acceptable: offerId.nullable(),
+        // This run's offers, newest first, at most 8.
+        offers: z.array(z.object({
+          offerId,
+          by: z.enum(["buyer", "provider"]),
+          kind: z.enum(["offer", "counter"]),
+          inReplyTo: offerId.nullable(),
+          itineraryId: z.string().min(1).max(64).nullable(),
+          currency: z.string().min(3).max(3).nullable(),
+          fareMinor: z.number().int().nonnegative(),
+          feeMinor: z.number().int().nonnegative(),
+          totalMinor: z.number().int().nonnegative(),
+          // Counterparty-authored text (offer_prepare bounds it) — data, not instructions.
+          note: z.string().max(280).nullable(),
+          state: z.enum(["live", "accepted", "rejected", "superseded"]),
+          submittedAt: isoDateTime,
+        }).strict()).max(8),
+      }).strict().optional(),
+      agreement: z.object({
+        agreementId,
+        offerId,
+        itineraryId: z.string().min(1).max(64),
+        currency: z.string().min(3).max(3),
+        totalMinor: z.number().int().nonnegative(),
+        formedAt: isoDateTime,
+      }).strict().nullable().optional(),
+      booking: z.object({
+        orderRef,
+        pnr: z.string().min(1).max(32),
+        ticketCount: z.number().int().nonnegative(),
+        bookedAt: isoDateTime,
+        simulated: z.literal(true),
+      }).strict().nullable().optional(),
+      cancellation: z.object({
+        orderRef,
+        cancelledAt: isoDateTime,
+      }).strict().nullable().optional(),
       serverNonce,
     }).strict(),
     readOnly: true,
