@@ -193,21 +193,38 @@ export function createHandshakeReceiptStore(options: {
 }): HandshakeReceiptStore {
   const chains = new Map<string, ServerReceipt[]>();
   const capped = new Set<string>();
+  // Sessions whose chain was dropped (evicted/corrupt): never re-genesised, so no forked chain is ever served.
+  const poisoned = new Set<string>();
   const { signer, file } = options;
 
   if (file !== undefined && existsSync(file)) {
-    try {
-      for (const line of readFileSync(file, "utf8").split("\n")) {
-        if (line.trim() === "") continue;
+    let text = "";
+    try { text = readFileSync(file, "utf8"); } catch { text = ""; }
+    for (const line of text.split("\n")) {
+      if (line.trim() === "") continue;
+      // One torn/corrupt line skips only itself; a chain broken by it is refused below.
+      try {
         const parsed = serverReceiptSchema.safeParse(JSON.parse(line));
         if (!parsed.success || parsed.data.surface !== "handshake") continue;
         const chain = chains.get(parsed.data.runId) ?? [];
+        if (chain.length >= MAX_RECEIPTS_PER_SESSION) { capped.add(parsed.data.runId); continue; }
         chain.push(parsed.data);
         chains.set(parsed.data.runId, chain);
+      } catch { /* skip this line */ }
+    }
+    // A reloaded chain must still link (prevHash) or it is dropped and never extended.
+    for (const [id, chain] of [...chains]) {
+      let ok = true;
+      for (let i = 0; i < chain.length; i += 1) {
+        const expected = i === 0 ? RECEIPT_CHAIN_GENESIS : canonicalDigest(chain[i - 1]);
+        if (chain[i]!.prevHash !== expected) { ok = false; break; }
       }
-    } catch {
-      // A corrupt receipts file never blocks the handshake; chains reload empty.
-      chains.clear();
+      if (!ok) { chains.delete(id); capped.delete(id); poisoned.add(id); }
+    }
+    while (chains.size > MAX_SESSIONS) {
+      const oldest = chains.keys().next().value;
+      if (oldest === undefined) break;
+      chains.delete(oldest); capped.delete(oldest); poisoned.add(oldest);
     }
   }
 
@@ -226,12 +243,12 @@ export function createHandshakeReceiptStore(options: {
 
   return {
     append(sessionId, fields) {
-      if (!UUID.test(sessionId)) return undefined;
+      if (!UUID.test(sessionId) || poisoned.has(sessionId)) return undefined;
       let chain = chains.get(sessionId);
       if (chain === undefined) {
         if (chains.size >= MAX_SESSIONS) {
           const oldest = chains.keys().next().value;
-          if (oldest !== undefined) { chains.delete(oldest); capped.delete(oldest); }
+          if (oldest !== undefined) { chains.delete(oldest); capped.delete(oldest); poisoned.add(oldest); }
         }
         chain = [];
         chains.set(sessionId, chain);
@@ -398,7 +415,9 @@ export function createHandshakeReceiptRecorder(options: {
     void (async () => {
       let certificate: unknown;
       try {
-        const envelope = options.getCertificate ? await options.getCertificate(sessionId) : undefined;
+        const envelope = options.getCertificate
+          ? await Promise.race([options.getCertificate(sessionId), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 5_000).unref())])
+          : undefined;
         const e = envelope as { result?: { sessionId?: unknown } } | null | undefined;
         if (e && typeof e === "object" && e.result?.sessionId === sessionId) certificate = envelope;
       } catch {

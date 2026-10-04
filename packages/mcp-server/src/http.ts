@@ -509,7 +509,8 @@ export async function runHttp(): Promise<Server> {
         allowFeed: () => allowHandshakeReceiptFeed("observer"),
         onRateLimited: () => rlEvents.inc({ surface: bounded("handshake_call", RL_SURFACES) }),
       });
-    } catch {
+    } catch (error) {
+      console.error(`[clockchain-mcp] handshake v2 receipts unavailable (recording off): ${error instanceof Error ? error.name : "error"}`);
       return undefined;
     }
     return handshakeReceiptRecorder;
