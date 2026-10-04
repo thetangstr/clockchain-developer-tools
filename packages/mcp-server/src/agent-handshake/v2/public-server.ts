@@ -9,6 +9,7 @@ import { isV2RetryableToolError, registerV2PublicTools, V2_PUBLIC_TOOL_NAMES, ty
 import { readV2RoleAccessPayload, V2RoleAccessError } from "./access.js";
 import { handshakeStateDir } from "../../handshake-core/durable-store.js";
 import { createHandleMap } from "../../handshake-core/handle-map.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { HANDSHAKE_RECEIPT_META_KEY, type HandshakeReceiptEcho, type HandshakeReceiptRecorder, type RawInvokeHook } from "./receipts.js";
 
 export { V2_PUBLIC_TOOL_NAMES } from "./public-tools.js";
@@ -153,11 +154,11 @@ function createRoleAccessBroker(
   };
 }
 
-export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2PublicInvoke; metaFor?: () => Record<string, unknown> | undefined }): McpServer {
+export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2PublicInvoke; metaFor?: () => Record<string, unknown> | undefined; scope?: <T>(run: () => Promise<T>) => Promise<T> }): McpServer {
   const server = new McpServer({ name: "clockchain-agent-handshake", version: V2_HELPER_VERSION }, {
     instructions: buildV2Instructions(options.pin),
   });
-  registerV2PublicTools(server, options.invoke, options.metaFor);
+  registerV2PublicTools(server, options.invoke, options.metaFor, options.scope);
   return server;
 }
 
@@ -210,13 +211,22 @@ export function createV2PublicHttpHandler(options: {
       return;
     }
     // Opt-in nonce echo: only when the request carries x-clockchain-receipt: 1 AND recording is on.
-    let echo: HandshakeReceiptEcho | undefined;
-    const receiptHook = options.receipts?.hookFor({ headers: req.headers, ip, onEcho: (e) => { echo = e; } });
+    // The echo lives in a per-tool-call async scope, so concurrent calls on one request (a JSON-RPC batch)
+    // can never read each other's receipt.
+    const echoScope = new AsyncLocalStorage<{ echo?: HandshakeReceiptEcho }>();
+    const receiptHook = options.receipts?.hookFor({
+      headers: req.headers,
+      ip,
+      onEcho: (e) => { const store = echoScope.getStore(); if (store !== undefined) store.echo = e; },
+    });
     const server = buildV2PublicServer({
       pin: options.pin,
-      metaFor: () => echo === undefined ? undefined : { [HANDSHAKE_RECEIPT_META_KEY]: { ...echo } },
+      scope: (run) => echoScope.run({}, run),
+      metaFor: () => {
+        const echo = echoScope.getStore()?.echo;
+        return echo === undefined ? undefined : { [HANDSHAKE_RECEIPT_META_KEY]: { ...echo } };
+      },
       invoke: async (name, args) => {
-        echo = undefined;
         if (name === "agent_handshake_invite") {
           const inviteKey = `invite:${ip}`;
           if (!allowInvite.acquire(inviteKey)) {

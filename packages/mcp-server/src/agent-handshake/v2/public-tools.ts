@@ -161,6 +161,8 @@ export function registerV2PublicTools(
   invoke: V2PublicInvoke,
   /** Opt-in: extra result `_meta` for the call just made (receipt nonce echo). Absent/undefined = result unchanged. */
   metaFor?: () => Record<string, unknown> | undefined,
+  /** Opt-in: runs one tool call inside its own scope so concurrent calls (a JSON-RPC batch) never share an echo. */
+  scope?: <T>(run: () => Promise<T>) => Promise<T>,
 ): void {
   for (const definition of definitions) {
     server.registerTool(definition.name, {
@@ -174,6 +176,7 @@ export function registerV2PublicTools(
         openWorldHint: false,
       },
     }, async (args: Record<string, unknown>) => {
+      const run = async (): Promise<Record<string, unknown>> => {
       const withMeta = <T extends Record<string, unknown>>(response: T): T => {
         const meta = metaFor?.();
         return meta === undefined ? response : { ...response, _meta: meta };
@@ -245,6 +248,8 @@ export function registerV2PublicTools(
           ? { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body }
           : { isError: true, content: [{ type: "text", text: JSON.stringify(body) }] });
       }
+      };
+      return scope === undefined ? run() : scope(run);
     });
   }
 }

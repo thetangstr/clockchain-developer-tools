@@ -182,3 +182,31 @@ test("nonce echo: a call that is not attributable (forged access) is not echoed"
     assert.ok(!r.text.includes("clockchain/receipt"));
   } finally { await on.close(); }
 });
+
+test("nonce echo: concurrent calls in one JSON-RPC batch each get their own receipt's nonce", async () => {
+  const on = await serve({ withReceipts: true });
+  try {
+    const call = (id, name, args) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+    const response = await fetch(`${on.base}/handshake/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: ACCEPT, ...ECHO },
+      body: JSON.stringify([
+        call(1, "agent_handshake_status", { access: access("initiator") }),
+        call(2, "agent_handshake_next", { access: access("responder"), waitMs: 0 }),
+        call(3, "agent_handshake_get_certificate", { access: access("initiator") }),
+      ]),
+    });
+    const text = await response.text();
+    const messages = text.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)));
+    const chain = on.recorder.store.receipts(SESSION);
+    const toolOf = { 1: "agent_handshake_status", 2: "agent_handshake_next", 3: "agent_handshake_get_certificate" };
+    assert.equal(messages.length, 3, text);
+    for (const m of messages) {
+      const e = m.result._meta["clockchain/receipt"];
+      const receipt = chain.find((r) => r.serverNonce === e.serverNonce);
+      assert.ok(receipt, "echoed nonce names a real receipt");
+      assert.equal(receipt.tool, toolOf[m.id]);
+    }
+    assert.equal(new Set(messages.map((m) => m.result._meta["clockchain/receipt"].serverNonce)).size, 3);
+  } finally { await on.close(); }
+});
