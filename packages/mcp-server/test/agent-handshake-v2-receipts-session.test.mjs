@@ -145,3 +145,17 @@ test("stateful call responses and echo meta match the stateless shape; echo hash
     assert.equal(chain[1].mcpSessionId, undefined);
   } finally { await s.close(); }
 });
+
+test("session objects are not leaked by failed initializes; per-IP session cap falls back to stateless", async () => {
+  const s = await serve();
+  try {
+    // bad Accept: SDK refuses with 406, no session minted
+    const bad = await post(s.url, { jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, { ...OPT, accept: "application/json" });
+    assert.equal(bad.status, 406);
+    await bad.text();
+    const ids = new Set();
+    for (let i = 0; i < 8; i += 1) ids.add(await initialize(s.url));
+    assert.equal(ids.size, 8);
+    assert.equal(await initialize(s.url), null); // 9th from the same IP: stateless fallback
+  } finally { await s.close(); }
+});

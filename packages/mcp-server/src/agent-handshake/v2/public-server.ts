@@ -167,13 +167,15 @@ export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2Publ
 /** Opted-in (x-clockchain-receipt: 1) MCP sessions kept so receipts can carry the transport's `mcp-session-id`. */
 const RECEIPT_SESSION_TTL_MS = 10 * 60_000;
 const MAX_RECEIPT_SESSIONS = 256;
-const MAX_INITIALIZE_BODY = 64 * 1024;
+const MAX_INITIALIZE_BODY = 4 * 1024 * 1024; // the SDK's own default body limit
+const MAX_RECEIPT_SESSIONS_PER_IP = 8;
 
 interface ReceiptSession {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
   id?: string;
   lastSeenMs: number;
+  ip: string;
   reqScope: AsyncLocalStorage<{ ip: string; hook: RawInvokeHook | undefined }>;
 }
 
@@ -302,7 +304,10 @@ export function createV2PublicHttpHandler(options: {
         }
         return;
       }
-      if (req.method === "POST" && sid.length === 0 && firstHeader(req.headers[HANDSHAKE_RECEIPT_ECHO_HEADER]) === "1") {
+      // Only a well-formed JSON POST is pre-read (anything else keeps the SDK's own 406/415 handling untouched).
+      const accept = firstHeader(req.headers.accept);
+      const wellFormed = /^application\/json\b/i.test(firstHeader(req.headers["content-type"])) && accept.includes("application/json") && accept.includes("text/event-stream");
+      if (req.method === "POST" && wellFormed && sid.length === 0 && firstHeader(req.headers[HANDSHAKE_RECEIPT_ECHO_HEADER]) === "1") {
         parsedBody = await readJsonBody(req, MAX_INITIALIZE_BODY);
         if (parsedBody === undefined) {
           res.writeHead(400, { "content-type": "application/json" });
@@ -310,7 +315,7 @@ export function createV2PublicHttpHandler(options: {
           return;
         }
         const isInit = typeof parsedBody === "object" && parsedBody !== null && !Array.isArray(parsedBody) && (parsedBody as { method?: unknown }).method === "initialize";
-        if (isInit && receiptSessions.size < MAX_RECEIPT_SESSIONS && options.receipts.hookFor({ headers: req.headers, ip }) !== undefined) {
+        if (isInit && receiptSessions.size < MAX_RECEIPT_SESSIONS && [...receiptSessions.values()].filter((x) => x.ip === ip).length < MAX_RECEIPT_SESSIONS_PER_IP && options.receipts.hookFor({ headers: req.headers, ip }) !== undefined) {
           const echoScope = new AsyncLocalStorage<{ echo?: HandshakeReceiptEcho }>();
           const reqScope = new AsyncLocalStorage<{ ip: string; hook: RawInvokeHook | undefined }>();
           const server = buildV2PublicServer({
@@ -325,7 +330,7 @@ export function createV2PublicHttpHandler(options: {
               return runTool(ctx?.ip ?? ip, ctx?.hook, name, args);
             },
           });
-          const sess: ReceiptSession = { transport: undefined as never, server, lastSeenMs: now(), reqScope };
+          const sess: ReceiptSession = { transport: undefined as never, server, lastSeenMs: now(), ip, reqScope };
           echoScopes.set(sess, echoScope);
           const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
@@ -337,7 +342,10 @@ export function createV2PublicHttpHandler(options: {
           try {
             await server.connect(transport);
             await reqScope.run({ ip, hook: undefined }, () => transport.handleRequest(req, res, parsedBody));
+            // An initialize that never produced a session (406/415/invalid) must not leak its server/transport.
+            if (sess.id === undefined) { echoScopes.delete(sess); void transport.close().catch(() => {}); void server.close().catch(() => {}); }
           } catch {
+            echoScopes.delete(sess); void transport.close().catch(() => {}); void server.close().catch(() => {});
             if (!res.headersSent) {
               res.writeHead(500, { "content-type": "application/json", "cache-control": "no-store" });
               res.end(JSON.stringify({ error: "internal_error" }));
