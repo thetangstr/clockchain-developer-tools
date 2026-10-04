@@ -20,6 +20,12 @@ test("F16: Rome family of 4 — partySize issues 4 tickets and verification reco
 
     const looked = await env.callTool("tb1", "booking_lookup", { orderRef: booked.orderRef });
     assert.equal(looked.observation.ticketCount, 4);
+    // the booking's own party size (the principal-signed mandate's), so a buyer compares like with like
+    assert.equal(looked.observation.travellers, 4);
+    // never a caller input: the lookup schema is strict
+    const forged = await env.callTool("tb1", "booking_lookup", { orderRef: booked.orderRef, travellers: 9 });
+    assert.equal(forged.rpcError?.code, -32602, JSON.stringify(forged));
+    assert.equal(forged.observation, undefined);
 
     const prepV = await env.callTool("tb1", "verification_prepare", {
       orderRef: booked.orderRef, result: "match", findingsDigest: `0x${"dd".repeat(32)}`,
@@ -42,6 +48,10 @@ test("F16: a short booking can never verify as match — the model's match is fl
       mandateOverrides: { partySize: 4, capMinor: 700_000 },
     });
     assert.equal(booked.tickets.length, 5);
+    // the observation keeps the booked party size apart from what was issued: 4 booked, 5 tickets
+    const looked = await env.callTool("tb1", "booking_lookup", { orderRef: booked.orderRef });
+    assert.equal(looked.observation.travellers, 4);
+    assert.equal(looked.observation.ticketCount, 5);
 
     const prepV = await env.callTool("tb1", "verification_prepare", {
       orderRef: booked.orderRef, result: "match", findingsDigest: `0x${"ee".repeat(32)}`,

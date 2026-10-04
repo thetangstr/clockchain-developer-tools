@@ -97,6 +97,13 @@ export interface SimOrderObservation {
   itineraryId?: string;
   totalMinor?: number;
   currency?: string;
+  /**
+   * The party size the order was booked for — the server's own order record
+   * (the principal-signed mandate's partySize, never a caller input). Distinct
+   * from `ticketCount`, what was actually issued: a buyer compares the two.
+   * Absent on NOT_FOUND.
+   */
+  travellers?: number;
   ticketCount: number;
   observedAt: string;
   simulated: true;
@@ -453,6 +460,7 @@ function createSimRun(
         itineraryId: order.itineraryId,
         totalMinor: order.totalMinor,
         currency: order.currency,
+        travellers: order.travelerCount,
         ticketCount: order.tickets.length,
         observedAt: isoNow(),
         simulated: true,

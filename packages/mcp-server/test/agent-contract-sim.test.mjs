@@ -168,6 +168,8 @@ test("lookupOrder observes PENDING → ISSUED → CANCELLED and NOT_FOUND", () =
   assert.equal(pending.status, "PENDING");
   assert.equal(pending.pnr, order.pnr);
   assert.equal(pending.ticketCount, 0);
+  // the order's own party size is observed before any ticket exists
+  assert.equal(pending.travellers, order.travelerCount);
 
   const issued = run.issueTickets({ orderRef: order.orderRef });
   const issuedObs = run.lookupOrder({ orderRef: order.orderRef });
@@ -182,6 +184,7 @@ test("lookupOrder observes PENDING → ISSUED → CANCELLED and NOT_FOUND", () =
   const missing = run.lookupOrder({ orderRef: "ORD-ZZZZZZZZ" });
   assert.equal(missing.status, "NOT_FOUND");
   assert.equal(missing.simulated, true);
+  assert.equal("travellers" in missing, false, "an unknown order has no party size");
 });
 
 test("cancelOrder cancels visibly and replays the same record", () => {
