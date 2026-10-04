@@ -10,7 +10,8 @@ import { readV2RoleAccessPayload, V2RoleAccessError } from "./access.js";
 import { handshakeStateDir } from "../../handshake-core/durable-store.js";
 import { createHandleMap } from "../../handshake-core/handle-map.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { HANDSHAKE_RECEIPT_META_KEY, type HandshakeReceiptEcho, type HandshakeReceiptRecorder, type RawInvokeHook } from "./receipts.js";
+import { randomUUID } from "node:crypto";
+import { HANDSHAKE_RECEIPT_ECHO_HEADER, HANDSHAKE_RECEIPT_META_KEY, type HandshakeReceiptEcho, type HandshakeReceiptRecorder, type RawInvokeHook } from "./receipts.js";
 
 export { V2_PUBLIC_TOOL_NAMES } from "./public-tools.js";
 
@@ -162,6 +163,38 @@ export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2Publ
   return server;
 }
 
+
+/** Opted-in (x-clockchain-receipt: 1) MCP sessions kept so receipts can carry the transport's `mcp-session-id`. */
+const RECEIPT_SESSION_TTL_MS = 10 * 60_000;
+const MAX_RECEIPT_SESSIONS = 256;
+const MAX_INITIALIZE_BODY = 4 * 1024 * 1024; // the SDK's own default body limit
+const MAX_RECEIPT_SESSIONS_PER_IP = 8;
+
+interface ReceiptSession {
+  transport: StreamableHTTPServerTransport;
+  server: McpServer;
+  id?: string;
+  lastSeenMs: number;
+  ip: string;
+  reqScope: AsyncLocalStorage<{ ip: string; hook: RawInvokeHook | undefined }>;
+}
+
+async function readJsonBody(req: IncomingMessage, cap: number): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.length;
+    if (total > cap) return undefined;
+    chunks.push(buf);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
 export function createV2PublicHttpHandler(options: {
   pin: V2ReleasePin;
   invoke: V2PublicInvoke;
@@ -180,6 +213,40 @@ export function createV2PublicHttpHandler(options: {
   const allowInvite = limiter(options.invitePerHour ?? 5, 60 * 60_000, now);
   const allowCall = limiter(options.callsPerMinute ?? 120, 60_000, now);
   const invoke = createRoleAccessBroker(options.invoke, now, options.stateDir ?? handshakeStateDir("agent-handshake-v2"));
+  const receiptSessions = new Map<string, ReceiptSession>();
+  const echoScopes = new Map<ReceiptSession, AsyncLocalStorage<{ echo?: HandshakeReceiptEcho }>>();
+  const dropReceiptSession = (id: string, sess: ReceiptSession): void => {
+    receiptSessions.delete(id);
+    void sess.transport.close().catch(() => {});
+    void sess.server.close().catch(() => {});
+  };
+  const sweepReceiptSessions = (): void => {
+    const t = now();
+    for (const [id, sess] of receiptSessions) if (t - sess.lastSeenMs > RECEIPT_SESSION_TTL_MS) dropReceiptSession(id, sess);
+  };
+  if (options.receipts !== undefined) setInterval(sweepReceiptSessions, 60_000).unref?.();
+
+  // One tool call, rate-limited exactly as before; shared by the stateless and the opted-in stateful paths.
+  const runTool = async (ip: string, receiptHook: RawInvokeHook | undefined, name: string, args: Record<string, unknown>): Promise<unknown> => {
+    if (name === "agent_handshake_invite") {
+      const inviteKey = `invite:${ip}`;
+      if (!allowInvite.acquire(inviteKey)) {
+        options.onRateLimited?.("handshake_invite");
+        throw new V2RateLimitedError(allowInvite.retryAfterMs(inviteKey));
+      }
+      try {
+        return await invoke(name, args, receiptHook);
+      } catch (error) {
+        // Session-state transient rejections (consumed session, insufficient
+        // invitation runway, dependency breaker) mint nothing — refund the
+        // hourly budget so SOP-documented retry polling cannot self-lockout.
+        if (isV2RetryableToolError(error)) allowInvite.release(inviteKey);
+        throw error;
+      }
+    }
+    return invoke(name, args, receiptHook);
+  };
+
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = (req.url ?? "").split("?")[0];
     // Digest-addressed fetch for verbatim helperStep commands: the 256-bit
@@ -210,6 +277,84 @@ export function createV2PublicHttpHandler(options: {
       res.end(JSON.stringify({ error: "rate_limited" }));
       return;
     }
+    // Opt-in receipt sessions: a request that carries x-clockchain-receipt: 1 AND initializes an MCP session
+    // gets a stateful transport, so every receipt of that session carries the transport's `mcp-session-id`
+    // (the same evidence the contract server records). Requests without the opt-in header, requests that
+    // name no live session, and non-initialize requests all take the unchanged stateless path below.
+    let parsedBody: unknown;
+    if (options.receipts !== undefined) {
+      sweepReceiptSessions();
+      const sid = firstHeader(req.headers["mcp-session-id"]).trim();
+      const live = sid.length > 0 ? receiptSessions.get(sid) : undefined;
+      if (live !== undefined) {
+        live.lastSeenMs = now();
+        const mk = (): RawInvokeHook | undefined => options.receipts!.hookFor({
+          headers: req.headers,
+          ip,
+          mcpSessionId: live.id,
+          onEcho: (e) => { const store = echoScopes.get(live)?.getStore(); if (store !== undefined) store.echo = e; },
+        });
+        try {
+          await live.reqScope.run({ ip, hook: mk() }, () => live.transport.handleRequest(req, res));
+        } catch {
+          if (!res.headersSent) {
+            res.writeHead(500, { "content-type": "application/json", "cache-control": "no-store" });
+            res.end(JSON.stringify({ error: "internal_error" }));
+          }
+        }
+        return;
+      }
+      // Only a well-formed JSON POST is pre-read (anything else keeps the SDK's own 406/415 handling untouched).
+      const accept = firstHeader(req.headers.accept);
+      const wellFormed = /^application\/json\b/i.test(firstHeader(req.headers["content-type"])) && accept.includes("application/json") && accept.includes("text/event-stream");
+      if (req.method === "POST" && wellFormed && sid.length === 0 && firstHeader(req.headers[HANDSHAKE_RECEIPT_ECHO_HEADER]) === "1") {
+        parsedBody = await readJsonBody(req, MAX_INITIALIZE_BODY);
+        if (parsedBody === undefined) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32700, message: "Parse error: Invalid JSON" }, id: null }));
+          return;
+        }
+        const isInit = typeof parsedBody === "object" && parsedBody !== null && !Array.isArray(parsedBody) && (parsedBody as { method?: unknown }).method === "initialize";
+        if (isInit && receiptSessions.size < MAX_RECEIPT_SESSIONS && [...receiptSessions.values()].filter((x) => x.ip === ip).length < MAX_RECEIPT_SESSIONS_PER_IP && options.receipts.hookFor({ headers: req.headers, ip }) !== undefined) {
+          const echoScope = new AsyncLocalStorage<{ echo?: HandshakeReceiptEcho }>();
+          const reqScope = new AsyncLocalStorage<{ ip: string; hook: RawInvokeHook | undefined }>();
+          const server = buildV2PublicServer({
+            pin: options.pin,
+            scope: (run) => echoScope.run({}, run),
+            metaFor: () => {
+              const echo = echoScope.getStore()?.echo;
+              return echo === undefined ? undefined : { [HANDSHAKE_RECEIPT_META_KEY]: { ...echo } };
+            },
+            invoke: (name, args) => {
+              const ctx = reqScope.getStore();
+              return runTool(ctx?.ip ?? ip, ctx?.hook, name, args);
+            },
+          });
+          const sess: ReceiptSession = { transport: undefined as never, server, lastSeenMs: now(), ip, reqScope };
+          echoScopes.set(sess, echoScope);
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (id) => { sess.id = id; receiptSessions.set(id, sess); },
+            onsessionclosed: (id) => { receiptSessions.delete(id); },
+          });
+          (sess as { transport: StreamableHTTPServerTransport }).transport = transport;
+          transport.onclose = () => { if (sess.id !== undefined) receiptSessions.delete(sess.id); echoScopes.delete(sess); };
+          try {
+            await server.connect(transport);
+            await reqScope.run({ ip, hook: undefined }, () => transport.handleRequest(req, res, parsedBody));
+            // An initialize that never produced a session (406/415/invalid) must not leak its server/transport.
+            if (sess.id === undefined) { echoScopes.delete(sess); void transport.close().catch(() => {}); void server.close().catch(() => {}); }
+          } catch {
+            echoScopes.delete(sess); void transport.close().catch(() => {}); void server.close().catch(() => {});
+            if (!res.headersSent) {
+              res.writeHead(500, { "content-type": "application/json", "cache-control": "no-store" });
+              res.end(JSON.stringify({ error: "internal_error" }));
+            }
+          }
+          return;
+        }
+      }
+    }
     // Opt-in nonce echo: only when the request carries x-clockchain-receipt: 1 AND recording is on.
     // The echo lives in a per-tool-call async scope, so concurrent calls on one request (a JSON-RPC batch)
     // can never read each other's receipt.
@@ -226,31 +371,13 @@ export function createV2PublicHttpHandler(options: {
         const echo = echoScope.getStore()?.echo;
         return echo === undefined ? undefined : { [HANDSHAKE_RECEIPT_META_KEY]: { ...echo } };
       },
-      invoke: async (name, args) => {
-        if (name === "agent_handshake_invite") {
-          const inviteKey = `invite:${ip}`;
-          if (!allowInvite.acquire(inviteKey)) {
-            options.onRateLimited?.("handshake_invite");
-            throw new V2RateLimitedError(allowInvite.retryAfterMs(inviteKey));
-          }
-          try {
-            return await invoke(name, args, receiptHook);
-          } catch (error) {
-            // Session-state transient rejections (consumed session, insufficient
-            // invitation runway, dependency breaker) mint nothing — refund the
-            // hourly budget so SOP-documented retry polling cannot self-lockout.
-            if (isV2RetryableToolError(error)) allowInvite.release(inviteKey);
-            throw error;
-          }
-        }
-        return invoke(name, args, receiptHook);
-      },
+      invoke: (name, args) => runTool(ip, receiptHook, name, args),
     });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { void transport.close(); void server.close(); });
     try {
       await server.connect(transport);
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, parsedBody);
     } catch {
       if (!res.headersSent) {
         res.writeHead(500, { "content-type": "application/json", "cache-control": "no-store" });
