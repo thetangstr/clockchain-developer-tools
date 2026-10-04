@@ -78,6 +78,13 @@ const expectedContractEnv = {
   CONTRACT_ANCHOR_ENABLED: "1\n",
   CONTRACT_SETTLEMENT_RAIL: "simulated\n",
   CONTRACT_TRUST_PROXY: "disabled\n",
+  HANDSHAKE_V2_RECEIPTS: "1\n",
+  HANDSHAKE_V2_RECEIPT_ED25519_SEED: "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\n",
+  HANDSHAKE_V2_RECEIPT_KEY_ID: "handshake-v2-receipts-2026-10\n",
+  HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM: "2026-10-01T00:00:00.000Z\n",
+  HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL: "2027-10-01T00:00:00.000Z\n",
+  HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN: "handshake-receipt-feed-token\n",
+  HANDSHAKE_V2_RECEIPTS_FILE: "/app/state/handshake-v2-receipts.jsonl\n",
 };
 const expectedContractParamNames = Object.keys(expectedContractEnv).map(
   (name) => `/clockchain/mcp/${name}`,
@@ -328,6 +335,13 @@ case "$name" in
   /clockchain/mcp/CONTRACT_ANCHOR_ENABLED) value=$'1\\n' ;;
   /clockchain/mcp/CONTRACT_SETTLEMENT_RAIL) value=$'simulated\\n' ;;
   /clockchain/mcp/CONTRACT_TRUST_PROXY) value=$'disabled\\n' ;;
+  /clockchain/mcp/HANDSHAKE_V2_RECEIPTS) value=$'1\\n' ;;
+  /clockchain/mcp/HANDSHAKE_V2_RECEIPT_ED25519_SEED) value=$'ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\\n' ;;
+  /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_ID) value=$'handshake-v2-receipts-2026-10\\n' ;;
+  /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM) value=$'2026-10-01T00:00:00.000Z\\n' ;;
+  /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL) value=$'2027-10-01T00:00:00.000Z\\n' ;;
+  /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN) value=$'handshake-receipt-feed-token\\n' ;;
+  /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE) value=$'/app/state/handshake-v2-receipts.jsonl\\n' ;;
   /clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=="}\\n' ;;
   /clockchain/mcp/SHORT_ACCEPTANCE_HMAC) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw="}\\n' ;;
   /clockchain/mcp/NEWLINE_KID_HMAC) value=$'{"kid":"accept-fresh\\n","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU="}\\n' ;;

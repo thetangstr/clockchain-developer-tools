@@ -401,6 +401,15 @@ read_optional_env CONTRACT_ERC8004_REGISTRY_ADDRESS /clockchain/mcp/CONTRACT_ERC
 read_optional_env CONTRACT_ANCHOR_ENABLED /clockchain/mcp/CONTRACT_ANCHOR_ENABLED
 read_optional_env CONTRACT_SETTLEMENT_RAIL /clockchain/mcp/CONTRACT_SETTLEMENT_RAIL
 read_optional_env CONTRACT_TRUST_PROXY /clockchain/mcp/CONTRACT_TRUST_PROXY
+# Agent Handshake v2 per-call receipts (opt-in, off unless HANDSHAKE_V2_RECEIPTS=1). Dedicated key — never
+# the contract server key. All optional reads, like the contract block above.
+read_optional_env HANDSHAKE_V2_RECEIPTS /clockchain/mcp/HANDSHAKE_V2_RECEIPTS
+read_optional_env HANDSHAKE_V2_RECEIPT_ED25519_SEED /clockchain/mcp/HANDSHAKE_V2_RECEIPT_ED25519_SEED
+read_optional_env HANDSHAKE_V2_RECEIPT_KEY_ID /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_ID
+read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM
+read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL
+read_optional_env HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN
+read_optional_env HANDSHAKE_V2_RECEIPTS_FILE /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE
 validate_v2_server_config
 # Read-only; exports the HANDSHAKE_* values compose interpolates, so the resolved compose
 # config is the same in both modes.

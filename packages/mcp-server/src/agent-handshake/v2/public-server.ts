@@ -9,6 +9,7 @@ import { isV2RetryableToolError, registerV2PublicTools, V2_PUBLIC_TOOL_NAMES, ty
 import { readV2RoleAccessPayload, V2RoleAccessError } from "./access.js";
 import { handshakeStateDir } from "../../handshake-core/durable-store.js";
 import { createHandleMap } from "../../handshake-core/handle-map.js";
+import type { HandshakeReceiptRecorder, RawInvokeHook } from "./receipts.js";
 
 export { V2_PUBLIC_TOOL_NAMES } from "./public-tools.js";
 
@@ -91,7 +92,11 @@ function object(value: unknown): Record<string, unknown> {
 // Handles live in a HandleMap (handshake-core/handle-map.ts): durable across restarts when
 // HANDSHAKE_STATE_DIR is set, sealed at rest. Behaviour is otherwise unchanged: a handle
 // lives until its role token expires, one handle per token, the same cap.
-function createRoleAccessBroker(invoke: V2PublicInvoke, now: () => number, stateDir: string | undefined): V2PublicInvoke {
+function createRoleAccessBroker(
+  inner: V2PublicInvoke,
+  now: () => number,
+  stateDir: string | undefined,
+): (name: string, args: Record<string, unknown>, hook?: RawInvokeHook) => Promise<unknown> {
   const handles = createHandleMap({
     label: "v2/ccra",
     prefix: "ccra_",
@@ -122,7 +127,10 @@ function createRoleAccessBroker(invoke: V2PublicInvoke, now: () => number, state
     return { clientAccess: value, signedAccess: access };
   }
 
-  return async (name, args) => {
+  return async (name, args, hook) => {
+    // Receipts (opt-in): the hook observes the RAW coordinator call and returns/throws
+    // exactly what it does. Without a hook this is the original `inner` call.
+    const invoke: V2PublicInvoke = hook === undefined ? inner : (n, a) => hook(n, a, inner);
     if (ROLE_SCOPED_TOOLS.has(name)) {
       const resolved = resolve(args.access);
       const result = object(await invoke(name, { ...args, access: resolved.signedAccess }));
@@ -164,6 +172,8 @@ export function createV2PublicHttpHandler(options: {
   localActionCommand?: (commandSha256: string) => string | null;
   /** Durable state directory for ccra_ handles; defaults to HANDSHAKE_STATE_DIR/agent-handshake-v2. */
   stateDir?: string;
+  /** Opt-in per-call signed receipts + their feed routes; absent = behaviour unchanged. */
+  receipts?: HandshakeReceiptRecorder;
 }) {
   const now = options.now ?? Date.now;
   const allowInvite = limiter(options.invitePerHour ?? 5, 60 * 60_000, now);
@@ -199,6 +209,7 @@ export function createV2PublicHttpHandler(options: {
       res.end(JSON.stringify({ error: "rate_limited" }));
       return;
     }
+    const receiptHook = options.receipts?.hookFor({ headers: req.headers, ip });
     const server = buildV2PublicServer({
       pin: options.pin,
       invoke: async (name, args) => {
@@ -209,7 +220,7 @@ export function createV2PublicHttpHandler(options: {
             throw new V2RateLimitedError(allowInvite.retryAfterMs(inviteKey));
           }
           try {
-            return await invoke(name, args);
+            return await invoke(name, args, receiptHook);
           } catch (error) {
             // Session-state transient rejections (consumed session, insufficient
             // invitation runway, dependency breaker) mint nothing — refund the
@@ -218,7 +229,7 @@ export function createV2PublicHttpHandler(options: {
             throw error;
           }
         }
-        return invoke(name, args);
+        return invoke(name, args, receiptHook);
       },
     });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

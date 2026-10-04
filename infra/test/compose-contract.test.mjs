@@ -97,6 +97,27 @@ test("the mcp service carries the full /contract/mcp environment surface", async
   }
 });
 
+// Agent Handshake v2 receipts (opt-in): wired through, read from SSM only when present.
+const HANDSHAKE_RECEIPT_ENV_NAMES = [
+  "HANDSHAKE_V2_RECEIPTS",
+  "HANDSHAKE_V2_RECEIPT_ED25519_SEED",
+  "HANDSHAKE_V2_RECEIPT_KEY_ID",
+  "HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM",
+  "HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL",
+  "HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN",
+  "HANDSHAKE_V2_RECEIPTS_FILE",
+];
+
+test("the mcp service carries the handshake v2 receipts env and compose-up reads each optionally", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  for (const name of HANDSHAKE_RECEIPT_ENV_NAMES) {
+    assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
+    assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
+  }
+});
+
 test("the wired contract surface covers check-config-from-ssm ENV_PARAMETERS", async () => {
   const { ENV_PARAMETERS } = await import(
     "../../packages/mcp-server/scripts/agent-contract/check-config-from-ssm.mjs"
