@@ -9,7 +9,7 @@ import { isV2RetryableToolError, registerV2PublicTools, V2_PUBLIC_TOOL_NAMES, ty
 import { readV2RoleAccessPayload, V2RoleAccessError } from "./access.js";
 import { handshakeStateDir } from "../../handshake-core/durable-store.js";
 import { createHandleMap } from "../../handshake-core/handle-map.js";
-import type { HandshakeReceiptRecorder, RawInvokeHook } from "./receipts.js";
+import { HANDSHAKE_RECEIPT_META_KEY, type HandshakeReceiptEcho, type HandshakeReceiptRecorder, type RawInvokeHook } from "./receipts.js";
 
 export { V2_PUBLIC_TOOL_NAMES } from "./public-tools.js";
 
@@ -153,11 +153,11 @@ function createRoleAccessBroker(
   };
 }
 
-export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2PublicInvoke }): McpServer {
+export function buildV2PublicServer(options: { pin: V2ReleasePin; invoke: V2PublicInvoke; metaFor?: () => Record<string, unknown> | undefined }): McpServer {
   const server = new McpServer({ name: "clockchain-agent-handshake", version: V2_HELPER_VERSION }, {
     instructions: buildV2Instructions(options.pin),
   });
-  registerV2PublicTools(server, options.invoke);
+  registerV2PublicTools(server, options.invoke, options.metaFor);
   return server;
 }
 
@@ -209,10 +209,14 @@ export function createV2PublicHttpHandler(options: {
       res.end(JSON.stringify({ error: "rate_limited" }));
       return;
     }
-    const receiptHook = options.receipts?.hookFor({ headers: req.headers, ip });
+    // Opt-in nonce echo: only when the request carries x-clockchain-receipt: 1 AND recording is on.
+    let echo: HandshakeReceiptEcho | undefined;
+    const receiptHook = options.receipts?.hookFor({ headers: req.headers, ip, onEcho: (e) => { echo = e; } });
     const server = buildV2PublicServer({
       pin: options.pin,
+      metaFor: () => echo === undefined ? undefined : { [HANDSHAKE_RECEIPT_META_KEY]: { ...echo } },
       invoke: async (name, args) => {
+        echo = undefined;
         if (name === "agent_handshake_invite") {
           const inviteKey = `invite:${ip}`;
           if (!allowInvite.acquire(inviteKey)) {
