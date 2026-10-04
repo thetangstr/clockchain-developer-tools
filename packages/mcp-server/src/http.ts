@@ -59,7 +59,9 @@ import {
   buildV2Manifest,
   readV2ReleasePin,
 } from "./agent-handshake/v2/instructions.js";
-import { createRuntimeV2Coordinator } from "./agent-handshake/v2/coordinator.js";
+import { createRuntimeV2Coordinator, runtimeRelay as runtimeV2Relay, __runtimeV2KeyConfig } from "./agent-handshake/v2/coordinator.js";
+import { handshakeStateDir } from "./handshake-core/durable-store.js";
+import { createHandshakeReceiptRecorder, loadHandshakeReceiptsConfig, type HandshakeReceiptRecorder } from "./agent-handshake/v2/receipts.js";
 import { buildStandaloneDiscovery, createStandaloneHttpHandler, limiter as keyedWindowLimiter } from "./standalone-handshake/public-server.js";
 import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 import { normalizeRelayBaseUrl } from "./handshake/relay.js";
@@ -482,6 +484,37 @@ export async function runHttp(): Promise<Server> {
   const store: Store = createStore();
   const promoteSecret = process.env.MCP_PROMOTE_SECRET || signingSecret;
 
+  // Agent Handshake v2 per-call receipts: OPT-IN (HANDSHAKE_V2_RECEIPTS=1). Disabled or
+  // misconfigured -> no recorder is built, the v2 handler and routes are unchanged.
+  const handshakeReceiptsConfig = loadHandshakeReceiptsConfig(process.env);
+  if (handshakeReceiptsConfig.kind === "misconfigured") {
+    console.error(`[clockchain-mcp] handshake v2 receipts misconfigured (recording off): ${handshakeReceiptsConfig.reason}`);
+  } else if (handshakeReceiptsConfig.kind === "ready" && handshakeReceiptsConfig.signerEphemeral) {
+    console.warn(JSON.stringify({ event: "handshake_receipts_ephemeral_signer", keyId: handshakeReceiptsConfig.signer.keyId }));
+  }
+  const allowHandshakeReceiptFeed = keyedWindowLimiter(Number(process.env.CONTRACT_OBSERVER_PER_MINUTE || "30"), 60_000, Date.now);
+  let handshakeReceiptRecorder: HandshakeReceiptRecorder | undefined;
+  const getHandshakeReceiptRecorder = (): HandshakeReceiptRecorder | undefined => {
+    if (handshakeReceiptsConfig.kind !== "ready") return undefined;
+    if (handshakeReceiptRecorder) return handshakeReceiptRecorder;
+    try {
+      const relay = runtimeV2Relay(normalizeRelayBaseUrl(process.env.HANDSHAKE_RELAY ?? ""));
+      handshakeReceiptRecorder = createHandshakeReceiptRecorder({
+        // Durable by default when the v2 state dir exists (same dir as the ccra_ handles).
+        config: handshakeReceiptsConfig.file !== undefined || handshakeStateDir("agent-handshake-v2") === undefined
+          ? handshakeReceiptsConfig
+          : { ...handshakeReceiptsConfig, file: `${handshakeStateDir("agent-handshake-v2")}/receipts.jsonl` },
+        accessKeys: __runtimeV2KeyConfig(process.env).accessKeys,
+        getCertificate: (sessionId) => relay.getResult({ sessionId }),
+        allowFeed: () => allowHandshakeReceiptFeed("observer"),
+        onRateLimited: () => rlEvents.inc({ surface: bounded("handshake_call", RL_SURFACES) }),
+      });
+    } catch {
+      return undefined;
+    }
+    return handshakeReceiptRecorder;
+  };
+
   let publicHandshakeHandler: ReturnType<typeof createV2PublicHttpHandler> | undefined;
   let publicHandshakeCoordinator: ReturnType<typeof createRuntimeV2Coordinator> | undefined;
   const getPublicHandshakeHandler = () => {
@@ -496,6 +529,7 @@ export async function runHttp(): Promise<Server> {
       invoke: (name, args) => instrumentedInvoke(name, args as Record<string, unknown>, (n, a) => publicHandshakeCoordinator!.invoke(n, a as Record<string, never>)),
       onRateLimited: (surface) => rlEvents.inc({ surface: bounded(surface, RL_SURFACES) }),
       localActionCommand: (commandSha256) => publicHandshakeCoordinator!.localActionCommand(commandSha256),
+      ...(getHandshakeReceiptRecorder() !== undefined ? { receipts: getHandshakeReceiptRecorder()! } : {}),
     });
     return publicHandshakeHandler;
   };
@@ -1143,6 +1177,17 @@ export async function runHttp(): Promise<Server> {
         }
       }
       return;
+    }
+
+    // v2 receipt feed + key doc (opt-in). Absent flag: skipped, and these paths 404 as before.
+    if (handshakeReceiptsConfig.kind !== "disabled" && (pathOf(req.url) === "/handshake/receipts" || pathOf(req.url) === "/handshake/receipt-keys")) {
+      const recorder = getHandshakeReceiptRecorder();
+      if (recorder === undefined) {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "handshake_receipts_unavailable" }));
+        return;
+      }
+      if (recorder.routes(req, res)) return;
     }
 
     if (pathOf(req.url) === "/handshake/mcp") {

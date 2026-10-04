@@ -37,7 +37,7 @@ type InvitationService = Readonly<{
   accept(input: { invitation: string; acceptanceIdempotencyKey?: string }): Promise<{ claimedAtMs: string | null; responderAccess: string; metadata: V2InvitationMetadata | null; claim: V2InvitationClaim | null }>;
   advanceClaim(input: { claim: V2InvitationClaim; phase: ClaimPhase; completedAtMs?: string }): Promise<{ claim: V2InvitationClaim | null }>;
 }>;
-type Relay = Readonly<{
+export type Relay = Readonly<{
   fetchDiscovery(sessionId?: string): Promise<unknown>;
   getMessages(input: { sessionId: string; after?: string; waitMs?: number }): Promise<{ highestSeq?: string; messages: readonly JsonObject[] }>;
   postMessage(input: { body: unknown; kind: string; privateKeyPem: string; role: V2Role; senderKey: string; sessionId: string }): Promise<unknown>;
@@ -1249,7 +1249,7 @@ async function fetchV2Discovery(relayUrl: string, sessionId?: string): Promise<u
   return response.json();
 }
 
-function runtimeRelay(relayUrl: string): Relay {
+export function runtimeRelay(relayUrl: string): Relay {
   const base = createHandshakeRelayClient({ relayUrl }) as unknown as Relay;
   return Object.freeze({
     ...base,
