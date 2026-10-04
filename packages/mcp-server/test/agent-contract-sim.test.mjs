@@ -158,6 +158,14 @@ test("issueTickets emits deterministic ticket records and replays identically", 
   assert.equal(run.issueTickets({ orderRef: "ORD-ZZZZZZZZ" }).code, "ORDER_NOT_FOUND");
 });
 
+test("lookupOrder: an order booked without a signed party size carries no travellers (the default of 1 is not a claim)", () => {
+  const { world } = makeWorld();
+  const run = world.forRun("run-l-legacy");
+  const booked = run.bookOrder({ agreementId: "agr-legacy", itineraryId: "IT-QW-ONESTOP", feeMinor: 10000, totalMinor: 439000 });
+  assert.equal(booked.ok, true);
+  assert.equal("travellers" in run.lookupOrder({ orderRef: booked.orderRef }), false);
+});
+
 test("lookupOrder observes PENDING → ISSUED → CANCELLED and NOT_FOUND", () => {
   const { world } = makeWorld();
   const run = world.forRun("run-l-1");

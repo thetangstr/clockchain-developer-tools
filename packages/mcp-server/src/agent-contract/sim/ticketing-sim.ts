@@ -101,7 +101,7 @@ export interface SimOrderObservation {
    * The party size the order was booked for — the server's own order record
    * (the principal-signed mandate's partySize, never a caller input). Distinct
    * from `ticketCount`, what was actually issued: a buyer compares the two.
-   * Absent on NOT_FOUND.
+   * Absent on NOT_FOUND and when the order was booked without a signed party size (legacy mandate).
    */
   travellers?: number;
   ticketCount: number;
@@ -285,6 +285,8 @@ interface OrderRecord {
   totalMinor: number;
   currency: string;
   travelerCount: number;
+  /** The party size came from the principal-signed mandate (not the default of 1): only then is it observable. */
+  partySizeKnown: boolean;
   status: SimOrderStatus;
   bookedAt: string;
   cancelledAt?: string;
@@ -396,6 +398,7 @@ function createSimRun(
         totalMinor: req.totalMinor,
         currency: itinerary.currency,
         travelerCount: req.travelerCount ?? 1,
+        partySizeKnown: req.travelerCount !== undefined,
         status: "PENDING",
         bookedAt: isoNow(),
         tickets: [],
@@ -460,7 +463,9 @@ function createSimRun(
         itineraryId: order.itineraryId,
         totalMinor: order.totalMinor,
         currency: order.currency,
-        travellers: order.travelerCount,
+        // only a party size the principal signed — a legacy mandate without one books the default of 1,
+        // which is not a claim (contract_status/bookingPayload and verification_submit omit it the same way)
+        ...(order.partySizeKnown ? { travellers: order.travelerCount } : {}),
         ticketCount: order.tickets.length,
         observedAt: isoNow(),
         simulated: true,
