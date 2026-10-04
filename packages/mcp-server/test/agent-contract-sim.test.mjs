@@ -158,6 +158,14 @@ test("issueTickets emits deterministic ticket records and replays identically", 
   assert.equal(run.issueTickets({ orderRef: "ORD-ZZZZZZZZ" }).code, "ORDER_NOT_FOUND");
 });
 
+test("lookupOrder: an order booked without a signed party size carries no travellers (the default of 1 is not a claim)", () => {
+  const { world } = makeWorld();
+  const run = world.forRun("run-l-legacy");
+  const booked = run.bookOrder({ agreementId: "agr-legacy", itineraryId: "IT-QW-ONESTOP", feeMinor: 10000, totalMinor: 439000 });
+  assert.equal(booked.ok, true);
+  assert.equal("travellers" in run.lookupOrder({ orderRef: booked.orderRef }), false);
+});
+
 test("lookupOrder observes PENDING → ISSUED → CANCELLED and NOT_FOUND", () => {
   const { world } = makeWorld();
   const run = world.forRun("run-l-1");
@@ -168,6 +176,8 @@ test("lookupOrder observes PENDING → ISSUED → CANCELLED and NOT_FOUND", () =
   assert.equal(pending.status, "PENDING");
   assert.equal(pending.pnr, order.pnr);
   assert.equal(pending.ticketCount, 0);
+  // the order's own party size is observed before any ticket exists
+  assert.equal(pending.travellers, order.travelerCount);
 
   const issued = run.issueTickets({ orderRef: order.orderRef });
   const issuedObs = run.lookupOrder({ orderRef: order.orderRef });
@@ -182,6 +192,7 @@ test("lookupOrder observes PENDING → ISSUED → CANCELLED and NOT_FOUND", () =
   const missing = run.lookupOrder({ orderRef: "ORD-ZZZZZZZZ" });
   assert.equal(missing.status, "NOT_FOUND");
   assert.equal(missing.simulated, true);
+  assert.equal("travellers" in missing, false, "an unknown order has no party size");
 });
 
 test("cancelOrder cancels visibly and replays the same record", () => {
