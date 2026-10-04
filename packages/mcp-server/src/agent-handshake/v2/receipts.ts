@@ -326,6 +326,8 @@ export interface HandshakeReceiptRecorder {
     headers: IncomingHttpHeaders;
     ip: string;
     clientInfo?: { name: string; version: string };
+    /** The Streamable-HTTP `mcp-session-id` of the transport handling this request (stateful, opted-in sessions only). */
+    mcpSessionId?: string;
     /** Called with the receipt just recorded for this call, only when the request opted in via the echo header. */
     onEcho?: (echo: HandshakeReceiptEcho) => void;
   }): RawInvokeHook | undefined;
@@ -350,7 +352,7 @@ export function createHandshakeReceiptRecorder(options: {
   });
   const keysDoc = buildServerKeysDoc(config.serverKeys);
 
-  function record(name: string, args: Record<string, unknown>, outcomeOf: { result: unknown } | { error: unknown }, ip: string): ServerReceipt | undefined {
+  function record(name: string, args: Record<string, unknown>, outcomeOf: { result: unknown } | { error: unknown }, ip: string, mcpSessionId?: string): ServerReceipt | undefined {
     try {
       let scope: { sessionId: string; role: V2Role } | undefined;
       const ok = "result" in outcomeOf;
@@ -384,6 +386,7 @@ export function createHandshakeReceiptRecorder(options: {
         argsDigest: argsDigest.toLowerCase(),
         outcome: ok ? "ok" : errorOutcome((outcomeOf as { error: unknown }).error),
         responseDigest: responseDigest.toLowerCase(),
+        ...(mcpSessionId !== undefined ? { mcpSessionId } : {}),
         sourceIp: ip.slice(0, 64),
         ts: now(),
       });
@@ -458,7 +461,7 @@ export function createHandshakeReceiptRecorder(options: {
   return {
     store,
     routes,
-    hookFor({ headers, ip, onEcho }) {
+    hookFor({ headers, ip, onEcho, mcpSessionId }) {
       const optIn = headers[HANDSHAKE_RECEIPT_ECHO_HEADER];
       const wantsEcho = onEcho !== undefined && (Array.isArray(optIn) ? optIn[0] : optIn) === "1";
       const emit = (receipt: ServerReceipt | undefined): void => {
@@ -475,10 +478,10 @@ export function createHandshakeReceiptRecorder(options: {
         try {
           result = await call(name, args);
         } catch (error) {
-          emit(record(name, args, { error }, ip));
+          emit(record(name, args, { error }, ip, mcpSessionId));
           throw error;
         }
-        emit(record(name, args, { result }, ip));
+        emit(record(name, args, { result }, ip, mcpSessionId));
         return result;
       };
     },
