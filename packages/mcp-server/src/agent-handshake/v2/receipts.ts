@@ -53,6 +53,17 @@ export const HANDSHAKE_RECEIPTS_PATH = "/handshake/receipts";
 export const HANDSHAKE_RECEIPT_KEYS_PATH = "/handshake/receipt-keys";
 export const HANDSHAKE_PRINCIPAL_ROLE_MAP = Object.freeze({ initiator: "buyer", responder: "provider" } as const);
 
+/** Opt-in request header: when "1" (and recording is on) the call's receipt nonce is echoed in result `_meta`. */
+export const HANDSHAKE_RECEIPT_ECHO_HEADER = "x-clockchain-receipt";
+export const HANDSHAKE_RECEIPT_META_KEY = "clockchain/receipt";
+
+export interface HandshakeReceiptEcho {
+  serverNonce: string;
+  receiptId: string;
+  /** canonical digest of the whole receipt = the next receipt's prevHash. */
+  receiptHash: string;
+}
+
 export const MAX_RECEIPTS_PER_SESSION = 1_000;
 export const MAX_SESSIONS = 5_000;
 
@@ -311,7 +322,13 @@ export interface HandshakeReceiptRecorder {
   /** The feed + key routes (GET only); returns true when it handled the request. */
   routes: (req: IncomingMessage, res: ServerResponse) => boolean;
   /** Per-request hook, or undefined when this request's path is not opted in. */
-  hookFor(request: { headers: IncomingHttpHeaders; ip: string; clientInfo?: { name: string; version: string } }): RawInvokeHook | undefined;
+  hookFor(request: {
+    headers: IncomingHttpHeaders;
+    ip: string;
+    clientInfo?: { name: string; version: string };
+    /** Called with the receipt just recorded for this call, only when the request opted in via the echo header. */
+    onEcho?: (echo: HandshakeReceiptEcho) => void;
+  }): RawInvokeHook | undefined;
   store: HandshakeReceiptStore;
 }
 
@@ -333,12 +350,12 @@ export function createHandshakeReceiptRecorder(options: {
   });
   const keysDoc = buildServerKeysDoc(config.serverKeys);
 
-  function record(name: string, args: Record<string, unknown>, outcomeOf: { result: unknown } | { error: unknown }, ip: string): void {
+  function record(name: string, args: Record<string, unknown>, outcomeOf: { result: unknown } | { error: unknown }, ip: string): ServerReceipt | undefined {
     try {
       let scope: { sessionId: string; role: V2Role } | undefined;
       const ok = "result" in outcomeOf;
       if (ROLE_SCOPED.has(name)) {
-        if (typeof args.access !== "string") return;
+        if (typeof args.access !== "string") return undefined;
         // Only a bearer that verifies under the configured access keys is attributable
         // (time-agnostic: the coordinator already enforced freshness), so forged or
         // foreign access can never create or grow a session chain.
@@ -348,10 +365,10 @@ export function createHandshakeReceiptRecorder(options: {
         scope = { sessionId: v.payload.sessionId, role: v.payload.role };
       } else if (ok && (name === "agent_handshake_invite" || name === "agent_handshake_accept_invitation")) {
         const r = outcomeOf.result as Record<string, unknown> | null;
-        if (r === null || typeof r !== "object" || typeof r.sessionId !== "string") return;
+        if (r === null || typeof r !== "object" || typeof r.sessionId !== "string") return undefined;
         scope = { sessionId: r.sessionId, role: name === "agent_handshake_invite" ? "initiator" : "responder" };
       }
-      if (scope === undefined) return;
+      if (scope === undefined) return undefined;
       const argsDigest = digestOrNull(strip(args, STRIPPED_ARG_KEYS));
       const responseDigest = ok
         ? digestOrNull(
@@ -360,8 +377,8 @@ export function createHandshakeReceiptRecorder(options: {
               : outcomeOf.result ?? null,
           )
         : canonicalDigest({ refused: errorOutcome((outcomeOf as { error: unknown }).error) });
-      if (argsDigest === null || responseDigest === null) return;
-      store.append(scope.sessionId, {
+      if (argsDigest === null || responseDigest === null) return undefined;
+      return store.append(scope.sessionId, {
         role: scope.role,
         tool: name,
         argsDigest: argsDigest.toLowerCase(),
@@ -372,6 +389,7 @@ export function createHandshakeReceiptRecorder(options: {
       });
     } catch {
       // Recording must never affect the handshake call.
+      return undefined;
     }
   }
 
@@ -440,7 +458,15 @@ export function createHandshakeReceiptRecorder(options: {
   return {
     store,
     routes,
-    hookFor({ headers, ip }) {
+    hookFor({ headers, ip, onEcho }) {
+      const optIn = headers[HANDSHAKE_RECEIPT_ECHO_HEADER];
+      const wantsEcho = onEcho !== undefined && (Array.isArray(optIn) ? optIn[0] : optIn) === "1";
+      const emit = (receipt: ServerReceipt | undefined): void => {
+        if (!wantsEcho || receipt === undefined) return;
+        try {
+          onEcho({ serverNonce: receipt.serverNonce, receiptId: receipt.receiptId, receiptHash: canonicalDigest(receipt) });
+        } catch { /* echo is best effort */ }
+      };
       const raw = headers["x-forwarded-prefix"];
       const prefix = (Array.isArray(raw) ? raw[0] : raw) ?? "";
       if (config.prefix !== "*" && prefix !== config.prefix) return undefined;
@@ -449,10 +475,10 @@ export function createHandshakeReceiptRecorder(options: {
         try {
           result = await call(name, args);
         } catch (error) {
-          record(name, args, { error }, ip);
+          emit(record(name, args, { error }, ip));
           throw error;
         }
-        record(name, args, { result }, ip);
+        emit(record(name, args, { result }, ip));
         return result;
       };
     },

@@ -156,7 +156,14 @@ function structuredLocalAction(value: unknown): { changed: boolean; value: unkno
   return { changed, value: changed ? result : value };
 }
 
-export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void {
+export function registerV2PublicTools(
+  server: any,
+  invoke: V2PublicInvoke,
+  /** Opt-in: extra result `_meta` for the call just made (receipt nonce echo). Absent/undefined = result unchanged. */
+  metaFor?: () => Record<string, unknown> | undefined,
+  /** Opt-in: runs one tool call inside its own scope so concurrent calls (a JSON-RPC batch) never share an echo. */
+  scope?: <T>(run: () => Promise<T>) => Promise<T>,
+): void {
   for (const definition of definitions) {
     server.registerTool(definition.name, {
       title: definition.title,
@@ -169,6 +176,11 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
         openWorldHint: false,
       },
     }, async (args: Record<string, unknown>) => {
+      const run = async (): Promise<Record<string, unknown>> => {
+      const withMeta = <T extends Record<string, unknown>>(response: T): T => {
+        const meta = metaFor?.();
+        return meta === undefined ? response : { ...response, _meta: meta };
+      };
       try {
         const result = await invoke(definition.name, args);
         const record = result as Record<string, unknown>;
@@ -190,7 +202,7 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
           content: [{ type: "text", text: JSON.stringify(body) }],
         };
         if (!localAction.changed) response.structuredContent = body;
-        return response;
+        return withMeta(response);
       } catch (error) {
         const observedName = (error as Error)?.name;
         const errorName = typeof observedName === "string" && SAFE_ERROR_NAME.test(observedName)
@@ -213,7 +225,7 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
             retryable: true,
             retryAfterMs: Number.isSafeInteger(reset) && reset > 0 ? reset : 60_000,
           };
-          return { isError: true, content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
+          return withMeta({ isError: true, content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body });
         }
         const retryable = isV2RetryableToolError(error);
         const hinted = Number((error as { retryAfterMs?: unknown })?.retryAfterMs);
@@ -232,10 +244,12 @@ export function registerV2PublicTools(server: any, invoke: V2PublicInvoke): void
             body.note = "publishedTerms are the same fixed public session terms this endpoint returns to every caller — fixture data, not a substitution targeted at your request. Verify before resubmitting: publishedTerms.identityPolicy (erc8004, chainId, registryAddress) must be identical to what you sent — a changed identityPolicy or chain is a genuine red flag; refuse and report it. If it is identical, call agent_handshake_invite again with publishedTerms verbatim.";
           }
         }
-        return retryable
+        return withMeta(retryable
           ? { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body }
-          : { isError: true, content: [{ type: "text", text: JSON.stringify(body) }] };
+          : { isError: true, content: [{ type: "text", text: JSON.stringify(body) }] });
       }
+      };
+      return scope === undefined ? run() : scope(run);
     });
   }
 }
