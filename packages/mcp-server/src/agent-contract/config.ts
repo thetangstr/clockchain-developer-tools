@@ -11,6 +11,7 @@ import {
 } from "./settlement-rail.js";
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
+import { parseContractDirectory } from "./directory.js";
 import { createCloseEmitter } from "./close-emitter.js";
 import { createRelayCertificateResolver, type CertificateResolver } from "./certificate-resolver.js";
 import { createContractService, MAX_POLICY_DIGESTS_PER_ROLE, type ContractRun, type ContractService } from "./service.js";
@@ -271,6 +272,18 @@ export function loadContractConfig(
     return misconfigured((err as Error).message);
   }
 
+  // O-2: directory pins (`name:providerKeyId`, append-only like the
+  // principal pins) — only the pinned provider may publish under a name.
+  let directory: Map<string, string>;
+  try {
+    directory = parseContractDirectory(
+      env.CONTRACT_DIRECTORY,
+      new Set(tokens.filter((t) => t.principal.role === "provider").map((t) => t.principal.keyId)),
+    );
+  } catch (err) {
+    return misconfigured((err as Error).message);
+  }
+
   // LOW (N4b-3): the verifier and observer credentials must differ — the
   // observer feed is salt-free by design, and a shared token would let one
   // credential both read the feed AND disclose the salts that unlock it.
@@ -517,6 +530,7 @@ export function loadContractConfig(
       expectedErc8004,
       policyDigests: policyDigests as { buyer: Set<string>; provider: Set<string> },
       principals,
+      directory,
       // N4b-4: the service refuses to sign once the published window closes.
       signerValidUntilMs: keyValidUntilMs,
       // N4b-5: config-only sim fault seeds (A2) — never settable by a tool.

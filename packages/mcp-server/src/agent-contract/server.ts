@@ -109,7 +109,7 @@ export function buildContractServer(options: {
    */
   const PRE_BIND_TOOLS = new Set([
     "rendezvous_publish_listing", "rendezvous_search", "rendezvous_send_invitation", "rendezvous_inbox",
-    "contract_bind_challenge", "contract_bind", "contract_status",
+    "rendezvous_ack", "contract_bind_challenge", "contract_bind", "contract_status",
   ]);
   const allowPoll = options.pollGate
     ?? keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
@@ -455,6 +455,16 @@ export function buildContractServer(options: {
       );
     } catch {
       dispatched = { ok: false as const, code: "CONTRACT_UNAVAILABLE" as const };
+    }
+    // O-2: an inbox long-poll may hold for up to 25 s — like PR #180 F2,
+    // re-resolve the receipt target so a run that ENDED meanwhile is never
+    // appended to (the receipt lands on the pre-bind chain instead).
+    if (name === "rendezvous_inbox") {
+      const retarget = receiptTargetFor(receiptRun);
+      if (retarget !== receiptRun) {
+        receiptRun = retarget;
+        argsDigest = argsDigestFor(receiptRun);
+      }
     }
     outcome = dispatched.ok ? ok(dispatched.result) : refusal(dispatched.code, serverNonce);
     // D8: the dispatch may carry extra server-derived receipt fields (e.g.

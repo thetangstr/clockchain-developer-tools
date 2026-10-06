@@ -27,6 +27,8 @@ const isoDateTime = z.string().datetime({ offset: false });
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const opaqueRecord = z.record(z.string(), z.unknown());
 const listingId = z.string().min(4).max(64);
+/** O-2: a `CONTRACT_DIRECTORY` name (lowercase slug) — see directory.ts. */
+const directoryName = z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/);
 const orderRef = z.string().min(4).max(32);
 const offerId = z.string().min(4).max(64);
 const agreementId = z.string().min(4).max(64);
@@ -148,10 +150,18 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       summary: z.string().min(1).max(1024),
       sealedBoxPublicKeyHex: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
       terms: opaqueRecord.optional(),
+      // O-2: claim a directory name pinned to this keyId (CONTRACT_DIRECTORY);
+      // `standing` (directory listings only) is never consumed by a bind.
+      directoryName: directoryName.optional(),
+      standing: z.boolean().optional(),
     },
     outputSchema: z.object({
       listingId,
       publishedAt: isoDateTime,
+      // O-2: directory listings only.
+      directoryName: directoryName.optional(),
+      standing: z.boolean().optional(),
+      expiresAt: isoDateTime.optional(),
       serverNonce,
     }).strict(),
     readOnly: false,
@@ -165,6 +175,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       destination: z.string().min(2).max(64),
       departDate: isoDate.optional(),
       returnDate: isoDate.optional(),
+      // O-2: only the listing the pinned provider published under this name.
+      name: directoryName.optional(),
     },
     outputSchema: z.object({
       listings: z.array(z.object({
@@ -175,6 +187,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         /** When this listing was first published — at most one live listing
          *  per provider (a newer publish supersedes the old one). */
         publishedAt: isoDateTime,
+        // O-2: present on directory-pinned listings only.
+        directoryName: directoryName.optional(),
+        standing: z.boolean().optional(),
       }).strict()),
       serverNonce,
     }).strict(),
@@ -206,12 +221,28 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     role: "both",
     schema: {
       since: isoDateTime.optional(),
+      // O-2 long-poll: hold the read up to this long for a delivery.
+      waitMs: z.number().int().min(0).max(25_000).optional(),
     },
     outputSchema: z.object({
       messages: z.array(inboxMessage),
       serverNonce,
     }).strict(),
     readOnly: true,
+    simulated: false,
+  },
+  {
+    // O-2: consume delivered inbox messages one by one (standing listings).
+    name: "rendezvous_ack",
+    role: "provider",
+    schema: {
+      messageIds: z.array(z.string().min(4).max(64)).min(1).max(64),
+    },
+    outputSchema: z.object({
+      acked: z.number().int().nonnegative(),
+      serverNonce,
+    }).strict(),
+    readOnly: false,
     simulated: false,
   },
   // -- binding / mandate -----------------------------------------------------
