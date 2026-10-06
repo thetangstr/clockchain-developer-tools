@@ -15,6 +15,8 @@ import { parseContractDirectory } from "./directory.js";
 import { createCloseEmitter } from "./close-emitter.js";
 import { createRelayCertificateResolver, type CertificateResolver } from "./certificate-resolver.js";
 import { createContractService, MAX_POLICY_DIGESTS_PER_ROLE, type ContractRun, type ContractService } from "./service.js";
+import { DEFAULT_MAX_RUNS_PER_KEY, MAX_RUNS_PER_KEY_LIMIT } from "./run-routing.js";
+import { parseContractBriefs, type ContractBrief } from "./server-anchors.js";
 import type { SimFaults } from "./sim/index.js";
 import type { ContractSigner } from "./envelope.js";
 import type { IncomingHttpHeaders } from "node:http";
@@ -407,6 +409,29 @@ export function loadContractConfig(
   // defaults use || and treat "" exactly like an absent variable.
   const callsPerMinute = Number(env.CONTRACT_CALLS_PER_MINUTE || "120");
   const maxRuns = Number(env.CONTRACT_MAX_RUNS || "1024");
+  // O-3: live runs per bearer keyId (default 1 = today's one-live-run rule).
+  // Above 1, runs route per (keyId, mcpSessionId). Out of range is a
+  // startup error, never a silent clamp.
+  const maxRunsPerKey = Number(env.CONTRACT_MAX_RUNS_PER_KEY || String(DEFAULT_MAX_RUNS_PER_KEY));
+  if (!Number.isInteger(maxRunsPerKey) || maxRunsPerKey < 1 || maxRunsPerKey > MAX_RUNS_PER_KEY_LIMIT) {
+    return misconfigured(`CONTRACT_MAX_RUNS_PER_KEY wants an integer 1..${MAX_RUNS_PER_KEY_LIMIT}`);
+  }
+  // Server-side anchors: CONTRACT_BRIEFS=<name>:<0x sha256>,… with each
+  // text at CONTRACT_BRIEFS_DIR/<name>.md. Every file must hash to its pin
+  // at startup — a drifted or missing brief is a misconfiguration.
+  let briefs: ReadonlyMap<string, ContractBrief> | undefined;
+  const briefsRaw = (env.CONTRACT_BRIEFS ?? "").trim();
+  if (briefsRaw !== "") {
+    const briefsDir = (env.CONTRACT_BRIEFS_DIR ?? "").trim();
+    if (briefsDir === "" || !path.isAbsolute(briefsDir)) {
+      return misconfigured("CONTRACT_BRIEFS needs an absolute CONTRACT_BRIEFS_DIR");
+    }
+    try {
+      briefs = parseContractBriefs(briefsRaw, briefsDir);
+    } catch (err) {
+      return misconfigured((err as Error).message);
+    }
+  }
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN || "4096");
   const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL || "512");
   const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS || String(24 * 3600_000));
@@ -523,6 +548,8 @@ export function loadContractConfig(
       signer,
       stateDir,
       maxRuns: Number.isFinite(maxRuns) ? maxRuns : 1024,
+      maxRunsPerKey,
+      ...(briefs !== undefined ? { briefs } : {}),
       maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
       maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
       runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,

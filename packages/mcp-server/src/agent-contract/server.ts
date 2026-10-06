@@ -12,6 +12,7 @@ import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
 import { newServerNonce, type ReceiptFields, type ServerReceipt } from "./receipts.js";
 import type { ContractService, ContractPrincipal, ContractRun } from "./service.js";
 import type { CertificateResolver } from "./certificate-resolver.js";
+import { renderFinalAnchor, renderServerAnchor } from "./server-anchors.js";
 
 /**
  * The `/contract/mcp` MCP server: `contract_bind`/`contract_status` are
@@ -110,6 +111,7 @@ export function buildContractServer(options: {
   const PRE_BIND_TOOLS = new Set([
     "rendezvous_publish_listing", "rendezvous_search", "rendezvous_send_invitation", "rendezvous_inbox",
     "rendezvous_ack", "contract_bind_challenge", "contract_bind", "contract_status",
+    "contract_register_policy", "contract_get_brief",
   ]);
   const allowPoll = options.pollGate
     ?? keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
@@ -136,7 +138,8 @@ export function buildContractServer(options: {
     const name = request.params.name;
     const serverNonce = newServerNonce();
     const callArgs = request.params.arguments ?? {};
-    const runId = service.runIdForPrincipal(principal.keyId);
+    // O-3: routed by (keyId, mcpSessionId) above CONTRACT_MAX_RUNS_PER_KEY=1.
+    const runId = service.runIdForPrincipal(principal.keyId, options.session?.id);
     const run = runId === undefined ? undefined : service.runFor(runId);
     // Pre-bind routing (live p6-l-2026-10-03-1): runIdForPrincipal keeps
     // resolving an ENDED run (terminal, or released per #176/#179) until its
@@ -157,7 +160,7 @@ export function buildContractServer(options: {
     // either is disclosed ONLY through the verifier-scoped endpoint.
     const argsScheme = isCapBearingCall(name, callArgs) ? "hmac-sha256" as const : "canonical" as const;
     const argsDigestFor = (target: ContractRun | undefined): string => argsScheme === "hmac-sha256"
-      ? saltedCanonicalDigest(target?.runSalt ?? service.preBindSaltFor(principal.keyId), callArgs)
+      ? saltedCanonicalDigest(target?.runSalt ?? service.preBindSaltFor(principal.keyId, options.session?.id), callArgs)
       : canonicalDigest(callArgs);
     let argsDigest = argsDigestFor(receiptRun);
 
@@ -223,6 +226,29 @@ export function buildContractServer(options: {
       outcome = issued.ok
         ? ok({ challenge: issued.challenge, expiresAt: issued.expiresAt, serverNonce })
         : refusal(issued.code, serverNonce);
+      return asResult(recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme));
+    }
+
+    if (name === "contract_register_policy") {
+      // Mandates without a restart: verified against the CONTRACT_PRINCIPALS
+      // pin, durable, single-use; receipted like any other call.
+      const registered = service.registerPolicy(
+        principal,
+        parsed.data as { role: "buyer"; digest: string; expiresAt: string; principalSig: string },
+      );
+      outcome = registered.ok ? ok({ ...registered.result, serverNonce }) : refusal(registered.code, serverNonce);
+      return asResult(recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme));
+    }
+
+    if (name === "contract_get_brief") {
+      // Server-side anchors: a pinned brief; its digest is anchored (first
+      // serve per scope) and the bounded wait completes BEFORE the result
+      // returns, so the receipt's responseDigest covers the anchor id.
+      const served = await service.getBrief((parsed.data as { name: string }).name, {
+        ...(receiptRun !== undefined ? { run: receiptRun } : {}),
+        preBindScope: service.preBindBriefScope(principal.keyId, options.session?.id),
+      });
+      outcome = served.ok ? ok({ ...served.result, serverNonce }) : refusal(served.code, serverNonce);
       return asResult(recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme));
     }
 
@@ -309,6 +335,11 @@ export function buildContractServer(options: {
         // N4b-9 (F14): after a restart the in-memory run is gone but its
         // terminal job persisted — render the durable record (terminal
         // state, close delivery, anchor outcomes), not "rendezvous".
+        // Server-side anchors: the final anchor is awaited (bounded) before
+        // the terminal state is reported.
+        if (runId !== undefined && service.terminalJobFor(runId)?.terminalState != null) {
+          await service.awaitFinalAnchor(runId);
+        }
         const job = runId !== undefined ? service.terminalJobFor(runId) : undefined;
         if (job !== undefined && job.terminalState !== null) {
           const anchorJobs = job.anchors === undefined
@@ -347,6 +378,9 @@ export function buildContractServer(options: {
                 ledger: job.anchors.terminal.ledger ?? null,
                 error: job.anchors.terminal.error ?? null,
               },
+              terms: renderServerAnchor(job.anchors.terms),
+              brief: renderServerAnchor(job.anchors.brief),
+              final: renderFinalAnchor(job.anchors.final),
             },
             // PR #180 F4: the recovered terminal run is the caller's PRIOR run.
             priorRun: true,
@@ -364,6 +398,7 @@ export function buildContractServer(options: {
       // configured, "failed" when any subject's anchor recorded a failure
       // (surfaced as `anchor: "failed"` per the brief), "pending" while a
       // delivery is in flight, "ok" once every fired anchor resolved.
+      if (run.terminalState !== null) await service.awaitFinalAnchor(run.runId);
       const anchorStates = run.anchors;
       const anchorVals = anchorStates === undefined
         ? []
@@ -419,6 +454,10 @@ export function buildContractServer(options: {
             ledger: anchorStates.terminal.ledger ?? null,
             error: anchorStates.terminal.error ?? null,
           },
+          // Server-side anchors — recorded here, never chained receipts.
+          terms: renderServerAnchor(anchorStates.terms),
+          brief: renderServerAnchor(anchorStates.brief),
+          final: renderFinalAnchor(anchorStates.final),
         },
         // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
         // this run's offers (+ the one this caller may accept), agreement,
@@ -500,7 +539,7 @@ export function buildContractServer(options: {
    */
   function responseEvidence(run: ContractRun | undefined, body: Record<string, unknown>) {
     const responseDigestScheme = containsAmountField(body) ? "hmac-sha256" as const : "canonical" as const;
-    const salt = run === undefined ? service.preBindSaltFor(principal.keyId) : run.runSalt;
+    const salt = run === undefined ? service.preBindSaltFor(principal.keyId, options.session?.id) : run.runSalt;
     return {
       responseDigestScheme,
       responseDigest: responseDigestScheme === "hmac-sha256"

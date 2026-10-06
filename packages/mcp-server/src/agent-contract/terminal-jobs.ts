@@ -37,9 +37,11 @@ export const DEFAULT_TERMINAL_JOBS_MAX_FINISHED = 256;
 
 /** A persisted anchor job — mirrors AnchorRunState plus the subject digest. */
 export interface TerminalAnchorJob {
-  kind: "agreement" | "terminal";
+  kind: "agreement" | "terminal" | "terms" | "brief" | "final";
   digest: string;
   status: "anchoring" | "pending" | "anchored" | "failed";
+  /** final only: the run-chain length the final head covers (null after a restart). */
+  receiptCount?: number | null;
   anchorId?: string;
   eventHash?: string;
   ledger?: { ledgerId: string; blockHeight: string | null; time: string | null; status: string };
@@ -76,7 +78,14 @@ export interface TerminalJob {
    */
   prevReceipt?: ServerReceipt | null;
   close?: TerminalCloseJob;
-  anchors?: { agreement?: TerminalAnchorJob; terminal?: TerminalAnchorJob };
+  anchors?: {
+    agreement?: TerminalAnchorJob;
+    terminal?: TerminalAnchorJob;
+    /** Server-side anchors (server-anchors.ts): recorded here, never chained. */
+    terms?: TerminalAnchorJob;
+    brief?: TerminalAnchorJob;
+    final?: TerminalAnchorJob;
+  };
   /** Post-transition evidence receipts (mirror of the live run chain). */
   evidence: ServerReceipt[];
   updatedAtMs: number;
@@ -113,12 +122,16 @@ function loadTerminalJobs(stateDir: string): Map<string, TerminalJob> {
  * (the exact complement of the `unfinished()` predicate). Unfinished jobs
  * are never dropped: they are the recovery state.
  */
+function anchorJobOpen(j: TerminalJob): boolean {
+  const a = j.anchors;
+  return a !== undefined && [a.agreement, a.terminal, a.terms, a.brief, a.final].some(
+    (x) => x !== undefined && (x.status === "anchoring" || x.status === "pending"),
+  );
+}
+
 function isFinishedJob(j: TerminalJob): boolean {
   const closeDone = j.close === undefined || j.close.status !== "delivering";
-  const anchorOpen = [j.anchors?.agreement, j.anchors?.terminal].some(
-    (a) => a !== undefined && (a.status === "anchoring" || a.status === "pending"),
-  );
-  return closeDone && !anchorOpen;
+  return closeDone && !anchorJobOpen(j);
 }
 
 /**
@@ -225,11 +238,7 @@ export function createTerminalOutbox(
     all: () => [...jobs.values()],
     unfinished() {
       return [...jobs.values()].filter((j) =>
-        (j.close !== undefined && j.close.status === "delivering") ||
-        (j.anchors !== undefined &&
-          [j.anchors.agreement, j.anchors.terminal].some(
-            (a) => a !== undefined && (a.status === "anchoring" || a.status === "pending"),
-          )),
+        (j.close !== undefined && j.close.status === "delivering") || anchorJobOpen(j),
       );
     },
   };

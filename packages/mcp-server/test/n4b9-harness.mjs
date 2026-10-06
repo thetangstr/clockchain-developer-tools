@@ -194,8 +194,10 @@ export async function boot(serviceOptions = {}) {
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   const baseUrl = `http://127.0.0.1:${srv.address().port}/contract/mcp`;
   const sessions = new Map();
-  const callTool = async (token, name, args = {}) => {
-    let sid = sessions.get(token);
+  // `sessionKey` (default: the token) selects the MCP session — O-3 tests
+  // open several sessions under one bearer token.
+  const callTool = async (token, name, args = {}, sessionKey = token) => {
+    let sid = sessions.get(sessionKey);
     if (!sid) {
       const init = await fetch(baseUrl, {
         method: "POST",
@@ -204,7 +206,7 @@ export async function boot(serviceOptions = {}) {
           params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }),
       });
       sid = init.headers.get("mcp-session-id");
-      sessions.set(token, sid);
+      sessions.set(sessionKey, sid);
       await fetch(baseUrl, {
         method: "POST",
         headers: { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}`, "mcp-session-id": sid },
@@ -222,7 +224,11 @@ export async function boot(serviceOptions = {}) {
     if (body.error !== undefined) return { rpcError: body.error };
     return body.result?.structuredContent ?? {};
   };
-  return { service, callTool, stateDir, close: () => { srv.close(); service.close(); } };
+  return {
+    service, callTool, stateDir,
+    sessionIdOf: (sessionKey) => sessions.get(sessionKey),
+    close: () => { srv.close(); service.close(); },
+  };
 }
 
 function bindArgs(certificate, role) {
