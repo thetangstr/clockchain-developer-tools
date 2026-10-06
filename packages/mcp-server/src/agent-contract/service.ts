@@ -1006,8 +1006,14 @@ export function createContractService(options: {
    * layer wires telemetry-lanes.ts here (v2 for a lane-linked run).
    */
   mintTerminalReceipt?: (fields: TerminalReceiptFields, signer: ContractSigner) => TerminalReceipt;
-  /** O-1: fired once both seats are bound — the config layer links the run's lanes. */
-  onRunBound?: (run: ContractRun) => void;
+  /**
+   * O-1: fired once both seats are bound — the config layer links the run's
+   * lanes. Integration (O-1 x O-3): above CONTRACT_MAX_RUNS_PER_KEY=1 it
+   * carries, per role, the MCP sessions the router maps to THIS run, so a
+   * run links only its own sessions' lanes (never a sibling run's). At cap 1
+   * it is undefined and every unlinked lane of the bound keyIds is linked.
+   */
+  onRunBound?: (run: ContractRun, sessions?: Record<ContractRole, string[]>) => void;
   /**
    * N4b-9 (F14): awaited inside `drain(deadlineMs)` — the config layer wires
    * the close emitter's bounded flush here.
@@ -1742,13 +1748,21 @@ export function createContractService(options: {
     };
     run.receipts.push(receipt);
     run.receiptsByPrincipal.set(principal.keyId, principalReceipts + 1);
-    if (run.bound.buyer !== undefined && run.bound.provider !== undefined) {
-      run.stage = "bound";
-      try { options.onRunBound?.(run); } catch { /* a link bug must never break the bind */ }
-    }
+    if (run.bound.buyer !== undefined && run.bound.provider !== undefined) run.stage = "bound";
     if (existing === undefined) runs.set(runId, run);
     router.set(principal.keyId, slot, runId);
     boundChains.set(`${runId}|${principal.role}`, preBindChain);
+    // O-1 x O-3: the link hook runs AFTER the router maps this seat, so the
+    // run id it links is the one this session routes to, and (above cap 1)
+    // the lane set is limited to the sessions routed to this run.
+    if (run.bound.buyer !== undefined && run.bound.provider !== undefined) {
+      const sessionsOf = (role: ContractRole): string[] => {
+        const keyId = run.bound[role]?.principalKeyId;
+        return keyId === undefined ? [] : router.sessionSlotsFor(keyId, runId);
+      };
+      const sessions = router.cap > 1 ? { buyer: sessionsOf("buyer"), provider: sessionsOf("provider") } : undefined;
+      try { options.onRunBound?.(run, sessions); } catch { /* a link bug must never break the bind */ }
+    }
     // LOW (N4b-3): commit-time consumption — the provider's successful bind
     // consumes ONLY the named listing (ownership probed above).
     if (principal.role === "provider" && bindListingId !== undefined) {

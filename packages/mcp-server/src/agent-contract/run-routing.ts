@@ -27,6 +27,8 @@ export interface RunRouter {
   deleteSlot(keyId: string, slot: string): void;
   /** Distinct runIds currently mapped for a keyId (any slot). */
   runIds(keyId: string): string[];
+  /** The per-session slots (never `*`) of a keyId that route to `runId`. */
+  sessionSlotsFor(keyId: string, runId: string): string[];
   /** Forget every mapping that points at `runId`. */
   dropRun(runId: string): void;
   /**
@@ -91,6 +93,11 @@ export function createRunRouter(maxRunsPerKey: number | undefined): RunRouter {
     },
     runIds(keyId) {
       return [...new Set(slots.get(keyId)?.values() ?? [])];
+    },
+    sessionSlotsFor(keyId, runId) {
+      return [...(slots.get(keyId) ?? [])]
+        .filter(([slot, rid]) => rid === runId && slot !== SHARED_SLOT)
+        .map(([slot]) => slot);
     },
     dropRun(runId) {
       for (const [keyId, m] of slots) {

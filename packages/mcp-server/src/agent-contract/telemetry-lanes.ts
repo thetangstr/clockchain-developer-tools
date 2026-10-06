@@ -24,6 +24,9 @@
  * sink refuses a second open for a session — LANE_REUSED). At bind (both
  * seats taken) every unlinked lane each bound principal opened inside the
  * lane window is linked to the run, write-once, and POSTed with retries.
+ * Above CONTRACT_MAX_RUNS_PER_KEY=1 (O-3) only lanes of the MCP sessions
+ * routed to THAT run are linked, so concurrent runs of one keyId never
+ * capture each other's lanes.
  * A linked run's terminal receipt is v2; an unlinked run keeps v1, so a
  * deployment that never calls telemetry_open behaves exactly as before.
  */
@@ -169,8 +172,15 @@ export interface TelemetryLanesOptions {
 export interface TelemetryLanes {
   /** The adapter's per-session call. Returns ciphertext only. */
   open(principal: { keyId: string; role: ContractRole }, mcpSessionId: string | undefined): Promise<TelemetryOpenResult>;
-  /** Service hook at bind (both seats taken): link + deliver, write-once. */
-  onRunBound(run: { runId: string; bound: Partial<Record<ContractRole, { principalKeyId: string }>> }): void;
+  /**
+   * Service hook at bind (both seats taken): link + deliver, write-once.
+   * `sessions` (O-3, cap > 1): per role, only lanes opened by these MCP
+   * sessions are linked; absent, every unlinked lane of the bound keyId is.
+   */
+  onRunBound(
+    run: { runId: string; bound: Partial<Record<ContractRole, { principalKeyId: string }>> },
+    sessions?: Readonly<Record<ContractRole, readonly string[]>>,
+  ): void;
   /** v2 for a linked run, v1 otherwise. */
   terminalReceiptFor(fields: TerminalReceiptFields, signer: ContractSigner): TerminalReceipt;
   linkFor(runId: string): RunLinkState | undefined;
@@ -373,14 +383,16 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
       return p;
     },
 
-    onRunBound(run) {
+    onRunBound(run, sessions) {
       if (links.has(run.runId)) return;
       const t = now();
       const pick = (role: ContractRole): LaneEntry[] => {
         const keyId = run.bound[role]?.principalKeyId;
         if (keyId === undefined) return [];
+        const only = sessions?.[role];
         return [...lanes.values()]
           .filter((l) => l.keyId === keyId && l.role === role && l.runId === null && l.openedAtMs + laneWindowMs > t)
+          .filter((l) => only === undefined || only.includes(l.mcpSessionId))
           .sort((a, b) => a.openedAtMs - b.openedAtMs)
           .slice(-MAX_LANES_PER_ROLE);
       };

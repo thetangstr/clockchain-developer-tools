@@ -609,7 +609,8 @@ export function loadContractConfig(
         ? {
             mintTerminalReceipt: (fields: import("./close-emitter.js").TerminalReceiptFields, s: ContractSigner) =>
               telemetryLanes!.terminalReceiptFor(fields, s),
-            onRunBound: (run: ContractRun) => telemetryLanes?.onRunBound(run),
+            onRunBound: (run: ContractRun, sessions?: Record<"buyer" | "provider", string[]>) =>
+              telemetryLanes?.onRunBound(run, sessions),
           }
         : {}),
     });
