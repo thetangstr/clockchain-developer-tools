@@ -183,6 +183,8 @@ export function createContractHttpHandler(options: {
   callsPerMinute?: number;
   /** N4b-3: per-principal polling-tool rate limit (rendezvous_inbox, contract_status). */
   pollsPerMinute?: number;
+  /** CDT-SEC M2: per-principal contract_register_policy limit (default 6/min). */
+  registrationsPerMinute?: number;
   trustProxy?: boolean;
   /** Idle-session TTL (M2); default 30 min. */
   sessionTtlMs?: number;
@@ -201,6 +203,8 @@ export function createContractHttpHandler(options: {
   // N4b-4: ONE poll limiter for the whole handler — keyed by principal, so a
   // fresh session can never reset a principal's polling budget.
   const pollGate = keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, now);
+  // CDT-SEC M2: one registration limiter per handler, keyed by principal.
+  const registerGate = keyedWindowLimiter(options.registrationsPerMinute ?? 6, 60_000, now);
   const sessions = new Map<string, ContractSession>();
 
   /**
@@ -323,6 +327,7 @@ export function createContractHttpHandler(options: {
       ...(options.telemetryLanes !== undefined ? { telemetryLanes: options.telemetryLanes } : {}),
       session: ctx,
       pollGate,
+      registerGate,
       now,
     });
     ctx.sourceIp = clientIp(req.headers, req.socket.remoteAddress, options.trustProxy === true);

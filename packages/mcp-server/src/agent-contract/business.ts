@@ -279,6 +279,11 @@ export function createBusinessOps(options: {
   signingOpen?: () => boolean;
   /** Required per-role §13 policy pins (`CONTRACT_POLICY_DIGESTS`). */
   policyDigests: Readonly<Record<ContractRole, ReadonlySet<string>>>;
+  /**
+   * CDT-SEC M1: the buyer set for ONE bound buyer keyId (env pins plus that
+   * key's own live registrations). Absent → `policyDigests.buyer`.
+   */
+  buyerPolicyDigestsFor?: (keyId: string) => ReadonlySet<string>;
   /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
   principals?: ReadonlyMap<string, string>;
   /**
@@ -1080,6 +1085,9 @@ export function createBusinessOps(options: {
     const gate = requireRun(run, tool);
     if (gate !== null) return gate;
     const liveRun = run!;
+    // M1: the bound buyer's own allowed set (env pins ∪ its registrations).
+    const buyerPins = (r: typeof liveRun): ReadonlySet<string> =>
+      options.buyerPolicyDigestsFor?.(r.bound.buyer!.principalKeyId) ?? options.policyDigests.buyer;
 
     // The agreement is WRITE-ONCE: once formed, every offer/accept path is
     // closed — a stale accept can never rewrite the booked agreement.
@@ -1837,7 +1845,7 @@ export function createBusinessOps(options: {
             envelopeDigest: canonicalDigest(envCheck.envelope),
             expiresAt: envCheck.envelope.expiresAt,
             approvalKey: liveRun.bound.buyer!.approvalKey,
-            expectedPolicyDigest: options.policyDigests.buyer,
+            expectedPolicyDigest: buyerPins(liveRun),
             nowMs: now(),
           });
           if (denyDecision === null) return refuse("APPROVAL_INVALID");
@@ -1913,7 +1921,7 @@ export function createBusinessOps(options: {
           envelopeDigest: canonicalDigest(submitted.envelope),
           expiresAt: submitted.envelope.expiresAt,
           approvalKey,
-          expectedPolicyDigest: options.policyDigests.buyer,
+          expectedPolicyDigest: buyerPins(liveRun),
           nowMs: now(),
         });
         if (settleDecision === null) return refuse("APPROVAL_INVALID");

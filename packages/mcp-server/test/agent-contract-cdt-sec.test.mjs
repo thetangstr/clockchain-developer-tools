@@ -15,10 +15,11 @@ import { createContractHttpHandler } from "../dist/agent-contract/http-handler.j
 import { loadContractConfig } from "../dist/agent-contract/config.js";
 import { buildServerCard } from "../dist/agent-contract/server-card.js";
 import { toolsListForRole, guidanceDigests } from "../dist/agent-contract/tools-list.js";
-import { eip191SignDigest32 } from "../dist/agent-contract/eip191.js";
-import { policyRegistrationDigest } from "../dist/agent-contract/policy-registry.js";
+import { eip191RecoverPublicKey, eip191SignDigest32, publicKeyToAddress } from "../dist/agent-contract/eip191.js";
+import { createPolicyRegistry, policyRegistrationDigest } from "../dist/agent-contract/policy-registry.js";
 import {
-  ACCEPT, HOST_ROOTS, POLICY, boot, agreePair, bookPair, signedSubmit, makeApproval, fakeAnchor, waitFor, uuid, keys,
+  ACCEPT, HOST_ROOTS, POLICY, SIGNER, PRINCIPAL_ADDRESS, boot, agreePair, bookPair, signedSubmit, makeApproval,
+  fakeAnchor, waitFor, uuid, keys,
 } from "./n4b9-harness.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -51,8 +52,11 @@ const POLICY_D = `0x${"5a".repeat(32)}`;
 const inHours = (h) => new Date(Date.now() + h * 3600_000).toISOString();
 
 /** A family-principal-signed buyer policy registration (harness principal key). */
-function signPolicy({ tokenKeyId = "kb1", digest = POLICY_D, expiresAt = inHours(1), priv = keys.principal.priv } = {}) {
-  const d = policyRegistrationDigest({ tokenKeyId, digest, expiresAt });
+function signPolicy({
+  tokenKeyId = "kb1", digest = POLICY_D, expiresAt = inHours(1), priv = keys.principal.priv,
+  audience = SIGNER.keyId, chainId = null,
+} = {}) {
+  const d = policyRegistrationDigest({ audience, chainId, tokenKeyId, digest, expiresAt });
   return {
     role: "buyer", digest, expiresAt,
     principalSig: eip191SignDigest32(Buffer.from(d.slice(2), "hex"), priv),
@@ -60,19 +64,19 @@ function signPolicy({ tokenKeyId = "kb1", digest = POLICY_D, expiresAt = inHours
 }
 
 /** Books, verifies and tries to settle under an approval citing `policyDigest`. */
-async function settleUnder(env, n, policyDigest) {
-  const { booked } = await bookPair(env, uuid(n), "tb1", "tp1");
-  const prepV = await env.callTool("tb1", "verification_prepare", {
+async function settleUnder(env, n, policyDigest, buyerToken = "tb1") {
+  const { booked } = await bookPair(env, uuid(n), buyerToken, "tp1");
+  const prepV = await env.callTool(buyerToken, "verification_prepare", {
     orderRef: booked.orderRef, result: "match", findingsDigest: `0x${"dd".repeat(32)}`,
   });
-  await signedSubmit(env, { token: "tb1", role: "buyer", prepared: prepV, submitTool: "verification_submit" });
-  const prepS = await env.callTool("tb1", "settlement_prepare", {});
+  await signedSubmit(env, { token: buyerToken, role: "buyer", prepared: prepV, submitTool: "verification_submit" });
+  const prepS = await env.callTool(buyerToken, "settlement_prepare", {});
   const approval = makeApproval({
     envelope: prepS.envelope, role: "buyer", action: "settlement",
     tool: "settlement_authorize", key: keys.buyerApproval, policyDigest,
   });
   return signedSubmit(env, {
-    token: "tb1", role: "buyer", prepared: prepS, submitTool: "settlement_authorize", extraArgs: { approval },
+    token: buyerToken, role: "buyer", prepared: prepS, submitTool: "settlement_authorize", extraArgs: { approval },
   });
 }
 
@@ -243,4 +247,134 @@ test("M5: with CONTRACT_POLICY_REGISTRATION off, persisted registrations authori
     const settled = await settleUnder(again, 1504, POLICY_D);
     assert.equal(settled.status, "released", JSON.stringify(settled));
   } finally { again.close(); }
+});
+
+// =============================================================================
+// M1 — registrations approve on (keyId, digest) only; per-keyId cap; reloaded
+// entries are re-checked against the CURRENT principal pins.
+// =============================================================================
+
+const digestN = (i) => `0x${i.toString(16).padStart(64, "0")}`;
+
+test("M1: a registration for kb1 does not authorize kb2's settlement, even under the same principal", async () => {
+  const env = await boot({ policyRegistration: true });
+  try {
+    const reg = await env.callTool("tb1", "contract_register_policy", signPolicy({ tokenKeyId: "kb1" }));
+    assert.equal(reg.registered, true, JSON.stringify(reg));
+    // kb1's own run settles (and frees the provider for the next run)…
+    const own = await settleUnder(env, 1601, POLICY_D, "tb1");
+    assert.equal(own.status, "released", JSON.stringify(own));
+    // …but kb2, pinned to the SAME principal, gets nothing from it.
+    const other = await settleUnder(env, 1602, POLICY_D, "tb2");
+    assert.notEqual(other.status, "released", JSON.stringify(other));
+    assert.ok(other.error, JSON.stringify(other));
+  } finally { env.close(); }
+});
+
+test("M1: the cap is per keyId — kb1 cannot exhaust the allowed set of kb2", async () => {
+  const env = await boot({ policyRegistration: true });
+  try {
+    for (let i = 1; i <= 8; i += 1) {
+      assert.equal(env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ digest: digestN(i) })).ok, true, `kb1 #${i}`);
+    }
+    const ninth = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ digest: digestN(9) }));
+    assert.deepEqual(ninth, { ok: false, code: "RATE_LIMITED" });
+    const kb2 = env.service.registerPolicy({ keyId: "kb2" }, signPolicy({ tokenKeyId: "kb2", digest: digestN(9) }));
+    assert.equal(kb2.ok, true, JSON.stringify(kb2));
+  } finally { env.close(); }
+});
+
+test("M1: a removed or changed principal pin revokes that key's persisted registrations on reload", () => {
+  // The registry directly: a changed pin also breaks the mandate path, so a
+  // full settlement cannot isolate the registration check.
+  const stateDir = mkdtempSync(path.join(tmpdir(), "cdt-sec-m1-pin-"));
+  const base = { stateDir, envBuyer: new Set([POLICY.buyer]), maxPerRole: 64, now: Date.now, audience: SIGNER.keyId, chainId: null };
+  const pinned = new Map([["kb1", PRINCIPAL_ADDRESS], ["kb2", PRINCIPAL_ADDRESS]]);
+  // Before CDT-SEC the registry exposed one union set as `buyer`.
+  const allows = (r, keyId) => (typeof r.buyerFor === "function" ? r.buyerFor(keyId) : r.buyer).has(POLICY_D);
+  const first = createPolicyRegistry({ ...base, principals: pinned });
+  assert.equal(first.register({ keyId: "kb1" }, signPolicy()).ok, true);
+  assert.equal(allows(first, "kb1"), true);
+
+  const otherAddress = publicKeyToAddress(Buffer.from(keys.buyerSigner.publicKeyHex.slice(2), "hex"));
+  const changed = createPolicyRegistry({ ...base, principals: new Map([["kb1", otherAddress], ["kb2", PRINCIPAL_ADDRESS]]) });
+  assert.equal(allows(changed, "kb1"), false, "a changed pin revokes");
+  const removed = createPolicyRegistry({ ...base, principals: new Map([["kb2", PRINCIPAL_ADDRESS]]) });
+  assert.equal(allows(removed, "kb1"), false, "a removed pin revokes");
+  assert.equal(removed.buyerFor?.("kb1").has(POLICY.buyer) ?? true, true, "env pins are unaffected");
+
+  // Only re-check, never delete-on-read: with the pin restored the
+  // still-unexpired registration authorizes again.
+  const restored = createPolicyRegistry({ ...base, principals: pinned });
+  assert.equal(allows(restored, "kb1"), true);
+});
+
+// =============================================================================
+// M2 — per-keyId rate limit before recovery; recovery cached by signature
+// bytes; every call receipted, refusals included.
+// =============================================================================
+
+test("M2: contract_register_policy is rate limited per keyId, and every call is receipted", async () => {
+  let recoveries = 0;
+  const env = await boot({
+    policyRegistration: true,
+    recoverPolicySigner: (d, sig) => { recoveries += 1; return eip191RecoverPublicKey(d, sig); },
+  });
+  try {
+    const out = [];
+    for (let i = 1; i <= 7; i += 1) {
+      out.push(await env.callTool("tb1", "contract_register_policy", signPolicy({ digest: digestN(i) })));
+    }
+    assert.equal(out.slice(0, 6).every((r) => r.registered === true), true, JSON.stringify(out));
+    assert.equal(out[6].error, "RATE_LIMITED", JSON.stringify(out[6]));
+    assert.equal(out[6].retryable, true);
+    assert.equal(recoveries, 6, "the limited call never reaches signature recovery");
+    // Another keyId has its own budget.
+    const kb2 = await env.callTool("tb2", "contract_register_policy", signPolicy({ tokenKeyId: "kb2", digest: digestN(1) }));
+    assert.equal(kb2.registered, true, JSON.stringify(kb2));
+    const regs = env.service.preBindFeed("kb1").receipts.filter((r) => r.tool === "contract_register_policy");
+    assert.equal(regs.length, 7, "the refusal is receipted too");
+    assert.equal(regs.filter((r) => r.outcome === "ok").length, 6);
+  } finally { env.close(); }
+});
+
+test("M2: the same signature bytes are recovered once (valid and invalid alike)", async () => {
+  let recoveries = 0;
+  const env = await boot({
+    policyRegistration: true,
+    recoverPolicySigner: (d, sig) => { recoveries += 1; return eip191RecoverPublicKey(d, sig); },
+  });
+  try {
+    const good = signPolicy();
+    assert.equal(env.service.registerPolicy({ keyId: "kb1" }, good).ok, true);
+    assert.deepEqual(env.service.registerPolicy({ keyId: "kb1" }, good), { ok: false, code: "NONCE_REUSED" });
+    assert.equal(recoveries, 1);
+    const bad = signPolicy({ digest: digestN(2), priv: keys.buyerSigner.priv });
+    for (let i = 0; i < 3; i += 1) {
+      assert.deepEqual(env.service.registerPolicy({ keyId: "kb1" }, bad), { ok: false, code: "SIGNATURE_INVALID" });
+    }
+    assert.equal(recoveries, 2);
+  } finally { env.close(); }
+});
+
+// =============================================================================
+// L1 — the signed registration names this server (signer keyId) and chain.
+// =============================================================================
+
+test("L1: a registration signed for another server or chain is refused", async () => {
+  const chainId = "eip155:11155111";
+  const env = await boot({
+    policyRegistration: true,
+    expectedErc8004: { chainId, registryAddress: `0x${"8004".repeat(10)}` },
+  });
+  try {
+    const otherServer = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ audience: "contract-server-other", chainId }));
+    assert.deepEqual(otherServer, { ok: false, code: "SIGNATURE_INVALID" });
+    const otherChain = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ chainId: "eip155:1" }));
+    assert.deepEqual(otherChain, { ok: false, code: "SIGNATURE_INVALID" });
+    const noChain = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ chainId: null }));
+    assert.deepEqual(noChain, { ok: false, code: "SIGNATURE_INVALID" });
+    const ours = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ chainId }));
+    assert.equal(ours.ok, true, JSON.stringify(ours));
+  } finally { env.close(); }
 });

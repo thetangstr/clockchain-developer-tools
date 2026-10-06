@@ -95,6 +95,14 @@ export function buildContractServer(options: {
    * in-process construction ≈ one session anyway).
    */
   pollGate?: (principalKeyId: string) => boolean;
+  /**
+   * CDT-SEC M2: per-principal limit on `contract_register_policy`, checked
+   * BEFORE the (pure-JS, ~150 ms) signature recovery. Shared across sessions
+   * by the transport, like `pollGate`; absent → a per-server limiter.
+   */
+  registerGate?: (principalKeyId: string) => boolean;
+  /** Default 6/min when no `registerGate` is injected. */
+  registrationsPerMinute?: number;
   now?: () => number;
   /**
    * Live MCP session evidence (M2): `id` is filled on
@@ -130,6 +138,8 @@ export function buildContractServer(options: {
   ]);
   const allowPoll = options.pollGate
     ?? keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
+  const allowRegister = options.registerGate
+    ?? keyedWindowLimiter(options.registrationsPerMinute ?? 6, 60_000, options.now ?? Date.now);
   const sessionFields = () => ({
     mcpSessionId: options.session?.id,
     clientInfo: options.session?.clientInfo,
@@ -274,6 +284,12 @@ export function buildContractServer(options: {
     if (name === "contract_register_policy") {
       // Mandates without a restart: verified against the CONTRACT_PRINCIPALS
       // pin, durable, single-use; receipted like any other call.
+      // M2: the per-keyId limit runs before any signature work, and the
+      // refusal is receipted like every other outcome.
+      if (!allowRegister(principal.keyId)) {
+        outcome = refusal("RATE_LIMITED", serverNonce, { retryable: true });
+        return asResult(recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme));
+      }
       const registered = service.registerPolicy(
         principal,
         parsed.data as { role: "buyer"; digest: string; expiresAt: string; principalSig: string },

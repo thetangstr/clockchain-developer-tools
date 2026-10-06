@@ -115,8 +115,13 @@ test("O-3: at the default cap=1 a second session of the key is still refused", a
 const POLICY_D = `0x${"5a".repeat(32)}`;
 const inHours = (h) => new Date(Date.now() + h * 3600_000).toISOString();
 
-function signPolicy({ tokenKeyId = "kb1", digest = POLICY_D, expiresAt = inHours(1), priv = keys.principal.priv } = {}) {
-  const d = policyRegistrationDigest({ tokenKeyId, digest, expiresAt });
+// CDT-SEC L1: the signed registration names this server (its signer keyId)
+// and its ERC-8004 chain pin (none in this harness).
+function signPolicy({
+  tokenKeyId = "kb1", digest = POLICY_D, expiresAt = inHours(1), priv = keys.principal.priv,
+  audience = SIGNER.keyId, chainId = null,
+} = {}) {
+  const d = policyRegistrationDigest({ audience, chainId, tokenKeyId, digest, expiresAt });
   return {
     role: "buyer", digest, expiresAt,
     principalSig: eip191SignDigest32(Buffer.from(d.slice(2), "hex"), priv),
@@ -158,11 +163,13 @@ test("register_policy: wrong signer, expired, too-long, replayed and provider ca
   } finally { env.close(); }
 });
 
-test("register_policy: the per-role 64-digest cap counts env pins plus live registrations", async () => {
+// CDT-SEC M1 replaced the shared per-role union cap (64) with a per-keyId cap
+// (MAX_REGISTRATIONS_PER_KEY = 8 distinct digests; env ∪ own still ≤ 64), so
+// one key can no longer fill the role's allowed set for every other key.
+test("register_policy: the per-keyId cap counts that key's live registrations", async () => {
   const env = await boot({ policyRegistration: true });
   try {
-    // The env pins one buyer digest; 63 registrations fill the cap.
-    for (let i = 1; i <= 63; i += 1) {
+    for (let i = 1; i <= 8; i += 1) {
       const digest = `0x${i.toString(16).padStart(64, "0")}`;
       const r = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ digest }));
       assert.equal(r.ok, true, `registration ${i}`);
@@ -231,13 +238,15 @@ test("register_policy: a registered digest authorizes an approval without a rest
     principals: new Map([["kb1", PRINCIPAL_ADDRESS]]),
     maxPerRole: 64,
     now: () => t,
+    audience: SIGNER.keyId,
+    chainId: null,
   });
   const expiresAt = new Date(t + 60_000).toISOString();
   assert.equal(registry.register({ keyId: "kb1" }, signPolicy({ expiresAt })).ok, true);
-  assert.equal(registry.buyer.has(POLICY_D), true);
+  assert.equal(registry.buyerFor("kb1").has(POLICY_D), true);
   t += 60_001;
-  assert.equal(registry.buyer.has(POLICY_D), false, "expired registration leaves the allowed set");
-  assert.equal(registry.buyer.has(POLICY_DIGEST), true, "env pins never expire");
+  assert.equal(registry.buyerFor("kb1").has(POLICY_D), false, "expired registration leaves the allowed set");
+  assert.equal(registry.buyerFor("kb1").has(POLICY_DIGEST), true, "env pins never expire");
 });
 
 // ============================================================================

@@ -965,6 +965,8 @@ export function createContractService(options: {
   runTtlMs?: number;
   /** Optional pin: certificates must attest this exact ERC-8004 chain+registry. */
   expectedErc8004?: { chainId: string; registryAddress: string };
+  /** Test seam (CDT-SEC M2): the policy-registration secp256k1 recovery. */
+  recoverPolicySigner?: (digest32: Buffer, signature: string) => Uint8Array | null;
   /** Closed sim world (ticketing + payment rail); one is created if absent. */
   sim?: SimWorld;
   /**
@@ -1213,7 +1215,9 @@ export function createContractService(options: {
     }
   }
   // Mandates without a restart: the buyer pin set business checks is LIVE —
-  // env pins plus unexpired principal-signed registrations (cap 64 kept).
+  // env pins plus THAT keyId's unexpired, pin-current principal-signed
+  // registrations (CDT-SEC M1). L1: registrations are bound to this server's
+  // signer keyId and ERC-8004 chain pin.
   let policyRegistry: PolicyRegistry;
   try {
     policyRegistry = createPolicyRegistry({
@@ -1222,16 +1226,23 @@ export function createContractService(options: {
       principals: options.principals,
       maxPerRole: MAX_POLICY_DIGESTS_PER_ROLE,
       now,
+      audience: options.signer.keyId,
+      chainId: options.expectedErc8004?.chainId ?? null,
+      ...(options.recoverPolicySigner !== undefined ? { recoverPublicKey: options.recoverPolicySigner } : {}),
     });
   } catch (err) {
     releaseLock?.();
     throw err;
   }
   const livePolicyDigests: Readonly<Record<ContractRole, ReadonlySet<string>>> = Object.freeze({
-    // M5: with registration off only the env pins authorize (b04059e).
-    buyer: features.policyRegistration === true ? policyRegistry.buyer : policyDigests.buyer,
+    buyer: policyDigests.buyer,
     provider: policyDigests.provider,
   });
+  // M1: per-keyId buyer set. M5: with registration off only the env pins
+  // authorize (b04059e) — no lookup is handed to business at all.
+  const buyerPolicyDigestsFor = features.policyRegistration === true
+    ? (keyId: string): ReadonlySet<string> => policyRegistry.buyerFor(keyId)
+    : undefined;
 
   /**
    * Single-use mandate ledger (N4B2B-CHANGES-2 §3): `mandateId` is claimed
@@ -2155,6 +2166,7 @@ export function createContractService(options: {
     sim,
     signingOpen,
     policyDigests: livePolicyDigests,
+    ...(buyerPolicyDigestsFor !== undefined ? { buyerPolicyDigestsFor } : {}),
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
     // O-2: directory pins + standing-listing persistence (business-owned).
     ...(options.directory !== undefined ? { directory: options.directory } : {}),
