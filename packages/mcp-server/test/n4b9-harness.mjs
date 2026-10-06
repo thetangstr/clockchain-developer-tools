@@ -194,6 +194,11 @@ export async function boot(serviceOptions = {}) {
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   const baseUrl = `http://127.0.0.1:${srv.address().port}/contract/mcp`;
   const sessions = new Map();
+  // JSON-RPC ids must be unique among a session's in-flight requests: the
+  // SDK transport routes each response by id, so two concurrent calls with
+  // the same id on one session misdeliver one response and leave the other
+  // HTTP request open forever (the L4 hang).
+  let nextRpcId = 1;
   // `sessionKey` (default: the token) selects the MCP session — O-3 tests
   // open several sessions under one bearer token.
   const callTool = async (token, name, args = {}, sessionKey = token) => {
@@ -216,7 +221,7 @@ export async function boot(serviceOptions = {}) {
     const res = await fetch(baseUrl, {
       method: "POST",
       headers: { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}`, "mcp-session-id": sid },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: nextRpcId++, method: "tools/call", params: { name, arguments: args } }),
     });
     const text = await res.text();
     const data = text.split("\n").find((l) => l.startsWith("data:"));
