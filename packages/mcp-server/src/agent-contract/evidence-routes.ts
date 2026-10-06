@@ -106,8 +106,11 @@ export function createContractEvidenceRoutes(
       // run chain plus both bound principals' pre-bind chains.
       const keyId = params.get("keyId");
       const runId = params.get("runId") ?? "";
+      // O-3: above CONTRACT_MAX_RUNS_PER_KEY=1 a keyId's pre-bind chain is
+      // per MCP session — `&mcpSessionId=` selects it.
+      const feedSession = params.get("mcpSessionId") ?? undefined;
       const feed = keyId !== null
-        ? options.service.preBindFeed(keyId)
+        ? options.service.preBindFeed(keyId, feedSession)
         : options.service.receiptFeed(runId);
       if (feed === undefined) {
         refuse(res, 404, "not_found");
@@ -142,8 +145,11 @@ export function createContractEvidenceRoutes(
       const q = new URL(req.url ?? "/", "http://localhost").searchParams;
       const keyIdQ = q.get("keyId");
       const runIdQ = q.get("runId");
+      const sessionQ = q.get("mcpSessionId");
       const salt = options.service.saltFor(
-        keyIdQ !== null ? { keyId: keyIdQ } : runIdQ !== null ? { runId: runIdQ } : {},
+        keyIdQ !== null
+          ? { keyId: keyIdQ, ...(sessionQ !== null ? { mcpSessionId: sessionQ } : {}) }
+          : runIdQ !== null ? { runId: runIdQ } : {},
       );
       if (salt === undefined) {
         refuse(res, 404, "not_found");

@@ -31,6 +31,7 @@ const BUYER_ONLY = [
   "verification_submit",
   "settlement_prepare",
   "settlement_authorize",
+  "contract_register_policy",
 ];
 const PROVIDER_ONLY = [
   "rendezvous_publish_listing",
@@ -53,11 +54,12 @@ const SHARED = [
   "agreement_get",
   "settlement_status",
   "contract_status",
+  "contract_get_brief",
 ];
 
 test("every LLD §3 tool exists exactly once, role-scoped", () => {
-  assert.equal(CONTRACT_TOOL_DEFS.length, 27);
-  assert.equal(new Set(CONTRACT_TOOL_NAMES).size, 27);
+  assert.equal(CONTRACT_TOOL_DEFS.length, 29);
+  assert.equal(new Set(CONTRACT_TOOL_NAMES).size, 29);
   for (const name of BUYER_ONLY) assert.equal(contractToolDef(name).role, "buyer", name);
   for (const name of PROVIDER_ONLY) assert.equal(contractToolDef(name).role, "provider", name);
   for (const name of SHARED) assert.equal(contractToolDef(name).role, "both", name);
@@ -66,8 +68,8 @@ test("every LLD §3 tool exists exactly once, role-scoped", () => {
 test("role-scoped tools/list hides the other role's tools", () => {
   const buyerTools = toolsListForRole("buyer").tools.map((t) => t.name);
   const providerTools = toolsListForRole("provider").tools.map((t) => t.name);
-  assert.equal(buyerTools.length, 21);
-  assert.equal(providerTools.length, 18);
+  assert.equal(buyerTools.length, 23);
+  assert.equal(providerTools.length, 19);
   for (const name of PROVIDER_ONLY) assert.ok(!buyerTools.includes(name), name);
   for (const name of BUYER_ONLY) assert.ok(!providerTools.includes(name), name);
   for (const name of SHARED) {

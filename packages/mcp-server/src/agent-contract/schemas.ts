@@ -138,6 +138,21 @@ export interface ContractToolDef {
 
 const envelopeOut = { envelope: prepareEnvelopeSchema, serverNonce } as const;
 
+/** A server-side anchor outcome (terms / brief / final) as contract_status and the brief result report it. */
+const serverAnchorState = z.object({
+  status: z.enum(["anchoring", "pending", "anchored", "failed"]),
+  digest: digestHex,
+  anchorId: z.string().min(1).max(160).nullable(),
+  eventHash: digestHex.nullable(),
+  ledger: z.object({
+    ledgerId: z.string(),
+    blockHeight: z.string().nullable(),
+    time: z.string().nullable(),
+    status: z.string(),
+  }).strict().nullable(),
+  error: z.string().nullable(),
+}).strict();
+
 export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<ContractToolDef[]>([
   // -- rendezvous / discovery ------------------------------------------------
   {
@@ -681,6 +696,15 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
           }).strict().nullable(),
           error: z.string().nullable(),
         }).strict().nullable(),
+        // Server-side anchors (mcp-coordination-design.md): the run's terms
+        // digest at bind, the brief digest, and the final chain head once
+        // the terminal job finished. Recorded on the job, never chained.
+        terms: serverAnchorState.nullable().optional(),
+        brief: serverAnchorState.nullable().optional(),
+        final: serverAnchorState.extend({
+          /** Receipts on the run chain the final head covers. */
+          receiptCount: z.number().int().nonnegative().nullable(),
+        }).strict().nullable().optional(),
       }).strict().nullable(),
       // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
       // the caller's own run — absent on pre-bind and recovered-terminal
@@ -725,6 +749,48 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         orderRef,
         cancelledAt: isoDateTime,
       }).strict().nullable().optional(),
+      serverNonce,
+    }).strict(),
+    readOnly: true,
+    simulated: false,
+  },
+  // -- coordination (mcp-coordination-design.md) -----------------------------
+  {
+    // Mandates without a restart: a family-principal-signed buyer policy
+    // digest joins the allowed set until it expires (≤ 24 h).
+    name: "contract_register_policy",
+    role: "buyer",
+    schema: {
+      role: z.literal("buyer"),
+      digest: digestHex,
+      expiresAt: isoDateTime,
+      principalSig: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
+    },
+    outputSchema: z.object({
+      registered: z.literal(true),
+      role: z.literal("buyer"),
+      digest: digestHex,
+      expiresAt: isoDateTime,
+      registrationId: digestHex,
+      serverNonce,
+    }).strict(),
+    readOnly: false,
+    simulated: false,
+  },
+  {
+    // Server-side brief anchoring: a frozen, digest-pinned brief template
+    // (CONTRACT_BRIEFS) served through the session; the first serve per
+    // scope anchors its digest before the result returns.
+    name: "contract_get_brief",
+    role: "both",
+    schema: {
+      name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+    },
+    outputSchema: z.object({
+      name: z.string(),
+      digest: digestHex,
+      text: z.string(),
+      anchor: serverAnchorState.nullable(),
       serverNonce,
     }).strict(),
     readOnly: true,

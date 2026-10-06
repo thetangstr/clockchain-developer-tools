@@ -36,12 +36,13 @@ export interface AnchorWrite {
 
 export interface ContractAnchor {
   /**
-   * Anchor a digest under a kind ("agreement" | "terminal"). Resolves with
+   * Anchor a digest under a kind ("agreement" | "terminal", or the
+   * server-side "terms" | "brief" | "final" subjects). Resolves with
    * the AnchorWrite; REJECTS or throws on any failure — the caller records
    * the failure, it is never silently dropped.
    */
   anchor(input: {
-    kind: "agreement" | "terminal";
+    kind: "agreement" | "terminal" | "terms" | "brief" | "final";
     runId: string;
     digestHex: string;
   }): Promise<AnchorWrite>;

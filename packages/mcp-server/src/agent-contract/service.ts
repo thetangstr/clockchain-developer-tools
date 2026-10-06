@@ -21,6 +21,9 @@ import { createBusinessOps, type BusinessOps } from "./business.js";
 import type { SettlementRail } from "./settlement-rail.js";
 import { createSimWorld, type SimFaults, type SimRun, type SimTicket, type SimWorld } from "./sim/index.js";
 import { eip191RecoverPublicKey, isCanonicalEip191Signature, publicKeyToAddress } from "./eip191.js";
+import { createRunRouter, keyIdOfChain } from "./run-routing.js";
+import { createPolicyRegistry, type PolicyRegistry } from "./policy-registry.js";
+import { createServerAnchors, termsDigestOf, type ContractBrief, type ServerAnchors } from "./server-anchors.js";
 
 /**
  * Run-scoped contract state and the `contract_bind` decision logic
@@ -103,6 +106,8 @@ export interface AnchorRunState {
   eventHash?: string;
   ledger?: { ledgerId: string; blockHeight: string | null; time: string | null; status: string };
   error?: string;
+  /** final only (server-anchors.ts): the run-chain length the final head covers; null when taken from the job after a restart. */
+  receiptCount?: number | null;
 }
 
 export interface OfferRecord {
@@ -254,7 +259,14 @@ export interface ContractRun {
    * formation, "terminal" at the terminal transition (the chain head at that
    * moment; post-terminal evidence receipts still chain on top).
    */
-  anchors?: { agreement?: AnchorRunState; terminal?: AnchorRunState };
+  anchors?: {
+    agreement?: AnchorRunState;
+    terminal?: AnchorRunState;
+    /** Server-side anchors (server-anchors.ts) — recorded, never chained. */
+    terms?: AnchorRunState;
+    brief?: AnchorRunState;
+    final?: AnchorRunState;
+  };
   stage: ContractStage;
   /**
    * M4: per-run HMAC salt for cap-bearing call argsDigests — generated at
@@ -333,7 +345,11 @@ export interface ContractService {
    */
   canReceipt(run: ContractRun, principalKeyId: string): boolean;
   runFor(runId: string): ContractRun | undefined;
-  runIdForPrincipal(keyId: string): string | undefined;
+  /**
+   * O-3: the run a call routes to — by (keyId, mcpSessionId) above
+   * CONTRACT_MAX_RUNS_PER_KEY=1, by keyId alone at the default cap.
+   */
+  runIdForPrincipal(keyId: string, mcpSessionId?: string): string | undefined;
   /**
    * Pre-bind routing: true once the run has ended — terminal, TTL-expired, or
    * half-bound past its bind deadline (#179). The run stays observable, but
@@ -390,9 +406,12 @@ export interface ContractService {
     fields: Omit<ReceiptFields, "runId" | "principal">,
   ): { ok: true; receipt: ServerReceipt } | { ok: false; code: ContractRefusalCode };
   /** Seal the active pre-bind segment at a successful bind (N4b-3). */
-  sealPreBindSegment(keyId: string): void;
-  /** A principal's segmented pre-bind chain for the observer feed. */
-  preBindFeed(keyId: string): {
+  sealPreBindSegment(keyId: string, mcpSessionId?: string): void;
+  /**
+   * A principal's segmented pre-bind chain for the observer feed. O-3:
+   * above cap 1 the chain is per MCP session — `mcpSessionId` selects it.
+   */
+  preBindFeed(keyId: string, mcpSessionId?: string): {
     principalKeyId: string;
     head: string;
     /** prevHash the oldest RETAINED receipt links to — genesis unless rolled. */
@@ -448,10 +467,24 @@ export interface ContractService {
    * is the active segment's, `salts` covers every retained segment).
    * Disclosed ONLY through the verifier-scoped endpoint.
    */
-  saltFor(query: { runId?: string; keyId?: string }):
+  saltFor(query: { runId?: string; keyId?: string; mcpSessionId?: string }):
     { scope: "run" | "pre-bind"; id: string; salt: string; salts?: string[] } | undefined;
-  /** M4: a principal's ACTIVE pre-bind segment salt (lazily created). */
-  preBindSaltFor(keyId: string): string;
+  /** M4: a principal's ACTIVE pre-bind segment salt (lazily created). O-3: per session above cap 1. */
+  preBindSaltFor(keyId: string, mcpSessionId?: string): string;
+  /**
+   * Mandates without a restart: register a principal-signed buyer policy
+   * digest (policy-registry.ts). The caller receipts the call.
+   */
+  registerPolicy: PolicyRegistry["register"];
+  /**
+   * Server-side anchors: serve a pinned brief, anchoring its digest the
+   * first time per scope (the run, else the caller's pre-bind chain).
+   */
+  getBrief: ServerAnchors["getBrief"];
+  /** Bounded wait for a terminal run's final anchor (contract_status awaits it before reporting). */
+  awaitFinalAnchor(runId: string): Promise<void>;
+  /** The pre-bind scope id for brief anchors served before a bind. */
+  preBindBriefScope(keyId: string, mcpSessionId?: string): string;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
@@ -552,30 +585,44 @@ interface BindChallenge {
   used: boolean;
 }
 
-/** Same fail-closed rule as used-sessions: corrupt ≠ empty (N1). */
-function loadAgentBindings(stateDir: string): Map<string, AgentBinding> {
+/**
+ * Same fail-closed rule as used-sessions: corrupt ≠ empty (N1).
+ * O-3: a keyId maps to a LIST of bindings (one per live run, bounded by
+ * CONTRACT_MAX_RUNS_PER_KEY). The on-disk form stays `{agentId, runId}`
+ * for a single binding — byte-compatible with the pre-O-3 file — and is an
+ * array only when a keyId holds more than one.
+ */
+function loadAgentBindings(stateDir: string): Map<string, AgentBinding[]> {
   const file = path.join(stateDir, AGENT_BINDINGS_FILE);
   if (!existsSync(file)) return new Map();
   const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
   if (!isPlainRecord(raw) || !isPlainRecord(raw.bindings)) {
     throw new Error(`corrupt ${AGENT_BINDINGS_FILE}`);
   }
-  for (const v of Object.values(raw.bindings)) {
-    if (!isPlainRecord(v) || typeof v.agentId !== "string" || typeof v.runId !== "string") {
+  const isBinding = (v: unknown): v is AgentBinding =>
+    isPlainRecord(v) && typeof v.agentId === "string" && typeof v.runId === "string";
+  const out = new Map<string, AgentBinding[]>();
+  for (const [keyId, v] of Object.entries(raw.bindings)) {
+    const list = Array.isArray(v) ? v : [v];
+    if (list.length === 0 || !list.every(isBinding)) {
       throw new Error(`corrupt ${AGENT_BINDINGS_FILE}`);
     }
+    out.set(keyId, list.map((b) => ({ agentId: b.agentId, runId: b.runId })));
   }
-  return new Map(Object.entries(raw.bindings) as [string, AgentBinding][]);
+  return out;
 }
 
 /** Same durable-write discipline as persistUsedSessions (N1). */
-function persistAgentBindings(stateDir: string, bindings: ReadonlyMap<string, AgentBinding>): void {
+function persistAgentBindings(stateDir: string, bindings: ReadonlyMap<string, readonly AgentBinding[]>): void {
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, AGENT_BINDINGS_FILE);
   const tmp = `${file}.${process.pid}.tmp`;
   const fd = openSync(tmp, "w");
   try {
-    writeFileSync(fd, JSON.stringify({ bindings: Object.fromEntries(bindings) }));
+    const wire = Object.fromEntries(
+      [...bindings].map(([keyId, list]) => [keyId, list.length === 1 ? list[0] : list]),
+    );
+    writeFileSync(fd, JSON.stringify({ bindings: wire }));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -895,6 +942,12 @@ export function createContractService(options: {
    */
   terminalJobsMaxFinished?: number;
   maxRuns?: number;
+  /**
+   * O-3: `CONTRACT_MAX_RUNS_PER_KEY` — live runs one bearer keyId may hold
+   * at once (default 1 = one live run per keyId, the pre-O-3 behaviour).
+   * Above 1, runs are routed per (keyId, mcpSessionId) — see run-routing.ts.
+   */
+  maxRunsPerKey?: number;
   maxReceiptsPerRun?: number;
   maxReceiptsPerPrincipal?: number;
   runTtlMs?: number;
@@ -966,6 +1019,15 @@ export function createContractService(options: {
    */
   anchorConfirmDelayMs?: number;
   anchorConfirmMaxAttempts?: number;
+  /**
+   * Server-side anchors (server-anchors.ts): the frozen, digest-pinned
+   * brief templates served by contract_get_brief (CONTRACT_BRIEFS), and
+   * the bounded waits for the brief anchor (before the brief returns) and
+   * the final anchor (before contract_status reports a terminal run).
+   */
+  briefs?: ReadonlyMap<string, ContractBrief>;
+  briefAnchorAwaitMs?: number;
+  finalAnchorAwaitMs?: number;
   /** Injectable for tests; defaults to an unref'd setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -990,11 +1052,16 @@ export function createContractService(options: {
   // check would be ambiguous — never silently degrade.
   const policyDigests = normalizePolicyDigests(options.policyDigests);
   const runs = new Map<string, ContractRun>();
-  const principalRuns = new Map<string, string>();
+  /** O-3: live-run routing per (keyId, mcpSessionId slot), capped per keyId. */
+  const router = createRunRouter(options.maxRunsPerKey);
   /** M1/N4b-3: per-principal SEGMENTED pre-bind chains — the run genesis
    *  links each side's head (`preBindHead`); each bind seals the active
-   *  segment and the oldest segments roll off past `preBindMaxSegments`. */
+   *  segment and the oldest segments roll off past `preBindMaxSegments`.
+   *  O-3: keyed by `router.chainKey(keyId, mcpSessionId)` — the keyId at
+   *  cap 1, per session above it. */
   const preBindChains = new Map<string, PreBindSegment[]>();
+  /** O-3: the pre-bind chain each bound seat linked at bind (`runId|role`). */
+  const boundChains = new Map<string, string>();
   const preBindSegmentMax = options.preBindSegmentMax ?? DEFAULT_PREBIND_SEGMENT_MAX;
   const preBindMaxSegments = options.preBindMaxSegments ?? DEFAULT_PREBIND_MAX_SEGMENTS;
   /**
@@ -1008,7 +1075,8 @@ export function createContractService(options: {
   let usedSessions: Map<string, string> = new Map();
   let usedMandates: Map<string, UsedMandate> = new Map();
   // N4b-7: write-once {keyId → {agentId, runId}} for late-bound (*) tokens.
-  let agentBindings: Map<string, AgentBinding> = new Map();
+  // O-3: one entry per live run of the keyId (≤ maxRunsPerKey).
+  let agentBindings: Map<string, AgentBinding[]> = new Map();
   /**
    * N4b-9 (F14): the durable terminal outbox — close receipts, anchor
    * subjects, delivery/anchor outcomes, and post-restart evidence survive
@@ -1069,9 +1137,14 @@ export function createContractService(options: {
    * with a deadline at shutdown.
    */
   const anchorOps = new Set<Promise<void>>();
-  const trackAnchorOp = (p: Promise<void>): void => {
+  const trackAnchorOp = (p: Promise<void>, runId?: string): void => {
     anchorOps.add(p);
-    void p.finally(() => anchorOps.delete(p));
+    void p.finally(() => {
+      anchorOps.delete(p);
+      // Server-side anchors: a settled agreement/terminal op may make the
+      // run's final anchor eligible.
+      if (runId !== undefined) serverAnchors.scheduleFinal(runId);
+    });
   };
   /** F14: assigned after `drain` is defined; the lock's signal handlers drain through it. */
   let drainForExit: (() => Promise<void>) | undefined;
@@ -1098,6 +1171,25 @@ export function createContractService(options: {
       throw err;
     }
   }
+  // Mandates without a restart: the buyer pin set business checks is LIVE —
+  // env pins plus unexpired principal-signed registrations (cap 64 kept).
+  let policyRegistry: PolicyRegistry;
+  try {
+    policyRegistry = createPolicyRegistry({
+      stateDir: options.stateDir,
+      envBuyer: policyDigests.buyer,
+      principals: options.principals,
+      maxPerRole: MAX_POLICY_DIGESTS_PER_ROLE,
+      now,
+    });
+  } catch (err) {
+    releaseLock?.();
+    throw err;
+  }
+  const livePolicyDigests: Readonly<Record<ContractRole, ReadonlySet<string>>> = Object.freeze({
+    buyer: policyRegistry.buyer,
+    provider: policyDigests.provider,
+  });
 
   /**
    * Single-use mandate ledger (N4B2B-CHANGES-2 §3): `mandateId` is claimed
@@ -1207,8 +1299,8 @@ export function createContractService(options: {
   }
 
   /** M4: the ACTIVE segment's pre-bind salt — created lazily on first need. */
-  function preBindSaltFor(keyId: string): string {
-    return activePreBindSegment(keyId).salt;
+  function preBindSaltFor(keyId: string, mcpSessionId?: string): string {
+    return activePreBindSegment(router.chainKey(keyId, mcpSessionId)).salt;
   }
 
   /** The head of a principal's pre-bind chain, or undefined if it has none. */
@@ -1217,11 +1309,33 @@ export function createContractService(options: {
     return tail === null ? undefined : canonicalDigest(tail);
   }
 
+  /** One pre-bind chain (by chain key) as the observer feed renders it. */
+  function preBindFeedFor(chainKey: string): ReturnType<ContractService["preBindFeed"]> {
+    const segments = preBindChains.get(chainKey);
+    if (segments === undefined) return undefined;
+    const nonEmpty = segments.filter((s) => s.receipts.length > 0);
+    if (nonEmpty.length === 0) return undefined;
+    const first = nonEmpty[0]!.receipts[0]!;
+    const receipts = nonEmpty.flatMap((s) => s.receipts.map((r) => structuredClone(r)));
+    return {
+      // O-3: a per-session chain still reports its owning keyId.
+      principalKeyId: keyIdOfChain(chainKey),
+      head: canonicalDigest(nonEmpty.at(-1)!.receipts.at(-1)!),
+      anchor: first.prevHash,
+      truncated: first.prevHash !== RECEIPT_CHAIN_GENESIS,
+      receipts,
+      segments: nonEmpty.map((s) => ({
+        anchor: s.receipts[0]!.prevHash,
+        receipts: s.receipts.map((r) => structuredClone(r)),
+      })),
+    };
+  }
+
   function dropRun(runId: string): void {
     runs.delete(runId);
-    for (const [keyId, rid] of principalRuns) {
-      if (rid === runId) principalRuns.delete(keyId);
-    }
+    router.dropRun(runId);
+    boundChains.delete(`${runId}|buyer`);
+    boundChains.delete(`${runId}|provider`);
   }
 
   /**
@@ -1282,6 +1396,8 @@ export function createContractService(options: {
     },
   ): BindOutcome {
     evictEnded(); // M4/M5: free cap slots before deciding
+    // O-3: the caller's pre-bind chain (the keyId's at cap 1).
+    const preBindChain = router.chainKey(principal.keyId, evidence.mcpSessionId);
     // N4: buyer ≡ initiator, provider ≡ responder — enforced at token parse
     // (startup error) AND again here at bind.
     if ((principal.role === "buyer") !== (principal.side === "initiator")) {
@@ -1374,19 +1490,24 @@ export function createContractService(options: {
     // the keyId may bind a NEW run. That bind still passes the mandatory
     // statement check above (HIGH-1), so it can only claim the agentId whose
     // session key it proves — never another party's.
-    let releasesBinding = false;
+    // O-3: the keyId holds up to `router.cap` live bindings (one per live
+    // run). At cap 1 this is exactly the single-record rule above; above 1,
+    // concurrent live runs of one `*` keyId must all carry the same agentId.
+    let nextAgentBindings: AgentBinding[] | undefined;
     if (lateBinding) {
-      const recorded = agentBindings.get(principal.keyId);
-      if (recorded !== undefined) {
-        if (recorded.runId === verdict.sessionId) {
-          if (recorded.agentId !== boundAgentId) return { ok: false, code: "STATE_REFUSED" };
-        } else {
-          const recordedRun = runs.get(recorded.runId);
-          if (recordedRun !== undefined && !runEnded(recordedRun)) {
-            return { ok: false, code: "STATE_REFUSED" };
-          }
-          releasesBinding = true;
-        }
+      const recorded = agentBindings.get(principal.keyId) ?? [];
+      const same = recorded.find((b) => b.runId === verdict.sessionId);
+      if (same !== undefined) {
+        if (same.agentId !== boundAgentId) return { ok: false, code: "STATE_REFUSED" };
+      } else {
+        const live = recorded.filter((b) => {
+          const r = runs.get(b.runId);
+          return r !== undefined && !runEnded(r);
+        });
+        if (live.length >= router.cap) return { ok: false, code: "STATE_REFUSED" };
+        if (live.some((b) => b.agentId !== boundAgentId)) return { ok: false, code: "STATE_REFUSED" };
+        // Late-bind release: ended runs' bindings are replaced by this run's.
+        nextAgentBindings = [...live, { agentId: boundAgentId, runId: verdict.sessionId }];
       }
     }
 
@@ -1416,26 +1537,49 @@ export function createContractService(options: {
       consumedChallenge = challenge;
     }
 
-    const priorRunId = principalRuns.get(principal.keyId);
+    // Idempotent re-bind on the same run requires an identical
+    // {resultDigest, signerKey, approvalKey}; anything else is a refusal.
+    const sameSeat = (prior: ContractRun): BoundRole | undefined => {
+      const mine = prior.bound[principal.role];
+      return mine === undefined ||
+        verdict.sessionId !== prior.runId ||
+        mine.signerKey.keyId !== signerKey.data.keyId ||
+        mine.signerKey.publicKeyHex !== signerKey.data.publicKeyHex ||
+        mine.approvalKey.keyId !== approvalKey.data.keyId ||
+        mine.approvalKey.publicKeyHex !== approvalKey.data.publicKeyHex ||
+        verdict.resultDigest !== prior.resultDigest
+        ? undefined
+        : mine;
+    };
+    // O-3: the caller's routing slot — `*` at cap 1 (every session of the
+    // keyId shares it, the pre-O-3 rule), its MCP session above 1.
+    const slot = router.slotFor(evidence.mcpSessionId);
+    const priorRunId = router.getSlot(principal.keyId, slot);
     if (priorRunId !== undefined) {
       const prior = runs.get(priorRunId);
       if (prior !== undefined && !runEnded(prior)) {
-        // Idempotent re-bind on the same run requires an identical
-        // {resultDigest, signerKey, approvalKey}; anything else is a refusal.
-        const mine = prior.bound[principal.role];
-        if (
-          mine === undefined ||
-          verdict.sessionId !== prior.runId ||
-          mine.signerKey.keyId !== signerKey.data.keyId ||
-          mine.signerKey.publicKeyHex !== signerKey.data.publicKeyHex ||
-          mine.approvalKey.keyId !== approvalKey.data.keyId ||
-          mine.approvalKey.publicKeyHex !== approvalKey.data.publicKeyHex ||
-          verdict.resultDigest !== prior.resultDigest
-        ) return { ok: false, code: "STATE_REFUSED" };
+        const mine = sameSeat(prior);
+        if (mine === undefined) return { ok: false, code: "STATE_REFUSED" };
         return idempotentOutcome(prior, principal.role, mine.boundAt, evidence.serverNonce);
       }
       // M5: the previous run has ended — the seat is free for a new run.
-      principalRuns.delete(principal.keyId);
+      router.deleteSlot(principal.keyId, slot);
+    }
+    if (router.cap > 1) {
+      // O-3: the keyId's OTHER live runs (other sessions' slots).
+      const live = router.runIds(principal.keyId)
+        .map((id) => runs.get(id))
+        .filter((r): r is ContractRun => r !== undefined && !runEnded(r));
+      const resumed = live.find((r) => r.runId === verdict.sessionId);
+      if (resumed !== undefined) {
+        // Resume: the same bind on a NEW MCP session re-attaches this
+        // session to the live run — idempotent by content, no receipt.
+        const mine = sameSeat(resumed);
+        if (mine === undefined) return { ok: false, code: "STATE_REFUSED" };
+        router.set(principal.keyId, slot, resumed.runId);
+        return idempotentOutcome(resumed, principal.role, mine.boundAt, evidence.serverNonce);
+      }
+      if (live.length >= router.cap) return { ok: false, code: "STATE_REFUSED" };
     }
 
     const existing = runs.get(verdict.sessionId);
@@ -1541,7 +1685,8 @@ export function createContractService(options: {
         bindStatement: bindStatementOutcome,
         // M1: the bind receipt carries THIS principal's pre-bind chain head —
         // the run chain's link back to the evidence that preceded it.
-        preBindHead: preBindHeadFor(principal.keyId),
+        // O-3: the chain of THIS session above cap 1.
+        preBindHead: preBindHeadFor(preBindChain),
         // N4b-6: bind receipts on a fault-seeded run carry the marker too.
         ...(run.simFault !== undefined ? { simFault: run.simFault } : {}),
         ts: now(),
@@ -1556,10 +1701,7 @@ export function createContractService(options: {
     // N4b-7: the late-binding record is written FIRST — a crash between the
     // two writes then leaves an unused binding, not an unrecorded session.
     // Late-bind release: a binding whose run ended is REPLACED by this run's.
-    const newBinding: AgentBinding | undefined =
-      lateBinding && (!agentBindings.has(principal.keyId) || releasesBinding)
-        ? { agentId: boundAgentId, runId: verdict.sessionId }
-        : undefined;
+    const newBinding: AgentBinding[] | undefined = nextAgentBindings;
     if (options.stateDir !== undefined && (existing === undefined || newBinding !== undefined)) {
       const nextBindings = new Map(agentBindings);
       if (newBinding !== undefined) nextBindings.set(principal.keyId, newBinding);
@@ -1593,7 +1735,8 @@ export function createContractService(options: {
     run.receiptsByPrincipal.set(principal.keyId, principalReceipts + 1);
     if (run.bound.buyer !== undefined && run.bound.provider !== undefined) run.stage = "bound";
     if (existing === undefined) runs.set(runId, run);
-    principalRuns.set(principal.keyId, runId);
+    router.set(principal.keyId, slot, runId);
+    boundChains.set(`${runId}|${principal.role}`, preBindChain);
     // LOW (N4b-3): commit-time consumption — the provider's successful bind
     // consumes ONLY the named listing (ownership probed above).
     if (principal.role === "provider" && bindListingId !== undefined) {
@@ -1605,7 +1748,13 @@ export function createContractService(options: {
     // N4b-3: a successful bind SEALS this principal's pre-bind segment — the
     // next pre-bind call starts a fresh segment (fresh salt) anchored on the
     // sealed head, so the lifetime cap can never lock a principal out.
-    sealPreBindSegment(principal.keyId);
+    sealPreBindSegment(preBindChain);
+    // Server-side anchors: the run's terms at its creating bind; a brief
+    // anchored on this seat's pre-bind scope becomes the run's brief anchor.
+    try {
+      if (existing === undefined) serverAnchors.fireTerms(run, termsDigestOf(verdict.result, verdict.resultDigest));
+      serverAnchors.carryBrief(run, briefScopeOf(preBindChain));
+    } catch { /* an anchor bug must never break a committed bind */ }
     return { ok: true, runId, role: principal.role, boundAt, result: resultBody, receipt, run };
   }
 
@@ -1651,6 +1800,23 @@ export function createContractService(options: {
   }));
   const anchorConfirmDelayMs = options.anchorConfirmDelayMs ?? 30_000;
   const anchorConfirmMaxAttempts = options.anchorConfirmMaxAttempts ?? 4;
+  /** The anchor scope id of a pre-bind chain (brief anchors served before a bind). */
+  const briefScopeOf = (chainKey: string): string => `pre-bind:${chainKey.replace("\u0000", "/")}`;
+  // Server-side anchors (terms / brief / final): new module, same
+  // in-process ContractAnchor, outcomes recorded on run + job, never chained.
+  const serverAnchors = createServerAnchors({
+    anchor: options.anchor,
+    getRun: (runId) => runs.get(runId),
+    getJob: (runId) => outbox.get(runId),
+    updateJob: (runId, mutate) => void updateJob(runId, mutate),
+    track: (p) => trackAnchorOp(p),
+    sleep,
+    confirmDelayMs: anchorConfirmDelayMs,
+    confirmMaxAttempts: anchorConfirmMaxAttempts,
+    ...(options.briefs !== undefined ? { briefs: options.briefs } : {}),
+    ...(options.briefAnchorAwaitMs !== undefined ? { briefAnchorAwaitMs: options.briefAnchorAwaitMs } : {}),
+    ...(options.finalAnchorAwaitMs !== undefined ? { finalAnchorAwaitMs: options.finalAnchorAwaitMs } : {}),
+  });
 
   const fireAnchor = (run: ContractRun, kind: "agreement" | "terminal"): void => {
     const anchor = options.anchor;
@@ -1723,7 +1889,7 @@ export function createContractService(options: {
         persistAnchor(next);
         receiptOutcome("anchor_failed", { error });
       });
-    trackAnchorOp(op);
+    trackAnchorOp(op, run.runId);
   };
 
   /**
@@ -1784,7 +1950,7 @@ export function createContractService(options: {
       .catch(() => {
         if (attempt < anchorConfirmMaxAttempts) scheduleAnchorConfirm(run, kind, digest, anchorId, attempt + 1);
       });
-    trackAnchorOp(op);
+    trackAnchorOp(op, run.runId);
   };
 
   /**
@@ -1863,7 +2029,7 @@ export function createContractService(options: {
         const message = err instanceof Error ? err.message : String(err);
         if (aj.status === "anchoring") persist("pending", { error: `recovery: ${message}` });
       });
-    trackAnchorOp(op);
+    trackAnchorOp(op, runId);
   };
 
   const endRun = (run: ContractRun, terminalState: string, principal?: ContractPrincipal): void => {
@@ -1898,6 +2064,11 @@ export function createContractService(options: {
         run.bound.provider?.principalKeyId,
       ].filter((k): k is string => k !== undefined);
       job.prevReceipt = run.receipts.at(-1) ?? null;
+      // Server-side anchors recorded on the live run so far join the job.
+      for (const k of ["terms", "brief"] as const) {
+        const st = run.anchors?.[k];
+        if (st !== undefined) job.anchors = { ...job.anchors, [k]: { kind: k, ...st } };
+      }
       if (receipt !== undefined) {
         job.receipt = receipt;
         job.receiptDigest = canonicalDigest(receipt);
@@ -1922,13 +2093,14 @@ export function createContractService(options: {
         options.onTerminalRun?.(run, terminalState, principal, receipt);
       }
     } catch { /* an emitter bug must never break the terminal transition */ }
+    serverAnchors.scheduleFinal(run.runId);
   };
   const business = createBusinessOps({
     signer: options.signer,
     now,
     sim,
     signingOpen,
-    policyDigests,
+    policyDigests: livePolicyDigests,
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
     claimMandate,
     endRun,
@@ -1987,6 +2159,12 @@ export function createContractService(options: {
           recoverAnchorJob(job, aj);
         }
       }
+      // Server-side anchors re-drive unchained (server-anchors.ts).
+      for (const aj of [job.anchors?.terms, job.anchors?.brief, job.anchors?.final]) {
+        if (aj !== undefined && (aj.status === "anchoring" || aj.status === "pending")) {
+          serverAnchors.recover(job, aj);
+        }
+      }
     }
   }
 
@@ -2004,6 +2182,10 @@ export function createContractService(options: {
   return {
     bind,
     issueBindChallenge,
+    registerPolicy: (principal, input) => policyRegistry.register(principal, input),
+    getBrief: (name, scope) => serverAnchors.getBrief(name, scope),
+    awaitFinalAnchor: (runId) => serverAnchors.awaitFinal(runId),
+    preBindBriefScope: (keyId, mcpSessionId) => briefScopeOf(router.chainKey(keyId, mcpSessionId)),
     business,
     anchorConfigured: options.anchor !== undefined,
     settlementRailId: options.settlementRail?.railId ?? "simulated",
@@ -2041,11 +2223,13 @@ export function createContractService(options: {
         ),
         responseDigestScheme: "canonical",
       });
+      serverAnchors.scheduleFinal(runId);
     },
     persistTerminalClose(runId, state) {
       updateJob(runId, (job) => {
         job.close = { status: state.status, attempts: state.attempts, lastError: state.lastError, deliveredAt: state.deliveredAt };
       });
+      serverAnchors.scheduleFinal(runId);
     },
     drain: drainImpl,
     checkReceiptEvidence(run, principal, fields) {
@@ -2067,7 +2251,7 @@ export function createContractService(options: {
         });
         return ok ? { ok: true } : { ok: false, code: "CONTRACT_UNAVAILABLE" };
       }
-      const prev = preBindTailFor(principal.keyId);
+      const prev = preBindTailFor(router.chainKey(principal.keyId, fields.mcpSessionId));
       const ok = checkReceiptDraft(prev, {
         ...fields,
         runId: PRE_BIND_SCOPE,
@@ -2089,10 +2273,11 @@ export function createContractService(options: {
       // is refused; a build failure (unreachable after the pre-dispatch
       // check) is a refusal, never a throw.
       if (!signingOpen()) return { ok: false, code: "CONTRACT_UNAVAILABLE" };
-      const segment = activePreBindSegment(principal.keyId);
+      const chain = router.chainKey(principal.keyId, fields.mcpSessionId);
+      const segment = activePreBindSegment(chain);
       let receipt: ServerReceipt;
       try {
-        receipt = makeReceipt(preBindTailFor(principal.keyId), {
+        receipt = makeReceipt(preBindTailFor(chain), {
           ...fields,
           runId: PRE_BIND_SCOPE,
           principal: { role: principal.role, keyId: principal.keyId },
@@ -2104,25 +2289,11 @@ export function createContractService(options: {
       segment.receipts.push(receipt);
       return { ok: true, receipt };
     },
-    sealPreBindSegment,
-    preBindFeed(keyId) {
-      const segments = preBindChains.get(keyId);
-      if (segments === undefined) return undefined;
-      const nonEmpty = segments.filter((s) => s.receipts.length > 0);
-      if (nonEmpty.length === 0) return undefined;
-      const first = nonEmpty[0]!.receipts[0]!;
-      const receipts = nonEmpty.flatMap((s) => s.receipts.map((r) => structuredClone(r)));
-      return {
-        principalKeyId: keyId,
-        head: canonicalDigest(nonEmpty.at(-1)!.receipts.at(-1)!),
-        anchor: first.prevHash,
-        truncated: first.prevHash !== RECEIPT_CHAIN_GENESIS,
-        receipts,
-        segments: nonEmpty.map((s) => ({
-          anchor: s.receipts[0]!.prevHash,
-          receipts: s.receipts.map((r) => structuredClone(r)),
-        })),
-      };
+    sealPreBindSegment(keyId, mcpSessionId) {
+      sealPreBindSegment(router.chainKey(keyId, mcpSessionId));
+    },
+    preBindFeed(keyId, mcpSessionId) {
+      return preBindFeedFor(router.chainKey(keyId, mcpSessionId));
     },
     receiptFeed(runId) {
       evictEnded();
@@ -2137,7 +2308,8 @@ export function createContractService(options: {
       for (const role of ["buyer", "provider"] as const) {
         const bound = run.bound[role];
         if (bound === undefined) continue;
-        const feed = this.preBindFeed(bound.principalKeyId);
+        // O-3: the chain this seat linked at bind (the keyId's at cap 1).
+        const feed = preBindFeedFor(boundChains.get(`${runId}|${role}`) ?? bound.principalKeyId);
         if (feed !== undefined) preBind.push({ ...feed, role });
       }
       return {
@@ -2205,7 +2377,15 @@ export function createContractService(options: {
         // materialize salts for an unknown keyId. `salt` is the ACTIVE
         // segment's; `salts` covers every retained segment (N4b-3 LOW:
         // salts rotate per segment).
-        const segments = (preBindChains.get(query.keyId) ?? []).filter((s) => s.receipts.length > 0);
+        // O-3: above cap 1 a keyId has one chain per MCP session —
+        // `mcpSessionId` selects one; without it every chain of the keyId
+        // contributes its salts (the active `salt` is the newest chain's).
+        const chainKeys = query.mcpSessionId !== undefined || router.cap === 1
+          ? [router.chainKey(query.keyId, query.mcpSessionId)]
+          : [...preBindChains.keys()].filter((k) => keyIdOfChain(k) === query.keyId);
+        const segments = chainKeys
+          .flatMap((k) => preBindChains.get(k) ?? [])
+          .filter((s) => s.receipts.length > 0);
         if (segments.length === 0) return undefined;
         return {
           scope: "pre-bind" as const,
@@ -2219,9 +2399,9 @@ export function createContractService(options: {
     preBindSaltFor,
     endRun,
     runEnded,
-    runIdForPrincipal(keyId) {
+    runIdForPrincipal(keyId, mcpSessionId) {
       evictEnded();
-      const runId = principalRuns.get(keyId);
+      const runId = router.get(keyId, mcpSessionId);
       if (runId !== undefined) {
         const run = runs.get(runId);
         // Terminal-but-unexpired runs still resolve: contract_status and the
