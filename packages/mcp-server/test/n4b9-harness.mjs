@@ -230,7 +230,7 @@ export async function boot(serviceOptions = {}) {
     return body.result?.structuredContent ?? {};
   };
   return {
-    service, callTool, stateDir,
+    service, callTool, stateDir, baseUrl,
     sessionIdOf: (sessionKey) => sessions.get(sessionKey),
     close: () => { srv.close(); service.close(); },
   };

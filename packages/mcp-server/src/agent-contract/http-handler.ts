@@ -220,9 +220,20 @@ export function createContractHttpHandler(options: {
   const sweepTimer = setInterval(sweepIdleSessions, Math.max(1_000, Math.min(sessionTtlMs, 60_000)));
   sweepTimer.unref?.();
 
+  /**
+   * Forget a session record — CDT-SEC M3: and tell the service once, so its
+   * per-session pre-bind state is evicted (closed, DELETEd or idle-swept).
+   */
+  function forgetSession(sessionId: string): void {
+    const sess = sessions.get(sessionId);
+    if (sess === undefined) return;
+    sessions.delete(sessionId);
+    try { service.sessionDropped?.(sess.principalKeyId, sessionId); } catch { /* eviction must never break the transport */ }
+  }
+
   /** Drop a session — closed transport, forgotten record. */
   function dropSession(sessionId: string, sess: ContractSession): void {
-    sessions.delete(sessionId);
+    forgetSession(sessionId);
     void sess.transport.close().catch(() => {});
   }
 
@@ -342,9 +353,9 @@ export function createContractHttpHandler(options: {
           lastSeenMs: now(),
         });
       },
-      onsessionclosed: (id) => { sessions.delete(id); },
+      onsessionclosed: (id) => { forgetSession(id); },
     });
-    transport.onclose = () => { if (ctx.id !== undefined) sessions.delete(ctx.id); };
+    transport.onclose = () => { if (ctx.id !== undefined) forgetSession(ctx.id); };
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res, body);

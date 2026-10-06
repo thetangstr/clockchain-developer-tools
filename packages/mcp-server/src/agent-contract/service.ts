@@ -408,6 +408,13 @@ export interface ContractService {
   /** Seal the active pre-bind segment at a successful bind (N4b-3). */
   sealPreBindSegment(keyId: string, mcpSessionId?: string): void;
   /**
+   * CDT-SEC M3: the transport dropped this MCP session (closed, deleted or
+   * idle-swept). Above cap 1 its pre-bind chain is evicted unless a bind
+   * captured it (then it goes when that run is dropped). Optional so test
+   * doubles of the service need not implement it.
+   */
+  sessionDropped?(keyId: string, mcpSessionId: string): void;
+  /**
    * A principal's segmented pre-bind chain for the observer feed. O-3:
    * above cap 1 the chain is per MCP session — `mcpSessionId` selects it.
    */
@@ -528,6 +535,8 @@ interface PreBindSegment {
 }
 const DEFAULT_PREBIND_SEGMENT_MAX = 256;
 const DEFAULT_PREBIND_MAX_SEGMENTS = 8;
+/** CDT-SEC M3: pre-bind chains kept per keyId above cap 1 (oldest uncaptured evicted). */
+export const MAX_PREBIND_CHAINS_PER_KEY = 16;
 /** N4b-7: outstanding bind-statement challenge caps (swept by TTL). */
 const MAX_BIND_CHALLENGES = 1024;
 const MAX_BIND_CHALLENGES_PER_PRINCIPAL = 8;
@@ -1105,6 +1114,25 @@ export function createContractService(options: {
   const preBindChains = new Map<string, PreBindSegment[]>();
   /** O-3: the pre-bind chain each bound seat linked at bind (`runId|role`). */
   const boundChains = new Map<string, string>();
+  /**
+   * CDT-SEC M3: each keyId's pre-bind chain keys, oldest first — bounds the
+   * chains per keyId and lets `saltFor` read one key's chains without a scan.
+   */
+  const chainsByKey = new Map<string, Set<string>>();
+  /** M3: chains whose MCP session dropped while a bind still captured them. */
+  const orphanedChains = new Set<string>();
+  const chainCaptured = (chain: string): boolean => {
+    for (const linked of boundChains.values()) if (linked === chain) return true;
+    return false;
+  };
+  function forgetChain(chain: string): void {
+    preBindChains.delete(chain);
+    orphanedChains.delete(chain);
+    const keyId = keyIdOfChain(chain);
+    const set = chainsByKey.get(keyId);
+    set?.delete(chain);
+    if (set?.size === 0) chainsByKey.delete(keyId);
+  }
   const preBindSegmentMax = options.preBindSegmentMax ?? DEFAULT_PREBIND_SEGMENT_MAX;
   const preBindMaxSegments = options.preBindMaxSegments ?? DEFAULT_PREBIND_MAX_SEGMENTS;
   /**
@@ -1321,6 +1349,23 @@ export function createContractService(options: {
     if (segments === undefined) {
       segments = [];
       preBindChains.set(keyId, segments);
+      // M3: index the new chain under its keyId; past the per-key cap the
+      // oldest chain no bind captured is evicted.
+      const owner = keyIdOfChain(keyId);
+      let set = chainsByKey.get(owner);
+      if (set === undefined) {
+        set = new Set();
+        chainsByKey.set(owner, set);
+      }
+      set.add(keyId);
+      if (set.size > MAX_PREBIND_CHAINS_PER_KEY) {
+        for (const old of set) {
+          if (old !== keyId && !chainCaptured(old)) {
+            forgetChain(old);
+            break;
+          }
+        }
+      }
     }
     const last = segments.at(-1);
     if (last === undefined || last.sealed || last.receipts.length >= preBindSegmentMax) {
@@ -1389,6 +1434,10 @@ export function createContractService(options: {
     router.dropRun(runId);
     boundChains.delete(`${runId}|buyer`);
     boundChains.delete(`${runId}|provider`);
+    // M3: a dropped session's chain was kept only for this run's feed.
+    for (const chain of [...orphanedChains]) {
+      if (!chainCaptured(chain)) forgetChain(chain);
+    }
   }
 
   /**
@@ -2365,6 +2414,14 @@ export function createContractService(options: {
     sealPreBindSegment(keyId, mcpSessionId) {
       sealPreBindSegment(router.chainKey(keyId, mcpSessionId));
     },
+    sessionDropped(keyId, mcpSessionId) {
+      // At cap 1 the chain is the keyId's own — never per session.
+      if (router.cap === 1) return;
+      const chain = router.chainKey(keyId, mcpSessionId);
+      if (!preBindChains.has(chain)) return;
+      if (chainCaptured(chain)) orphanedChains.add(chain);
+      else forgetChain(chain);
+    },
     preBindFeed(keyId, mcpSessionId) {
       return preBindFeedFor(router.chainKey(keyId, mcpSessionId));
     },
@@ -2453,9 +2510,10 @@ export function createContractService(options: {
         // O-3: above cap 1 a keyId has one chain per MCP session —
         // `mcpSessionId` selects one; without it every chain of the keyId
         // contributes its salts (the active `salt` is the newest chain's).
+        // M3: the per-key index, never a scan of every tenant's chains.
         const chainKeys = query.mcpSessionId !== undefined || router.cap === 1
           ? [router.chainKey(query.keyId, query.mcpSessionId)]
-          : [...preBindChains.keys()].filter((k) => keyIdOfChain(k) === query.keyId);
+          : [...(chainsByKey.get(query.keyId) ?? [])];
         const segments = chainKeys
           .flatMap((k) => preBindChains.get(k) ?? [])
           .filter((s) => s.receipts.length > 0);

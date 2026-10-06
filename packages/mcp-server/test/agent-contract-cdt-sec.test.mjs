@@ -378,3 +378,66 @@ test("L1: a registration signed for another server or chain is refused", async (
     assert.equal(ours.ok, true, JSON.stringify(ours));
   } finally { env.close(); }
 });
+
+// =============================================================================
+// M3 — above cap 1, a dropped MCP session's pre-bind chain is evicted unless
+// a bind captured it; chains per keyId are capped; saltFor reads an index.
+// =============================================================================
+
+/** The env bound to one named MCP session per token (`<token>#<suffix>`). */
+const viaSession = (env, suffix) => ({
+  ...env,
+  callTool: (token, name, args = {}) => env.callTool(token, name, args, `${token}#${suffix}`),
+});
+
+/** Client-side DELETE of an MCP session (the spec's session termination). */
+async function deleteSession(env, token, sid) {
+  const res = await fetch(env.baseUrl, {
+    method: "DELETE",
+    headers: { accept: ACCEPT, authorization: `Bearer ${token}`, "mcp-session-id": sid },
+  });
+  await res.text();
+  return res.status;
+}
+
+test("M3: a dropped session's pre-bind chain is evicted; a chain a bind captured stays with its run", async () => {
+  const env = await boot({ maxRunsPerKey: 2 });
+  try {
+    const st = await viaSession(env, "A").callTool("tb1", "contract_status", {});
+    assert.ok(st.serverNonce, JSON.stringify(st));
+    const sidA = env.sessionIdOf("tb1#A");
+    assert.ok(env.service.preBindFeed("kb1", sidA), "the session has a pre-bind chain");
+    assert.equal(await deleteSession(env, "tb1", sidA), 200);
+    assert.equal(await waitFor(() => env.service.preBindFeed("kb1", sidA) === undefined, 2_000), true,
+      "the dropped session's chain is evicted");
+
+    // Captured by a bind: the run's feed keeps the seat's pre-bind evidence.
+    const sB = viaSession(env, "B");
+    await sB.callTool("tb1", "contract_status", {});
+    const { runId } = await agreePair(sB, uuid(1701), "tb1", "tp1");
+    const sidB = env.sessionIdOf("tb1#B");
+    assert.equal(await deleteSession(env, "tb1", sidB), 200);
+    const feed = env.service.receiptFeed(runId);
+    const buyerPre = feed.preBind.find((p) => p.role === "buyer");
+    assert.ok(buyerPre && buyerPre.receipts.some((r) => r.tool === "contract_status"), JSON.stringify(feed.preBind));
+  } finally { env.close(); }
+});
+
+test("M3: pre-bind chains per keyId are capped (oldest uncaptured evicted)", async () => {
+  const env = await boot({ maxRunsPerKey: 2 });
+  try {
+    const principal = { keyId: "kb1", role: "buyer", agentId: "9452", side: "initiator" };
+    for (let i = 0; i < 24; i += 1) {
+      const r = env.service.recordPreBind(principal, {
+        tool: "contract_status", argsDigest: canonicalDigest({ i }), argsDigestScheme: "canonical",
+        outcome: "ok", responseDigest: canonicalDigest({ i }), serverNonce: `0x${String(i).padStart(32, "0")}`,
+        mcpSessionId: `sess-${i}`,
+      });
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    const salts = env.service.saltFor({ keyId: "kb1" });
+    assert.equal(salts.salts.length, 16, "at most 16 chains per keyId");
+    assert.equal(env.service.preBindFeed("kb1", "sess-0"), undefined, "the oldest went first");
+    assert.ok(env.service.preBindFeed("kb1", "sess-23"));
+  } finally { env.close(); }
+});
