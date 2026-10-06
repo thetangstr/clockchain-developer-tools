@@ -24,15 +24,22 @@ import { sign as edSign } from "node:crypto";
 
 import { canonicalJson, canonicalDigest } from "./canonical.js";
 import type { ContractSigner } from "./envelope.js";
+import type { TerminalReceiptV2 } from "./telemetry-lanes.js";
 
 /** The signed close authority the sink verifies. */
-export interface TerminalReceipt {
+export interface TerminalReceiptV1 {
   schema: "ac-terminal-receipt/v1";
   runId: string;
   terminalState: string;
   ts: string;
   signature: { alg: "ed25519"; keyId: string; sig: `0x${string}` };
 }
+
+/**
+ * O-1: a run whose lanes were linked at bind closes with the v2 receipt
+ * (minted in telemetry-lanes.ts); the emitter delivers either verbatim.
+ */
+export type TerminalReceipt = TerminalReceiptV1 | TerminalReceiptV2;
 
 export interface TerminalReceiptFields {
   runId: string;
@@ -45,7 +52,7 @@ export interface TerminalReceiptFields {
  * (`ac-terminal-receipt/v1`; the signature covers the canonical JSON of
  * `{schema, runId, terminalState, ts, alg, keyId}` per sink checkReceipt).
  */
-export function mintTerminalReceipt(fields: TerminalReceiptFields, signer: ContractSigner): TerminalReceipt {
+export function mintTerminalReceipt(fields: TerminalReceiptFields, signer: ContractSigner): TerminalReceiptV1 {
   const message = {
     schema: "ac-terminal-receipt/v1" as const,
     runId: fields.runId,

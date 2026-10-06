@@ -51,25 +51,91 @@ test("sink ports are compose-network only: expose 8081/8082/8083, never publishe
   assert.doesNotMatch(svc, /ipv4_address/);
 });
 
-test("sink environment: production, public keys from the deploy env, explicit no-peer, no secrets", async () => {
-  const source = await readFile(composeFile, "utf8");
-  const env = envBlock(serviceBlock(source, "telemetry-sink") ?? "");
+/**
+ * Reviewed amendment (cdt-sink, O-1/N4b-8 anchor): the sink may read its
+ * anchor bearer from a compose SECRET FILE — never from a plaintext env value.
+ *
+ *   - Exactly one secret-bearing env name is exempt from the name ban:
+ *     TELEMETRY_ANCHOR_TOKEN_FILE, and only with the literal value
+ *     /run/secrets/telemetry_anchor_token (a path, not the token).
+ *   - When it is present, the sink must list the compose secret
+ *     `telemetry_anchor_token`, the top-level secret must be `file:`-sourced
+ *     (an `environment:`-sourced secret would put the value back in env),
+ *     and TELEMETRY_ANCHOR_MCP_URL must be wired beside it.
+ *   - The plaintext TELEMETRY_ANCHOR_TOKEN stays banned everywhere in the file.
+ *
+ * Every other name/value check is unchanged. Compose itself is NOT wired by
+ * this change (a missing secret file would fail the deploy); the anchor
+ * switch-on is its own reviewed deploy step.
+ */
+const ANCHOR_TOKEN_FILE_ENV = "TELEMETRY_ANCHOR_TOKEN_FILE";
+const ANCHOR_TOKEN_SECRET_PATH = "/run/secrets/telemetry_anchor_token";
+
+function checkSinkEnvironment(source) {
+  const svc = serviceBlock(source, "telemetry-sink") ?? "";
+  const env = envBlock(svc);
   assert.match(env, /^      TELEMETRY_ENV:\s*"production"\s*$/m);
   assert.match(env, /^      TELEMETRY_STATE_DIR:\s*\/telemetry\/state\s*$/m);
   assert.match(env, /^      TELEMETRY_CONTRACT_KEYS:\s*"\$\{TELEMETRY_CONTRACT_KEYS:-\}"\s*$/m);
   assert.match(env, /^      TELEMETRY_PEER_CONTRACT_KEYS:\s*"\$\{TELEMETRY_CONTRACT_KEYS_STAGING:-\}"\s*$/m);
   assert.match(env, /^      TELEMETRY_PEER_ENV:\s*"none"\s*$/m);
+  let anchorFile = false;
   for (const line of env.split("\n").filter((l) => l && !/^\s*#/.test(l))) {
     const [, name, value] = line.match(/^      (\w+):\s*(.*)$/) ?? [];
     assert.ok(name, `env line parses: ${line}`);
+    if (name === ANCHOR_TOKEN_FILE_ENV) {
+      // The single exemption: a fixed secret-mount PATH, never the token.
+      assert.match(value, /^"?\/run\/secrets\/telemetry_anchor_token"?$/, `${name} must be ${ANCHOR_TOKEN_SECRET_PATH}`);
+      anchorFile = true;
+      continue;
+    }
     // No key material / tokens by name (the sink generates its key in-container).
     assert.doesNotMatch(name, /SECRET|SEED|PRIVATE|PASSWORD|TOKEN|SIGNING|_KEY$|_KEY_FILE|JWK/i, `env name ${name}`);
     // Values are interpolations or short non-secret literals — never inline key material.
     assert.ok(/^"?\$\{\w+(:-[^}]*)?\}"?$/.test(value) || /^"?[\w./-]{0,40}"?$/.test(value),
       `env ${name} value must be an interpolation or a short literal`);
   }
-  // The anchor token is a secret: not wired in this deploy.
-  assert.doesNotMatch(source, /TELEMETRY_ANCHOR_TOKEN/);
+  // The plaintext anchor token is a secret: never an env value, anywhere.
+  assert.doesNotMatch(source, /TELEMETRY_ANCHOR_TOKEN(?!_FILE)/);
+  if (anchorFile) {
+    assert.match(env, /^      TELEMETRY_ANCHOR_MCP_URL:/m, "the token file needs its URL");
+    assert.match(svc, /^    secrets:\n(?:      - .*\n)*      - telemetry_anchor_token\s*$/m, "sink lists the compose secret");
+    const top = source.match(/^secrets:\n((?:^  .*\n?)+)/m);
+    assert.ok(top, "top-level secrets block declared");
+    assert.match(top[1], /^  telemetry_anchor_token:\n    file:\s*\S+/m, "the secret is file-sourced");
+    assert.doesNotMatch(top[1], /^    environment:/m, "an env-sourced secret puts the value back in env");
+  }
+}
+
+test("sink environment: production, public keys from the deploy env, explicit no-peer, no secrets", async () => {
+  checkSinkEnvironment(await readFile(composeFile, "utf8"));
+});
+
+test("amended env check: only a file-sourced TELEMETRY_ANCHOR_TOKEN_FILE secret passes; plaintext stays banned", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const anchorLines = (value) =>
+    `      TELEMETRY_ANCHOR_MCP_URL: "\${TELEMETRY_ANCHOR_MCP_URL:-}"\n      ${ANCHOR_TOKEN_FILE_ENV}: ${value}\n`;
+  const withEnv = (extra, { secrets = "    secrets:\n      - telemetry_anchor_token\n", top = "secrets:\n  telemetry_anchor_token:\n    file: ./secrets/telemetry_anchor_token\n" } = {}) =>
+    source
+      .replace(/(      TELEMETRY_FLUSH_GRACE_MS:.*\n)/, `$1${extra}`)
+      .replace(/(    volumes:\n      - telemetry_state:\/telemetry\/state\n)/, `$1${secrets}`)
+      .replace(/^volumes:\n/m, `${top}\nvolumes:\n`);
+
+  // The secret-file form passes.
+  checkSinkEnvironment(withEnv(anchorLines(`"${ANCHOR_TOKEN_SECRET_PATH}"`)));
+  // Plaintext token env is still refused (by name and by the file-wide ban).
+  assert.throws(() => checkSinkEnvironment(withEnv(`      TELEMETRY_ANCHOR_TOKEN: "\${TELEMETRY_ANCHOR_TOKEN:-}"\n`)));
+  assert.throws(() => checkSinkEnvironment(withEnv(`      TELEMETRY_ANCHOR_TOKEN: "abc"\n`)));
+  // The file env must point at the secret mount, not an arbitrary path or a value.
+  assert.throws(() => checkSinkEnvironment(withEnv(anchorLines('"/telemetry/state/anchor"'))));
+  assert.throws(() => checkSinkEnvironment(withEnv(anchorLines('"${TELEMETRY_ANCHOR_TOKEN_FILE:-}"'))));
+  // Without the sink's secrets entry, or with an env-sourced secret, it fails.
+  assert.throws(() => checkSinkEnvironment(withEnv(anchorLines(`"${ANCHOR_TOKEN_SECRET_PATH}"`), { secrets: "" })));
+  assert.throws(() => checkSinkEnvironment(withEnv(anchorLines(`"${ANCHOR_TOKEN_SECRET_PATH}"`), {
+    top: "secrets:\n  telemetry_anchor_token:\n    environment: TELEMETRY_ANCHOR_TOKEN_VALUE\n",
+  })));
+  // Other secret-smelling names are still refused even next to the exemption.
+  assert.throws(() => checkSinkEnvironment(withEnv(`${anchorLines(`"${ANCHOR_TOKEN_SECRET_PATH}"`)}      OTHER_KEY_FILE: /run/secrets/x\n`)));
 });
 
 test("compose carries no inline key material anywhere", async () => {

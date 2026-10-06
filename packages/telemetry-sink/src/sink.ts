@@ -1,6 +1,7 @@
 import { createPublicKey, sign, verify, type KeyObject } from "node:crypto";
 
 import { bodyDigest, canonicalDigest, canonicalJson } from "./canonical.js";
+import { isLaneId, type LaneRecord, type LinkedLanes, type RunLink } from "./lanes.js";
 import type { RunLedger } from "./run-ledger.js";
 import type { ContractRole, TokenStore } from "./tokens.js";
 
@@ -146,6 +147,56 @@ export interface TerminalReceipt {
   signature: { alg: "ed25519"; keyId: string; sig: `0x${string}` };
 }
 
+/**
+ * O-1: the v2 receipt for a LINKED run. Every field is signed — the message
+ * is canonicalJson({schema, runId, terminalState, ts, lanes, linkDigest, alg,
+ * keyId}). The sink accepts it only when `lanes` equals the linked set and
+ * `linkDigest` equals the link's digest, then freezes every member lane.
+ */
+export interface TerminalReceiptV2 {
+  schema: "ac-terminal-receipt/v2";
+  runId: string;
+  terminalState: TerminalState;
+  ts: string;
+  lanes: LinkedLanes;
+  linkDigest: string;
+  signature: { alg: "ed25519"; keyId: string; sig: `0x${string}` };
+}
+
+export const RUN_SET_SCHEMA = "ac-telemetry.run-set/v1";
+
+/** One member lane of a linked run, as the read listener serves it. */
+export interface RunSetLane {
+  laneId: string;
+  /** open: still ingesting · pending: receipt accepted, sealing at closedAt · final: sealed under a final head · empty: sealed with no records · lost: a restart lost its chain */
+  state: "open" | "pending" | "final" | "empty" | "lost";
+  head: SignedHead | null;
+  annex: RefusalAnnex | null;
+  /** post-close ingest refusals (the annex count; for an empty lane the sink's own count). */
+  refusedAfterClose: number;
+  /** the lane's signed-open binding (role, keyId, mcpSessionId) — the verifier's R8 scope. */
+  keyId: string;
+  mcpSessionId: string;
+  openDigest: string;
+}
+
+/**
+ * The run as the ordered set of lane heads (design §O-1 step 2). Unsigned on
+ * purpose: every component is already signed — each final lane head carries
+ * receiptDigest = the v2 receipt's digest, and that receipt (contract-signed)
+ * names the runId, the lane set, and the linkDigest.
+ */
+export interface RunSetHead {
+  schema: typeof RUN_SET_SCHEMA;
+  runId: string;
+  linkDigest: string;
+  lanes: { buyer: RunSetLane[]; provider: RunSetLane[] };
+  /** digest of the accepted v2 receipt; null until one is accepted. */
+  receiptDigest: string | null;
+  /** true once a receipt was accepted AND every member lane is final, empty, or lost. */
+  final: boolean;
+}
+
 export const TERMINAL_STATES = new Set([
   "settled",
   "no_agreement",
@@ -184,7 +235,13 @@ export type SinkRefusalCode =
   | "RECEIPT_STALE"
   | "RUN_EMPTY"
   /** N7a HIGH-1: the run was opened before a restart — its chain is gone. */
-  | "RUN_LOST";
+  | "RUN_LOST"
+  /** O-1 lane-open / link refusals (lanes.ts). */
+  | "NOT_ENROLLED"
+  | "LANE_REUSED"
+  | "LANE_LIMIT"
+  | "LINK_INVALID"
+  | "LINK_CONFLICT";
 
 export interface SinkRefusal {
   ok: false;
@@ -273,11 +330,15 @@ export interface TelemetrySink {
     runId: string;
     receipt?: unknown;
   }): Promise<
-    | { ok: true; head: SignedHead; anchorResult: unknown }
+    | { ok: true; head: SignedHead | RunSetHead; anchorResult: unknown }
     | { ok: true; head: null; pendingClosedAt: string }
     | SinkRefusal
   >;
   isClosed(runId: string): boolean;
+  /** O-1: the linked run as its ordered lane heads; null when `runId` is not linked. */
+  runSet(runId: string): RunSetHead | null;
+  /** The accepted terminal receipt body (v1 or v2) — the verifier fetches it from the sink, never the harness. */
+  receipt(runId: string): unknown | null;
   /** Record metadata for a run (no bodies). */
   recordsFor(runId: string): SinkRecord[];
   /** Records WITH bodies — the extraction helper's and verifier's input. */
@@ -444,6 +505,12 @@ export function createTelemetrySink(options: {
   flushGraceMs?: number;
   /** bound on how far ahead of the sink clock a receipt ts may be. */
   clockSkewMs?: number;
+  /**
+   * O-1: the lane registry (lanes.ts). With it, a contract runId that has a
+   * link closes ONLY by a matching ac-terminal-receipt/v2; v1 stays accepted
+   * for every run with no link. Without it, behaviour is unchanged.
+   */
+  lanes?: { linkFor(runId: string): RunLink | undefined; lane(laneId: string): LaneRecord | undefined };
 }): TelemetrySink {
   const now = options.now ?? Date.now;
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
@@ -464,6 +531,13 @@ export function createTelemetrySink(options: {
   // mints into the annex the moment the final head is signed.
   const annexCounts = new Map<string, number>();
   const headCache = new Map<string, { tip: string; head: SignedHead }>();
+  /** Accepted receipt bodies (v1 or v2), served to the verifier on the read listener. */
+  const receipts = new Map<string, unknown>();
+  /** O-1: linked runs whose v2 receipt was accepted. */
+  const linkedClose = new Map<string, PendingClose>();
+  /** O-1: lanes sealed with no records — no head exists; their ingest is revoked. */
+  const emptySealed = new Map<string, number>();
+  const emptyRefused = new Map<string, number>();
 
   /** Sign a head message; every non-signature field lands top-level on the head. */
   function signHead(fields: Omit<SignedHead, "signature" | "anchor"> & { anchor?: HeadAnchor }): SignedHead {
@@ -605,18 +679,27 @@ export function createTelemetrySink(options: {
    * closedAt, or the window end. ClosedAt is the boundary, never now().
    */
   function maybeSettle(runId: string): void {
-    if (closed.has(runId)) return;
-    const opened = runOpenedMs.get(runId);
-    if (opened === undefined) return;
+    if (closed.has(runId) || emptySealed.has(runId)) return;
     const t = now();
     const pending = pendingClose.get(runId);
-    const windowEndMs = options.runWindowMs === undefined ? undefined : opened + options.runWindowMs;
     if (pending !== undefined && t >= pending.closedAtMs) {
       pendingClose.delete(runId);
       const cr = freeze(runId, "terminal_receipt", pending.receiptDigest, pending.closedAtMs);
-      if (cr !== null) void cr.ready;
+      if (cr !== null) {
+        void cr.ready;
+      } else {
+        // O-1: a linked lane that never carried a record seals EMPTY — its
+        // ingest authority ends exactly like a frozen run's (pendingClose is
+        // only ever set for an empty chain on a lane).
+        options.tokens.revokeRunIngests(runId);
+        options.tokens.markRunUsed(runId);
+        emptySealed.set(runId, pending.closedAtMs);
+      }
       return;
     }
+    const opened = runOpenedMs.get(runId);
+    if (opened === undefined) return;
+    const windowEndMs = options.runWindowMs === undefined ? undefined : opened + options.runWindowMs;
     if (windowEndMs !== undefined && t >= windowEndMs) {
       const cr = freeze(runId, "window_expired", null, windowEndMs);
       if (cr !== null) void cr.ready;
@@ -648,6 +731,152 @@ export function createTelemetrySink(options: {
     return { digest: canonicalDigest({ schema: r.schema, runId: r.runId, terminalState: r.terminalState, ts: r.ts, signature: s }), tsMs };
   }
 
+  /**
+   * O-1: validate an ac-terminal-receipt/v2 against the run's link. Every
+   * field is signed; `lanes` must equal the linked set and `linkDigest` the
+   * link's digest. Returns {digest, tsMs} or null.
+   */
+  function checkReceiptV2(receipt: unknown, runId: string, link: RunLink): { digest: string; tsMs: number } | null {
+    if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt)) return null;
+    const r = receipt as Record<string, unknown>;
+    const keys = Object.keys(r);
+    const want = ["schema", "runId", "terminalState", "ts", "lanes", "linkDigest", "signature"];
+    if (keys.length !== want.length || !want.every((k) => Object.hasOwn(r, k))) return null;
+    if (r.schema !== "ac-terminal-receipt/v2") return null;
+    if (r.runId !== runId) return null;
+    if (typeof r.terminalState !== "string" || !TERMINAL_STATES.has(r.terminalState as TerminalState)) return null;
+    if (typeof r.ts !== "string") return null;
+    const tsMs = Date.parse(r.ts);
+    if (Number.isNaN(tsMs)) return null;
+    if (typeof r.linkDigest !== "string" || r.linkDigest !== link.linkDigest) return null;
+    let lanesJson: string;
+    try { lanesJson = canonicalJson(r.lanes); } catch { return null; }
+    if (lanesJson !== canonicalJson(link.lanes)) return null;
+    const s = r.signature;
+    if (typeof s !== "object" || s === null) return null;
+    const sig = s as Record<string, unknown>;
+    if (sig.alg !== "ed25519" || typeof sig.keyId !== "string") return null;
+    if (typeof sig.sig !== "string" || !/^0x[0-9a-f]{128}$/.test(sig.sig)) return null;
+    const publicKey = options.contractKeys?.[sig.keyId];
+    if (publicKey === undefined) return null;
+    const fields = {
+      schema: r.schema, runId: r.runId, terminalState: r.terminalState, ts: r.ts,
+      lanes: r.lanes, linkDigest: r.linkDigest,
+    };
+    const message = canonicalJson({ ...fields, alg: sig.alg, keyId: sig.keyId });
+    if (!verify(null, Buffer.from(message, "utf8"), publicKey, Buffer.from(sig.sig.slice(2), "hex"))) return null;
+    return { digest: canonicalDigest({ ...fields, signature: s }), tsMs };
+  }
+
+  /** Sign a `lost: true` final head for a run whose chain a restart lost (HIGH-1). */
+  function closeLost(runId: string, receiptDigest: string): SignedHead {
+    lostInMemory.add(runId);
+    try { options.runLedger?.markLost(runId, now()); } catch { /* refuse regardless */ }
+    const ts = new Date(now()).toISOString();
+    const lostHead = signHead({
+      schema: HEAD_SCHEMA,
+      runId,
+      seq: -1,
+      headDigest: CHAIN_GENESIS,
+      recordCount: 0,
+      final: true,
+      signedAt: ts,
+      closedAt: ts,
+      closeCause: "run_lost",
+      receiptDigest,
+      lost: true,
+    });
+    closed.set(runId, { head: lostHead, ready: Promise.resolve(lostHead), anchorResult: null });
+    options.tokens.markRunUsed(runId);
+    return lostHead;
+  }
+
+  const hasDurableTrace = (runId: string): boolean =>
+    lostInMemory.has(runId)
+    || options.runLedger?.isOpened(runId) === true
+    || options.tokens.isRunUsed(runId);
+
+  function runSetLane(laneId: string): RunSetLane {
+    maybeSettle(laneId);
+    const rec = options.lanes?.lane(laneId);
+    const cr = closed.get(laneId);
+    const signed = head(laneId);
+    const annex = annexes.get(laneId) ?? null;
+    let state: RunSetLane["state"];
+    if (emptySealed.has(laneId)) state = "empty";
+    else if (cr !== undefined && cr.head !== undefined) state = cr.head.lost === true ? "lost" : "final";
+    else if (cr !== undefined || pendingClose.has(laneId)) state = "pending";
+    else state = "open";
+    return {
+      laneId,
+      state,
+      head: signed,
+      annex: annex === null ? null : { ...annex, signature: { ...annex.signature } },
+      refusedAfterClose: emptySealed.has(laneId) ? (emptyRefused.get(laneId) ?? 0) : (annexCounts.get(laneId) ?? 0),
+      keyId: rec?.keyId ?? "",
+      mcpSessionId: rec?.mcpSessionId ?? "",
+      openDigest: rec?.openDigest ?? "",
+    };
+  }
+
+  function runSet(runId: string): RunSetHead | null {
+    const link = options.lanes?.linkFor(runId);
+    if (link === undefined) return null;
+    const lanes = { buyer: link.lanes.buyer.map(runSetLane), provider: link.lanes.provider.map(runSetLane) };
+    const accepted = linkedClose.get(runId);
+    const all = [...lanes.buyer, ...lanes.provider];
+    return {
+      schema: RUN_SET_SCHEMA,
+      runId,
+      linkDigest: link.linkDigest,
+      lanes,
+      receiptDigest: accepted?.receiptDigest ?? null,
+      final: accepted !== undefined && all.every((l) => l.state === "final" || l.state === "empty" || l.state === "lost"),
+    };
+  }
+
+  /**
+   * O-1 close of a LINKED run: only a v2 receipt matching the link. Every
+   * member lane seals at receipt.ts + flushGrace under that receipt's digest
+   * (a lane already window-expired stays as it is — disclosed in the set);
+   * a lane whose chain a restart lost signs `lost: true`; a lane that never
+   * carried a record seals empty.
+   */
+  async function closeLinked(runId: string, receipt: unknown, link: RunLink): Promise<
+    | { ok: true; head: RunSetHead; anchorResult: unknown }
+    | { ok: true; head: null; pendingClosedAt: string }
+    | SinkRefusal
+  > {
+    let accepted = linkedClose.get(runId);
+    if (accepted === undefined) {
+      const checked = checkReceiptV2(receipt, runId, link);
+      if (checked === null) return { ok: false, code: "RECEIPT_INVALID" };
+      if (checked.tsMs < link.tsMs - clockSkewMs || checked.tsMs > now() + clockSkewMs) {
+        return { ok: false, code: "RECEIPT_STALE" };
+      }
+      accepted = { receiptDigest: checked.digest, closedAtMs: checked.tsMs + flushGraceMs };
+      linkedClose.set(runId, accepted);
+      receipts.set(runId, JSON.parse(JSON.stringify(receipt)));
+      for (const laneId of [...link.lanes.buyer, ...link.lanes.provider]) {
+        maybeSettle(laneId);
+        if (closed.has(laneId) || emptySealed.has(laneId)) continue;
+        const chain = chains.get(laneId);
+        if ((chain === undefined || chain.length === 0) && hasDurableTrace(laneId)) {
+          closeLost(laneId, checked.digest);
+          continue;
+        }
+        pendingClose.set(laneId, { receiptDigest: accepted.receiptDigest, closedAtMs: accepted.closedAtMs });
+      }
+    }
+    const members = [...link.lanes.buyer, ...link.lanes.provider];
+    for (const laneId of members) maybeSettle(laneId);
+    if (members.some((laneId) => pendingClose.has(laneId))) {
+      return { ok: true, head: null, pendingClosedAt: new Date(accepted.closedAtMs).toISOString() };
+    }
+    await Promise.all(members.map((laneId) => closed.get(laneId)?.ready));
+    return { ok: true, head: runSet(runId) as RunSetHead, anchorResult: null };
+  }
+
   function ingest(input: {
     token: string | undefined;
     kind: SinkRecordKind;
@@ -659,6 +888,10 @@ export function createTelemetrySink(options: {
     // Kind first (no oracle): non-ingest holders never learn a run is closed.
     if (peeked.kind !== "ingest") return { ok: false, code: "FORBIDDEN" };
     maybeSettle(peeked.runId);
+    if (emptySealed.has(peeked.runId)) {
+      emptyRefused.set(peeked.runId, (emptyRefused.get(peeked.runId) ?? 0) + 1);
+      return { ok: false, code: "RUN_CLOSED" };
+    }
     // Then closed state: a post-close write is refused loudly AND counted in
     // the re-signed final head — the verifier requires refusedAfterClose === 0.
     if (closed.has(peeked.runId)) {
@@ -748,10 +981,16 @@ export function createTelemetrySink(options: {
     runId: string;
     receipt?: unknown;
   }): Promise<
-    | { ok: true; head: SignedHead; anchorResult: unknown }
+    | { ok: true; head: SignedHead | RunSetHead; anchorResult: unknown }
     | { ok: true; head: null; pendingClosedAt: string }
     | SinkRefusal
   > {
+    // O-1: a linked contract runId closes only by its v2 receipt; a lane is
+    // never closed directly by any receipt (it seals through its link or its
+    // window). v1 is unchanged for every run with no link.
+    const link = options.lanes?.linkFor(input.runId);
+    if (link !== undefined) return closeLinked(input.runId, input.receipt, link);
+    if (isLaneId(input.runId)) return { ok: false, code: "RECEIPT_INVALID" };
     maybeSettle(input.runId);
     const existing = closed.get(input.runId);
     if (existing !== undefined) {
@@ -776,30 +1015,9 @@ export function createTelemetrySink(options: {
       // verified authority; sign a `lost: true` head so the close is on
       // record and the verifier REJECTs rather than silently swallowing the
       // evidence gap. Permanently lost.
-      if (
-        lostInMemory.has(input.runId)
-        || options.runLedger?.isOpened(input.runId) === true
-        || options.tokens.isRunUsed(input.runId)
-      ) {
-        lostInMemory.add(input.runId);
-        try { options.runLedger?.markLost(input.runId, now()); } catch { /* refuse regardless */ }
-        const ts = new Date(now()).toISOString();
-        const lostHead = signHead({
-          schema: HEAD_SCHEMA,
-          runId: input.runId,
-          seq: -1,
-          headDigest: CHAIN_GENESIS,
-          recordCount: 0,
-          final: true,
-          signedAt: ts,
-          closedAt: ts,
-          closeCause: "run_lost",
-          receiptDigest: checked.digest,
-          lost: true,
-        });
-        closed.set(input.runId, { head: lostHead, ready: Promise.resolve(lostHead), anchorResult: null });
-        options.tokens.markRunUsed(input.runId);
-        return { ok: true, head: lostHead, anchorResult: null };
+      if (hasDurableTrace(input.runId)) {
+        receipts.set(input.runId, JSON.parse(JSON.stringify(input.receipt)));
+        return { ok: true, head: closeLost(input.runId, checked.digest), anchorResult: null };
       }
       return { ok: false, code: "RUN_EMPTY" };
     }
@@ -811,6 +1029,7 @@ export function createTelemetrySink(options: {
     // Seal at receipt.ts + flushGrace — immediate if already due.
     const closedAtMs = checked.tsMs + flushGraceMs;
     pendingClose.set(input.runId, { receiptDigest: checked.digest, closedAtMs });
+    receipts.set(input.runId, JSON.parse(JSON.stringify(input.receipt)));
     maybeSettle(input.runId);
     const sealed = closed.get(input.runId);
     if (sealed === undefined) {
@@ -839,7 +1058,12 @@ export function createTelemetrySink(options: {
   return {
     ingest,
     closeRun,
-    isClosed: (runId) => { maybeSettle(runId); return closed.has(runId); },
+    isClosed: (runId) => { maybeSettle(runId); return closed.has(runId) || emptySealed.has(runId); },
+    runSet,
+    receipt(runId) {
+      const r = receipts.get(runId);
+      return r === undefined ? null : JSON.parse(JSON.stringify(r));
+    },
     annex(runId) {
       maybeSettle(runId);
       const a = annexes.get(runId);

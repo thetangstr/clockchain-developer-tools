@@ -11,7 +11,7 @@ import { canonicalDigest } from "./canonical.js";
 import { guidanceDigests, type GuidanceDigests } from "./tools-list.js";
 import { verifyCertificateEnvelope, type HostRootPin } from "./certificate.js";
 import type { ContractAnchor } from "./anchor.js";
-import { mintTerminalReceipt, type TerminalReceipt } from "./close-emitter.js";
+import { mintTerminalReceipt, type TerminalReceipt, type TerminalReceiptFields } from "./close-emitter.js";
 import { createTerminalOutbox, type TerminalAnchorJob, type TerminalJob } from "./terminal-jobs.js";
 import { makeReceipt, checkReceiptDraft, chainHead, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
 import type { ContractSigner } from "./envelope.js";
@@ -1002,6 +1002,13 @@ export function createContractService(options: {
    */
   onTerminalRun?: (run: ContractRun, terminalState: string, principal: ContractPrincipal | undefined, receipt: TerminalReceipt) => void;
   /**
+   * O-1: mints the terminal receipt in place of the v1 default — the config
+   * layer wires telemetry-lanes.ts here (v2 for a lane-linked run).
+   */
+  mintTerminalReceipt?: (fields: TerminalReceiptFields, signer: ContractSigner) => TerminalReceipt;
+  /** O-1: fired once both seats are bound — the config layer links the run's lanes. */
+  onRunBound?: (run: ContractRun) => void;
+  /**
    * N4b-9 (F14): awaited inside `drain(deadlineMs)` — the config layer wires
    * the close emitter's bounded flush here.
    */
@@ -1735,7 +1742,10 @@ export function createContractService(options: {
     };
     run.receipts.push(receipt);
     run.receiptsByPrincipal.set(principal.keyId, principalReceipts + 1);
-    if (run.bound.buyer !== undefined && run.bound.provider !== undefined) run.stage = "bound";
+    if (run.bound.buyer !== undefined && run.bound.provider !== undefined) {
+      run.stage = "bound";
+      try { options.onRunBound?.(run); } catch { /* a link bug must never break the bind */ }
+    }
     if (existing === undefined) runs.set(runId, run);
     router.set(principal.keyId, slot, runId);
     boundChains.set(`${runId}|${principal.role}`, preBindChain);
@@ -2046,7 +2056,7 @@ export function createContractService(options: {
     // chain tip at this instant), the bound principals, and the run-chain
     // state needed to mint post-restart evidence are all on disk first.
     const receipt = options.onTerminalRun !== undefined
-      ? mintTerminalReceipt(
+      ? (options.mintTerminalReceipt ?? mintTerminalReceipt)(
           { runId: run.runId, terminalState, ts: new Date(now()).toISOString() },
           options.signer,
         )
