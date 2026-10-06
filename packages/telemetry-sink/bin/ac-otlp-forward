@@ -7,10 +7,16 @@
  *   AC_LISTEN             optional; host:port to bind (default 127.0.0.1:4318).
  *                         Only the literals `127.0.0.1` and `[::1]` are
  *                         accepted — `localhost` and anything else refuse.
- *   AC_RUN_ID             required; the run this forwarder is bound to
+ *   AC_RUN_ID             required (static mode); the run this forwarder is bound to
  *   AC_ROLE               required; "buyer" | "provider"
- *   AC_SEALED_TOKEN       the sealed token box as JSON
- *   AC_SEALED_TOKEN_FILE  path to a file containing that JSON
+ *   AC_SEALED_TOKEN       the sealed token box as JSON (static mode)
+ *   AC_SEALED_TOKEN_FILE  path to a file containing that JSON (static mode)
+ *   AC_LANE_MODE          "1" → O-1 lane mode: start token-less, buffer spans
+ *                         in order (bounded), and accept the sealed lane token
+ *                         ONCE at runtime on the control listener
+ *                         (POST /v1/lane-token {laneId, sealedBox}).
+ *   AC_CONTROL_LISTEN     lane mode; host:port of the control listener
+ *                         (loopback literal, a different port from AC_LISTEN)
  *   AC_SERVICES_KEY_FILE  path to the local-services x25519 private key (JWK).
  *                         MUST be mode 0600 — anything looser refuses startup.
  *
@@ -24,43 +30,66 @@ import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = (name) => pathToFileURL(path.join(here, "..", "dist", name)).href;
-const { createForwarder } = await import(dist("forward.js"));
+const { createForwarder, createLaneForwarder } = await import(dist("forward.js"));
 const { readServicesKeyFile } = await import(dist("services-key.js"));
 
 const die = (msg) => { console.error(`ac-otlp-forward: ${msg}`); process.exit(2); };
 
 const sinkUrl = process.env.AC_SINK_URL ?? die("AC_SINK_URL is required");
-const runId = process.env.AC_RUN_ID ?? die("AC_RUN_ID is required");
+const laneMode = process.env.AC_LANE_MODE === "1";
 const role = process.env.AC_ROLE ?? die("AC_ROLE is required");
 if (role !== "buyer" && role !== "provider") die(`AC_ROLE must be buyer|provider (got ${role})`);
 
 const keyFile = process.env.AC_SERVICES_KEY_FILE ?? die("AC_SERVICES_KEY_FILE is required");
 
-const sealedJson = process.env.AC_SEALED_TOKEN
-  ?? (process.env.AC_SEALED_TOKEN_FILE ? readFileSync(process.env.AC_SEALED_TOKEN_FILE, "utf8") : null);
-if (!sealedJson) die("AC_SEALED_TOKEN or AC_SEALED_TOKEN_FILE is required");
-
-// Parse AC_LISTEN: `127.0.0.1:port` or `[::1]:port` only.
-const [listenHost, listenPort] = (() => {
-  const spec = process.env.AC_LISTEN ?? "127.0.0.1:4318";
+// Parse a listen spec: `127.0.0.1:port` or `[::1]:port` only.
+const parseListen = (name, spec) => {
   const v6 = /^\[([0-9a-fA-F:]+)\]:(\d+)$/.exec(spec);
   if (v6 !== null) return [v6[1], Number(v6[2])];
   const v4 = /^([0-9.]+):(\d+)$/.exec(spec);
   if (v4 !== null) return [v4[1], Number(v4[2])];
-  die(`AC_LISTEN must be host:port or [host]:port (got ${spec})`);
-})();
+  die(`${name} must be host:port or [host]:port (got ${spec})`);
+};
+const [listenHost, listenPort] = parseListen("AC_LISTEN", process.env.AC_LISTEN ?? "127.0.0.1:4318");
 
-const server = createForwarder({
-  listen: { host: listenHost, port: listenPort },
-  targetBaseUrl: sinkUrl,
-  sealedToken: JSON.parse(sealedJson),
-  servicesPrivateKeyJwk: readServicesKeyFile(keyFile),
-  runId,
-  role,
-});
+if (laneMode) {
+  const [controlHost, controlPort] = parseListen(
+    "AC_CONTROL_LISTEN",
+    process.env.AC_CONTROL_LISTEN ?? die("AC_CONTROL_LISTEN is required in lane mode"),
+  );
+  const fwd = createLaneForwarder({
+    listen: { host: listenHost, port: listenPort },
+    control: { host: controlHost, port: controlPort },
+    targetBaseUrl: sinkUrl,
+    servicesPrivateKeyJwk: readServicesKeyFile(keyFile),
+    role,
+  });
+  fwd.server.listen(listenPort, listenHost, () => {
+    const addr = fwd.server.address();
+    console.log(`ac-otlp-forward ${role}@lane(pending) listening on ${addr.address}:${addr.port} -> ${sinkUrl}`);
+  });
+  fwd.control.listen(controlPort, controlHost, () => {
+    const addr = fwd.control.address();
+    console.log(`ac-otlp-forward ${role} lane-token control on ${addr.address}:${addr.port}`);
+  });
+} else {
+  const runId = process.env.AC_RUN_ID ?? die("AC_RUN_ID is required");
+  const sealedJson = process.env.AC_SEALED_TOKEN
+    ?? (process.env.AC_SEALED_TOKEN_FILE ? readFileSync(process.env.AC_SEALED_TOKEN_FILE, "utf8") : null);
+  if (!sealedJson) die("AC_SEALED_TOKEN or AC_SEALED_TOKEN_FILE is required");
 
-server.listen(listenPort, listenHost, () => {
-  const addr = server.address();
-  // Status lines carry the bind, run, and target only — never key or token material.
-  console.log(`ac-otlp-forward ${role}@${runId} listening on ${addr.address}:${addr.port} -> ${sinkUrl}`);
-});
+  const server = createForwarder({
+    listen: { host: listenHost, port: listenPort },
+    targetBaseUrl: sinkUrl,
+    sealedToken: JSON.parse(sealedJson),
+    servicesPrivateKeyJwk: readServicesKeyFile(keyFile),
+    runId,
+    role,
+  });
+
+  server.listen(listenPort, listenHost, () => {
+    const addr = server.address();
+    // Status lines carry the bind, run, and target only — never key or token material.
+    console.log(`ac-otlp-forward ${role}@${runId} listening on ${addr.address}:${addr.port} -> ${sinkUrl}`);
+  });
+}

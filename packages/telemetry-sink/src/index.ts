@@ -34,6 +34,10 @@ export {
   type RefusalAnnex,
   type CloseCause,
   type TerminalReceipt,
+  type TerminalReceiptV2,
+  type RunSetHead,
+  type RunSetLane,
+  RUN_SET_SCHEMA,
   type TerminalState,
   type SinkRefusal,
   type SinkRefusalCode,
@@ -60,9 +64,41 @@ export {
   type SinkKeyFile,
   type SinkKeysDoc,
 } from "./sink-key.js";
-export { startFromEnv, parseContractKeys } from "./main.js";
+export { startFromEnv, parseContractKeys, resolveAnchorToken } from "./main.js";
+export {
+  createEnrollmentRegistry,
+  enrollParty,
+  assertX25519Public,
+  ENROLLMENTS_SCHEMA,
+  ENROLL_KEY_ID_RE,
+  type Enrollment,
+  type EnrollmentRegistry,
+} from "./enrollments.js";
+export { runEnrollCli } from "./enroll-cli.js";
+export {
+  createLaneService,
+  linkDigestOf,
+  laneOpenMessage,
+  runLinkMessage,
+  isLaneId,
+  LANE_OPEN_SCHEMA,
+  RUN_LINK_SCHEMA,
+  LANES_FILE_SCHEMA,
+  LANE_ID_RE,
+  type LaneRecord,
+  type LinkedLanes,
+  type RunLink,
+  type LaneService,
+  type LaneOpenResult,
+  type LaneRefusalCode,
+} from "./lanes.js";
 export { createRunLedger, RUN_LEDGER_SCHEMA, type RunLedger, type RunMarker } from "./run-ledger.js";
-export { createForwarder } from "./forward.js";
+export {
+  createForwarder,
+  createLaneForwarder,
+  type LaneForwarder,
+  type LaneForwarderStatus,
+} from "./forward.js";
 export { createMcpTsaAnchor, type McpTsaAnchorOptions } from "./mcp-anchor.js";
 export { readServicesKeyFile } from "./services-key.js";
 export {

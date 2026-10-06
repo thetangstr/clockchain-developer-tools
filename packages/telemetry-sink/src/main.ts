@@ -1,7 +1,9 @@
 import { createPublicKey, type JsonWebKey, type KeyObject } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
+import { createEnrollmentRegistry } from "./enrollments.js";
+import { createLaneService } from "./lanes.js";
 import { createTelemetrySink } from "./sink.js";
 import { createTelemetrySinkServer } from "./server.js";
 import { createMcpTsaAnchor } from "./mcp-anchor.js";
@@ -19,6 +21,10 @@ import { createTokenStore } from "./tokens.js";
  *   - close port  TELEMETRY_CLOSE_PORT  (default 8083 — compose-network only, NEVER routed by Caddy)
  *   - contract keys  TELEMETRY_CONTRACT_KEYS  (JSON {keyId: pem-or-jwk PUBLIC key} — close authority)
  *   - windows        TELEMETRY_RUN_WINDOW_MS / TELEMETRY_FLUSH_GRACE_MS (optional)
+ *   - anchor         TELEMETRY_ANCHOR_MCP_URL + (TELEMETRY_ANCHOR_TOKEN_FILE — a
+ *                    mounted secret file, preferred — or TELEMETRY_ANCHOR_TOKEN)
+ *   - O-1 lanes      enrollments.json (admin-written by enroll-cli) and
+ *                    lanes.json (server-written) on the state volume
  *
  * There is deliberately NO env var that supplies the sink signing key — the
  * key is generated on first boot inside this process and persisted to the
@@ -65,6 +71,34 @@ export function parseContractKeys(
 /** The raw public key bytes — the overlap check compares material, not keyIds. */
 function publicKeyBytes(key: KeyObject): string {
   return key.export({ format: "jwk" }).x as string;
+}
+
+/**
+ * The anchor bearer, from TELEMETRY_ANCHOR_TOKEN_FILE (a mounted secret file;
+ * the value never appears in the container env or `docker inspect`) or the
+ * legacy TELEMETRY_ANCHOR_TOKEN. Both set is ambiguous and refuses boot; an
+ * empty or unreadable file refuses boot. The token is never logged.
+ */
+export function resolveAnchorToken(env: NodeJS.ProcessEnv): string | undefined {
+  const file = env.TELEMETRY_ANCHOR_TOKEN_FILE;
+  const plain = env.TELEMETRY_ANCHOR_TOKEN;
+  if (file !== undefined && plain !== undefined) {
+    throw new Error("set TELEMETRY_ANCHOR_TOKEN_FILE or TELEMETRY_ANCHOR_TOKEN, not both");
+  }
+  if (file === undefined) return plain;
+  if (file === "") throw new Error("TELEMETRY_ANCHOR_TOKEN_FILE is empty");
+  let st;
+  try {
+    st = statSync(file);
+  } catch {
+    throw new Error(`TELEMETRY_ANCHOR_TOKEN_FILE is not readable: ${file}`);
+  }
+  if (!st.isFile()) throw new Error(`TELEMETRY_ANCHOR_TOKEN_FILE is not a regular file: ${file}`);
+  const token = readFileSync(file, "utf8").trim();
+  if (token === "" || /\s/.test(token)) {
+    throw new Error(`TELEMETRY_ANCHOR_TOKEN_FILE must hold exactly one non-empty token: ${file}`);
+  }
+  return token;
 }
 
 export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
@@ -146,11 +180,11 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
   // (or vice versa) is a misconfiguration. Unset entirely → heads carry no
   // anchor block; the `anchor` flag in the ready line makes that visible.
   const anchorUrl = env.TELEMETRY_ANCHOR_MCP_URL;
-  const anchorToken = env.TELEMETRY_ANCHOR_TOKEN;
+  const anchorToken = resolveAnchorToken(env);
   if ((anchorUrl === undefined) !== (anchorToken === undefined)
     || anchorUrl === "" || anchorToken === "") {
     throw new Error(
-      "TELEMETRY_ANCHOR_MCP_URL and TELEMETRY_ANCHOR_TOKEN must both be set or both unset",
+      "TELEMETRY_ANCHOR_MCP_URL and TELEMETRY_ANCHOR_TOKEN(_FILE) must both be set or both unset",
     );
   }
   const anchorBackoff = (env.TELEMETRY_ANCHOR_BACKOFF_MS ?? "")
@@ -162,10 +196,20 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
       }
       return v;
     });
+  // O-1: the enrollment registry is admin-written (enroll-cli) and read-only
+  // here; lanes.json is server-written. Neither ever carries a secret.
+  const enrollments = createEnrollmentRegistry({ file: path.join(stateDir, "enrollments.json") });
+  const lanes = createLaneService({
+    tokens,
+    enrollments,
+    ...(contractKeys === undefined ? {} : { contractKeys }),
+    file: path.join(stateDir, "lanes.json"),
+  });
   const sink = createTelemetrySink({
     signer: { keyId: sinkKey.keyId, privateKey: sinkKey.privateKey },
     tokens,
     runLedger,
+    lanes,
     ...(contractKeys === undefined ? {} : { contractKeys }),
     ...(anchorUrl === undefined ? {} : {
       anchor: createMcpTsaAnchor({
@@ -179,7 +223,7 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
     flushGraceMs: intEnv(env, "TELEMETRY_FLUSH_GRACE_MS", 30_000),
   });
   const keysDoc = sinkKeysDoc(sinkKey);
-  const servers = createTelemetrySinkServer({ sink, tokens, keys: () => keysDoc });
+  const servers = createTelemetrySinkServer({ sink, tokens, keys: () => keysDoc, lanes });
 
   const host = env.TELEMETRY_BIND_HOST ?? "0.0.0.0";
   const writePort = intEnv(env, "TELEMETRY_WRITE_PORT", 8081);

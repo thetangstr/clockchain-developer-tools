@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
 import { buildContractServer } from "./server.js";
 import type { CertificateResolver } from "./certificate-resolver.js";
+import type { TelemetryLanes } from "./telemetry-lanes.js";
 import { receiptClientInfoSchema } from "./receipts.js";
 import type { ContractPrincipal, ContractService, ContractSide } from "./service.js";
 import type { ContractSigner } from "./envelope.js";
@@ -177,6 +178,8 @@ export function createContractHttpHandler(options: {
   service: ContractService;
   /** contract_bind by reference (handshakeSessionId → closing certificate). */
   resolveCertificate?: CertificateResolver;
+  /** O-1: the adapter's `telemetry_open` (sealed lane) — absent = tool not served. */
+  telemetryLanes?: TelemetryLanes;
   callsPerMinute?: number;
   /** N4b-3: per-principal polling-tool rate limit (rendezvous_inbox, contract_status). */
   pollsPerMinute?: number;
@@ -317,6 +320,7 @@ export function createContractHttpHandler(options: {
       principal,
       service,
       ...(options.resolveCertificate !== undefined ? { resolveCertificate: options.resolveCertificate } : {}),
+      ...(options.telemetryLanes !== undefined ? { telemetryLanes: options.telemetryLanes } : {}),
       session: ctx,
       pollGate,
       now,

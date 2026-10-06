@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
+import type { LaneService } from "./lanes.js";
 import type { SinkRefusalCode, TelemetrySink } from "./sink.js";
 import type { SinkKeysDoc } from "./sink-key.js";
 import type { TokenStore } from "./tokens.js";
@@ -17,9 +18,12 @@ import type { TokenStore } from "./tokens.js";
  *     GET  /v1/runs/:runId/records          — paged records + head + annex + advisory, Bearer query/global-query token
  *     GET  /v1/runs/:runId/head             — signed head + annex + advisory, Bearer query/global-query token
  *     GET  /v1/health                       — liveness, unauthenticated
+ *     GET  /v1/runs/:runId/receipt          — the accepted terminal receipt (v1 or v2), same gate (O-1)
  *   close listener  (contract-server uid/address ONLY — N4C-CHANGES-4):
  *     POST /v1/runs/:runId/close            — body = signed contract-server terminal receipt
- *                                           (no bearer — the receipt IS the authority); nothing else
+ *                                           (no bearer — the receipt IS the authority)
+ *     POST /v1/lanes/open                   — body = contract-signed ac-lane-open/v1 (O-1; only when lanes are wired)
+ *     POST /v1/runs/:runId/link             — body = contract-signed ac-run-link/v1 (O-1; only when lanes are wired)
  *
  * Auth is capability-separated: ingest writes (never reads), query reads one
  * run (never writes/closes), and "global-query" — an explicit separate kind —
@@ -35,8 +39,16 @@ import type { TokenStore } from "./tokens.js";
  * `evidentiary: false` — the evidence is the records + signed head; callers
  * must re-verify offline.
  *
- * There is deliberately NO mint endpoint: tokens are minted in-process by the
- * sink owner and delivered sealed; nothing on this surface can create one.
+ * There is deliberately NO public mint endpoint: tokens are minted in-process
+ * by the sink owner and delivered sealed. The one in-band mint is
+ * /v1/lanes/open on the close listener (O-1): it requires a contract-server
+ * signature, names a keyId the sink admin ENROLLED, and seals only to that
+ * enrolled key — it never accepts a public key from the request, and its
+ * response carries ciphertext only.
+ *
+ * Query scope for a linked run (O-1): a `query` token for contract runId R
+ * also reads every lane linked to R; a lane's own laneId is never a query
+ * token scope (lanes are not query-mintable before they are used).
  */
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -69,6 +81,11 @@ const REFUSAL_STATUS: Record<SinkRefusalCode, number> = {
   RECEIPT_STALE: 403,
   RUN_EMPTY: 409,
   RUN_LOST: 410,
+  NOT_ENROLLED: 404,
+  LANE_REUSED: 409,
+  LANE_LIMIT: 429,
+  LINK_INVALID: 409,
+  LINK_CONFLICT: 409,
 };
 
 function readBody(req: IncomingMessage): Promise<Buffer | "too_large" | "timeout"> {
@@ -116,6 +133,8 @@ export function createTelemetrySinkServer(options: {
   tokens: TokenStore;
   /** Published unauthenticated at GET /v1/keys on the read listener (N7a /telemetry/keys). */
   keys?: () => SinkKeysDoc;
+  /** O-1 lane registry — enables /v1/lanes/open and /v1/runs/:runId/link on the close listener. */
+  lanes?: LaneService;
 }): TelemetrySinkServers {
   const { sink, tokens } = options;
 
@@ -187,11 +206,14 @@ export function createTelemetrySinkServer(options: {
     try {
       const url = new URL(req.url ?? "/", "http://loopback.invalid");
       const closeMatch = /^\/v1\/runs\/([^/]+)\/close$/.exec(url.pathname);
-      if (req.method !== "POST" || closeMatch === null) {
+      const linkMatch = /^\/v1\/runs\/([^/]+)\/link$/.exec(url.pathname);
+      const laneOpen = url.pathname === "/v1/lanes/open";
+      const lanes = options.lanes;
+      if (req.method !== "POST"
+        || (closeMatch === null && ((linkMatch === null && !laneOpen) || lanes === undefined))) {
         json(res, 404, { error: "not_found" });
         return;
       }
-      const [, runId] = closeMatch;
       const body = await readBody(req);
       if (body === "too_large") {
         json(res, 413, { error: "payload_too_large" });
@@ -208,6 +230,33 @@ export function createTelemetrySinkServer(options: {
         json(res, 400, { error: "request_invalid" });
         return;
       }
+      if (lanes !== undefined && laneOpen) {
+        // The response is the laneId plus CIPHERTEXT sealed to the enrolled
+        // key — the plaintext token never crosses this listener.
+        const opened = await lanes.open(receipt);
+        if (!opened.ok) {
+          json(res, REFUSAL_STATUS[opened.code], { error: opened.code.toLowerCase() });
+          return;
+        }
+        json(res, 200, {
+          laneId: opened.laneId,
+          role: opened.role,
+          keyId: opened.keyId,
+          mcpSessionId: opened.mcpSessionId,
+          sealedBox: opened.sealedBox,
+        });
+        return;
+      }
+      if (lanes !== undefined && linkMatch !== null) {
+        const linked = await lanes.link(linkMatch[1], receipt);
+        if (!linked.ok) {
+          json(res, REFUSAL_STATUS[linked.code], { error: linked.code.toLowerCase() });
+          return;
+        }
+        json(res, 200, { linked: true, runId: linked.runId, linkDigest: linked.linkDigest, created: linked.created });
+        return;
+      }
+      const runId = (closeMatch as RegExpExecArray)[1];
       const out = await sink.closeRun({ runId, receipt });
       if (!out.ok) {
         json(res, REFUSAL_STATUS[out.code], { error: out.code.toLowerCase() });
@@ -247,7 +296,7 @@ export function createTelemetrySinkServer(options: {
       }
 
       // ---- query (read-only capability) ----
-      const match = /^\/v1\/runs\/([^/]+)\/(records|head)$/.exec(path);
+      const match = /^\/v1\/runs\/([^/]+)\/(records|head|receipt)$/.exec(path);
       if (req.method === "GET" && match !== null) {
         const [, runId, what] = match;
         const record = tokens.resolve(bearerToken(req) ?? "");
@@ -255,18 +304,34 @@ export function createTelemetrySinkServer(options: {
           json(res, 401, { error: "unauthorized" });
           return;
         }
+        // O-1: a run's query token also reads the lanes linked to that run.
+        const linkedTo = options.lanes?.lane(runId)?.runId ?? null;
         const canRead =
           record.kind === "global-query" ||
-          (record.kind === "query" && record.runId === runId);
+          (record.kind === "query" && record.runId === runId) ||
+          (record.kind === "query" && linkedTo !== null && linkedTo === record.runId);
         if (!canRead) {
           json(res, 403, { error: "forbidden" });
+          return;
+        }
+        if (what === "receipt") {
+          const accepted = sink.receipt(runId);
+          if (accepted === null) {
+            json(res, 404, { error: "not_found" });
+            return;
+          }
+          json(res, 200, { runId, receipt: accepted });
           return;
         }
         const head = sink.head(runId);
         const annex = sink.annex(runId); // the verifier fetches the LATEST annex itself
         const advisory = { evidentiary: false, result: sink.verifyRun(runId) };
+        // O-1: a linked contract runId has no chain of its own — the run is
+        // its ordered lane heads. Additive field; absent for unlinked runs.
+        const runSet = sink.runSet(runId);
+        const linked = runSet === null ? {} : { runSet };
         if (what === "head") {
-          json(res, 200, { runId, head, annex, advisory });
+          json(res, 200, { runId, head, annex, advisory, ...linked });
           return;
         }
         const cursorParam = url.searchParams.get("cursor");
@@ -290,6 +355,7 @@ export function createTelemetrySinkServer(options: {
           head,
           annex,
           advisory,
+          ...linked,
         });
         return;
       }

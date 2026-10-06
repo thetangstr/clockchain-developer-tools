@@ -1,0 +1,408 @@
+import { randomBytes, verify, type KeyObject } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
+
+import { canonicalDigest, canonicalJson } from "./canonical.js";
+import type { EnrollmentRegistry } from "./enrollments.js";
+import { sealTo, type SealedBox } from "./seal.js";
+import type { ContractRole, TokenStore } from "./tokens.js";
+
+/**
+ * O-1 lanes (state/ledger/notes/mcp-coordination-design.md §O-1).
+ *
+ * A LANE is a pre-bind ingest stream for one (role, principal keyId,
+ * mcpSessionId). Its id is `lane:<32 hex>`, allocated here; it is an
+ * ordinary sink run (its own hash chain, its own ingest token) whose runId
+ * happens to be the laneId.
+ *
+ *   POST /v1/lanes/open            (close listener) body = contract-signed ac-lane-open/v1
+ *   POST /v1/runs/:runId/link      (close listener) body = contract-signed ac-run-link/v1
+ *
+ * Authority (the reason this file exists):
+ *   - The ingest token is minted HERE, by the sink — the only mint.
+ *   - It is sealed ONLY to the x25519 key the sink admin enrolled for the
+ *     named keyId (enrollments.json). The request names a keyId; it can never
+ *     carry a public key — the lane-open field set is exact, and any extra
+ *     field (publicKey, x25519, sealTo, ...) refuses REQUEST_INVALID.
+ *   - The request is authorized by a contract-server ed25519 signature under
+ *     a key pinned in `contractKeys` (the same pin as close). There is no
+ *     bearer path and no public mint endpoint.
+ *   - One lane per (keyId, role, mcpSessionId), ever: a replayed or repeated
+ *     open is LANE_REUSED. At most `maxOpenLanesPerKey` unlinked lanes per
+ *     keyId inside `laneWindowMs` (LANE_LIMIT) so a contract key cannot
+ *     exhaust sink state.
+ *   - A link is write-once per contract runId; a lane belongs to at most one
+ *     run. Linking marks the contract runId used so the verifier can mint a
+ *     query token for it.
+ *
+ * lanes.json (state volume, server-written only) keeps lanes and links across
+ * a restart, so a lane can never be re-opened for the same session and a
+ * link survives; the lane CHAINS are in memory like every sink run — a
+ * restart leaves an ingested lane RUN_LOST via runs.json, never reset.
+ */
+
+export const LANE_OPEN_SCHEMA = "ac-lane-open/v1" as const;
+export const RUN_LINK_SCHEMA = "ac-run-link/v1" as const;
+export const LANES_FILE_SCHEMA = "ac-telemetry.lanes/v1" as const;
+export const LANE_ID_RE = /^lane:[0-9a-f]{32}$/;
+const MCP_SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SIG_RE = /^0x[0-9a-f]{128}$/;
+const MAX_LANES_PER_ROLE = 8;
+const DEFAULT_MAX_OPEN_LANES_PER_KEY = 8;
+const DEFAULT_LANE_WINDOW_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_CLOCK_SKEW_MS = 60_000;
+
+export const isLaneId = (id: string): boolean => id.startsWith("lane:");
+
+export interface LaneRecord {
+  laneId: string;
+  keyId: string;
+  role: ContractRole;
+  mcpSessionId: string;
+  openedAtMs: number;
+  /** canonical digest of the accepted signed lane-open — the verifier's link from lane to session. */
+  openDigest: string;
+  /** contract runId once linked; null until then. */
+  runId: string | null;
+}
+
+export interface LinkedLanes {
+  buyer: string[];
+  provider: string[];
+}
+
+export interface RunLink {
+  runId: string;
+  lanes: LinkedLanes;
+  /** canonicalDigest({schema: "ac-run-link/v1", runId, lanes}) — what ac-terminal-receipt/v2 carries. */
+  linkDigest: string;
+  tsMs: number;
+  linkedAtMs: number;
+}
+
+export type LaneRefusalCode =
+  | "REQUEST_INVALID"
+  | "RECEIPT_INVALID"
+  | "RECEIPT_STALE"
+  | "NOT_ENROLLED"
+  | "LANE_REUSED"
+  | "LANE_LIMIT"
+  | "LINK_INVALID"
+  | "LINK_CONFLICT";
+
+export interface LaneOpenResult {
+  ok: true;
+  laneId: string;
+  role: ContractRole;
+  keyId: string;
+  mcpSessionId: string;
+  /** the ingest token, sealed to the ENROLLED key, bound to (laneId, role). */
+  sealedBox: SealedBox;
+}
+
+export interface LaneService {
+  open(body: unknown): Promise<LaneOpenResult | { ok: false; code: LaneRefusalCode }>;
+  link(runId: string, body: unknown): Promise<
+    { ok: true; runId: string; linkDigest: string; created: boolean } | { ok: false; code: LaneRefusalCode }
+  >;
+  lane(laneId: string): LaneRecord | undefined;
+  linkFor(runId: string): RunLink | undefined;
+}
+
+/** The digest both the contract service and the sink compute for a link. */
+export function linkDigestOf(runId: string, lanes: LinkedLanes): string {
+  return canonicalDigest({ schema: RUN_LINK_SCHEMA, runId, lanes });
+}
+
+/**
+ * The signed message of an ac-lane-open/v1. The body's `keyId` names the
+ * PRINCIPAL, so the signer's keyId rides nested under `signature` (with
+ * `sig` omitted) rather than top-level as in the receipt convention — the
+ * two keyIds can never collide.
+ */
+export function laneOpenMessage(
+  fields: { keyId: string; role: string; mcpSessionId: string; ts: string },
+  signature: { alg: string; keyId: string },
+): string {
+  return canonicalJson({
+    schema: LANE_OPEN_SCHEMA,
+    keyId: fields.keyId,
+    role: fields.role,
+    mcpSessionId: fields.mcpSessionId,
+    ts: fields.ts,
+    signature: { alg: signature.alg, keyId: signature.keyId },
+  });
+}
+
+/** The signed message of an ac-run-link/v1 — the receipt convention {..., alg, keyId}. */
+export function runLinkMessage(
+  fields: { runId: string; lanes: LinkedLanes; ts: string },
+  signature: { alg: string; keyId: string },
+): string {
+  return canonicalJson({
+    schema: RUN_LINK_SCHEMA,
+    runId: fields.runId,
+    lanes: fields.lanes,
+    ts: fields.ts,
+    alg: signature.alg,
+    keyId: signature.keyId,
+  });
+}
+
+interface LanesDoc {
+  schema: typeof LANES_FILE_SCHEMA;
+  lanes: Record<string, Omit<LaneRecord, "laneId">>;
+  links: Record<string, Omit<RunLink, "runId">>;
+}
+
+function readLanesFile(file: string): LanesDoc {
+  const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
+  if (typeof raw !== "object" || raw === null || (raw as LanesDoc).schema !== LANES_FILE_SCHEMA) {
+    throw new Error(`corrupt ${file}: not a ${LANES_FILE_SCHEMA} document`);
+  }
+  const doc = raw as LanesDoc;
+  if (typeof doc.lanes !== "object" || doc.lanes === null || typeof doc.links !== "object" || doc.links === null) {
+    throw new Error(`corrupt ${file}: bad shape`);
+  }
+  return {
+    schema: LANES_FILE_SCHEMA,
+    lanes: Object.assign(Object.create(null), doc.lanes),
+    links: Object.assign(Object.create(null), doc.links),
+  };
+}
+
+function writeLanesAtomic(file: string, doc: LanesDoc): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  const fd = openSync(tmp, "w", 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(doc));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, file);
+}
+
+const exactKeys = (o: Record<string, unknown>, keys: readonly string[]): boolean => {
+  const own = Object.keys(o);
+  return own.length === keys.length && keys.every((k) => Object.hasOwn(o, k));
+};
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Parse the `signature` member: exactly {alg:"ed25519", keyId, sig:0x<128hex>}. */
+function parseSignature(v: unknown): { alg: "ed25519"; keyId: string; sig: string } | null {
+  if (!isPlainObject(v) || !exactKeys(v, ["alg", "keyId", "sig"])) return null;
+  if (v.alg !== "ed25519" || typeof v.keyId !== "string" || typeof v.sig !== "string" || !SIG_RE.test(v.sig)) {
+    return null;
+  }
+  return { alg: "ed25519", keyId: v.keyId, sig: v.sig };
+}
+
+export function createLaneService(options: {
+  tokens: TokenStore;
+  enrollments: EnrollmentRegistry;
+  /** pinned contract-server ed25519 keys — the same pin as close. */
+  contractKeys?: Record<string, KeyObject>;
+  /** lanes.json on the state volume; absent → in-memory (tests). */
+  file?: string;
+  now?: () => number;
+  clockSkewMs?: number;
+  maxOpenLanesPerKey?: number;
+  /** an unlinked lane older than this no longer counts toward the per-key cap. */
+  laneWindowMs?: number;
+}): LaneService {
+  const now = options.now ?? Date.now;
+  const clockSkewMs = options.clockSkewMs ?? DEFAULT_CLOCK_SKEW_MS;
+  const maxOpen = options.maxOpenLanesPerKey ?? DEFAULT_MAX_OPEN_LANES_PER_KEY;
+  const laneWindowMs = options.laneWindowMs ?? DEFAULT_LANE_WINDOW_MS;
+  // Fail closed on a corrupt file: construction throws, the sink refuses boot.
+  const doc: LanesDoc = options.file !== undefined && existsSync(options.file)
+    ? readLanesFile(options.file)
+    : { schema: LANES_FILE_SCHEMA, lanes: Object.create(null), links: Object.create(null) };
+  const sessionIndex = new Map<string, string>();
+  const sessionKey = (keyId: string, role: string, mcpSessionId: string): string =>
+    canonicalJson([keyId, role, mcpSessionId]);
+  for (const [laneId, l] of Object.entries(doc.lanes)) {
+    sessionIndex.set(sessionKey(l.keyId, l.role, l.mcpSessionId), laneId);
+  }
+
+  const persist = (): void => {
+    if (options.file !== undefined) writeLanesAtomic(options.file, doc);
+  };
+
+  function verifyContractSig(message: string, sig: { keyId: string; sig: string }): boolean {
+    const publicKey = options.contractKeys?.[sig.keyId];
+    if (publicKey === undefined) return false;
+    try {
+      return verify(null, Buffer.from(message, "utf8"), publicKey, Buffer.from(sig.sig.slice(2), "hex"));
+    } catch {
+      return false;
+    }
+  }
+
+  async function open(body: unknown): Promise<LaneOpenResult | { ok: false; code: LaneRefusalCode }> {
+    // Exact field set — a public key (or anything else) in the request refuses.
+    if (!isPlainObject(body) || !exactKeys(body, ["schema", "keyId", "role", "mcpSessionId", "ts", "signature"])) {
+      return { ok: false, code: "REQUEST_INVALID" };
+    }
+    const { schema, keyId, role, mcpSessionId, ts } = body;
+    if (schema !== LANE_OPEN_SCHEMA
+      || typeof keyId !== "string" || keyId.length === 0 || keyId.length > 128
+      || (role !== "buyer" && role !== "provider")
+      || typeof mcpSessionId !== "string" || !MCP_SESSION_RE.test(mcpSessionId)
+      || typeof ts !== "string") {
+      return { ok: false, code: "REQUEST_INVALID" };
+    }
+    const tsMs = Date.parse(ts);
+    if (Number.isNaN(tsMs)) return { ok: false, code: "REQUEST_INVALID" };
+    const signature = parseSignature(body.signature);
+    if (signature === null) return { ok: false, code: "RECEIPT_INVALID" };
+    if (!verifyContractSig(laneOpenMessage({ keyId, role, mcpSessionId, ts }, signature), signature)) {
+      return { ok: false, code: "RECEIPT_INVALID" };
+    }
+    const t = now();
+    if (Math.abs(tsMs - t) > clockSkewMs) return { ok: false, code: "RECEIPT_STALE" };
+    const enrollment = options.enrollments.get(keyId);
+    // Role mismatch reads the same as absence: the sink seals only to what
+    // the admin enrolled for exactly this (keyId, role).
+    if (enrollment === undefined || enrollment.role !== role) return { ok: false, code: "NOT_ENROLLED" };
+    const sKey = sessionKey(keyId, role, mcpSessionId);
+    if (sessionIndex.has(sKey)) return { ok: false, code: "LANE_REUSED" };
+    const openUnlinked = Object.values(doc.lanes).filter(
+      (l) => l.keyId === keyId && l.runId === null && l.openedAtMs + laneWindowMs > t,
+    ).length;
+    if (openUnlinked >= maxOpen) return { ok: false, code: "LANE_LIMIT" };
+
+    const laneId = `lane:${randomBytes(16).toString("hex")}`;
+    const record: Omit<LaneRecord, "laneId"> = {
+      keyId,
+      role,
+      mcpSessionId,
+      openedAtMs: t,
+      openDigest: canonicalDigest(body),
+      runId: null,
+    };
+    // Durable BEFORE minting: after a restart the session can never get a
+    // second lane, and the lane is known to the link route.
+    doc.lanes[laneId] = record;
+    sessionIndex.set(sKey, laneId);
+    try {
+      persist();
+    } catch (err) {
+      delete doc.lanes[laneId];
+      sessionIndex.delete(sKey);
+      throw err;
+    }
+    const minted = options.tokens.mintIngest({ runId: laneId, role });
+    try {
+      // Durable authority before it is handed out (same rule as mint-cli).
+      await options.tokens.flush();
+    } catch (err) {
+      options.tokens.revoke(minted.record.tokenId);
+      throw err;
+    }
+    // Sealed to the ENROLLED key only, bound to (laneId, role). The plaintext
+    // never leaves this function.
+    const sealedBox = sealTo(enrollment.x25519, minted.token, { runId: laneId, role });
+    return { ok: true, laneId, role, keyId, mcpSessionId, sealedBox };
+  }
+
+  function parseLanes(v: unknown): LinkedLanes | null {
+    if (!isPlainObject(v) || !exactKeys(v, ["buyer", "provider"])) return null;
+    const seen = new Set<string>();
+    for (const role of ["buyer", "provider"] as const) {
+      const list = v[role];
+      if (!Array.isArray(list) || list.length > MAX_LANES_PER_ROLE) return null;
+      for (const id of list) {
+        if (typeof id !== "string" || !LANE_ID_RE.test(id) || seen.has(id)) return null;
+        seen.add(id);
+      }
+    }
+    if (seen.size === 0) return null;
+    return { buyer: [...(v.buyer as string[])], provider: [...(v.provider as string[])] };
+  }
+
+  async function link(
+    runId: string,
+    body: unknown,
+  ): Promise<{ ok: true; runId: string; linkDigest: string; created: boolean } | { ok: false; code: LaneRefusalCode }> {
+    if (!isPlainObject(body) || !exactKeys(body, ["schema", "runId", "lanes", "ts", "signature"])) {
+      return { ok: false, code: "REQUEST_INVALID" };
+    }
+    if (body.schema !== RUN_LINK_SCHEMA || body.runId !== runId
+      || !RUN_ID_RE.test(runId) || isLaneId(runId) || typeof body.ts !== "string") {
+      return { ok: false, code: "REQUEST_INVALID" };
+    }
+    const lanes = parseLanes(body.lanes);
+    const tsMs = Date.parse(body.ts);
+    if (lanes === null || Number.isNaN(tsMs)) return { ok: false, code: "REQUEST_INVALID" };
+    const signature = parseSignature(body.signature);
+    if (signature === null) return { ok: false, code: "RECEIPT_INVALID" };
+    if (!verifyContractSig(runLinkMessage({ runId, lanes, ts: body.ts }, signature), signature)) {
+      return { ok: false, code: "RECEIPT_INVALID" };
+    }
+    const t = now();
+    if (tsMs > t + clockSkewMs) return { ok: false, code: "RECEIPT_STALE" };
+    const linkDigest = linkDigestOf(runId, lanes);
+    // Write-once: an identical re-link (a retried delivery) is idempotent;
+    // anything else is a conflict.
+    const existing = Object.hasOwn(doc.links, runId) ? doc.links[runId] : undefined;
+    if (existing !== undefined) {
+      return existing.linkDigest === linkDigest
+        ? { ok: true, runId, linkDigest, created: false }
+        : { ok: false, code: "LINK_CONFLICT" };
+    }
+    // A runId that already carries a direct (v1-era) sink run is never
+    // re-purposed as a linked run.
+    if (options.tokens.isRunUsed(runId)) return { ok: false, code: "LINK_CONFLICT" };
+    for (const role of ["buyer", "provider"] as const) {
+      for (const laneId of lanes[role]) {
+        const lane = Object.hasOwn(doc.lanes, laneId) ? doc.lanes[laneId] : undefined;
+        if (lane === undefined || lane.role !== role) return { ok: false, code: "LINK_INVALID" };
+        // A lane belongs to at most one run.
+        if (lane.runId !== null) return { ok: false, code: "LANE_REUSED" };
+      }
+    }
+    doc.links[runId] = { lanes, linkDigest, tsMs, linkedAtMs: t };
+    for (const laneId of [...lanes.buyer, ...lanes.provider]) doc.lanes[laneId].runId = runId;
+    try {
+      persist();
+    } catch (err) {
+      delete doc.links[runId];
+      for (const laneId of [...lanes.buyer, ...lanes.provider]) doc.lanes[laneId].runId = null;
+      throw err;
+    }
+    // The contract runId becomes a real (query-mintable) run; it can never
+    // gain direct ingest authority.
+    options.tokens.markRunUsed(runId);
+    await options.tokens.flush();
+    return { ok: true, runId, linkDigest, created: true };
+  }
+
+  return {
+    open,
+    link,
+    lane(laneId) {
+      if (!Object.hasOwn(doc.lanes, laneId)) return undefined;
+      return { laneId, ...doc.lanes[laneId] };
+    },
+    linkFor(runId) {
+      if (!Object.hasOwn(doc.links, runId)) return undefined;
+      const l = doc.links[runId];
+      return { runId, ...l, lanes: { buyer: [...l.lanes.buyer], provider: [...l.lanes.provider] } };
+    },
+  };
+}

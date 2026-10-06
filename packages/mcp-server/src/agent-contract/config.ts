@@ -12,6 +12,7 @@ import {
 import { PUBLISHED_HOST_ROOTS, type HostRootPin } from "./certificate.js";
 import { parseContractTokens, tokenAuthenticator } from "./http-handler.js";
 import { createCloseEmitter } from "./close-emitter.js";
+import { createTelemetryLanes, type TelemetryLanes } from "./telemetry-lanes.js";
 import { createRelayCertificateResolver, type CertificateResolver } from "./certificate-resolver.js";
 import { createContractService, MAX_POLICY_DIGESTS_PER_ROLE, type ContractRun, type ContractService } from "./service.js";
 import type { SimFaults } from "./sim/index.js";
@@ -95,6 +96,8 @@ export type ContractRouteConfig =
        * (the same relay the v2 coordinator reads certificates from).
        */
       readonly resolveCertificate?: CertificateResolver;
+      /** O-1: TELEMETRY_LANES=1 — the adapter's `telemetry_open`, run links and v2 close. */
+      readonly telemetryLanes?: TelemetryLanes;
     };
 
 const ED25519_PKCS8_PREFIX = "302e020100300506032b657004220420";
@@ -357,6 +360,18 @@ export function loadContractConfig(
     return misconfigured("TELEMETRY_CLOSE_URL must be an http(s) URL");
   }
   const telemetryCloseUrl = telemetryCloseRaw === "" ? undefined : telemetryCloseRaw;
+  // O-1: TELEMETRY_LANES=1 serves the adapter's `telemetry_open`, links the
+  // run's lanes at bind and closes linked runs with ac-terminal-receipt/v2.
+  // Unset/0 = today's behaviour (v1 close, no lane tool). The lane-open and
+  // link routes live on the same close listener, so the URL is required.
+  const lanesRaw = (env.TELEMETRY_LANES ?? "").trim();
+  if (lanesRaw !== "" && lanesRaw !== "0" && lanesRaw !== "1") {
+    return misconfigured("TELEMETRY_LANES wants 0 or 1");
+  }
+  const lanesEnabled = lanesRaw === "1";
+  if (lanesEnabled && telemetryCloseUrl === undefined) {
+    return misconfigured("TELEMETRY_LANES=1 requires TELEMETRY_CLOSE_URL (lanes open on the sink close listener)");
+  }
   // Retry schedule for close delivery — test/dev can shorten it; default
   // retries ~5 attempts over ~30s. Non-numeric/negative entries refuse.
   const backoffRaw = (env.TELEMETRY_CLOSE_BACKOFF_MS ?? "").trim();
@@ -481,6 +496,10 @@ export function loadContractConfig(
   // triggering principal is remembered so the evidence receipt names the
   // caller that ended the run.
   const terminalPrincipal = new Map<string, { role: "buyer" | "provider"; keyId: string }>();
+  // O-1: created AFTER the service (its boot resumes link deliveries, which
+  // must not start for a service that failed to take the state lock); the
+  // service hooks below read it through this binding.
+  let telemetryLanes: TelemetryLanes | undefined;
   const closeEmitter = telemetryCloseUrl === undefined ? undefined : createCloseEmitter({
     signer,
     closeUrl: telemetryCloseRaw,
@@ -545,9 +564,32 @@ export function loadContractConfig(
             onDrain: () => closeEmitter.drain(5_000),
           }
         : {}),
+      ...(lanesEnabled
+        ? {
+            mintTerminalReceipt: (fields: import("./close-emitter.js").TerminalReceiptFields, s: ContractSigner) =>
+              telemetryLanes!.terminalReceiptFor(fields, s),
+            onRunBound: (run: ContractRun) => telemetryLanes?.onRunBound(run),
+          }
+        : {}),
     });
   } catch (err) {
     return misconfigured(`contract state: ${(err as Error).message}`);
+  }
+
+  if (lanesEnabled) {
+    try {
+      telemetryLanes = createTelemetryLanes({
+        signer,
+        closeUrl: telemetryCloseRaw,
+        stateDir,
+        ...(telemetryCloseBackoff !== undefined ? { backoffMs: telemetryCloseBackoff } : {}),
+        ...(telemetryCloseAttemptTimeoutMs !== undefined ? { attemptTimeoutMs: telemetryCloseAttemptTimeoutMs } : {}),
+        ...(telemetryCloseDeadlineMs !== undefined ? { deadlineMs: telemetryCloseDeadlineMs } : {}),
+      });
+    } catch (err) {
+      service.close();
+      return misconfigured(`telemetry lanes state: ${(err as Error).message}`);
+    }
   }
 
   // N4b-9 (F14): boot recovery — persisted close jobs that never resolved
@@ -591,5 +633,6 @@ export function loadContractConfig(
       ? { resolveCertificate: createRelayCertificateResolver({ relayUrl: env.HANDSHAKE_RELAY.trim() }) }
       : {}),
     service,
+    ...(telemetryLanes !== undefined ? { telemetryLanes } : {}),
   };
 }

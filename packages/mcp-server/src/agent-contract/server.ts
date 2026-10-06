@@ -12,6 +12,7 @@ import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
 import { newServerNonce, type ReceiptFields, type ServerReceipt } from "./receipts.js";
 import type { ContractService, ContractPrincipal, ContractRun } from "./service.js";
 import type { CertificateResolver } from "./certificate-resolver.js";
+import { TELEMETRY_OPEN_TOOL, type TelemetryLanes } from "./telemetry-lanes.js";
 
 /**
  * The `/contract/mcp` MCP server: `contract_bind`/`contract_status` are
@@ -74,6 +75,11 @@ export function buildContractServer(options: {
    * a bind by session id refuses CONTRACT_UNAVAILABLE.
    */
   resolveCertificate?: CertificateResolver;
+  /**
+   * O-1: enables the ADAPTER tool `telemetry_open` (absent from tools/list,
+   * so guidanceDigests are unchanged). Absent, the name is NOT_FOUND.
+   */
+  telemetryLanes?: TelemetryLanes;
   sourceIp?: string;
   /**
    * N4b-3: polling tools (`rendezvous_inbox`, `contract_status`) get their
@@ -109,7 +115,7 @@ export function buildContractServer(options: {
    */
   const PRE_BIND_TOOLS = new Set([
     "rendezvous_publish_listing", "rendezvous_search", "rendezvous_send_invitation", "rendezvous_inbox",
-    "contract_bind_challenge", "contract_bind", "contract_status",
+    "contract_bind_challenge", "contract_bind", "contract_status", TELEMETRY_OPEN_TOOL,
   ]);
   const allowPoll = options.pollGate
     ?? keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
@@ -174,6 +180,33 @@ export function buildContractServer(options: {
     });
     if (!preflight.ok) {
       return asResult(refusal(preflight.code, serverNonce));
+    }
+
+    // O-1: the local adapter (never the model) opens this session's sealed
+    // telemetry lane. Arguments must be exactly {} — a public key or any
+    // other field is invalid params (the sink seals only to the key its
+    // admin enrolled). The result is the laneId plus CIPHERTEXT; the call is
+    // receipted like every other.
+    if (name === TELEMETRY_OPEN_TOOL && options.telemetryLanes !== undefined) {
+      if (!z.object({}).strict().safeParse(callArgs).success) {
+        // Same evidence as a schema-invalid catalogued call (below).
+        const invalidEvidence = {
+          tool: name, argsDigest, argsDigestScheme: argsScheme, outcome: "INVALID_PARAMS",
+          responseDigest: canonicalDigest({ error: "invalid_params" }), serverNonce, ...sessionFields(),
+        };
+        if (receiptRun === undefined) {
+          service.recordPreBind(principal, invalidEvidence);
+        } else if (service.canReceipt(receiptRun, principal.keyId)) {
+          service.recordReceipt(receiptRun, { ...invalidEvidence, principal: { role: principal.role, keyId: principal.keyId } });
+        }
+        throw new McpError(ErrorCode.InvalidParams, "invalid tool arguments");
+      }
+      const opened = await options.telemetryLanes.open(principal, sessionFields().mcpSessionId);
+      const opOutcome = opened.ok
+        ? ok({ laneId: opened.laneId, role: opened.role, sealedBox: opened.sealedBox, serverNonce })
+        : refusal(opened.code, serverNonce, opened.retryable ? { retryable: true } : undefined);
+      // The run may have ended during the await — never append to it then.
+      return asResult(recordAny(receiptTargetFor(receiptRun), name, argsDigest, opOutcome, serverNonce, argsScheme));
     }
 
     const def = contractToolDef(name);
