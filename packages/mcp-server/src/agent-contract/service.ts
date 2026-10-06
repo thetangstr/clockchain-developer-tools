@@ -926,6 +926,8 @@ export function createContractService(options: {
   policyDigests: Readonly<Record<ContractRole, PolicyDigestPin>>;
   /** `CONTRACT_PRINCIPALS`: buyer keyId → pinned family-principal address. */
   principals?: ReadonlyMap<string, string>;
+  /** O-2: `CONTRACT_DIRECTORY` — directory name → pinned provider keyId. */
+  directory?: ReadonlyMap<string, string>;
   /**
    * N4b-7 (P-GAP): `CONTRACT_REQUIRE_BIND_STATEMENT=1` — every contract_bind
    * must carry a verified session-key possession statement. At L the
@@ -1930,6 +1932,9 @@ export function createContractService(options: {
     signingOpen,
     policyDigests,
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
+    // O-2: directory pins + standing-listing persistence (business-owned).
+    ...(options.directory !== undefined ? { directory: options.directory } : {}),
+    ...(options.stateDir !== undefined ? { stateDir: options.stateDir } : {}),
     claimMandate,
     endRun,
     allowLegacySealV2: options.allowLegacySealV2 === true,

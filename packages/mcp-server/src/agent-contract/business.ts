@@ -17,6 +17,7 @@ import type {
   AgreementRecord, ContractPrincipal, ContractRun, OfferRecord,
 } from "./service.js";
 import type { SimWorld } from "./sim/index.js";
+import { loadStandingListings, persistStandingListings, type StandingListingRecord } from "./directory.js";
 
 /**
  * The `/contract/mcp` business semantics (N4b-2b, LLD §3/§13 + rev 6.5):
@@ -79,6 +80,19 @@ interface Listing {
   /** Pending sealed deliveries — at most one per sender keyId (a resend
    *  replaces the sender's old one), at most 16 per listing. */
   pending: Map<string, InboxMessage>;
+  /**
+   * O-2: the `CONTRACT_DIRECTORY` name this listing claims — set only when
+   * the publishing keyId is the one pinned to that name (no squatting).
+   */
+  directoryName?: string;
+  /**
+   * O-2: a standing (durable) listing is never consumed by a bind, so one
+   * provider serves many travelers; each delivery is consumed on its own
+   * (provider ack, or expiry after STANDING_DELIVERY_TTL_MS). Requires a
+   * directoryName; persisted under stateDir. Absent = today's
+   * consume-on-bind listing.
+   */
+  standing?: boolean;
 }
 
 interface InboxMessage {
@@ -164,6 +178,17 @@ const MAX_SUPERSEDED = 1024;
 const MAX_PENDING_PER_LISTING = 16;
 const MAX_INBOX_MESSAGES = 256;
 const MAX_DELIVERIES_PER_MINUTE = 12;
+/**
+ * O-2: a delivery on a standing listing that the provider never acks is
+ * dropped after this long. It must outlive the handshake claim window the
+ * sealed invitation carries (coordinator.ts INVITATION_CLAIM_RUNWAY_MS,
+ * 180 s) — after that the invitation can no longer be claimed anyway.
+ */
+const STANDING_DELIVERY_TTL_MS = 5 * 60_000;
+/** O-2: inbox long-poll bound — well inside the ~25 s worst-case claim runway. */
+export const MAX_INBOX_WAIT_MS = 25_000;
+/** O-2: concurrent inbox long-polls across all providers (one per keyId). */
+const MAX_INBOX_WAITERS = 256;
 
 function pad4(n: number): string {
   return String(n).padStart(4, "0");
@@ -284,6 +309,14 @@ export function createBusinessOps(options: {
    * touch this; its async calls make dispatch return a Promise there.
    */
   settlementRail?: SettlementRail;
+  /**
+   * O-2: `CONTRACT_DIRECTORY` — directory name → the only provider keyId
+   * that may publish a listing under it. Empty/absent = no directory names
+   * can be claimed and no listing can be standing.
+   */
+  directory?: ReadonlyMap<string, string>;
+  /** O-2: standing listings persist here (`standing-listings.json`). */
+  stateDir?: string;
 }): BusinessOps {
   const now = options.now ?? Date.now;
   const sim = options.sim;
@@ -314,6 +347,22 @@ export function createBusinessOps(options: {
   const inbox = new Map<string, InboxMessage[]>();
   /** Deliveries per sender per rolling minute (rendezvous abuse cap). */
   const deliveries = new Map<string, number[]>();
+  const directory = options.directory ?? new Map<string, string>();
+  /**
+   * O-2: one pending inbox long-poll per provider keyId — its wake function.
+   * A newer poll from the same keyId supersedes (wakes) the older one.
+   */
+  const inboxWaiters = new Map<string, () => void>();
+  // O-2: standing listings survive a restart (metadata only — pending
+  // deliveries never persist). An expired record, or one whose directory
+  // pin no longer names its provider, is not restored.
+  if (options.stateDir !== undefined) {
+    const t = now();
+    for (const r of loadStandingListings(options.stateDir)) {
+      if (t >= r.expiresAtMs || directory.get(r.directoryName) !== r.providerKeyId) continue;
+      listings.set(r.listingId, { ...r, standing: true, consumed: false, pending: new Map() });
+    }
+  }
 
   function publicKeyOf(privateKey: ContractSigner["privateKey"]): KeyObject | string | Buffer {
     try {
@@ -650,6 +699,16 @@ export function createBusinessOps(options: {
     const t = now();
     for (const [id, l] of listings) if (t >= l.expiresAtMs) listings.delete(id);
     for (const [id, exp] of superseded) if (t >= exp) superseded.delete(id);
+    // O-2: unacked deliveries on a standing listing expire one by one.
+    for (const l of listings.values()) {
+      if (l.standing !== true) continue;
+      for (const [sender, m] of l.pending) {
+        if (t - Date.parse(m.receivedAt) >= STANDING_DELIVERY_TTL_MS) {
+          removeFromInbox(l.providerKeyId, m.messageId);
+          l.pending.delete(sender);
+        }
+      }
+    }
     for (const [k, ts] of deliveries) {
       const fresh = ts.filter((x) => t - x < 60_000);
       if (fresh.length === 0) deliveries.delete(k); else deliveries.set(k, fresh);
@@ -661,6 +720,50 @@ export function createBusinessOps(options: {
     if (list === undefined) return;
     const i = list.findIndex((m) => m.messageId === messageId);
     if (i >= 0) list.splice(i, 1);
+  }
+
+  /** O-2: wake this provider's pending inbox long-poll, if any. */
+  function wakeInbox(providerKeyId: string): void {
+    inboxWaiters.get(providerKeyId)?.();
+  }
+
+  /**
+   * O-2: hold an inbox read until a delivery reaches this provider or
+   * `ms` passes. Bounded: one hold per keyId (a newer one supersedes),
+   * MAX_INBOX_WAITERS overall (past it the read answers at once).
+   */
+  function waitForDelivery(providerKeyId: string, ms: number): Promise<void> {
+    wakeInbox(providerKeyId);
+    if (inboxWaiters.size >= MAX_INBOX_WAITERS) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        if (inboxWaiters.get(providerKeyId) === done) inboxWaiters.delete(providerKeyId);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      inboxWaiters.set(providerKeyId, done);
+    });
+  }
+
+  /** O-2: the standing-listing records to persist, minus `drop`, plus `add`. */
+  function standingRecords(drop: ReadonlySet<string>, add?: Listing): StandingListingRecord[] {
+    const out: StandingListingRecord[] = [];
+    const keep = [...listings.values()].filter((l) => l.standing === true && !drop.has(l.listingId));
+    for (const l of add !== undefined && add.standing === true ? [...keep, add] : keep) {
+      out.push({
+        listingId: l.listingId,
+        providerKeyId: l.providerKeyId,
+        directoryName: l.directoryName!,
+        title: l.title,
+        summary: l.summary,
+        sealedBoxPublicKeyHex: l.sealedBoxPublicKeyHex,
+        ...(l.terms !== undefined ? { terms: l.terms } : {}),
+        publishedAtMs: l.publishedAtMs,
+        expiresAtMs: l.expiresAtMs,
+      });
+    }
+    return out;
   }
 
   /** Is `listingId` a live (unconsumed) listing owned by this provider? */
@@ -679,6 +782,9 @@ export function createBusinessOps(options: {
     const listing = listings.get(listingId);
     if (listing === undefined || listing.providerKeyId !== providerKeyId) return false;
     if (listing.consumed) return true; // already consumed — idempotent
+    // O-2: a standing listing is never consumed by a bind — it keeps serving
+    // other travelers; its deliveries are consumed one by one (ack/expiry).
+    if (listing.standing === true) return true;
     listing.consumed = true;
     for (const message of listing.pending.values()) {
       removeFromInbox(providerKeyId, message.messageId);
@@ -725,6 +831,45 @@ export function createBusinessOps(options: {
           // Only the listing's owner may republish/reset it.
           return refuse("LISTING_UNAVAILABLE");
         }
+        // O-2 directory pin: a directory name is claimable only by the
+        // provider keyId CONTRACT_DIRECTORY pins to it (no squatting). Like
+        // terms, a republish without the field keeps the listing's value.
+        const directoryName = (args.directoryName as string | undefined) ?? existing?.directoryName;
+        if (directoryName !== undefined && directory.get(directoryName) !== principal.keyId) {
+          return refuse("LISTING_UNAVAILABLE");
+        }
+        const standing = (args.standing as boolean | undefined) ?? existing?.standing ?? false;
+        // A standing listing must be directory-pinned, and a consumed
+        // listing is never resurrected as a standing one.
+        if (standing && directoryName === undefined) return refuse("PAYLOAD_INVALID");
+        if (standing && existing?.consumed === true) return refuse("LISTING_UNAVAILABLE");
+        // O-2: persist the standing set BEFORE any mutation whenever it
+        // changes (this listing standing now or before, or a standing
+        // listing about to be superseded) — a failed write refuses cleanly.
+        const supersededIds = new Set(existing === undefined
+          ? [...listings.values()].filter((l) => l.providerKeyId === principal.keyId).map((l) => l.listingId)
+          : []);
+        const touchesStanding = standing || existing?.standing === true ||
+          [...supersededIds].some((id) => listings.get(id)?.standing === true);
+        const capRefused = existing === undefined && listings.size - supersededIds.size >= MAX_LISTINGS;
+        if (options.stateDir !== undefined && touchesStanding) {
+          const t0 = now();
+          const draft: Listing | undefined = standing && !capRefused ? {
+            listingId, providerKeyId: principal.keyId, directoryName,
+            title: args.title as string, summary: args.summary as string,
+            sealedBoxPublicKeyHex: args.sealedBoxPublicKeyHex as string,
+            ...(args.terms !== undefined || existing?.terms !== undefined
+              ? { terms: (args.terms ?? existing?.terms) as Record<string, unknown> }
+              : {}),
+            publishedAtMs: existing?.publishedAtMs ?? t0, expiresAtMs: t0 + LISTING_TTL_MS,
+            consumed: false, pending: new Map(), standing: true,
+          } : undefined;
+          try {
+            persistStandingListings(options.stateDir, standingRecords(new Set([...supersededIds, listingId]), draft));
+          } catch {
+            return refuse("CONTRACT_UNAVAILABLE");
+          }
+        }
         if (existing === undefined) {
           // Live run p6-l-2026-10-01-8: a NEW listing from this provider keyId
           // SUPERSEDES every listing it published before. Each run's signer
@@ -769,20 +914,38 @@ export function createBusinessOps(options: {
           // consumed listing.
           consumed: existing?.consumed ?? false,
           pending: existing?.pending ?? new Map(),
+          ...(directoryName !== undefined ? { directoryName } : {}),
+          ...(standing ? { standing: true } : {}),
         });
-        return ok({ listingId, publishedAt: iso(existing?.publishedAtMs ?? t), serverNonce });
+        // Default listings answer exactly as before; directory listings also
+        // report their name, mode and expiry (the adapter renews before it).
+        return ok({
+          listingId, publishedAt: iso(existing?.publishedAtMs ?? t),
+          ...(directoryName !== undefined
+            ? { directoryName, standing, expiresAt: iso(t + LISTING_TTL_MS) }
+            : {}),
+          serverNonce,
+        });
       }
 
       case "rendezvous_search": {
         purgeListings();
+        // O-2: `name` returns only the listing the pinned keyId published
+        // under that directory name — a squatter's title never matches it.
+        const name = args.name as string | undefined;
         const out = [...listings.values()]
           .filter((l) => listingMatches(l, args))
+          .filter((l) => name === undefined ||
+            (l.directoryName === name && directory.get(name) === l.providerKeyId))
           .map((l) => ({
             listingId: l.listingId,
             title: l.title,
             summary: l.summary,
             sealedBoxPublicKeyHex: l.sealedBoxPublicKeyHex,
             publishedAt: iso(l.publishedAtMs),
+            ...(l.directoryName !== undefined
+              ? { directoryName: l.directoryName, standing: l.standing === true }
+              : {}),
           }));
         return ok({ listings: out, serverNonce });
       }
@@ -847,6 +1010,7 @@ export function createBusinessOps(options: {
         list.push(message);
         if (list.length > MAX_INBOX_MESSAGES) list.splice(0, list.length - MAX_INBOX_MESSAGES);
         inbox.set(listing.providerKeyId, list);
+        wakeInbox(listing.providerKeyId);
         return {
           ok: true,
           result: { delivered: true, deliveredAt: receivedAt, senderAgentId, senderProof, serverNonce },
@@ -856,11 +1020,42 @@ export function createBusinessOps(options: {
       }
 
       case "rendezvous_inbox": {
+        purgeListings(); // O-2: drops expired standing deliveries first
         const sinceMs = args.since !== undefined ? Date.parse(args.since as string) : undefined;
-        const messages = (inbox.get(principal.keyId) ?? []).filter(
+        const read = () => (inbox.get(principal.keyId) ?? []).filter(
           (m) => sinceMs === undefined || Date.parse(m.receivedAt) > sinceMs,
         );
-        return ok({ messages: structuredClone(messages), serverNonce });
+        const messages = read();
+        // O-2 long-poll: with `waitMs` and nothing to return, hold the read
+        // until a delivery reaches this caller or waitMs (≤ 25 s) passes —
+        // then answer the same shape (an empty list on timeout).
+        const waitMs = Math.min(typeof args.waitMs === "number" ? args.waitMs : 0, MAX_INBOX_WAIT_MS);
+        if (messages.length > 0 || waitMs <= 0) {
+          return ok({ messages: structuredClone(messages), serverNonce });
+        }
+        return waitForDelivery(principal.keyId, waitMs).then(() => {
+          purgeListings();
+          return ok({ messages: structuredClone(read()), serverNonce });
+        });
+      }
+
+      case "rendezvous_ack": {
+        // O-2: the provider consumes deliveries one by one — each acked
+        // message leaves its inbox AND frees its sender's pending slot on
+        // the listing. Only the caller's own inbox; unknown ids are no-ops.
+        purgeListings();
+        const ids = new Set(args.messageIds as string[]);
+        let acked = 0;
+        for (const m of [...(inbox.get(principal.keyId) ?? [])]) {
+          if (!ids.has(m.messageId)) continue;
+          removeFromInbox(principal.keyId, m.messageId);
+          const l = m.listingId !== undefined ? listings.get(m.listingId) : undefined;
+          if (l !== undefined && l.pending.get(m.senderKeyId)?.messageId === m.messageId) {
+            l.pending.delete(m.senderKeyId);
+          }
+          acked += 1;
+        }
+        return ok({ acked, serverNonce });
       }
 
       default:
