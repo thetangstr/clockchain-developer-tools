@@ -401,7 +401,8 @@ test("bind links every role's lanes; spans sent before the handshake are covered
   assert.ok(linked, "sink received the run link");
   assert.deepEqual(linked.lanes, link.lanes);
   assert.equal(linked.linkDigest, link.linkDigest);
-  assert.equal(env.cfg.telemetryLanes.linkFor(runId).status, "delivered");
+  // The sink stores the link before the contract side records the 2xx, so wait for the status too.
+  assert.ok(await waitFor(() => env.cfg.telemetryLanes.linkFor(runId).status === "delivered"), "contract side recorded delivery");
 
   const withdrawn = await env.callTool("tb1", "contract_withdraw", { reason: "plans changed" }, "b-second");
   assert.equal(withdrawn.state, "withdrawn");
