@@ -6,7 +6,7 @@ import { z } from "zod";
 import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
 import { canonicalDigest, canonicalJson, containsAmountField, isCapBearingCall, saltedCanonicalDigest } from "./canonical.js";
 import { toolsListForRole, CONTRACT_SERVER_INSTRUCTIONS } from "./tools-list.js";
-import { contractToolDef, toolDefsForRole } from "./schemas.js";
+import { contractToolDef, toolDefsForRole, NO_CONTRACT_FEATURES } from "./schemas.js";
 import { contractStatusReadView } from "./business.js";
 import { contractRefusalSchema, type ContractRefusalCode } from "./refusals.js";
 import { newServerNonce, type ReceiptFields, type ServerReceipt } from "./receipts.js";
@@ -109,6 +109,10 @@ export function buildContractServer(options: {
   };
 }): Server {
   const { principal, service } = options;
+  // M5: the env-gated surface (all off = b04059e). Older test doubles may
+  // lack the field — absent means every feature off.
+  const features = service.features ?? NO_CONTRACT_FEATURES;
+  const serverAnchorsOn = service.serverAnchors === true;
   const POLL_TOOLS = new Set(["rendezvous_inbox", "contract_status"]);
   /**
    * Calls an agent makes BEFORE it binds its next run. When the keyId's
@@ -116,8 +120,13 @@ export function buildContractServer(options: {
    */
   const PRE_BIND_TOOLS = new Set([
     "rendezvous_publish_listing", "rendezvous_search", "rendezvous_send_invitation", "rendezvous_inbox",
-    "rendezvous_ack", "contract_bind_challenge", "contract_bind", "contract_status",
-    "contract_register_policy", "contract_get_brief", TELEMETRY_OPEN_TOOL,
+    "contract_bind_challenge", "contract_bind", "contract_status",
+    // M5: a gated tool is pre-bind only while served — off, its name routes
+    // exactly like any unknown name did at b04059e.
+    ...(features.directory === true ? ["rendezvous_ack"] : []),
+    ...(features.policyRegistration === true ? ["contract_register_policy"] : []),
+    ...(features.briefs === true ? ["contract_get_brief"] : []),
+    ...(options.telemetryLanes !== undefined ? [TELEMETRY_OPEN_TOOL] : []),
   ]);
   const allowPoll = options.pollGate
     ?? keyedWindowLimiter(options.pollsPerMinute ?? 60, 60_000, options.now ?? Date.now);
@@ -128,7 +137,7 @@ export function buildContractServer(options: {
     // fixed option for direct (non-transport) server construction.
     sourceIp: options.session?.sourceIp ?? options.sourceIp,
   });
-  const visible = new Set(toolDefsForRole(principal.role).map((def) => def.name));
+  const visible = new Set(toolDefsForRole(principal.role, features).map((def) => def.name));
 
   const server = new Server(
     { name: "clockchain-agent-contract", version: "0.1.0" },
@@ -137,7 +146,7 @@ export function buildContractServer(options: {
 
   // Verbatim role-scoped payload — this is what guidanceDigests digests.
   server.setRequestHandler(ListToolsRequestSchema, async () =>
-    toolsListForRole(principal.role) as unknown as import("@modelcontextprotocol/sdk/types.js").ListToolsResult,
+    toolsListForRole(principal.role, features) as unknown as import("@modelcontextprotocol/sdk/types.js").ListToolsResult,
   );
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -212,7 +221,7 @@ export function buildContractServer(options: {
       return asResult(recordAny(receiptTargetFor(receiptRun), name, argsDigest, opOutcome, serverNonce, argsScheme));
     }
 
-    const def = contractToolDef(name);
+    const def = contractToolDef(name, features);
     if (def === undefined) {
       return asResult(withReceipt(receiptRun, name, argsDigest, refusal("NOT_FOUND", serverNonce), serverNonce));
     }
@@ -411,9 +420,12 @@ export function buildContractServer(options: {
                 ledger: job.anchors.terminal.ledger ?? null,
                 error: job.anchors.terminal.error ?? null,
               },
-              terms: renderServerAnchor(job.anchors.terms),
-              brief: renderServerAnchor(job.anchors.brief),
-              final: renderFinalAnchor(job.anchors.final),
+              // M5: reported only with CONTRACT_SERVER_ANCHORS=1.
+              ...(serverAnchorsOn ? {
+                terms: renderServerAnchor(job.anchors.terms),
+                brief: renderServerAnchor(job.anchors.brief),
+                final: renderFinalAnchor(job.anchors.final),
+              } : {}),
             },
             // PR #180 F4: the recovered terminal run is the caller's PRIOR run.
             priorRun: true,
@@ -488,9 +500,11 @@ export function buildContractServer(options: {
             error: anchorStates.terminal.error ?? null,
           },
           // Server-side anchors — recorded here, never chained receipts.
-          terms: renderServerAnchor(anchorStates.terms),
-          brief: renderServerAnchor(anchorStates.brief),
-          final: renderFinalAnchor(anchorStates.final),
+          ...(serverAnchorsOn ? {
+            terms: renderServerAnchor(anchorStates.terms),
+            brief: renderServerAnchor(anchorStates.brief),
+            final: renderFinalAnchor(anchorStates.final),
+          } : {}),
         },
         // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
         // this run's offers (+ the one this caller may accept), agreement,

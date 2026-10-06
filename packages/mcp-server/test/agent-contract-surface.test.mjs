@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { contractRefusalSchema } from "../dist/agent-contract/refusals.js";
 import {
+  ALL_CONTRACT_FEATURES,
   CONTRACT_TOOL_DEFS,
   CONTRACT_TOOL_NAMES,
   contractToolDef,
@@ -68,17 +69,35 @@ test("every LLD §3 tool exists exactly once, role-scoped", () => {
   for (const name of SHARED) assert.equal(contractToolDef(name).role, "both", name);
 });
 
+/** M5: tools that exist only while their env feature is on. */
+const GATED = ["rendezvous_ack", "contract_register_policy", "contract_get_brief"];
+
 test("role-scoped tools/list hides the other role's tools", () => {
-  const buyerTools = toolsListForRole("buyer").tools.map((t) => t.name);
-  const providerTools = toolsListForRole("provider").tools.map((t) => t.name);
-  // buyer: 21 at base + contract_register_policy + contract_get_brief = 23.
-  // provider: 18 at base + rendezvous_ack + contract_get_brief = 20.
+  // M5 default (every new env unset): the b04059e surface — 27 tools,
+  // buyer 21, provider 18, none of the gated tools.
+  const defaultBuyer = toolsListForRole("buyer").tools.map((t) => t.name);
+  const defaultProvider = toolsListForRole("provider").tools.map((t) => t.name);
+  assert.equal(new Set([...defaultBuyer, ...defaultProvider]).size, 27);
+  assert.equal(defaultBuyer.length, 21);
+  assert.equal(defaultProvider.length, 18);
+  assert.equal(toolDefsForRole("buyer").length, 21);
+  for (const name of GATED) {
+    assert.ok(!defaultBuyer.includes(name) && !defaultProvider.includes(name), `default hides ${name}`);
+  }
+  // All features on: buyer 21 + contract_register_policy + contract_get_brief
+  // = 23; provider 18 + rendezvous_ack + contract_get_brief = 20; 30 in all.
+  const buyerTools = toolsListForRole("buyer", ALL_CONTRACT_FEATURES).tools.map((t) => t.name);
+  const providerTools = toolsListForRole("provider", ALL_CONTRACT_FEATURES).tools.map((t) => t.name);
   assert.equal(buyerTools.length, 23);
   assert.equal(providerTools.length, 20);
-  for (const name of PROVIDER_ONLY) assert.ok(!buyerTools.includes(name), name);
-  for (const name of BUYER_ONLY) assert.ok(!providerTools.includes(name), name);
-  for (const name of SHARED) {
-    assert.ok(buyerTools.includes(name) && providerTools.includes(name), name);
+  assert.equal(new Set([...buyerTools, ...providerTools]).size, 30);
+  for (const [b, p] of [[defaultBuyer, defaultProvider], [buyerTools, providerTools]]) {
+    for (const name of PROVIDER_ONLY) assert.ok(!b.includes(name), name);
+    for (const name of BUYER_ONLY) assert.ok(!p.includes(name), name);
+    for (const name of SHARED) {
+      if (b === defaultBuyer && GATED.includes(name)) continue;
+      assert.ok(b.includes(name) && p.includes(name), name);
+    }
   }
 });
 
@@ -86,7 +105,7 @@ test("guidance has no ordered steps and no cross-tool references", () => {
   const ordered = /\bfirst\b[\s\S]*\bthen\b|\bstep\s+\d|\b\d+\s*[.)]\s+[a-z]/i;
   const named = (text) => CONTRACT_TOOL_NAMES.some((name) => text.includes(name));
   for (const role of ["buyer", "provider"]) {
-    for (const tool of toolsListForRole(role).tools) {
+    for (const tool of [...toolsListForRole(role).tools, ...toolsListForRole(role, ALL_CONTRACT_FEATURES).tools]) {
       assert.ok(!ordered.test(tool.description), `${tool.name}: ordered-steps phrasing`);
       assert.ok(!/\d+\.\s/.test(tool.description), `${tool.name}: numbered list`);
       for (const other of CONTRACT_TOOL_NAMES) {

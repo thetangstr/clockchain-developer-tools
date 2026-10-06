@@ -447,6 +447,17 @@ export function loadContractConfig(
       return misconfigured((err as Error).message);
     }
   }
+  // M5: true default-off switches (unset/0 = the b04059e surface/behaviour).
+  const flag = (name: string): boolean | string => {
+    const raw = (env[name] ?? "").trim();
+    if (raw === "" || raw === "0") return false;
+    if (raw === "1") return true;
+    return `${name} wants 0 or 1`;
+  };
+  const policyRegistration = flag("CONTRACT_POLICY_REGISTRATION");
+  if (typeof policyRegistration === "string") return misconfigured(policyRegistration);
+  const serverAnchors = flag("CONTRACT_SERVER_ANCHORS");
+  if (typeof serverAnchors === "string") return misconfigured(serverAnchors);
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN || "4096");
   const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL || "512");
   const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS || String(24 * 3600_000));
@@ -569,6 +580,8 @@ export function loadContractConfig(
       maxRuns: Number.isFinite(maxRuns) ? maxRuns : 1024,
       maxRunsPerKey,
       ...(briefs !== undefined ? { briefs } : {}),
+      ...(policyRegistration ? { policyRegistration: true } : {}),
+      ...(serverAnchors ? { serverAnchors: true } : {}),
       maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
       maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
       runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,

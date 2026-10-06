@@ -6,8 +6,8 @@
 // telemetry sink is the real one from ../telemetry-sink/dist, in-process.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -335,7 +335,7 @@ test("integration: the final anchor head includes the v2 close receipt", async (
   });
   service = createContractService({
     hostRoots: HOST_ROOTS, signer: SIGNER, policyDigests: POLICY, principals: PRINCIPALS, stateDir,
-    maxRunsPerKey: 2, anchor,
+    maxRunsPerKey: 2, anchor, serverAnchors: true,
     onTerminalRun: (_run, _state, _p, receipt) => emitter.resume(receipt),
     mintTerminalReceipt: (fields, s) => lanes.terminalReceiptFor(fields, s),
     onRunBound: (run, sessions) => lanes?.onRunBound(run, sessions),
@@ -383,14 +383,22 @@ test("integration: the final anchor head includes the v2 close receipt", async (
 test("integration: telemetry_open stays hidden from the merged tools/list and accepts only {}", async (t) => {
   assert.ok(!CONTRACT_TOOL_NAMES.includes("telemetry_open"));
   const sink = await bootSink(t, { [CONFIG_KEY_ID]: configServerPubKey });
+  // CDT-SEC M5: every gated feature is switched on by its own env here.
+  const briefsDir = mkdtempSync(path.join(tmpdir(), "integ-briefs-"));
+  const briefText = "# brief\n";
+  writeFileSync(path.join(briefsDir, "family-travel.md"), briefText);
+  const briefDigest = `0x${createHash("sha256").update(briefText).digest("hex")}`;
   const env = await bootConfig(t, {
     TELEMETRY_CLOSE_URL: sink.closeUrl, TELEMETRY_LANES: "1", CONTRACT_MAX_RUNS_PER_KEY: "2",
+    CONTRACT_POLICY_REGISTRATION: "1", CONTRACT_DIRECTORY: "roma-travel:kp1",
+    CONTRACT_BRIEFS: `family-travel:${briefDigest}`, CONTRACT_BRIEFS_DIR: briefsDir,
   });
+  assert.deepEqual(env.service.features, { directory: true, policyRegistration: true, briefs: true });
   for (const [token, role, count] of [["tb1", "buyer", 23], ["tp1", "provider", 20]]) {
     const list = await env.listTools(token);
     assert.equal(list.tools.length, count, `${role} tools`);
     assert.ok(!list.tools.some((x) => x.name === "telemetry_open"), role);
-    assert.equal(canonicalDigest(list), canonicalDigest(toolsListForRole(role)), `${role}: verbatim role payload`);
+    assert.equal(canonicalDigest(list), canonicalDigest(toolsListForRole(role, env.service.features)), `${role}: verbatim role payload`);
   }
   for (const args of [{ x25519: SEAL_KEY }, { mcpSessionId: "other" }, { keyId: "kb1" }]) {
     const out = await env.callTool("tb1", "telemetry_open", args, "buyer-A");
@@ -398,7 +406,13 @@ test("integration: telemetry_open stays hidden from the merged tools/list and ac
   }
   const ok = await env.callTool("tb1", "telemetry_open", {}, "buyer-A");
   assert.deepEqual(Object.keys(ok).sort(), ["laneId", "role", "sealedBox", "serverNonce"]);
-  // Off by default: the name is NOT_FOUND without TELEMETRY_LANES=1.
+  // Off by default: the name is NOT_FOUND without TELEMETRY_LANES=1, and
+  // without the feature envs the surface is the b04059e 21 + 18.
   const plain = await bootConfig(t, { CONTRACT_MAX_RUNS_PER_KEY: "2" });
   assert.equal((await plain.callTool("tb1", "telemetry_open")).error, "NOT_FOUND");
+  for (const [token, role, count] of [["tb1", "buyer", 21], ["tp1", "provider", 18]]) {
+    const list = await plain.listTools(token);
+    assert.equal(list.tools.length, count, `default ${role} tools`);
+    assert.equal(canonicalDigest(list), canonicalDigest(toolsListForRole(role)), `default ${role}: verbatim role payload`);
+  }
 });

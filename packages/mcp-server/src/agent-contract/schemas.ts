@@ -136,7 +136,33 @@ export interface ContractToolDef {
   readonly readOnly: boolean;
   /** Sim-backed outputs must carry `simulated: true`. */
   readonly simulated: boolean;
+  /**
+   * M5 (default off): a tool that exists only while this feature is on.
+   * Off, it is absent from tools/list and its name is NOT_FOUND.
+   */
+  readonly feature?: ContractFeature;
+  /**
+   * M5: input fields of `schema` that exist only while a feature is on. Off,
+   * they are absent from the wire schema and refused as unknown keys.
+   */
+  readonly featureFields?: Readonly<Partial<Record<ContractFeature, readonly string[]>>>;
 }
+
+/**
+ * M5: env-gated surface features. Every one is off unless its env is set, and
+ * with all off the served surface (tools/list, guidance digests, accepted
+ * arguments) is byte-identical to b04059e.
+ * - `directory`: CONTRACT_DIRECTORY (O-2 directory names, standing listings,
+ *   inbox long-poll, rendezvous_ack).
+ * - `policyRegistration`: CONTRACT_POLICY_REGISTRATION=1.
+ * - `briefs`: CONTRACT_BRIEFS.
+ */
+export type ContractFeature = "directory" | "policyRegistration" | "briefs";
+export type ContractFeatures = Readonly<Partial<Record<ContractFeature, boolean>>>;
+export const NO_CONTRACT_FEATURES: ContractFeatures = Object.freeze({});
+export const ALL_CONTRACT_FEATURES: ContractFeatures = Object.freeze({
+  directory: true, policyRegistration: true, briefs: true,
+});
 
 const envelopeOut = { envelope: prepareEnvelopeSchema, serverNonce } as const;
 
@@ -170,6 +196,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       directoryName: directoryName.optional(),
       standing: z.boolean().optional(),
     },
+    featureFields: { directory: ["directoryName", "standing"] },
     outputSchema: z.object({
       listingId,
       publishedAt: isoDateTime,
@@ -193,6 +220,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       // O-2: only the listing the pinned provider published under this name.
       name: directoryName.optional(),
     },
+    featureFields: { directory: ["name"] },
     outputSchema: z.object({
       listings: z.array(z.object({
         listingId,
@@ -239,6 +267,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
       // O-2 long-poll: hold the read up to this long for a delivery.
       waitMs: z.number().int().min(0).max(25_000).optional(),
     },
+    featureFields: { directory: ["waitMs"] },
     outputSchema: z.object({
       messages: z.array(inboxMessage),
       serverNonce,
@@ -250,6 +279,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     // O-2: consume delivered inbox messages one by one (standing listings).
     name: "rendezvous_ack",
     role: "provider",
+    feature: "directory",
     schema: {
       messageIds: z.array(z.string().min(4).max(64)).min(1).max(64),
     },
@@ -791,6 +821,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     // digest joins the allowed set until it expires (≤ 24 h).
     name: "contract_register_policy",
     role: "buyer",
+    feature: "policyRegistration",
     schema: {
       role: z.literal("buyer"),
       digest: digestHex,
@@ -814,6 +845,7 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     // scope anchors its digest before the result returns.
     name: "contract_get_brief",
     role: "both",
+    feature: "briefs",
     schema: {
       name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
     },
@@ -833,13 +865,61 @@ export const CONTRACT_TOOL_NAMES: readonly string[] = Object.freeze(
   CONTRACT_TOOL_DEFS.map((def) => def.name),
 );
 
-/** The tools one role may see and call: its own tools plus shared ones. */
-export function toolDefsForRole(role: ContractRole): readonly ContractToolDef[] {
-  return CONTRACT_TOOL_DEFS.filter((def) => def.role === "both" || def.role === role);
+/** Stable cache key of a feature set (only the features that are on). */
+export function featureKey(features: ContractFeatures): string {
+  return (Object.keys(features) as ContractFeature[]).filter((f) => features[f] === true).sort().join(",");
+}
+
+const servedCache = new Map<string, ContractToolDef | null>();
+
+/**
+ * M5: the definition as SERVED under `features` — undefined when the tool's
+ * feature is off; otherwise the def with every off-feature field removed.
+ */
+function servedDef(def: ContractToolDef, features: ContractFeatures): ContractToolDef | undefined {
+  const key = `${def.name}|${featureKey(features)}`;
+  const hit = servedCache.get(key);
+  if (hit !== undefined) return hit ?? undefined;
+  let out: ContractToolDef | null = def;
+  if (def.feature !== undefined && features[def.feature] !== true) {
+    out = null;
+  } else if (def.featureFields !== undefined) {
+    const drop = new Set<string>();
+    for (const [f, keys] of Object.entries(def.featureFields) as [ContractFeature, readonly string[]][]) {
+      if (features[f] !== true) for (const k of keys) drop.add(k);
+    }
+    if (drop.size > 0) {
+      const schema: z.ZodRawShape = {};
+      for (const [k, v] of Object.entries(def.schema)) if (!drop.has(k)) schema[k] = v;
+      out = Object.freeze({ ...def, schema });
+    }
+  }
+  servedCache.set(key, out);
+  return out ?? undefined;
+}
+
+/**
+ * The tools one role may see and call under `features` (default: none on —
+ * the b04059e surface): its own tools plus shared ones.
+ */
+export function toolDefsForRole(
+  role: ContractRole,
+  features: ContractFeatures = NO_CONTRACT_FEATURES,
+): readonly ContractToolDef[] {
+  return CONTRACT_TOOL_DEFS
+    .filter((def) => def.role === "both" || def.role === role)
+    .map((def) => servedDef(def, features))
+    .filter((def): def is ContractToolDef => def !== undefined);
 }
 
 const toolIndex = new Map(CONTRACT_TOOL_DEFS.map((def) => [def.name, def]));
 
-export function contractToolDef(name: string): ContractToolDef | undefined {
-  return toolIndex.get(name);
+/**
+ * Without `features`: the catalogue entry (every feature's fields). With
+ * `features`: the served definition, undefined when its feature is off.
+ */
+export function contractToolDef(name: string, features?: ContractFeatures): ContractToolDef | undefined {
+  const def = toolIndex.get(name);
+  if (def === undefined || features === undefined) return def;
+  return servedDef(def, features);
 }

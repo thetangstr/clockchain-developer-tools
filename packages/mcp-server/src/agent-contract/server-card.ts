@@ -1,5 +1,6 @@
 import { canonicalDigest } from "./canonical.js";
 import { guidanceDigests } from "./tools-list.js";
+import type { ContractFeatures } from "./schemas.js";
 
 /**
  * The machine-readable server card for `/.well-known/mcp/server-card.json`
@@ -76,7 +77,7 @@ export interface ContractServerCard {
 /** The server card body; `cardDigest` covers the card minus itself. */
 export function buildServerCard(
   keys: readonly PublishedServerKey[] = [],
-  options: { simFaultsEnabled?: boolean } = {},
+  options: { simFaultsEnabled?: boolean; features?: ContractFeatures } = {},
 ): ContractServerCard {
   const card: ContractServerCard = {
     schema: SERVER_CARD_SCHEMA_ID,
@@ -100,8 +101,9 @@ export function buildServerCard(
       },
     ],
     guidance: {
-      buyer: guidanceDigests("buyer"),
-      provider: guidanceDigests("provider"),
+      // M5: the digests of the surface actually served (features off = b04059e).
+      buyer: guidanceDigests("buyer", options.features),
+      provider: guidanceDigests("provider", options.features),
     },
     keys,
     ...(options.simFaultsEnabled ? { simFaultsEnabled: true as const } : {}),

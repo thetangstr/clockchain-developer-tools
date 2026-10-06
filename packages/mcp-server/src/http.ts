@@ -1241,6 +1241,7 @@ export async function runHttp(): Promise<Server> {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "public, max-age=300" });
       res.end(JSON.stringify(buildServerCard(contractConfig.serverKeys, {
         simFaultsEnabled: contractConfig.simFaultsEnabled,
+        features: contractConfig.service.features,
       })));
       return;
     }

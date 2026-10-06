@@ -1,0 +1,2071 @@
+{
+  "commit": "b04059e",
+  "note": "tools/list payloads and guidanceDigests served by b04059e (generated from that commit with its own tools-list.ts)",
+  "buyer": {
+    "toolsList": {
+      "tools": [
+        {
+          "name": "rendezvous_search",
+          "title": "Search provider listings",
+          "description": "Search published provider listings for a route. Returns only each provider's latest listing, with its publishedAt time; an invitation to a superseded listing is refused LISTING_UNAVAILABLE — search again.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "origin": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64
+              },
+              "destination": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64
+              },
+              "departDate": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "returnDate": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              }
+            },
+            "required": [
+              "origin",
+              "destination"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "rendezvous_send_invitation",
+          "title": "Deliver a sealed invitation",
+          "description": "Deliver a sealed Clockchain handshake responder invitation to one listing. The payload is sealed to the listing's public key, so this service can carry it but never open it. A listing holds pending invitations from multiple senders until the provider acts on one. Each delivery is stamped senderAgentId + senderProof: 'token-pinned' or 'certificate-bound' proves the sender's agentId now; 'unproven-pre-bind' (senderAgentId null) means the sender used a late-binding token before binding — authenticate them through the handshake and bind that follow, not by this stamp.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "listingId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              },
+              "sealedInvitation": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "v": {
+                        "const": 2
+                      },
+                      "epk": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$"
+                      },
+                      "iv": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{24}$"
+                      },
+                      "ct": {
+                        "type": "string",
+                        "pattern": "^0x(?:[0-9a-f]{2}){1,8192}$"
+                      },
+                      "tag": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{32}$"
+                      }
+                    },
+                    "required": [
+                      "v",
+                      "epk",
+                      "iv",
+                      "ct",
+                      "tag"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "v": {
+                        "const": 4
+                      },
+                      "epk": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$"
+                      },
+                      "iv": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{24}$"
+                      },
+                      "ct": {
+                        "type": "string",
+                        "pattern": "^0x(?:[0-9a-f]{2}){1,8192}$"
+                      },
+                      "tag": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{32}$"
+                      }
+                    },
+                    "required": [
+                      "v",
+                      "epk",
+                      "iv",
+                      "ct",
+                      "tag"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "listingId",
+              "sealedInvitation"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "rendezvous_inbox",
+          "title": "Read your inbox",
+          "description": "Read sealed invitations and business messages addressed to this caller. Each message carries senderAgentId + senderProof — 'unproven-pre-bind' means the sender's agentId was not yet proven at delivery; trust it only after the handshake and bind complete.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_bind_challenge",
+          "title": "Get a bind challenge",
+          "description": "Issue a single-use, short-lived challenge nonce to sign into a bind statement. The statement proves the caller possesses the handshake session key of the certificate side it claims (DRAFT schema).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_bind",
+          "title": "Bind to a handshake session",
+          "description": "Bind this caller's business signing and approval keys to a closed, verified Clockchain handshake and join the contract session it names. Identify the handshake by its session id; the server resolves and verifies that session's closing certificate itself, so never copy or rebuild the certificate. A certificate may still be supplied, but it must match the resolved one exactly. Refused CERTIFICATE_NOT_READY (retryable) until the handshake has closed. Optionally carries a DRAFT bind statement — signed over a server-issued challenge — proving possession of the claimed side's handshake session key; its runId is the same session id.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "handshakeSessionId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              },
+              "certificate": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "signerKey": {
+                "type": "object",
+                "properties": {
+                  "keyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "publicKeyHex": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{64,132}$"
+                  }
+                },
+                "required": [
+                  "keyId",
+                  "publicKeyHex"
+                ],
+                "additionalProperties": false
+              },
+              "approvalKey": {
+                "type": "object",
+                "properties": {
+                  "keyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "publicKeyHex": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{64,132}$"
+                  }
+                },
+                "required": [
+                  "keyId",
+                  "publicKeyHex"
+                ],
+                "additionalProperties": false
+              },
+              "listingId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              },
+              "bindStatement": {
+                "type": "object",
+                "properties": {
+                  "domain": {
+                    "const": "agent-contract.bind/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 4,
+                    "maxLength": 128
+                  },
+                  "side": {
+                    "enum": [
+                      "initiator",
+                      "responder"
+                    ]
+                  },
+                  "tokenKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "challenge": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "issuedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "domain",
+                  "runId",
+                  "side",
+                  "tokenKeyId",
+                  "serverKeyId",
+                  "challenge",
+                  "issuedAt"
+                ],
+                "additionalProperties": false
+              },
+              "bindStatementSignature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "signerKey",
+              "approvalKey"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "mandate_prepare",
+          "title": "Prepare the mandate",
+          "description": "Prepare the family principal's signed mandate — caps, dates, travellers — for validation. Returns a server-signed envelope carrying the canonical mandate bytes.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "mandate": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "mandateSignature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "mandate",
+              "mandateSignature"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "mandate_submit",
+          "title": "Submit the mandate",
+          "description": "Submit a local signature over a prepared mandate envelope to bind the mandate's caps to this contract session. The principal signature inside the mandate is validated; caps are parsed and enforced from then on, but never disclosed.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "envelope",
+              "signatureHex"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_prepare",
+          "title": "Prepare an offer or counter",
+          "description": "Prepare an offer or counter-offer on a board itinerary with a service fee and an optional note. Returns a server-signed envelope quoting the board fare and the resulting total.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "itineraryId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              },
+              "feeMinor": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000000
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 280
+              }
+            },
+            "required": [
+              "itineraryId",
+              "feeMinor"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_submit",
+          "title": "Submit an offer",
+          "description": "Submit a local signature over a prepared offer envelope to make the offer live for the counterparty.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "envelope",
+              "signatureHex"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_accept_prepare",
+          "title": "Prepare an acceptance",
+          "description": "Prepare acceptance of the counterparty's live offer. Returns a server-signed envelope; the offer must still be live, the accepter must not be the offerer, and a buyer-side acceptance must still be within the buyer's mandate.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "offerId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "offerId"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_accept_submit",
+          "title": "Submit an acceptance",
+          "description": "Submit a local signature over a prepared acceptance envelope. When both roles have signed, a binding agreement forms.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "envelope",
+              "signatureHex"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_reject",
+          "title": "Reject an offer",
+          "description": "Refuse a live offer. Negotiation may continue unless the contract is withdrawn.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "offerId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "offerId"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_withdraw",
+          "title": "Withdraw from the contract",
+          "description": "Walk away from this contract session. Terminal for the negotiation.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "maxLength": 512
+              }
+            },
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "agreement_get",
+          "title": "Read the agreement",
+          "description": "Read the formed agreement — both role signatures, its terms and its ledger anchor — if one exists.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "booking_lookup",
+          "title": "Look up an order",
+          "description": "Look up an order's PNR and tickets directly in the simulated ticketing system. SIMULATED data.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "orderRef": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 32
+              }
+            },
+            "required": [
+              "orderRef"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "verification_prepare",
+          "title": "Prepare a verification",
+          "description": "Prepare a verification result — match, or mismatch with findings — over the booked order. Returns a server-signed envelope; the service recomputes the result and flags disagreement.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "orderRef": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 32
+              },
+              "result": {
+                "enum": [
+                  "match",
+                  "mismatch"
+                ]
+              },
+              "findingsDigest": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "orderRef",
+              "result",
+              "findingsDigest"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "verification_submit",
+          "title": "Submit a verification",
+          "description": "Submit a local signature over a prepared verification envelope. A mismatch blocks settlement.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "envelope",
+              "signatureHex"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "settlement_prepare",
+          "title": "Prepare the settlement",
+          "description": "Prepare authorization of the simulated payment for exactly the agreement total. Returns a server-signed envelope; authorization additionally requires a signed approval record and a match verification. SIMULATED payment.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "settlement_authorize",
+          "title": "Authorize the settlement",
+          "description": "Authorize the prepared simulated settlement with a local signature and a signed approval record. Requires a match verification and an amount equal to the agreement total. SIMULATED payment.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              },
+              "approval": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "action": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "policyDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "decision": {
+                    "enum": [
+                      "allow",
+                      "deny"
+                    ]
+                  },
+                  "ts": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  "approverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{128,130}$"
+                  }
+                },
+                "required": [
+                  "role",
+                  "action",
+                  "digest",
+                  "policyDigest",
+                  "decision",
+                  "ts",
+                  "approverKeyId",
+                  "signature"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "envelope",
+              "approval"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "settlement_status",
+          "title": "Read settlement status",
+          "description": "Read the simulated settlement state for this contract session. SIMULATED.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_status",
+          "title": "Read contract status",
+          "description": "Read overall contract progress and terminal state. This is the resume anchor for both roles.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    "guidance": {
+      "toolsListDigest": "0x270d4e382205d730b0d44254e27a39ae5234f0903ef2a5574a90f6382729436b",
+      "instructionsDigest": "0x959525fde3e8c0d18a11aac7d3dcffd07b95f7e90e1885e8947eee7f6aebfabd"
+    }
+  },
+  "provider": {
+    "toolsList": {
+      "tools": [
+        {
+          "name": "rendezvous_publish_listing",
+          "title": "Publish a service listing",
+          "description": "Advertise this provider's service as a listing other parties can find, and accept sealed handshake invitations delivered to it. A provider holds one live listing: publishing a new listing (e.g. under a fresh seal key) supersedes this provider's previous listing(s), drops invitations still pending on them, and later deliveries to a superseded listing are refused LISTING_UNAVAILABLE. Requires a caller key bound to a registered identity.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 128
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "sealedBoxPublicKeyHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{64}$"
+              },
+              "terms": {
+                "type": "object",
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "title",
+              "summary",
+              "sealedBoxPublicKeyHex"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "rendezvous_inbox",
+          "title": "Read your inbox",
+          "description": "Read sealed invitations and business messages addressed to this caller. Each message carries senderAgentId + senderProof — 'unproven-pre-bind' means the sender's agentId was not yet proven at delivery; trust it only after the handshake and bind complete.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_bind_challenge",
+          "title": "Get a bind challenge",
+          "description": "Issue a single-use, short-lived challenge nonce to sign into a bind statement. The statement proves the caller possesses the handshake session key of the certificate side it claims (DRAFT schema).",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_bind",
+          "title": "Bind to a handshake session",
+          "description": "Bind this caller's business signing and approval keys to a closed, verified Clockchain handshake and join the contract session it names. Identify the handshake by its session id; the server resolves and verifies that session's closing certificate itself, so never copy or rebuild the certificate. A certificate may still be supplied, but it must match the resolved one exactly. Refused CERTIFICATE_NOT_READY (retryable) until the handshake has closed. Optionally carries a DRAFT bind statement — signed over a server-issued challenge — proving possession of the claimed side's handshake session key; its runId is the same session id.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "handshakeSessionId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              },
+              "certificate": {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              "signerKey": {
+                "type": "object",
+                "properties": {
+                  "keyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "publicKeyHex": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{64,132}$"
+                  }
+                },
+                "required": [
+                  "keyId",
+                  "publicKeyHex"
+                ],
+                "additionalProperties": false
+              },
+              "approvalKey": {
+                "type": "object",
+                "properties": {
+                  "keyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "publicKeyHex": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{64,132}$"
+                  }
+                },
+                "required": [
+                  "keyId",
+                  "publicKeyHex"
+                ],
+                "additionalProperties": false
+              },
+              "listingId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              },
+              "bindStatement": {
+                "type": "object",
+                "properties": {
+                  "domain": {
+                    "const": "agent-contract.bind/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 4,
+                    "maxLength": 128
+                  },
+                  "side": {
+                    "enum": [
+                      "initiator",
+                      "responder"
+                    ]
+                  },
+                  "tokenKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "challenge": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "issuedAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "domain",
+                  "runId",
+                  "side",
+                  "tokenKeyId",
+                  "serverKeyId",
+                  "challenge",
+                  "issuedAt"
+                ],
+                "additionalProperties": false
+              },
+              "bindStatementSignature": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "signerKey",
+              "approvalKey"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "catalog_quote",
+          "title": "Read the offer board",
+          "description": "Read the simulated offer board for a route: itineraries, fares and the fixed service fee. SIMULATED data.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "origin": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64
+              },
+              "destination": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64
+              },
+              "departDate": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "returnDate": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              }
+            },
+            "required": [
+              "origin",
+              "destination"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_prepare",
+          "title": "Prepare an offer or counter",
+          "description": "Prepare an offer or counter-offer on a board itinerary with a service fee and an optional note. Returns a server-signed envelope quoting the board fare and the resulting total.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "itineraryId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              },
+              "feeMinor": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000000
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 280
+              }
+            },
+            "required": [
+              "itineraryId",
+              "feeMinor"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_submit",
+          "title": "Submit an offer",
+          "description": "Submit a local signature over a prepared offer envelope to make the offer live for the counterparty.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "envelope",
+              "signatureHex"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_accept_prepare",
+          "title": "Prepare an acceptance",
+          "description": "Prepare acceptance of the counterparty's live offer. Returns a server-signed envelope; the offer must still be live, the accepter must not be the offerer, and a buyer-side acceptance must still be within the buyer's mandate.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "offerId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "offerId"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_accept_submit",
+          "title": "Submit an acceptance",
+          "description": "Submit a local signature over a prepared acceptance envelope. When both roles have signed, a binding agreement forms.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              }
+            },
+            "required": [
+              "envelope",
+              "signatureHex"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "offer_reject",
+          "title": "Reject an offer",
+          "description": "Refuse a live offer. Negotiation may continue unless the contract is withdrawn.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "offerId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "offerId"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_withdraw",
+          "title": "Withdraw from the contract",
+          "description": "Walk away from this contract session. Terminal for the negotiation.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "maxLength": 512
+              }
+            },
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "agreement_get",
+          "title": "Read the agreement",
+          "description": "Read the formed agreement — both role signatures, its terms and its ledger anchor — if one exists.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "booking_prepare",
+          "title": "Prepare the booking",
+          "description": "Prepare booking the agreed itinerary on the simulated ticketing system. Returns a server-signed envelope; execution additionally requires a signed approval record for the consequential action.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "agreementId": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "agreementId"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "booking_execute",
+          "title": "Execute the booking",
+          "description": "Execute a prepared booking on the simulated ticketing system with a local signature and a signed approval record. Idempotent per agreement. SIMULATED booking.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              },
+              "approval": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "action": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "policyDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "decision": {
+                    "enum": [
+                      "allow",
+                      "deny"
+                    ]
+                  },
+                  "ts": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  "approverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{128,130}$"
+                  }
+                },
+                "required": [
+                  "role",
+                  "action",
+                  "digest",
+                  "policyDigest",
+                  "decision",
+                  "ts",
+                  "approverKeyId",
+                  "signature"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "envelope",
+              "approval"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "booking_cancel_prepare",
+          "title": "Prepare a cancellation",
+          "description": "Prepare cancellation of the booked order on the simulated ticketing system. Returns a server-signed envelope; execution additionally requires a signed approval record. Available until the settlement authorizes.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "enum": [
+                  "verification_mismatch",
+                  "verification_failed",
+                  "mutual_withdrawal"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "booking_cancel_submit",
+          "title": "Submit a cancellation",
+          "description": "Submit a local signature over a prepared cancellation envelope with a signed approval record. Cancels the order on the simulated ticketing system and ends this contract session; a repeat submission returns the same outcome. SIMULATED cancellation.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "envelope": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "agent-contract.prepare-envelope/v1"
+                  },
+                  "runId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "payloadDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "nonce": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{32}$"
+                  },
+                  "serverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "serverSig": {
+                    "type": "object",
+                    "properties": {
+                      "alg": {
+                        "const": "ed25519"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "sig": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-fA-F]{128}$"
+                      }
+                    },
+                    "required": [
+                      "alg",
+                      "keyId",
+                      "sig"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "runId",
+                  "tool",
+                  "role",
+                  "payload",
+                  "payloadDigest",
+                  "expiresAt",
+                  "nonce",
+                  "serverKeyId",
+                  "serverSig"
+                ],
+                "additionalProperties": false
+              },
+              "signatureHex": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{128,130}$"
+              },
+              "approval": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "buyer",
+                      "provider"
+                    ]
+                  },
+                  "action": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "policyDigest": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{64}$"
+                  },
+                  "decision": {
+                    "enum": [
+                      "allow",
+                      "deny"
+                    ]
+                  },
+                  "ts": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  "approverKeyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{128,130}$"
+                  }
+                },
+                "required": [
+                  "role",
+                  "action",
+                  "digest",
+                  "policyDigest",
+                  "decision",
+                  "ts",
+                  "approverKeyId",
+                  "signature"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "envelope",
+              "signatureHex",
+              "approval"
+            ],
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": false,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "settlement_status",
+          "title": "Read settlement status",
+          "description": "Read the simulated settlement state for this contract session. SIMULATED.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        },
+        {
+          "name": "contract_status",
+          "title": "Read contract status",
+          "description": "Read overall contract progress and terminal state. This is the resume anchor for both roles.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          },
+          "annotations": {
+            "readOnlyHint": true,
+            "openWorldHint": false
+          }
+        }
+      ]
+    },
+    "guidance": {
+      "toolsListDigest": "0xcee841ba587cc5cec7690b425754502f740abe388041ee03ef5c5775c1f99936",
+      "instructionsDigest": "0x959525fde3e8c0d18a11aac7d3dcffd07b95f7e90e1885e8947eee7f6aebfabd"
+    }
+  },
+  "instructions": "This surface carries the full travel Agent Contract workflow between two parties who each completed a Clockchain handshake. One party acts as buyer, the other as provider. Each sees only the operations its role can use, plus the shared read operations. Discovery happens through provider listings on this surface; a buyer delivers the handshake responder invitation to a listing as a sealed payload the service can carry but not open. A contract session begins when both parties bind their keys to the same verified handshake certificate. The buyer presents the family principal's signed mandate; its caps are enforced by this service and never disclosed. Negotiation is signed offers and counters over itineraries from the simulated offer board; a signed acceptance by the counterparty forms a binding agreement. Every mutating operation is a prepare step that returns a server-signed envelope, followed by a submit carrying the caller's local signature over exactly those bytes. Consequential actions — the simulated booking and the simulated settlement — additionally require a signed approval record from the caller's local policy. Ticketing and settlement are simulated and labelled as such in every response. Every call produces a signed, hash-chained receipt; the chain head is anchored at run end."
+}

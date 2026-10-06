@@ -15,7 +15,7 @@ import { mintTerminalReceipt, type TerminalReceipt, type TerminalReceiptFields }
 import { createTerminalOutbox, type TerminalAnchorJob, type TerminalJob } from "./terminal-jobs.js";
 import { makeReceipt, checkReceiptDraft, chainHead, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
 import type { ContractSigner } from "./envelope.js";
-import { CONTRACT_TOOL_DEFS, type ApprovalRecord, type ContractRole } from "./schemas.js";
+import { CONTRACT_TOOL_DEFS, type ApprovalRecord, type ContractFeatures, type ContractRole } from "./schemas.js";
 import type { ContractRefusalCode } from "./refusals.js";
 import { createBusinessOps, type BusinessOps } from "./business.js";
 import type { SettlementRail } from "./settlement-rail.js";
@@ -485,6 +485,18 @@ export interface ContractService {
   awaitFinalAnchor(runId: string): Promise<void>;
   /** The pre-bind scope id for brief anchors served before a bind. */
   preBindBriefScope(keyId: string, mcpSessionId?: string): string;
+  /**
+   * M5: the env-gated surface features this service serves (all off = the
+   * b04059e surface). The transport, the server card and the receipt feed
+   * read guidance through it.
+   */
+  readonly features: ContractFeatures;
+  /**
+   * M5: CONTRACT_SERVER_ANCHORS=1 — the server-side terms / brief / final
+   * anchors fire (with an anchor configured) and contract_status reports
+   * them. Off = the b04059e anchors only.
+   */
+  readonly serverAnchors: boolean;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
@@ -1041,6 +1053,13 @@ export function createContractService(options: {
    * the final anchor (before contract_status reports a terminal run).
    */
   briefs?: ReadonlyMap<string, ContractBrief>;
+  /** M5: CONTRACT_SERVER_ANCHORS=1 (default off) — fire terms/brief/final anchors. */
+  serverAnchors?: boolean;
+  /**
+   * M5: CONTRACT_POLICY_REGISTRATION=1 (default off) — serve
+   * contract_register_policy; off, persisted registrations authorize nothing.
+   */
+  policyRegistration?: boolean;
   briefAnchorAwaitMs?: number;
   finalAnchorAwaitMs?: number;
   /** Injectable for tests; defaults to an unref'd setTimeout. */
@@ -1066,6 +1085,13 @@ export function createContractService(options: {
   // Fail closed at construction: without the policy pins every approval
   // check would be ambiguous — never silently degrade.
   const policyDigests = normalizePolicyDigests(options.policyDigests);
+  // M5: each surface feature is on only when its env configured it.
+  const features: ContractFeatures = Object.freeze({
+    ...((options.directory?.size ?? 0) > 0 ? { directory: true } : {}),
+    ...(options.policyRegistration === true ? { policyRegistration: true } : {}),
+    ...((options.briefs?.size ?? 0) > 0 ? { briefs: true } : {}),
+  });
+  const serverAnchorsOn = options.serverAnchors === true;
   const runs = new Map<string, ContractRun>();
   /** O-3: live-run routing per (keyId, mcpSessionId slot), capped per keyId. */
   const router = createRunRouter(options.maxRunsPerKey);
@@ -1202,7 +1228,8 @@ export function createContractService(options: {
     throw err;
   }
   const livePolicyDigests: Readonly<Record<ContractRole, ReadonlySet<string>>> = Object.freeze({
-    buyer: policyRegistry.buyer,
+    // M5: with registration off only the env pins authorize (b04059e).
+    buyer: features.policyRegistration === true ? policyRegistry.buyer : policyDigests.buyer,
     provider: policyDigests.provider,
   });
 
@@ -1831,7 +1858,8 @@ export function createContractService(options: {
   // Server-side anchors (terms / brief / final): new module, same
   // in-process ContractAnchor, outcomes recorded on run + job, never chained.
   const serverAnchors = createServerAnchors({
-    anchor: options.anchor,
+    // M5: without CONTRACT_SERVER_ANCHORS=1 every server-side anchor is a no-op.
+    anchor: serverAnchorsOn ? options.anchor : undefined,
     getRun: (runId) => runs.get(runId),
     getJob: (runId) => outbox.get(runId),
     updateJob: (runId, mutate) => void updateJob(runId, mutate),
@@ -2211,7 +2239,11 @@ export function createContractService(options: {
   return {
     bind,
     issueBindChallenge,
-    registerPolicy: (principal, input) => policyRegistry.register(principal, input),
+    features,
+    serverAnchors: serverAnchorsOn,
+    registerPolicy: (principal, input) => features.policyRegistration === true
+      ? policyRegistry.register(principal, input)
+      : { ok: false, code: "NOT_FOUND" },
     getBrief: (name, scope) => serverAnchors.getBrief(name, scope),
     awaitFinalAnchor: (runId) => serverAnchors.awaitFinal(runId),
     preBindBriefScope: (keyId, mcpSessionId) => briefScopeOf(router.chainKey(keyId, mcpSessionId)),
@@ -2387,8 +2419,8 @@ export function createContractService(options: {
         // N6g-2 (R10c): the published per-role guidance digests — what the
         // transport's tools/list and instructions actually serve.
         guidance: {
-          buyer: guidanceDigests("buyer"),
-          provider: guidanceDigests("provider"),
+          buyer: guidanceDigests("buyer", features),
+          provider: guidanceDigests("provider", features),
         },
         // N4b-6: a seeded sim fault is disclosed at feed level too.
         ...(run.simFault !== undefined ? { simFault: run.simFault } : {}),

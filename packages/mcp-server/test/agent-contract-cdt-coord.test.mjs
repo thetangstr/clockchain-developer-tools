@@ -21,6 +21,8 @@ import {
 // cdt-coord (mcp-coordination-design.md): O-3 routing by (keyId,
 // mcpSessionId) with a per-keyId cap, contract_register_policy (mandates
 // without a restart), and the server-side terms / brief / final anchors.
+// CDT-SEC M5: register_policy and the server-side anchors are default-off;
+// these tests switch them on (policyRegistration / serverAnchors).
 
 /** The env bound to one named MCP session per token (`<token>#<suffix>`). */
 const viaSession = (env, suffix) => ({
@@ -122,7 +124,7 @@ function signPolicy({ tokenKeyId = "kb1", digest = POLICY_D, expiresAt = inHours
 }
 
 test("register_policy: wrong signer, expired, too-long, replayed and provider callers are refused", async () => {
-  const env = await boot();
+  const env = await boot({ policyRegistration: true });
   try {
     const wrong = await env.callTool("tb1", "contract_register_policy", signPolicy({ priv: keys.buyerSigner.priv }));
     assert.equal(wrong.error, "SIGNATURE_INVALID", JSON.stringify(wrong));
@@ -157,7 +159,7 @@ test("register_policy: wrong signer, expired, too-long, replayed and provider ca
 });
 
 test("register_policy: the per-role 64-digest cap counts env pins plus live registrations", async () => {
-  const env = await boot();
+  const env = await boot({ policyRegistration: true });
   try {
     // The env pins one buyer digest; 63 registrations fill the cap.
     for (let i = 1; i <= 63; i += 1) {
@@ -175,7 +177,7 @@ test("register_policy: the per-role 64-digest cap counts env pins plus live regi
 
 test("register_policy: a registered digest authorizes an approval without a restart, survives one, and expires", async () => {
   const stateDir = mkdtempSync(path.join(tmpdir(), "cdt-coord-policy-"));
-  const env = await boot({ stateDir });
+  const env = await boot({ stateDir, policyRegistration: true });
   let envOpen = true;
   let env2;
   try {
@@ -214,7 +216,7 @@ test("register_policy: a registered digest authorizes an approval without a rest
     envOpen = false;
 
     // Durable: a restart keeps the registration and its replay guard.
-    env2 = await boot({ stateDir });
+    env2 = await boot({ stateDir, policyRegistration: true });
     const replay = await env2.callTool("tb1", "contract_register_policy", signPolicy({ expiresAt: reg.expiresAt }));
     assert.equal(replay.error, "NONCE_REUSED", JSON.stringify(replay));
   } finally {
@@ -265,7 +267,7 @@ function briefFixture() {
 
 test("anchors/terms: the creating bind anchors the certificate's statementDigest, unchained", async () => {
   const anchor = fakeAnchor();
-  const env = await boot({ anchor });
+  const env = await boot({ anchor, serverAnchors: true });
   try {
     const { runId } = await agreePair(env, uuid(931), "tb1", "tp1");
     await waitFor(() => env.service.runFor(runId)?.anchors?.terms?.status === "anchored");
@@ -291,7 +293,7 @@ test("anchors/brief: a pinned brief is anchored before it returns and carried on
   assert.throws(() => parseContractBriefs(`missing:${fx.digest}`, fx.dir), /no brief file/);
 
   const anchor = fakeAnchor();
-  const env = await boot({ anchor, briefs });
+  const env = await boot({ anchor, briefs, serverAnchors: true });
   try {
     const got = await env.callTool("tb1", "contract_get_brief", { name: "family-travel" });
     assert.equal(got.text, fx.text);
@@ -329,6 +331,7 @@ test("anchors/final: covers the post-terminal receipts, recorded on the job, awa
   const anchor = slowFinalAnchor(150);
   let env;
   env = await boot({
+    serverAnchors: true,
     anchor,
     // A close emitter stand-in: delivery lands after the terminal anchor.
     onTerminalRun: (run, _state, _p, receipt) => {
@@ -379,7 +382,7 @@ test("anchors/final: an in-flight final persisted at shutdown is re-driven at bo
       return base.anchor(input);
     },
   };
-  const envA = await boot({ stateDir, anchor: hanging, finalAnchorAwaitMs: 50 });
+  const envA = await boot({ stateDir, anchor: hanging, finalAnchorAwaitMs: 50, serverAnchors: true });
   let runId;
   try {
     const r = await bookPair(envA, uuid(934), "tb1", "tp1");
@@ -394,7 +397,7 @@ test("anchors/final: an in-flight final persisted at shutdown is re-driven at bo
   } finally { envA.close(); }
 
   const anchorB = fakeAnchor();
-  const envB = await boot({ stateDir, anchor: anchorB });
+  const envB = await boot({ stateDir, serverAnchors: true, anchor: anchorB });
   try {
     const done = await waitFor(() => envB.service.terminalJobFor(runId)?.anchors?.final?.status === "anchored");
     assert.ok(done, "boot recovery re-drove the final anchor");
