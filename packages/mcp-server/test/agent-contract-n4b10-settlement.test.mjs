@@ -7,7 +7,7 @@ import test from "node:test";
 import { StripeTestRailError } from "../dist/agent-contract/settlement-rail.js";
 
 import {
-  boot, agreePair, bookPair, signedSubmit, makeApproval, signRoleSig, keys, uuid, statusSchema,
+  boot, agreePair, bookPair, signedSubmit, makeApproval, signRoleSig, keys, uuid, statusSchema, waitFor,
 } from "./n4b9-harness.mjs";
 
 // N4b-10 (spec D13): business integration of the Stripe TEST-mode
@@ -424,7 +424,11 @@ test("L4: concurrent settlement_authorize serialize — exactly one confirm, set
     const a2 = env.callTool("tb1", "settlement_authorize", {
       envelope: e2.envelope, signatureHex: sign(e2.envelope), approval: app2,
     });
-    await new Promise((r) => setTimeout(r, 60)); // let the winner reach confirm
+    // Hold the gate until the winner is parked inside confirm, then give the
+    // loser time to arrive and queue on the per-run lock. A blind 60ms sleep
+    // let a loaded machine release the gate before either reached the rail.
+    assert.ok(await waitFor(() => calls.confirm >= 1, 60_000), "the winner reaches confirm");
+    await new Promise((r) => setTimeout(r, 250));
     releaseGate();
     const [r1, r2] = await Promise.all([a1, a2]);
     const outcomes = [r1, r2].map((r) => (r.error ?? r.status)).sort();
