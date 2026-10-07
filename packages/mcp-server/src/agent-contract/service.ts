@@ -638,7 +638,7 @@ function persistAgentBindings(stateDir: string, bindings: ReadonlyMap<string, re
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, AGENT_BINDINGS_FILE);
   const tmp = `${file}.${process.pid}.tmp`;
-  const fd = openSync(tmp, "w");
+  const fd = openSync(tmp, "w", 0o600);
   try {
     const wire = Object.fromEntries(
       [...bindings].map(([keyId, list]) => [keyId, list.length === 1 ? list[0] : list]),
@@ -717,7 +717,7 @@ function persistUsedSessions(stateDir: string, used: ReadonlyMap<string, string>
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, USED_SESSIONS_FILE);
   const tmp = `${file}.${process.pid}.tmp`;
-  const fd = openSync(tmp, "w");
+  const fd = openSync(tmp, "w", 0o600);
   try {
     writeFileSync(fd, JSON.stringify({ sessions: Object.fromEntries(used) }));
     fsyncSync(fd);
@@ -800,7 +800,7 @@ function persistUsedMandates(stateDir: string, used: ReadonlyMap<string, UsedMan
       { runId: v.runId, expiresAt: v.expiresAtMs === null ? null : new Date(v.expiresAtMs).toISOString() },
     ]),
   );
-  const fd = openSync(tmp, "w");
+  const fd = openSync(tmp, "w", 0o600);
   try {
     writeFileSync(fd, JSON.stringify({ mandates }));
     fsyncSync(fd);

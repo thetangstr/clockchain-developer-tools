@@ -156,7 +156,7 @@ function persistTerminalJobs(
     // order is insertion order — a re-set keeps its original slot).
     .sort((a, b) => (b.j.updatedAtMs - a.j.updatedAtMs) || (b.insertion - a.insertion));
   const dropped = new Set(finished.slice(Math.max(0, maxFinished)).map(({ j }) => j.runId));
-  const fd = openSync(tmp, "w");
+  const fd = openSync(tmp, "w", 0o600);
   try {
     writeFileSync(fd, JSON.stringify({
       schema: TERMINAL_JOBS_SCHEMA,

@@ -36,8 +36,9 @@ import type { ContractRole, TokenStore } from "./tokens.js";
  *   - The request is authorized by a contract-server ed25519 signature under
  *     a key pinned in `contractKeys` (the same pin as close). There is no
  *     bearer path and no public mint endpoint.
- *   - One lane per (keyId, role, mcpSessionId), ever: a replayed or repeated
- *     open is LANE_REUSED. At most `maxOpenLanesPerKey` unlinked lanes per
+ *   - One lane per (keyId, role, mcpSessionId): a replayed or repeated
+ *     open is LANE_REUSED. An unlinked lane is forgotten LANE_PRUNE_GRACE_MS
+ *     after it leaves the window (L4); its signed open is stale by then. At most `maxOpenLanesPerKey` unlinked lanes per
  *     keyId inside `laneWindowMs` (LANE_LIMIT) so a contract key cannot
  *     exhaust sink state.
  *   - A link is write-once per contract runId; a lane belongs to at most one
@@ -61,6 +62,14 @@ const MAX_LANES_PER_ROLE = 8;
 const DEFAULT_MAX_OPEN_LANES_PER_KEY = 8;
 const DEFAULT_LANE_WINDOW_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_CLOCK_SKEW_MS = 60_000;
+/**
+ * L4: an UNLINKED lane is forgotten this long after it leaves the window.
+ * The grace covers clock skew plus a contract link that is still being
+ * delivered (or resumed after a contract restart) for a lane it picked
+ * inside the window. Linked lanes are never pruned: their records are run
+ * evidence (run-set keyId / mcpSessionId / openDigest, query authority).
+ */
+export const LANE_PRUNE_GRACE_MS = 60 * 60 * 1000;
 
 export const isLaneId = (id: string): boolean => id.startsWith("lane:");
 
@@ -192,6 +201,13 @@ function writeLanesAtomic(file: string, doc: LanesDoc): void {
     closeSync(fd);
   }
   renameSync(tmp, file);
+  // The rename is durable only once the directory entry is (L4).
+  const dirFd = openSync(path.dirname(file), "r");
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
+  }
 }
 
 const exactKeys = (o: Record<string, unknown>, keys: readonly string[]): boolean => {
@@ -235,13 +251,51 @@ export function createLaneService(options: {
   const sessionIndex = new Map<string, string>();
   const sessionKey = (keyId: string, role: string, mcpSessionId: string): string =>
     canonicalJson([keyId, role, mcpSessionId]);
+  // L4: unlinked lanes per keyId, so the LANE_LIMIT count never scans every
+  // lane the sink has ever opened.
+  const unlinkedByKey = new Map<string, Set<string>>();
+  const indexUnlinked = (keyId: string, laneId: string): void => {
+    let set = unlinkedByKey.get(keyId);
+    if (set === undefined) unlinkedByKey.set(keyId, (set = new Set()));
+    set.add(laneId);
+  };
+  const unindexUnlinked = (keyId: string, laneId: string): void => {
+    const set = unlinkedByKey.get(keyId);
+    if (set === undefined) return;
+    set.delete(laneId);
+    if (set.size === 0) unlinkedByKey.delete(keyId);
+  };
   for (const [laneId, l] of Object.entries(doc.lanes)) {
     sessionIndex.set(sessionKey(l.keyId, l.role, l.mcpSessionId), laneId);
+    if (l.runId === null) indexUnlinked(l.keyId, laneId);
   }
 
   const persist = (): void => {
     if (options.file !== undefined) writeLanesAtomic(options.file, doc);
   };
+
+  /**
+   * L4: drop unlinked lanes past window + grace. Such a lane no longer counts
+   * toward LANE_LIMIT and the contract never links it, and its signed open
+   * is long past the skew, so forgetting its session cannot enable a replay.
+   */
+  const prune = (t: number): boolean => {
+    let dropped = false;
+    for (const [keyId, set] of [...unlinkedByKey]) {
+      for (const laneId of [...set]) {
+        const l = doc.lanes[laneId];
+        if (l.openedAtMs + laneWindowMs + LANE_PRUNE_GRACE_MS > t) continue;
+        delete doc.lanes[laneId];
+        sessionIndex.delete(sessionKey(l.keyId, l.role, l.mcpSessionId));
+        unindexUnlinked(keyId, laneId);
+        dropped = true;
+      }
+    }
+    return dropped;
+  };
+  if (prune(now())) {
+    try { persist(); } catch { /* the pruned in-memory view is authoritative; the next write retries */ }
+  }
 
   function verifyContractSig(message: string, sig: { keyId: string; sig: string }): boolean {
     const publicKey = options.contractKeys?.[sig.keyId];
@@ -281,8 +335,9 @@ export function createLaneService(options: {
     if (enrollment === undefined || enrollment.role !== role) return { ok: false, code: "NOT_ENROLLED" };
     const sKey = sessionKey(keyId, role, mcpSessionId);
     if (sessionIndex.has(sKey)) return { ok: false, code: "LANE_REUSED" };
-    const openUnlinked = Object.values(doc.lanes).filter(
-      (l) => l.keyId === keyId && l.runId === null && l.openedAtMs + laneWindowMs > t,
+    prune(t); // persisted with the new lane below, or on the next write
+    const openUnlinked = [...(unlinkedByKey.get(keyId) ?? [])].filter(
+      (id) => doc.lanes[id].openedAtMs + laneWindowMs > t,
     ).length;
     if (openUnlinked >= maxOpen) return { ok: false, code: "LANE_LIMIT" };
 
@@ -299,11 +354,13 @@ export function createLaneService(options: {
     // second lane, and the lane is known to the link route.
     doc.lanes[laneId] = record;
     sessionIndex.set(sKey, laneId);
+    indexUnlinked(keyId, laneId);
     try {
       persist();
     } catch (err) {
       delete doc.lanes[laneId];
       sessionIndex.delete(sKey);
+      unindexUnlinked(keyId, laneId);
       throw err;
     }
     const minted = options.tokens.mintIngest({ runId: laneId, role });
@@ -377,12 +434,18 @@ export function createLaneService(options: {
       }
     }
     doc.links[runId] = { lanes, linkDigest, tsMs, linkedAtMs: t };
-    for (const laneId of [...lanes.buyer, ...lanes.provider]) doc.lanes[laneId].runId = runId;
+    for (const laneId of [...lanes.buyer, ...lanes.provider]) {
+      doc.lanes[laneId].runId = runId;
+      unindexUnlinked(doc.lanes[laneId].keyId, laneId);
+    }
     try {
       persist();
     } catch (err) {
       delete doc.links[runId];
-      for (const laneId of [...lanes.buyer, ...lanes.provider]) doc.lanes[laneId].runId = null;
+      for (const laneId of [...lanes.buyer, ...lanes.provider]) {
+        doc.lanes[laneId].runId = null;
+        indexUnlinked(doc.lanes[laneId].keyId, laneId);
+      }
       throw err;
     }
     // The contract runId becomes a real (query-mintable) run; it can never

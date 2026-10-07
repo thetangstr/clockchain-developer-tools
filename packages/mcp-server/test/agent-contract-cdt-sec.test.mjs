@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,6 +21,8 @@ import { createPolicyRegistry, policyRegistrationDigest } from "../dist/agent-co
 import { parseContractBriefs } from "../dist/agent-contract/server-anchors.js";
 import { createBusinessOps } from "../dist/agent-contract/business.js";
 import { createSimWorld } from "../dist/agent-contract/sim/index.js";
+import { persistStandingListings } from "../dist/agent-contract/directory.js";
+import { createTelemetryLanes } from "../dist/agent-contract/telemetry-lanes.js";
 import {
   ACCEPT, HOST_ROOTS, POLICY, SIGNER, PRINCIPAL_ADDRESS, boot, agreePair, bookPair, signedSubmit, makeApproval,
   fakeAnchor, waitFor, uuid, keys,
@@ -619,4 +621,59 @@ test("L3: calls after the final anchor are served but never extend the anchored 
     assert.ok(env.service.preBindFeed("kb1").receipts.some((r) => r.tool === "agreement_get"));
     assert.ok(env.service.preBindFeed("kp1").receipts.some((r) => r.tool === "booking_prepare" && r.outcome === "ALREADY_TERMINAL"));
   } finally { env.close(); }
+});
+
+// --- L4: owner-only state files; lanes past the window are pruned ------------------
+
+test("L4: the standing-listings file is written owner-only (0600)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cdt-sec-l4-"));
+  persistStandingListings(dir, []);
+  assert.equal(statSync(path.join(dir, "standing-listings.json")).mode & 0o777, 0o600);
+});
+
+test("L4: telemetry-lanes.json drops lanes past the window, linked or not; links stay", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "cdt-sec-l4-lanes-"));
+  const WINDOW = 6 * 3600_000;
+  let now = Date.parse("2030-01-01T00:00:00.000Z");
+  let n = 0;
+  const opens = [];
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (url.endsWith("/v1/lanes/open")) {
+      opens.push(body.mcpSessionId);
+      const laneId = `lane:${(++n).toString(16).padStart(32, "0")}`;
+      return { status: 200, text: async () => JSON.stringify({
+        laneId, role: body.role, keyId: body.keyId, mcpSessionId: body.mcpSessionId, sealedBox: { ct: "opaque" },
+      }) };
+    }
+    return { status: 200, text: async () => "{}" };
+  };
+  const make = () => createTelemetryLanes({
+    signer: SIGNER, closeUrl: "http://127.0.0.1:19459", stateDir, now: () => now, fetchImpl, backoffMs: [0],
+  });
+  let lanes = make();
+  const file = path.join(stateDir, "telemetry-lanes.json");
+  const unlinked = await lanes.open({ keyId: "kb1", role: "buyer" }, "sess-unlinked");
+  const linkedB = await lanes.open({ keyId: "kb1", role: "buyer" }, "sess-b");
+  assert.equal(unlinked.ok && linkedB.ok, true);
+  // kb1 binds a run while sess-unlinked belongs to another (cap > 1) route.
+  lanes.onRunBound({ runId: "run-1", bound: { buyer: { principalKeyId: "kb1" } } }, { buyer: ["sess-b"], provider: [] });
+  await lanes.flush();
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+
+  now += WINDOW + 1;
+  const fresh = await lanes.open({ keyId: "kb1", role: "buyer" }, "sess-fresh");
+  assert.equal(fresh.ok, true);
+  const onDisk = JSON.parse(readFileSync(file, "utf8"));
+  const ids = onDisk.lanes.map((l) => l.laneId);
+  assert.deepEqual(ids, [fresh.laneId], "both expired lanes (unlinked and linked) are pruned");
+  assert.ok(onDisk.links["run-1"], "the link record stays: the v2 terminal receipt is built from it");
+  assert.equal(lanes.linkFor("run-1")?.lanes.buyer[0], linkedB.laneId);
+
+  // A restart after a long outage prunes at boot.
+  now += WINDOW + 1;
+  lanes = make();
+  await lanes.flush();
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).lanes, [], "boot prunes lanes that expired while down");
+  assert.ok(lanes.linkFor("run-1"));
 });

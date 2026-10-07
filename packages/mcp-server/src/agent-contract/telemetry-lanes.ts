@@ -246,7 +246,33 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
       closeSync(fd);
     }
     renameSync(tmp, file);
+    // The rename is durable only once the directory entry is (L4).
+    const dirFd = openSync(path.dirname(file), "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
   };
+
+  /**
+   * L4: a lane past the window can never be linked (onRunBound filters it
+   * out), so its entry is dead weight — drop it, linked or not. The link
+   * record itself stays: the run's v2 terminal receipt is built from it.
+   */
+  const prune = (t: number): boolean => {
+    let dropped = false;
+    for (const [key, l] of lanes) {
+      if (l.openedAtMs + laneWindowMs <= t) {
+        lanes.delete(key);
+        dropped = true;
+      }
+    }
+    return dropped;
+  };
+  if (prune(now())) {
+    try { persist(); } catch { /* the pruned in-memory view is authoritative; the next write retries */ }
+  }
 
   async function post(url: string, body: unknown): Promise<{ status: number; text: string }> {
     const controller = new AbortController();
@@ -312,6 +338,7 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
       openedAtMs: now(), sealedBox: out.sealedBox, runId: null,
     };
     lanes.set(`${principal.keyId}\n${mcpSessionId}`, entry);
+    prune(entry.openedAtMs);
     try {
       persist();
     } catch {
@@ -402,6 +429,7 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
       if (buyer.length + provider.length === 0) return;
       const linked: LinkedLanes = { buyer: buyer.map((l) => l.laneId), provider: provider.map((l) => l.laneId) };
       for (const l of [...buyer, ...provider]) l.runId = run.runId;
+      prune(t);
       links.set(run.runId, {
         lanes: linked,
         ts: new Date(t).toISOString(),

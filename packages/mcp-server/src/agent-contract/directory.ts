@@ -94,7 +94,7 @@ export function persistStandingListings(stateDir: string, listings: readonly Sta
   mkdirSync(stateDir, { recursive: true });
   const file = path.join(stateDir, STANDING_LISTINGS_FILE);
   const tmp = `${file}.${process.pid}.tmp`;
-  const fd = openSync(tmp, "w");
+  const fd = openSync(tmp, "w", 0o600);
   try {
     writeFileSync(fd, JSON.stringify({ schema: STANDING_LISTINGS_SCHEMA, listings }));
     fsyncSync(fd);
