@@ -55,15 +55,18 @@ const T0 = Date.parse("2030-01-01T00:00:00.000Z");
 const iso = (ms) => new Date(ms).toISOString();
 const SPAN = (name) => JSON.stringify({ resourceSpans: [{ scopeSpans: [{ spans: [{ name }] }] }] });
 
+// CDT-SEC L5: every signed lane body names its sink (the sink's signing keyId).
+const SINK_AUD = sinkSigner.keyId;
+
 function laneOpen({ keyId = "buyer-key", role = "buyer", mcpSessionId = "sess-1", ts = T0, signer = contract.privateKey, signerKeyId = "contract-server", extra = {} } = {}) {
-  const fields = { keyId, role, mcpSessionId, ts: iso(ts) };
+  const fields = { aud: SINK_AUD, keyId, role, mcpSessionId, ts: iso(ts) };
   const sig = sign(null, Buffer.from(laneOpenMessage(fields, { alg: "ed25519", keyId: signerKeyId }), "utf8"), signer);
   return { schema: "ac-lane-open/v1", ...fields, ...extra, signature: { alg: "ed25519", keyId: signerKeyId, sig: `0x${sig.toString("hex")}` } };
 }
 
 function runLink(runId, lanes, ts = T0, signer = contract.privateKey) {
-  const sig = sign(null, Buffer.from(runLinkMessage({ runId, lanes, ts: iso(ts) }, { alg: "ed25519", keyId: "contract-server" }), "utf8"), signer);
-  return { schema: "ac-run-link/v1", runId, lanes, ts: iso(ts), signature: { alg: "ed25519", keyId: "contract-server", sig: `0x${sig.toString("hex")}` } };
+  const sig = sign(null, Buffer.from(runLinkMessage({ aud: SINK_AUD, runId, lanes, ts: iso(ts) }, { alg: "ed25519", keyId: "contract-server" }), "utf8"), signer);
+  return { schema: "ac-run-link/v1", aud: SINK_AUD, runId, lanes, ts: iso(ts), signature: { alg: "ed25519", keyId: "contract-server", sig: `0x${sig.toString("hex")}` } };
 }
 
 function receiptV2(runId, lanes, ts = T0, linkDigest = linkDigestOf(runId, lanes)) {
@@ -108,7 +111,7 @@ async function boot(t, { dir = stateDir(), t0 = T0, sinkOpts = {}, laneOpts = {}
   }
   const enrollments = createEnrollmentRegistry({ file: path.join(dir, "enrollments.json") });
   const lanes = createLaneService({
-    tokens, enrollments, contractKeys: contractPublicKeys, file: path.join(dir, "lanes.json"), now: clock, ...laneOpts,
+    audience: SINK_AUD, tokens, enrollments, contractKeys: contractPublicKeys, file: path.join(dir, "lanes.json"), now: clock, ...laneOpts,
   });
   const sink = createTelemetrySink({
     signer: sinkSigner, tokens, now: clock, runLedger: ledger, lanes,
@@ -274,7 +277,7 @@ test("lane reuse refused: one lane per (keyId, role, session), across a restart;
 
   // A restarted lane service (same lanes.json) still refuses the session.
   const restarted = createLaneService({
-    tokens: env.tokens, enrollments: createEnrollmentRegistry({ file: path.join(env.dir, "enrollments.json") }),
+    audience: SINK_AUD, tokens: env.tokens, enrollments: createEnrollmentRegistry({ file: path.join(env.dir, "enrollments.json") }),
     contractKeys: contractPublicKeys, file: path.join(env.dir, "lanes.json"), now: () => T0,
   });
   assert.deepEqual(await restarted.open(laneOpen({ mcpSessionId: "reuse-1" })), { ok: false, code: "LANE_REUSED" });

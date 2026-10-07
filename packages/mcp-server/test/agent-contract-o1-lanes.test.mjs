@@ -178,6 +178,7 @@ async function bootSink(t) {
   await enrollParty({ file: path.join(dir, "enrollments.json"), keyId: "kp1", role: "provider", x25519: providerKey.pub });
   const contractKeys = { [CONTRACT_KEY_ID]: configServerPubKey };
   const lanes = createLaneService({
+    audience: "ac-telemetry-test",
     tokens,
     enrollments: createEnrollmentRegistry({ file: path.join(dir, "enrollments.json") }),
     contractKeys,
@@ -298,7 +299,8 @@ const postJson = (url, p, body, token) => fetch(url + p, {
   body: typeof body === "string" ? body : JSON.stringify(body),
 });
 
-const lanesEnv = (sink) => ({ TELEMETRY_CLOSE_URL: sink.closeUrl, TELEMETRY_LANES: "1" });
+// CDT-SEC L5: TELEMETRY_SINK_KEY_ID = the sink's signing keyId (the lane bodies' audience).
+const lanesEnv = (sink) => ({ TELEMETRY_CLOSE_URL: sink.closeUrl, TELEMETRY_SINK_KEY_ID: "ac-telemetry-test", TELEMETRY_LANES: "1" });
 
 // --- tests --------------------------------------------------------------------
 

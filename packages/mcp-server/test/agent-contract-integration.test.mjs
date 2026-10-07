@@ -85,6 +85,9 @@ async function waitFor(fn, timeoutMs = 10_000) {
 
 // --- the real telemetry sink, in-process ----------------------------------------
 
+// CDT-SEC L5: the sink's signing keyId is the audience of every signed lane body.
+const SINK_AUD = "ac-telemetry-integ";
+
 async function bootSink(t, contractKeys) {
   const dir = mkdtempSync(path.join(tmpdir(), "integ-sink-"));
   const enrollFile = path.join(dir, "enrollments.json");
@@ -92,10 +95,10 @@ async function bootSink(t, contractKeys) {
   await enrollParty({ file: enrollFile, keyId: "kp1", role: "provider", x25519: x25519Pub() });
   const tokens = createTokenStore({ recordsFile: path.join(dir, "tokens.json") });
   const lanes = createLaneService({
-    tokens, enrollments: createEnrollmentRegistry({ file: enrollFile }), contractKeys, file: path.join(dir, "lanes.json"),
+    audience: SINK_AUD, tokens, enrollments: createEnrollmentRegistry({ file: enrollFile }), contractKeys, file: path.join(dir, "lanes.json"),
   });
   const sink = createTelemetrySink({
-    signer: { keyId: "ac-telemetry-integ", privateKey: generateKeyPairSync("ed25519").privateKey },
+    signer: { keyId: SINK_AUD, privateKey: generateKeyPairSync("ed25519").privateKey },
     tokens, runLedger: createRunLedger({ file: path.join(dir, "runs.json") }), lanes, contractKeys, flushGraceMs: 0,
   });
   const servers = createTelemetrySinkServer({ sink, tokens, lanes });
@@ -200,7 +203,7 @@ async function bindPair(env, sessionId, buyer, provider, providerExtra = {}) {
 test("integration: cap 2 — two sessions of one keyId get their own lane and their own run link", async (t) => {
   const sink = await bootSink(t, { [CONFIG_KEY_ID]: configServerPubKey });
   const env = await bootConfig(t, {
-    TELEMETRY_CLOSE_URL: sink.closeUrl, TELEMETRY_LANES: "1", CONTRACT_MAX_RUNS_PER_KEY: "2",
+    TELEMETRY_CLOSE_URL: sink.closeUrl, TELEMETRY_SINK_KEY_ID: SINK_AUD, TELEMETRY_LANES: "1", CONTRACT_MAX_RUNS_PER_KEY: "2",
   });
   // One buyer key (kb1) and one provider key (kp1), two MCP sessions each.
   const laneA = await env.callTool("tb1", "telemetry_open", {}, "buyer-A");
@@ -340,7 +343,7 @@ test("integration: the final anchor head includes the v2 close receipt", async (
     mintTerminalReceipt: (fields, s) => lanes.terminalReceiptFor(fields, s),
     onRunBound: (run, sessions) => lanes?.onRunBound(run, sessions),
   });
-  lanes = createTelemetryLanes({ signer: SIGNER, closeUrl: sink.closeUrl, stateDir, backoffMs: [0, 50] });
+  lanes = createTelemetryLanes({ signer: SIGNER, sinkAudience: SINK_AUD, closeUrl: sink.closeUrl, stateDir, backoffMs: [0, 50] });
   t.after(() => service.close());
   const env = await serve(t, {
     authenticate: tokenAuthenticator(parseContractTokens(TOKENS_RAW)),
@@ -389,7 +392,7 @@ test("integration: telemetry_open stays hidden from the merged tools/list and ac
   writeFileSync(path.join(briefsDir, "family-travel.md"), briefText);
   const briefDigest = `0x${createHash("sha256").update(briefText).digest("hex")}`;
   const env = await bootConfig(t, {
-    TELEMETRY_CLOSE_URL: sink.closeUrl, TELEMETRY_LANES: "1", CONTRACT_MAX_RUNS_PER_KEY: "2",
+    TELEMETRY_CLOSE_URL: sink.closeUrl, TELEMETRY_SINK_KEY_ID: SINK_AUD, TELEMETRY_LANES: "1", CONTRACT_MAX_RUNS_PER_KEY: "2",
     CONTRACT_POLICY_REGISTRATION: "1", CONTRACT_DIRECTORY: "roma-travel:kp1",
     CONTRACT_BRIEFS: `family-travel:${briefDigest}`, CONTRACT_BRIEFS_DIR: briefsDir,
   });

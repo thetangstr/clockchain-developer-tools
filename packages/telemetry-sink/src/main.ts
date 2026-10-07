@@ -200,6 +200,8 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
   // here; lanes.json is server-written. Neither ever carries a secret.
   const enrollments = createEnrollmentRegistry({ file: path.join(stateDir, "enrollments.json") });
   const lanes = createLaneService({
+    // L5: signed lane bodies name this sink by its signing keyId.
+    audience: sinkKey.keyId,
     tokens,
     enrollments,
     ...(contractKeys === undefined ? {} : { contractKeys }),

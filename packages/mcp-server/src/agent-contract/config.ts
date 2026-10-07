@@ -387,6 +387,13 @@ export function loadContractConfig(
   if (lanesEnabled && telemetryCloseUrl === undefined) {
     return misconfigured("TELEMETRY_LANES=1 requires TELEMETRY_CLOSE_URL (lanes open on the sink close listener)");
   }
+  // CDT-SEC L5: the sink's signing keyId (printed by the sink at boot) is
+  // the audience of every signed lane body, so another sink pinning the same
+  // contract key refuses them.
+  const sinkAudience = (env.TELEMETRY_SINK_KEY_ID ?? "").trim();
+  if (lanesEnabled && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(sinkAudience)) {
+    return misconfigured("TELEMETRY_LANES=1 requires TELEMETRY_SINK_KEY_ID (the sink's signing keyId)");
+  }
   // Retry schedule for close delivery — test/dev can shorten it; default
   // retries ~5 attempts over ~30s. Non-numeric/negative entries refuse.
   const backoffRaw = (env.TELEMETRY_CLOSE_BACKOFF_MS ?? "").trim();
@@ -624,6 +631,8 @@ export function loadContractConfig(
               telemetryLanes!.terminalReceiptFor(fields, s),
             onRunBound: (run: ContractRun, sessions?: Record<"buyer" | "provider", string[]>) =>
               telemetryLanes?.onRunBound(run, sessions),
+            onSessionReleased: (keyId: string, mcpSessionId: string) =>
+              telemetryLanes?.release(keyId, mcpSessionId),
           }
         : {}),
     });
@@ -635,6 +644,7 @@ export function loadContractConfig(
     try {
       telemetryLanes = createTelemetryLanes({
         signer,
+        sinkAudience,
         closeUrl: telemetryCloseRaw,
         stateDir,
         ...(telemetryCloseBackoff !== undefined ? { backoffMs: telemetryCloseBackoff } : {}),

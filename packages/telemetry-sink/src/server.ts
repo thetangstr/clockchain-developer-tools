@@ -208,9 +208,10 @@ export function createTelemetrySinkServer(options: {
       const closeMatch = /^\/v1\/runs\/([^/]+)\/close$/.exec(url.pathname);
       const linkMatch = /^\/v1\/runs\/([^/]+)\/link$/.exec(url.pathname);
       const laneOpen = url.pathname === "/v1/lanes/open";
+      const laneRelease = url.pathname === "/v1/lanes/release";
       const lanes = options.lanes;
       if (req.method !== "POST"
-        || (closeMatch === null && ((linkMatch === null && !laneOpen) || lanes === undefined))) {
+        || (closeMatch === null && ((linkMatch === null && !laneOpen && !laneRelease) || lanes === undefined))) {
         json(res, 404, { error: "not_found" });
         return;
       }
@@ -245,6 +246,15 @@ export function createTelemetrySinkServer(options: {
           mcpSessionId: opened.mcpSessionId,
           sealedBox: opened.sealedBox,
         });
+        return;
+      }
+      if (lanes !== undefined && laneRelease) {
+        const released = await lanes.release(receipt);
+        if (!released.ok) {
+          json(res, REFUSAL_STATUS[released.code], { error: released.code.toLowerCase() });
+          return;
+        }
+        json(res, 200, { released: true, laneId: released.laneId });
         return;
       }
       if (lanes !== undefined && linkMatch !== null) {

@@ -3,12 +3,18 @@
  * sink's close listener accepts (packages/telemetry-sink src/lanes.ts and
  * sink.ts checkReceiptV2 are the verifying halves):
  *
- *   ac-lane-open/v1      {schema, keyId, role, mcpSessionId, ts, signature}
- *     signed message = canonicalJson({schema, keyId, role, mcpSessionId, ts,
+ *   ac-lane-open/v1      {schema, aud, keyId, role, mcpSessionId, ts, signature}
+ *     signed message = canonicalJson({schema, aud, keyId, role, mcpSessionId, ts,
  *     signature: {alg, keyId: <contract signer keyId>}}). The body's `keyId`
  *     is the PRINCIPAL, so the signer keyId rides nested (no collision).
- *   ac-run-link/v1       {schema, runId, lanes: {buyer, provider}, ts, signature}
- *     signed message = canonicalJson({schema, runId, lanes, ts, alg, keyId}).
+ *   ac-run-link/v1       {schema, aud, runId, lanes: {buyer, provider}, ts, signature}
+ *     signed message = canonicalJson({schema, aud, runId, lanes, ts, alg, keyId}).
+ *   ac-lane-release/v1   {schema, aud, laneId, keyId, role, mcpSessionId, ts, signature}
+ *     lane-open style. CDT-SEC L5: sent when an MCP session drops above cap 1
+ *     before any run captured it, so a reconnecting client never exhausts
+ *     its own LANE_LIMIT with lanes no run can link.
+ *   `aud` (CDT-SEC L5) is the sink's signing keyId (TELEMETRY_SINK_KEY_ID),
+ *   so a body signed for one sink is refused by any other.
  *   ac-terminal-receipt/v2 {schema, runId, terminalState, ts, lanes, linkDigest, signature}
  *     signed message = canonicalJson({...fields, alg, keyId}); linkDigest =
  *     canonicalDigest({schema: "ac-run-link/v1", runId, lanes}).
@@ -44,6 +50,7 @@ import type { ContractRole } from "./schemas.js";
 export const TELEMETRY_OPEN_TOOL = "telemetry_open";
 export const LANE_OPEN_SCHEMA = "ac-lane-open/v1" as const;
 export const RUN_LINK_SCHEMA = "ac-run-link/v1" as const;
+export const LANE_RELEASE_SCHEMA = "ac-lane-release/v1" as const;
 export const TERMINAL_RECEIPT_V2_SCHEMA = "ac-terminal-receipt/v2" as const;
 const LANES_STATE_SCHEMA = "ac-contract.telemetry-lanes/v1";
 const LANES_STATE_FILE = "telemetry-lanes.json";
@@ -60,6 +67,7 @@ type Ed25519Signature = { alg: "ed25519"; keyId: string; sig: `0x${string}` };
 
 export interface LaneOpenRequest {
   schema: typeof LANE_OPEN_SCHEMA;
+  aud: string;
   keyId: string;
   role: ContractRole;
   mcpSessionId: string;
@@ -69,6 +77,7 @@ export interface LaneOpenRequest {
 
 export interface RunLinkRequest {
   schema: typeof RUN_LINK_SCHEMA;
+  aud: string;
   runId: string;
   lanes: LinkedLanes;
   ts: string;
@@ -93,16 +102,31 @@ export function linkDigestOf(runId: string, lanes: LinkedLanes): string {
 }
 
 export function mintLaneOpen(
-  fields: { keyId: string; role: ContractRole; mcpSessionId: string; ts: string },
+  fields: { aud: string; keyId: string; role: ContractRole; mcpSessionId: string; ts: string },
   signer: ContractSigner,
 ): LaneOpenRequest {
-  const body = { schema: LANE_OPEN_SCHEMA, keyId: fields.keyId, role: fields.role, mcpSessionId: fields.mcpSessionId, ts: fields.ts };
+  const body = {
+    schema: LANE_OPEN_SCHEMA, aud: fields.aud, keyId: fields.keyId, role: fields.role,
+    mcpSessionId: fields.mcpSessionId, ts: fields.ts,
+  };
   const sig = signHex(canonicalJson({ ...body, signature: { alg: "ed25519", keyId: signer.keyId } }), signer);
   return { ...body, signature: { alg: "ed25519", keyId: signer.keyId, sig } };
 }
 
-export function mintRunLink(fields: { runId: string; lanes: LinkedLanes; ts: string }, signer: ContractSigner): RunLinkRequest {
-  const body = { schema: RUN_LINK_SCHEMA, runId: fields.runId, lanes: fields.lanes, ts: fields.ts };
+export function mintLaneRelease(
+  fields: { aud: string; laneId: string; keyId: string; role: ContractRole; mcpSessionId: string; ts: string },
+  signer: ContractSigner,
+): { schema: typeof LANE_RELEASE_SCHEMA; aud: string; laneId: string; keyId: string; role: ContractRole; mcpSessionId: string; ts: string; signature: Ed25519Signature } {
+  const body = {
+    schema: LANE_RELEASE_SCHEMA, aud: fields.aud, laneId: fields.laneId, keyId: fields.keyId,
+    role: fields.role, mcpSessionId: fields.mcpSessionId, ts: fields.ts,
+  };
+  const sig = signHex(canonicalJson({ ...body, signature: { alg: "ed25519", keyId: signer.keyId } }), signer);
+  return { ...body, signature: { alg: "ed25519", keyId: signer.keyId, sig } };
+}
+
+export function mintRunLink(fields: { aud: string; runId: string; lanes: LinkedLanes; ts: string }, signer: ContractSigner): RunLinkRequest {
+  const body = { schema: RUN_LINK_SCHEMA, aud: fields.aud, runId: fields.runId, lanes: fields.lanes, ts: fields.ts };
   const sig = signHex(canonicalJson({ ...body, alg: "ed25519", keyId: signer.keyId }), signer);
   return { ...body, signature: { alg: "ed25519", keyId: signer.keyId, sig } };
 }
@@ -154,6 +178,8 @@ type FetchLike = (url: string, init: { method: string; headers: Record<string, s
 
 export interface TelemetryLanesOptions {
   signer: ContractSigner;
+  /** L5: the sink's signing keyId (TELEMETRY_SINK_KEY_ID) — the `aud` of every signed body. */
+  sinkAudience: string;
   /** Base URL of the sink CLOSE listener (TELEMETRY_CLOSE_URL). */
   closeUrl: string;
   stateDir?: string;
@@ -184,6 +210,13 @@ export interface TelemetryLanes {
   /** v2 for a linked run, v1 otherwise. */
   terminalReceiptFor(fields: TerminalReceiptFields, signer: ContractSigner): TerminalReceipt;
   linkFor(runId: string): RunLinkState | undefined;
+  /**
+   * L5: the MCP session dropped and no run can capture its lane any more
+   * (the service calls this only above cap 1, for an unrouted session).
+   * Forgets the unlinked lane locally (so no later link names it) and asks
+   * the sink, once and best-effort, to stop counting it toward LANE_LIMIT.
+   */
+  release(keyId: string, mcpSessionId: string): void;
   /** Resolve when in-flight link deliveries settle (tests + shutdown). */
   flush(): Promise<void>;
 }
@@ -304,7 +337,7 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
 
   async function openOnce(principal: { keyId: string; role: ContractRole }, mcpSessionId: string): Promise<TelemetryOpenResult> {
     const request = mintLaneOpen(
-      { keyId: principal.keyId, role: principal.role, mcpSessionId, ts: new Date(now()).toISOString() },
+      { aud: options.sinkAudience, keyId: principal.keyId, role: principal.role, mcpSessionId, ts: new Date(now()).toISOString() },
       options.signer,
     );
     let res: { status: number; text: string };
@@ -352,7 +385,7 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
   async function deliverLink(runId: string): Promise<void> {
     const link = links.get(runId);
     if (link === undefined) return;
-    const request = mintRunLink({ runId, lanes: link.lanes, ts: link.ts }, options.signer);
+    const request = mintRunLink({ aud: options.sinkAudience, runId, lanes: link.lanes, ts: link.ts }, options.signer);
     const startedAt = now();
     let attempt = 0;
     for (;;) {
@@ -449,6 +482,21 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
 
     linkFor(runId) {
       return links.get(runId);
+    },
+
+    release(keyId, mcpSessionId) {
+      const key = `${keyId}\n${mcpSessionId}`;
+      const lane = lanes.get(key);
+      if (lane === undefined || lane.runId !== null) return;
+      lanes.delete(key);
+      try { persist(); } catch { /* the in-memory removal already keeps it out of any link */ }
+      const request = mintLaneRelease({
+        aud: options.sinkAudience, laneId: lane.laneId, keyId, role: lane.role, mcpSessionId,
+        ts: new Date(now()).toISOString(),
+      }, options.signer);
+      const p = post(`${base}/v1/lanes/release`, request).then(() => {}, () => {});
+      const id = `release:${lane.laneId}`;
+      inFlight.set(id, p.finally(() => inFlight.delete(id)));
     },
 
     async flush() {

@@ -1,5 +1,6 @@
 // CDT-SEC (state/ledger/notes/cdt-integration-security-review.md): sink-side
-// fixes for L4 (lane store pruning). No network.
+// fixes for L4 (lane store pruning) and L5 (audience, lane release).
+// Loopback ports 19460-19469 only; every key is generated.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
@@ -10,11 +11,14 @@ import test from "node:test";
 import {
   createEnrollmentRegistry,
   createLaneService,
+  createTelemetrySink,
+  createTelemetrySinkServer,
   createTokenStore,
   enrollParty,
   laneOpenMessage,
   runLinkMessage,
 } from "../dist/index.js";
+import * as sinkLib from "../dist/index.js";
 
 const contract = generateKeyPairSync("ed25519");
 const contractPublicKeys = { "contract-server": contract.publicKey };
@@ -27,15 +31,17 @@ const T0 = Date.parse("2030-01-01T00:00:00.000Z");
 const HOUR = 3600_000;
 const iso = (ms) => new Date(ms).toISOString();
 
-function laneOpen({ keyId = "buyer-key", role = "buyer", mcpSessionId, ts }) {
-  const fields = { keyId, role, mcpSessionId, ts: iso(ts) };
+const SINK_AUD = "ac-telemetry-test";
+
+function laneOpen({ keyId = "buyer-key", role = "buyer", mcpSessionId, ts, aud = SINK_AUD }) {
+  const fields = { aud, keyId, role, mcpSessionId, ts: iso(ts) };
   const sig = sign(null, Buffer.from(laneOpenMessage(fields, { alg: "ed25519", keyId: "contract-server" }), "utf8"), contract.privateKey);
   return { schema: "ac-lane-open/v1", ...fields, signature: { alg: "ed25519", keyId: "contract-server", sig: `0x${sig.toString("hex")}` } };
 }
 
-function runLink(runId, lanes, ts) {
-  const sig = sign(null, Buffer.from(runLinkMessage({ runId, lanes, ts: iso(ts) }, { alg: "ed25519", keyId: "contract-server" }), "utf8"), contract.privateKey);
-  return { schema: "ac-run-link/v1", runId, lanes, ts: iso(ts), signature: { alg: "ed25519", keyId: "contract-server", sig: `0x${sig.toString("hex")}` } };
+function runLink(runId, lanes, ts, aud = SINK_AUD) {
+  const sig = sign(null, Buffer.from(runLinkMessage({ aud, runId, lanes, ts: iso(ts) }, { alg: "ed25519", keyId: "contract-server" }), "utf8"), contract.privateKey);
+  return { schema: "ac-run-link/v1", aud, runId, lanes, ts: iso(ts), signature: { alg: "ed25519", keyId: "contract-server", sig: `0x${sig.toString("hex")}` } };
 }
 
 async function laneStore() {
@@ -46,8 +52,8 @@ async function laneStore() {
   await enrollParty({ file: path.join(dir, "enrollments.json"), keyId: "buyer-key", role: "buyer", x25519: buyerX });
   const enrollments = createEnrollmentRegistry({ file: path.join(dir, "enrollments.json") });
   const file = path.join(dir, "lanes.json");
-  const make = () => createLaneService({ tokens, enrollments, contractKeys: contractPublicKeys, file, now: clock });
-  return { dir, file, make, setNow: (ms) => { now = ms; }, now: () => now };
+  const make = () => createLaneService({ audience: SINK_AUD, tokens, enrollments, contractKeys: contractPublicKeys, file, now: clock });
+  return { dir, file, make, tokens, setNow: (ms) => { now = ms; }, now: () => now };
 }
 
 test("L4 sink: an unlinked lane past window + grace is pruned; a linked lane and its link are kept", async () => {
@@ -99,4 +105,101 @@ test("L4 sink: a pruned lane's stale signed open cannot be replayed", async () =
   await lanes.open(laneOpen({ mcpSessionId: "sess-other", ts: s.now() })); // triggers the prune
   const replay = await lanes.open(body);
   assert.deepEqual(replay, { ok: false, code: "RECEIPT_STALE" }, "the skew check refuses the old signed open");
+});
+
+function laneRelease({ laneId, keyId = "buyer-key", role = "buyer", mcpSessionId, ts, aud = SINK_AUD }) {
+  const fields = { aud, laneId, keyId, role, mcpSessionId, ts: iso(ts) };
+  // Looked up at call time so the file still loads on a build without it.
+  const sig = sign(null, Buffer.from(sinkLib.laneReleaseMessage(fields, { alg: "ed25519", keyId: "contract-server" }), "utf8"), contract.privateKey);
+  return { schema: "ac-lane-release/v1", ...fields, signature: { alg: "ed25519", keyId: "contract-server", sig: `0x${sig.toString("hex")}` } };
+}
+
+test("L5 sink: lane-open and run-link signed for another sink are refused", async () => {
+  const s = await laneStore();
+  const lanes = s.make();
+  const ours = await lanes.open(laneOpen({ mcpSessionId: "sess-ours", ts: T0 }));
+  assert.equal(ours.ok, true, JSON.stringify(ours));
+  assert.deepEqual(await lanes.open(laneOpen({ mcpSessionId: "sess-other", ts: T0, aud: "another-sink" })),
+    { ok: false, code: "RECEIPT_INVALID" });
+  const noAud = laneOpen({ mcpSessionId: "sess-noaud", ts: T0 });
+  delete noAud.aud;
+  assert.deepEqual(await lanes.open(noAud), { ok: false, code: "REQUEST_INVALID" });
+  assert.deepEqual(await lanes.link("run-x", runLink("run-x", { buyer: [ours.laneId], provider: [] }, T0, "another-sink")),
+    { ok: false, code: "RECEIPT_INVALID" });
+  assert.equal((await lanes.link("run-x", runLink("run-x", { buyer: [ours.laneId], provider: [] }, T0))).ok, true);
+});
+
+test("L5 sink: a released lane stops counting toward LANE_LIMIT and can never be linked", async () => {
+  const s = await laneStore();
+  const lanes = s.make();
+  const opened = [];
+  for (let i = 0; i < 8; i += 1) {
+    const r = await lanes.open(laneOpen({ mcpSessionId: `sess-${i}`, ts: T0 }));
+    assert.equal(r.ok, true);
+    opened.push(r);
+  }
+  assert.deepEqual(await lanes.open(laneOpen({ mcpSessionId: "sess-8", ts: T0 })), { ok: false, code: "LANE_LIMIT" });
+
+  // Wrong audience, wrong session, or a lane already linked: refused.
+  assert.deepEqual(await lanes.release(laneRelease({ laneId: opened[0].laneId, mcpSessionId: "sess-0", ts: T0, aud: "another-sink" })),
+    { ok: false, code: "RECEIPT_INVALID" });
+  assert.deepEqual(await lanes.release(laneRelease({ laneId: opened[0].laneId, mcpSessionId: "sess-1", ts: T0 })),
+    { ok: false, code: "LINK_INVALID" });
+  assert.equal((await lanes.link("run-1", runLink("run-1", { buyer: [opened[7].laneId], provider: [] }, T0))).ok, true);
+  assert.deepEqual(await lanes.release(laneRelease({ laneId: opened[7].laneId, mcpSessionId: "sess-7", ts: T0 })),
+    { ok: false, code: "LANE_REUSED" });
+
+  // The link freed one slot; release frees another.
+  assert.equal((await lanes.open(laneOpen({ mcpSessionId: "sess-8", ts: T0 }))).ok, true);
+  assert.deepEqual(await lanes.open(laneOpen({ mcpSessionId: "sess-9", ts: T0 })), { ok: false, code: "LANE_LIMIT" });
+  assert.deepEqual(await lanes.release(laneRelease({ laneId: opened[0].laneId, mcpSessionId: "sess-0", ts: T0 })),
+    { ok: true, laneId: opened[0].laneId });
+  assert.deepEqual(await lanes.release(laneRelease({ laneId: opened[0].laneId, mcpSessionId: "sess-0", ts: T0 })),
+    { ok: true, laneId: opened[0].laneId }, "idempotent");
+  assert.equal((await lanes.open(laneOpen({ mcpSessionId: "sess-9", ts: T0 }))).ok, true);
+  assert.equal(typeof lanes.lane(opened[0].laneId).releasedAtMs, "number");
+
+  // Released: never linked, and the session stays used.
+  assert.deepEqual(await lanes.link("run-2", runLink("run-2", { buyer: [opened[0].laneId], provider: [] }, T0)),
+    { ok: false, code: "LINK_INVALID" });
+  assert.deepEqual(await lanes.open(laneOpen({ mcpSessionId: "sess-0", ts: T0 })), { ok: false, code: "LANE_REUSED" });
+  // Durable across a restart.
+  const again = s.make();
+  assert.equal(typeof again.lane(opened[0].laneId).releasedAtMs, "number");
+});
+
+async function listenClose(server) {
+  for (let p = 19460; p <= 19469; p += 1) {
+    const ok = await new Promise((resolve) => {
+      const onError = () => resolve(false);
+      server.once("error", onError);
+      server.listen(p, "127.0.0.1", () => { server.off("error", onError); resolve(true); });
+    });
+    if (ok) return `http://127.0.0.1:${p}`;
+  }
+  throw new Error("no free loopback port in 19460-19469");
+}
+
+test("L5 sink: the close listener serves POST /v1/lanes/release", async (t) => {
+  const s = await laneStore();
+  const lanes = s.make();
+  const tokens = s.tokens;
+  const sinkKeys = generateKeyPairSync("ed25519");
+  const sink = createTelemetrySink({
+    signer: { keyId: SINK_AUD, privateKey: sinkKeys.privateKey }, tokens, now: s.now, lanes,
+    contractKeys: contractPublicKeys, flushGraceMs: 0,
+  });
+  const servers = createTelemetrySinkServer({ sink, tokens, lanes });
+  const url = await listenClose(servers.close);
+  t.after(() => servers.close.close());
+  const opened = await lanes.open(laneOpen({ mcpSessionId: "sess-http", ts: T0 }));
+  const post = (body) => fetch(`${url}/v1/lanes/release`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  const bad = await post(laneRelease({ laneId: opened.laneId, mcpSessionId: "sess-http", ts: T0, aud: "another-sink" }));
+  assert.equal(bad.status, 403);
+  assert.deepEqual(await bad.json(), { error: "receipt_invalid" });
+  const good = await post(laneRelease({ laneId: opened.laneId, mcpSessionId: "sess-http", ts: T0 }));
+  assert.equal(good.status, 200);
+  assert.deepEqual(await good.json(), { released: true, laneId: opened.laneId });
 });

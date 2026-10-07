@@ -649,7 +649,7 @@ test("L4: telemetry-lanes.json drops lanes past the window, linked or not; links
     return { status: 200, text: async () => "{}" };
   };
   const make = () => createTelemetryLanes({
-    signer: SIGNER, closeUrl: "http://127.0.0.1:19459", stateDir, now: () => now, fetchImpl, backoffMs: [0],
+    signer: SIGNER, sinkAudience: "ac-telemetry-test", closeUrl: "http://127.0.0.1:19459", stateDir, now: () => now, fetchImpl, backoffMs: [0],
   });
   let lanes = make();
   const file = path.join(stateDir, "telemetry-lanes.json");
@@ -676,4 +676,98 @@ test("L4: telemetry-lanes.json drops lanes past the window, linked or not; links
   await lanes.flush();
   assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).lanes, [], "boot prunes lanes that expired while down");
   assert.ok(lanes.linkFor("run-1"));
+});
+
+// --- L5: signed lane bodies carry the sink audience; a dropped, unrouted ------------
+// session's lane is released (cap > 1) so reconnects never exhaust LANE_LIMIT.
+
+test("L5: TELEMETRY_LANES=1 requires TELEMETRY_SINK_KEY_ID (the lane bodies' audience)", (t) => {
+  const missing = loadContractConfig({
+    CONTRACT_MCP_ENABLED: "1", CONTRACT_AUTH_TOKENS: TOKENS_RAW,
+    CONTRACT_HOST_ROOTS: HOST_ROOTS.map((r) => `${r.kid}:${r.fingerprint}`).join(","),
+    CONTRACT_SERVER_ED25519_SEED: SERVER_SEED.toString("base64"), CONTRACT_SERVER_KEY_ID: "contract-server-sec",
+    CONTRACT_SERVER_KEY_VALID_FROM: "2020-01-01T00:00:00Z",
+    CONTRACT_POLICY_DIGESTS: `buyer:${POLICY.buyer},provider:${POLICY.provider}`,
+    CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "cdt-sec-l5-")),
+    TELEMETRY_CLOSE_URL: "http://127.0.0.1:19459", TELEMETRY_LANES: "1",
+  });
+  if (missing.kind === "ready") t.after(() => missing.service.close());
+  assert.equal(missing.kind, "misconfigured");
+  assert.match(missing.reason, /TELEMETRY_SINK_KEY_ID/);
+});
+
+test("L5: lane bodies name the sink (aud); release forgets the lane locally and tells the sink", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "cdt-sec-l5-lanes-"));
+  const posts = [];
+  let n = 0;
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    posts.push({ path: new URL(url).pathname, body });
+    if (url.endsWith("/v1/lanes/open")) {
+      const laneId = `lane:${(++n).toString(16).padStart(32, "0")}`;
+      return { status: 200, text: async () => JSON.stringify({
+        laneId, role: body.role, keyId: body.keyId, mcpSessionId: body.mcpSessionId, sealedBox: { ct: "opaque" },
+      }) };
+    }
+    return { status: 200, text: async () => "{}" };
+  };
+  const lanes = createTelemetryLanes({
+    signer: SIGNER, sinkAudience: "sink-aud-1", closeUrl: "http://127.0.0.1:19459", stateDir, fetchImpl, backoffMs: [0],
+  });
+  const dropped = await lanes.open({ keyId: "kb1", role: "buyer" }, "sess-dropped");
+  const kept = await lanes.open({ keyId: "kb1", role: "buyer" }, "sess-kept");
+  assert.equal(posts[0].body.aud, "sink-aud-1", "lane-open names its sink");
+
+  lanes.release("kb1", "sess-dropped");
+  await lanes.flush();
+  const rel = posts.find((p) => p.path === "/v1/lanes/release");
+  assert.ok(rel, "the sink is told");
+  assert.deepEqual(Object.keys(rel.body).sort(),
+    ["aud", "keyId", "laneId", "mcpSessionId", "role", "schema", "signature", "ts"]);
+  assert.equal(rel.body.schema, "ac-lane-release/v1");
+  assert.equal(rel.body.aud, "sink-aud-1");
+  assert.equal(rel.body.laneId, dropped.laneId);
+  const onDisk = JSON.parse(readFileSync(path.join(stateDir, "telemetry-lanes.json"), "utf8"));
+  assert.deepEqual(onDisk.lanes.map((l) => l.laneId), [kept.laneId]);
+
+  // A later bind never names the released lane (the sink would refuse the link).
+  lanes.onRunBound({ runId: "run-1", bound: { buyer: { principalKeyId: "kb1" } } });
+  await lanes.flush();
+  const link = posts.find((p) => p.path === "/v1/runs/run-1/link");
+  assert.deepEqual(link.body.lanes, { buyer: [kept.laneId], provider: [] });
+  assert.equal(link.body.aud, "sink-aud-1", "run-link names its sink");
+
+  // A linked lane is never released.
+  const before = posts.length;
+  lanes.release("kb1", "sess-kept");
+  await lanes.flush();
+  assert.equal(posts.length, before);
+});
+
+test("L5: above cap 1 a dropped session routed to no run is released; a routed one and cap 1 are not", async () => {
+  const released = [];
+  const env = await boot({ maxRunsPerKey: 2, onSessionReleased: (k, s) => released.push(`${k}/${s}`) });
+  try {
+    await viaSession(env, "A").callTool("tb1", "contract_status", {});
+    const sidA = env.sessionIdOf("tb1#A");
+    assert.equal(await deleteSession(env, "tb1", sidA), 200);
+    assert.equal(await waitFor(() => released.includes(`kb1/${sidA}`), 2_000), true, "unrouted session released");
+
+    const sB = viaSession(env, "B");
+    await sB.callTool("tb1", "contract_status", {});
+    await agreePair(sB, uuid(1751), "tb1", "tp1");
+    const sidB = env.sessionIdOf("tb1#B");
+    assert.equal(await deleteSession(env, "tb1", sidB), 200);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(released.includes(`kb1/${sidB}`), false, "a session routed to a run keeps its lane");
+  } finally { env.close(); }
+
+  const cap1 = [];
+  const env1 = await boot({ onSessionReleased: (k, s) => cap1.push(`${k}/${s}`) });
+  try {
+    await viaSession(env1, "A").callTool("tb1", "contract_status", {});
+    assert.equal(await deleteSession(env1, "tb1", env1.sessionIdOf("tb1#A")), 200);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(cap1, [], "cap 1 links every unlinked lane of the keyId at bind — nothing is released");
+  } finally { env1.close(); }
 });

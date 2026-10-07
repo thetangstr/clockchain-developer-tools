@@ -1038,6 +1038,12 @@ export function createContractService(options: {
    */
   onRunBound?: (run: ContractRun, sessions?: Record<ContractRole, string[]>) => void;
   /**
+   * CDT-SEC L5: above cap 1, an MCP session dropped while routed to no run —
+   * no bind can capture its telemetry lane any more (O-3 links only the
+   * sessions routed to the run), so the lane store may release it.
+   */
+  onSessionReleased?: (keyId: string, mcpSessionId: string) => void;
+  /**
    * N4b-9 (F14): awaited inside `drain(deadlineMs)` — the config layer wires
    * the close emitter's bounded flush here.
    */
@@ -2423,6 +2429,10 @@ export function createContractService(options: {
     sessionDropped(keyId, mcpSessionId) {
       // At cap 1 the chain is the keyId's own — never per session.
       if (router.cap === 1) return;
+      // L5: a session routed to no run can never be linked by a later bind.
+      if (router.getSlot(keyId, router.slotFor(mcpSessionId)) === undefined) {
+        try { options.onSessionReleased?.(keyId, mcpSessionId); } catch { /* release is best-effort */ }
+      }
       const chain = router.chainKey(keyId, mcpSessionId);
       if (!preBindChains.has(chain)) return;
       if (chainCaptured(chain)) orphanedChains.add(chain);
