@@ -24,6 +24,8 @@ import { createTokenStore } from "./tokens.js";
  *   - anchor         TELEMETRY_ANCHOR_MCP_URL + (TELEMETRY_ANCHOR_TOKEN_FILE — a
  *                    mounted secret file; the plaintext TELEMETRY_ANCHOR_TOKEN
  *                    is accepted only with TELEMETRY_ENV=staging — CDT-SEC L7)
+ *   - run-set head   TELEMETRY_RUN_SET_HEAD=1 (optional, off by default — CDT-GAPS
+ *                    gap 3: one signed combined head per linked run)
  *   - O-1 lanes      enrollments.json (admin-written by enroll-cli) and
  *                    lanes.json (server-written) on the state volume
  *
@@ -215,11 +217,18 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
     ...(contractKeys === undefined ? {} : { contractKeys }),
     file: path.join(stateDir, "lanes.json"),
   });
+  // CDT-GAPS gap 3: the signed combined head of a linked run — opt-in.
+  const runSetHeadFlag = env.TELEMETRY_RUN_SET_HEAD ?? "";
+  if (runSetHeadFlag !== "" && runSetHeadFlag !== "0" && runSetHeadFlag !== "1") {
+    throw new Error(`TELEMETRY_RUN_SET_HEAD must be unset, "0" or "1", got ${runSetHeadFlag}`);
+  }
+  const signRunSet = runSetHeadFlag === "1";
   const sink = createTelemetrySink({
     signer: { keyId: sinkKey.keyId, privateKey: sinkKey.privateKey },
     tokens,
     runLedger,
     lanes,
+    ...(signRunSet ? { signRunSet: true } : {}),
     ...(contractKeys === undefined ? {} : { contractKeys }),
     ...(anchorUrl === undefined ? {} : {
       anchor: createMcpTsaAnchor({
@@ -251,6 +260,7 @@ export function startFromEnv(env: NodeJS.ProcessEnv = process.env): {
     keyCreated: sinkKey.created,
     ports: { write: writePort, read: readPort, close: closePort },
     anchor: anchorUrl !== undefined,
+    runSetHead: signRunSet,
     environment,
     contractKeyIds: Object.keys(contractKeys ?? {}),
     peerKeyIds: Object.keys(peerKeys ?? {}),

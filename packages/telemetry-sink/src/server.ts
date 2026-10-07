@@ -340,8 +340,13 @@ export function createTelemetrySinkServer(options: {
         // its ordered lane heads. Additive field; absent for unlinked runs.
         const runSet = sink.runSet(runId);
         const linked = runSet === null ? {} : { runSet };
+        // CDT-GAPS gap 3 (opt-in, TELEMETRY_RUN_SET_HEAD=1): a linked runId
+        // has no chain head of its own — its `head` is the signed combined
+        // run-set head, null until the set is final and signed (never
+        // blocks on the anchor, like a single head's tip). Off: unchanged.
+        const served = runSet !== null && runSet.signedHead !== undefined ? runSet.signedHead : head;
         if (what === "head") {
-          json(res, 200, { runId, head, annex, advisory, ...linked });
+          json(res, 200, { runId, head: served, annex, advisory, ...linked });
           return;
         }
         const cursorParam = url.searchParams.get("cursor");
@@ -362,7 +367,7 @@ export function createTelemetrySinkServer(options: {
           runId,
           records: slice.map(({ record: r, body }) => ({ ...r, body })),
           nextCursor,
-          head,
+          head: served,
           annex,
           advisory,
           ...linked,

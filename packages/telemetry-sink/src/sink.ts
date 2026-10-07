@@ -195,6 +195,54 @@ export interface RunSetHead {
   receiptDigest: string | null;
   /** true once a receipt was accepted AND every member lane is final, empty, or lost. */
   final: boolean;
+  /**
+   * CDT-GAPS gap 3 (opt-in, `signRunSet`): the signed combined head — null
+   * until the set is final and the head is signed. Absent when the option is off.
+   */
+  signedHead?: SignedRunSetHead | null;
+}
+
+export const RUN_SET_HEAD_SCHEMA = "ac-telemetry.run-set-head/v1";
+
+/** One lane's entry in the signed run-set head — the stable lane facts only. */
+export interface RunSetHeadLane {
+  laneId: string;
+  state: "final" | "empty" | "lost";
+  /** canonicalDigest of the lane's WHOLE signed final head (anchor + signature included); null for an empty lane. */
+  headDigest: string | null;
+  /** the lane head's recordCount; 0 for an empty lane. */
+  recordCount: number;
+  keyId: string;
+  mcpSessionId: string;
+  openDigest: string;
+}
+
+/**
+ * CDT-GAPS gap 3: the SIGNED combined head of a linked run — one per runId,
+ * signed once when the run set is final, with the same sink key and the same
+ * scheme as a single-lane SignedHead: the anchor (when configured) covers
+ * canonicalDigest of every field except `anchor` and `signature`, then the
+ * signature covers canonicalJson({...fields, anchor?, alg, keyId}).
+ * Opt-in: built only when the sink runs with `signRunSet` (TELEMETRY_RUN_SET_HEAD=1).
+ */
+export interface SignedRunSetHead {
+  schema: typeof RUN_SET_HEAD_SCHEMA;
+  runId: string;
+  linkDigest: string;
+  /** digest of the accepted v2 receipt — the same value every lane head carries. */
+  receiptDigest: string;
+  lanes: { buyer: RunSetHeadLane[]; provider: RunSetHeadLane[] };
+  /** sum of the member lanes' recordCount. */
+  recordCount: number;
+  final: true;
+  signedAt: string;
+  /** the accepted receipt's ts + flushGrace — the lanes' common seal boundary. */
+  closedAt: string;
+  closeCause: "terminal_receipt";
+  /** present and true when any member lane is lost — the run evidence is incomplete. */
+  lost?: true;
+  anchor?: HeadAnchor;
+  signature: { alg: "ed25519"; keyId: string; sig: `0x${string}` };
 }
 
 export const TERMINAL_STATES = new Set([
@@ -341,6 +389,12 @@ export interface TelemetrySink {
   isClosed(runId: string): boolean;
   /** O-1: the linked run as its ordered lane heads; null when `runId` is not linked. */
   runSet(runId: string): RunSetHead | null;
+  /**
+   * CDT-GAPS gap 3: the signed combined head of a linked run once its set is
+   * final (anchor resolved first, signed once, cached). Null when the option
+   * is off, the runId is not linked, or the set is not final yet.
+   */
+  runSetHead(runId: string): Promise<SignedRunSetHead | null>;
   /** The accepted terminal receipt body (v1 or v2) — the verifier fetches it from the sink, never the harness. */
   receipt(runId: string): unknown | null;
   /** Record metadata for a run (no bodies). */
@@ -515,6 +569,12 @@ export function createTelemetrySink(options: {
    * for every run with no link. Without it, behaviour is unchanged.
    */
   lanes?: { linkFor(runId: string): RunLink | undefined; lane(laneId: string): LaneRecord | undefined };
+  /**
+   * CDT-GAPS gap 3: sign one combined head per linked run once its set is
+   * final (TELEMETRY_RUN_SET_HEAD=1). Off by default: the run set stays the
+   * unsigned O-1 document and `head` stays null for a linked runId.
+   */
+  signRunSet?: boolean;
 }): TelemetrySink {
   const now = options.now ?? Date.now;
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
@@ -542,6 +602,8 @@ export function createTelemetrySink(options: {
   /** O-1: lanes sealed with no records — no head exists; their ingest is revoked. */
   const emptySealed = new Map<string, number>();
   const emptyRefused = new Map<string, number>();
+  /** CDT-GAPS gap 3: one signed combined head per linked runId — built once, never re-signed. */
+  const runSetHeads = new Map<string, { head?: SignedRunSetHead; ready: Promise<SignedRunSetHead> }>();
 
   /** Sign a head message; every non-signature field lands top-level on the head. */
   function signHead(fields: Omit<SignedHead, "signature" | "anchor"> & { anchor?: HeadAnchor }): SignedHead {
@@ -823,7 +885,7 @@ export function createTelemetrySink(options: {
     };
   }
 
-  function runSet(runId: string): RunSetHead | null {
+  function unsignedRunSet(runId: string): RunSetHead | null {
     const link = options.lanes?.linkFor(runId);
     if (link === undefined) return null;
     const lanes = { buyer: link.lanes.buyer.map(runSetLane), provider: link.lanes.provider.map(runSetLane) };
@@ -837,6 +899,92 @@ export function createTelemetrySink(options: {
       receiptDigest: accepted?.receiptDigest ?? null,
       final: accepted !== undefined && all.every((l) => l.state === "final" || l.state === "empty" || l.state === "lost"),
     };
+  }
+
+  /**
+   * CDT-GAPS gap 3: the combined head's unsigned fields, from a FINAL run set.
+   * Every lane is reduced to its stable facts; the mutable per-lane refusal
+   * count stays in that lane's own signed annex.
+   */
+  function runSetHeadFields(set: RunSetHead, accepted: PendingClose): Omit<SignedRunSetHead, "signature" | "anchor"> {
+    const lane = (l: RunSetLane): RunSetHeadLane => ({
+      laneId: l.laneId,
+      state: l.state as RunSetHeadLane["state"],
+      headDigest: l.head === null ? null : canonicalDigest(l.head),
+      recordCount: l.head === null ? 0 : l.head.recordCount,
+      keyId: l.keyId,
+      mcpSessionId: l.mcpSessionId,
+      openDigest: l.openDigest,
+    });
+    const lanes = { buyer: set.lanes.buyer.map(lane), provider: set.lanes.provider.map(lane) };
+    const all = [...lanes.buyer, ...lanes.provider];
+    return {
+      schema: RUN_SET_HEAD_SCHEMA,
+      runId: set.runId,
+      linkDigest: set.linkDigest,
+      receiptDigest: accepted.receiptDigest,
+      lanes,
+      recordCount: all.reduce((n, l) => n + l.recordCount, 0),
+      final: true,
+      signedAt: new Date(now()).toISOString(),
+      closedAt: new Date(accepted.closedAtMs).toISOString(),
+      closeCause: "terminal_receipt",
+      ...(all.some((l) => l.state === "lost") ? { lost: true as const } : {}),
+    };
+  }
+
+  /** Same key, same scheme as signHead: canonicalJson({...fields, alg, keyId}). */
+  function signRunSetHead(fields: Omit<SignedRunSetHead, "signature">): SignedRunSetHead {
+    const message = { ...fields, alg: "ed25519" as const, keyId: options.signer.keyId };
+    const sig = sign(null, Buffer.from(canonicalJson(message), "utf8"), options.signer.privateKey);
+    return { ...fields, signature: { alg: "ed25519", keyId: options.signer.keyId, sig: `0x${sig.toString("hex")}` } };
+  }
+
+  /** Start (once) the anchor-then-sign of a final linked run's combined head. */
+  function ensureRunSetHead(set: RunSetHead): { head?: SignedRunSetHead; ready: Promise<SignedRunSetHead> } | null {
+    if (options.signRunSet !== true || !set.final) return null;
+    const existing = runSetHeads.get(set.runId);
+    if (existing !== undefined) return existing;
+    const accepted = linkedClose.get(set.runId);
+    if (accepted === undefined) return null;
+    const fields = runSetHeadFields(set, accepted);
+    const entry: { head?: SignedRunSetHead; ready: Promise<SignedRunSetHead> } = {
+      ready: Promise.resolve(undefined as unknown as SignedRunSetHead),
+    };
+    entry.ready = (async () => {
+      if (options.anchor === undefined) {
+        entry.head = signRunSetHead(fields);
+      } else {
+        try {
+          const write = await options.anchor.issue(canonicalDigest(fields));
+          entry.head = signRunSetHead({
+            ...fields,
+            anchor: { status: "anchored", anchorId: write.anchorId, eventHash: write.eventHash ?? null, ledger: write.ledger ?? null },
+          });
+        } catch (err) {
+          // As materialize(): the failure is signed in, never skipped.
+          entry.head = signRunSetHead({ ...fields, anchor: { status: "failed", error: err instanceof Error ? err.message : String(err) } });
+        }
+      }
+      return entry.head;
+    })();
+    runSetHeads.set(set.runId, entry);
+    return entry;
+  }
+
+  function runSet(runId: string): RunSetHead | null {
+    const set = unsignedRunSet(runId);
+    if (set === null || options.signRunSet !== true) return set;
+    const entry = ensureRunSetHead(set);
+    return { ...set, signedHead: entry?.head ?? null };
+  }
+
+  async function runSetHead(runId: string): Promise<SignedRunSetHead | null> {
+    const set = unsignedRunSet(runId);
+    if (set === null) return null;
+    const entry = ensureRunSetHead(set);
+    if (entry === null) return null;
+    return entry.ready;
   }
 
   /**
@@ -878,6 +1026,9 @@ export function createTelemetrySink(options: {
       return { ok: true, head: null, pendingClosedAt: new Date(accepted.closedAtMs).toISOString() };
     }
     await Promise.all(members.map((laneId) => closed.get(laneId)?.ready));
+    // Gap 3 (opt-in): the combined head signs once the lanes are final — the
+    // close answer carries it, so a close retry returns the same signed bytes.
+    await runSetHead(runId);
     return { ok: true, head: runSet(runId) as RunSetHead, anchorResult: null };
   }
 
@@ -1064,6 +1215,7 @@ export function createTelemetrySink(options: {
     closeRun,
     isClosed: (runId) => { maybeSettle(runId); return closed.has(runId) || emptySealed.has(runId); },
     runSet,
+    runSetHead,
     receipt(runId) {
       const r = receipts.get(runId);
       return r === undefined ? null : JSON.parse(JSON.stringify(r));
