@@ -183,8 +183,18 @@ export function buildContractServer(options: {
     // the next run's bind receipt links. The ended run's chain is never
     // appended to by them. Business tools (reads, terminal replays,
     // ALREADY_TERMINAL refusals) keep using the run as before.
+    //
+    // CDT-SEC L3: once a run's FINAL anchor is issued its chain is frozen —
+    // the final head covers every receipt. Later calls of ANY tool on that
+    // run (reads, terminal replays, the post-terminal cancel pair,
+    // ALREADY_TERMINAL refusals) still dispatch against the run, but their
+    // receipts land on the caller's pre-bind chain. Refusing them instead
+    // would break existing contracts (READ_ONLY / TERMINAL_REPLAY tools and
+    // the N4b-4 cancel pair stay reachable after terminalState).
     const receiptTargetFor = (r: ContractRun | undefined): ContractRun | undefined =>
-      r !== undefined && PRE_BIND_TOOLS.has(name) && service.runEnded(r) ? undefined : r;
+      r !== undefined && ((PRE_BIND_TOOLS.has(name) && service.runEnded(r)) || r.anchors?.final !== undefined)
+        ? undefined
+        : r;
     let receiptRun = receiptTargetFor(run);
 
     // M4: cap-bearing calls (mandate_*, any amount-like argument key) carry
@@ -565,8 +575,10 @@ export function buildContractServer(options: {
       // (httpRequestSignal, set by the transport) or its session closes.
       const reqSignal = httpRequestSignal.getStore();
       const signal = reqSignal === undefined ? extra.signal : AbortSignal.any([extra.signal, reqSignal]);
+      // L3: a business tool on a final-sealed run still dispatches against
+      // that run; only its receipt is re-targeted.
       dispatched = await service.business.dispatch(
-        principal, receiptRun, name, parsed.data, serverNonce, { signal },
+        principal, PRE_BIND_TOOLS.has(name) ? receiptRun : run, name, parsed.data, serverNonce, { signal },
       );
     } catch {
       dispatched = { ok: false as const, code: "CONTRACT_UNAVAILABLE" as const };

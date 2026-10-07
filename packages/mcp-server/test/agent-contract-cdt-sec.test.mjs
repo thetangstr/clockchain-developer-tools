@@ -586,3 +586,37 @@ test("L2: an inbox long-poll ends (and is receipted) as soon as its client disco
     assert.ok(Date.now() - t0 < 3_000);
   } finally { env.close(); }
 });
+
+// =============================================================================
+// L3 — after the final anchor, the run chain is frozen: later calls still
+// work but are receipted on the caller's pre-bind chain.
+// =============================================================================
+
+test("L3: calls after the final anchor are served but never extend the anchored run chain", async () => {
+  const env = await boot({ anchor: fakeAnchor(), serverAnchors: true });
+  try {
+    const { runId, booked } = await bookPair(env, uuid(1901), "tb1", "tp1");
+    const prepV = await env.callTool("tb1", "verification_prepare", {
+      orderRef: booked.orderRef, result: "mismatch", findingsDigest: `0x${"bb".repeat(32)}`,
+    });
+    const verified = await signedSubmit(env, { token: "tb1", role: "buyer", prepared: prepV, submitTool: "verification_submit" });
+    assert.equal(verified.terminalState, "verification_failed", JSON.stringify(verified));
+    const st = await env.callTool("tb1", "contract_status", {});
+    assert.equal(st.anchors.final?.status, "anchored", JSON.stringify(st.anchors));
+    const n = st.anchors.final.receiptCount;
+    assert.equal(env.service.receiptFeed(runId).receipts.length, n);
+
+    // A read and an ALREADY_TERMINAL refusal, from both parties.
+    const read = await env.callTool("tb1", "agreement_get", {});
+    assert.ok(read.agreementId ?? read.agreement, JSON.stringify(read));
+    const late = await env.callTool("tp1", "booking_prepare", { agreementId: read.agreementId ?? read.agreement?.agreementId });
+    assert.equal(late.error, "ALREADY_TERMINAL", JSON.stringify(late));
+
+    const feed = env.service.receiptFeed(runId);
+    assert.equal(feed.receipts.length, n, "nothing appended after the final head");
+    assert.equal(st.anchors.final.digest, canonicalDigest(feed.receipts.at(-1)));
+    // Still evidence: on each caller's pre-bind chain.
+    assert.ok(env.service.preBindFeed("kb1").receipts.some((r) => r.tool === "agreement_get"));
+    assert.ok(env.service.preBindFeed("kp1").receipts.some((r) => r.tool === "booking_prepare" && r.outcome === "ALREADY_TERMINAL"));
+  } finally { env.close(); }
+});
