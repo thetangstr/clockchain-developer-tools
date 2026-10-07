@@ -299,8 +299,8 @@ export function buildContractServer(options: {
     }
 
     if (name === "contract_get_brief") {
-      // Server-side anchors: a pinned brief; its digest is anchored (first
-      // serve per scope) and the bounded wait completes BEFORE the result
+      // Server-side anchors: a pinned brief; its digest's shared anchor
+      // (CDT-SEC M4) is issued on first need and the bounded wait completes BEFORE the result
       // returns, so the receipt's responseDigest covers the anchor id.
       const served = await service.getBrief((parsed.data as { name: string }).name, {
         ...(receiptRun !== undefined ? { run: receiptRun } : {}),

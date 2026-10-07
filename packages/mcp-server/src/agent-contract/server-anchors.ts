@@ -9,8 +9,13 @@
  *   fallback for "at invitation accept": the handshake coordinator holds no
  *   ContractAnchor).
  * - brief: a frozen, digest-pinned brief template (CONTRACT_BRIEFS) served
- *   by `contract_get_brief`; the first serve per scope (the run, or the
- *   caller's pre-bind chain) anchors its digest before the result returns.
+ *   by `contract_get_brief`. CDT-SEC M4: ONE anchor per brief digest, shared
+ *   by every scope (run or pre-bind session) — the first serve in the process
+ *   issues it (awaited, bounded) and every later scope refers to it; a failed
+ *   anchor is retried no sooner than 60 s later. CDT-SEC L6: its ledger
+ *   subject is the constant `agent-contract:brief` (BRIEF_ANCHOR_SUBJECT) —
+ *   no keyId, session id or run id goes on the ledger. The commitmentId is
+ *   deterministic, so a restart re-resolves the same ledger object.
  * - final: once the terminal job is finished (close delivered/failed/absent,
  *   every other anchor of the run resolved), the run chain head AT THAT
  *   MOMENT — covering the close and anchor evidence receipts that chain on
@@ -104,13 +109,20 @@ export function renderFinalAnchor(s: (AnchorRunState | TerminalAnchorJob) | unde
   return base === null ? null : { ...base, receiptCount: s?.receiptCount ?? null };
 }
 
+/** CDT-SEC L6: the brief anchor's ledger subject (`agent-contract:<this>`) — scope-free. */
+export const BRIEF_ANCHOR_SUBJECT = "brief";
+/** CDT-SEC M4: minimum wait before a failed brief anchor is re-issued. */
+export const BRIEF_ANCHOR_RETRY_MS = 60_000;
+/** CDT-SEC M4: backstop on remembered scopes (each is evicted when it ends). */
+const MAX_BRIEF_SCOPES = 4096;
+
 const isOpen = (a: { status: string } | undefined): boolean =>
   a !== undefined && (a.status === "anchoring" || a.status === "pending");
 
 export interface ServerAnchors {
   /** Anchor the run's terms digest (write-once per run). */
   fireTerms(run: ContractRun, digest: string): void;
-  /** Serve a brief; anchors its digest the first time per scope, awaited (bounded). */
+  /** Serve a brief; its digest's one shared anchor is issued on first need, awaited (bounded). */
   getBrief(
     name: string,
     scope: { run?: ContractRun; preBindScope: string },
@@ -120,6 +132,8 @@ export interface ServerAnchors {
   >;
   /** At bind: a brief anchored on the seat's pre-bind scope becomes the run's brief anchor. */
   carryBrief(run: ContractRun, preBindScope: string): void;
+  /** CDT-SEC M4: forget an ended scope (`run:<id>` or a pre-bind scope). */
+  dropScope(scope: string): void;
   /** Re-check whether the run's final anchor can fire (deferred one macrotask). */
   scheduleFinal(runId: string): void;
   /** Bounded wait for an issued-but-unsettled (or about-to-fire) final anchor. */
@@ -142,12 +156,27 @@ export function createServerAnchors(deps: {
   briefAnchorAwaitMs?: number;
   /** Max wait contract_status gives an issued final anchor (default 5s). */
   finalAnchorAwaitMs?: number;
+  /** M4: minimum wait before a failed brief anchor is retried (default 60 s). */
+  briefRetryMs?: number;
+  now?: () => number;
 }): ServerAnchors {
   const briefAwaitMs = deps.briefAnchorAwaitMs ?? 10_000;
   const finalAwaitMs = deps.finalAnchorAwaitMs ?? 5_000;
-  /** Brief anchors per scope (`run:<id>` or the pre-bind scope) and name. */
-  const briefStates = new Map<string, Map<string, AnchorRunState>>();
-  const briefOps = new Map<string, Promise<void>>();
+  const briefRetryMs = deps.briefRetryMs ?? BRIEF_ANCHOR_RETRY_MS;
+  const now = deps.now ?? Date.now;
+  /**
+   * M4: one anchor per brief digest. `runs` are the runs whose brief anchor
+   * IS this one — every state change is copied onto them (and their jobs).
+   */
+  interface SharedBrief {
+    state: AnchorRunState | undefined;
+    op: Promise<void> | undefined;
+    retryAtMs: number;
+    runs: Set<string>;
+  }
+  const sharedBriefs = new Map<string, SharedBrief>();
+  /** M4: the brief digests served per scope, in serve order (for carryBrief). */
+  const scopeBriefs = new Map<string, string[]>();
   const finalOps = new Map<string, Promise<void>>();
   /** Real timer for bounded waits — never the injectable confirm sleep. */
   const wait = (ms: number): Promise<void> => new Promise((r) => {
@@ -222,6 +251,59 @@ export function createServerAnchors(deps: {
     });
   };
 
+  /** M4: remember which brief a scope was served (bounded; evicted at scope end). */
+  function noteScopeBrief(scopeKey: string, digest: string): void {
+    let list = scopeBriefs.get(scopeKey);
+    if (list === undefined) {
+      if (scopeBriefs.size >= MAX_BRIEF_SCOPES) scopeBriefs.delete(scopeBriefs.keys().next().value!);
+      list = [];
+      scopeBriefs.set(scopeKey, list);
+    }
+    if (!list.includes(digest)) list.push(digest);
+  }
+
+  /**
+   * M4: the one anchor for `digest` — issued on first need; re-issued after
+   * a failure only once the backoff has passed and nothing is in flight.
+   */
+  function ensureBriefAnchor(digest: string): SharedBrief {
+    let shared = sharedBriefs.get(digest);
+    if (shared === undefined) {
+      shared = { state: undefined, op: undefined, retryAtMs: 0, runs: new Set() };
+      sharedBriefs.set(digest, shared);
+    }
+    const sb = shared;
+    const due = sb.state === undefined || (sb.state.status === "failed" && now() >= sb.retryAtMs);
+    if (due && sb.op === undefined) {
+      const op = run("brief", BRIEF_ANCHOR_SUBJECT, digest, (s) => {
+        sb.state = s;
+        if (s.status === "failed") sb.retryAtMs = now() + briefRetryMs;
+        for (const runId of [...sb.runs]) {
+          // A run whose live state and job are both gone needs no copy.
+          if (deps.getRun(runId) === undefined && deps.getJob(runId) === undefined) {
+            sb.runs.delete(runId);
+            continue;
+          }
+          copyToRun(runId, s);
+        }
+      });
+      sb.op = op;
+      void op.finally(() => { if (sb.op === op) sb.op = undefined; });
+    }
+    return sb;
+  }
+
+  /** M4: make the shared anchor this run's brief anchor (state copied now and on every change). */
+  function attachRun(sb: SharedBrief, runId: string): void {
+    sb.runs.add(runId);
+    if (sb.state !== undefined) copyToRun(runId, sb.state);
+  }
+
+  function copyToRun(runId: string, s: AnchorRunState): void {
+    recordOn(runId, "brief")(s);
+    if (s.status !== "anchoring") scheduleFinal(runId);
+  }
+
   function scheduleFinal(runId: string): void {
     if (deps.anchor === undefined) return;
     setImmediate(() => maybeFireFinal(runId));
@@ -264,49 +346,38 @@ export function createServerAnchors(deps: {
     async getBrief(name, scope) {
       const brief = deps.briefs?.get(name);
       if (brief === undefined) return { ok: false, code: "NOT_FOUND" };
-      const render = (s: AnchorRunState | undefined) => renderServerAnchor(s);
       if (deps.anchor === undefined) {
         return { ok: true, result: { name, digest: brief.digest, text: brief.text, anchor: null } };
       }
       const scopeKey = scope.run !== undefined ? `run:${scope.run.runId}` : scope.preBindScope;
-      let states = briefStates.get(scopeKey);
-      if (states === undefined) {
-        states = new Map();
-        briefStates.set(scopeKey, states);
+      noteScopeBrief(scopeKey, brief.digest);
+      const shared = ensureBriefAnchor(brief.digest);
+      // The run's brief anchor is the first brief served in it.
+      if (scope.run !== undefined) {
+        const cur = scope.run.anchors?.brief;
+        if (cur === undefined || cur.digest === brief.digest) attachRun(shared, scope.run.runId);
       }
-      const opKey = `${scopeKey}\u0000${name}`;
-      const existing = states.get(name);
-      // Write-once per scope and name; a FAILED anchor may be retried.
-      if (existing === undefined || existing.status === "failed") {
-        const runRef = scope.run;
-        const scopeStates = states;
-        const op = run(
-          "brief",
-          runRef !== undefined ? runRef.runId : scope.preBindScope,
-          brief.digest,
-          (s) => {
-            scopeStates.set(name, s);
-            // The run's brief anchor is the first brief anchored in it.
-            if (runRef !== undefined) {
-              const cur = runRef.anchors?.brief;
-              if (cur === undefined || cur.digest === s.digest) recordOn(runRef.runId, "brief")(s);
-            }
-          },
-        );
-        briefOps.set(opKey, op);
-        void op.finally(() => briefOps.delete(opKey));
-      }
-      const inflight = briefOps.get(opKey);
-      if (inflight !== undefined) await Promise.race([inflight, wait(briefAwaitMs)]);
-      return { ok: true, result: { name, digest: brief.digest, text: brief.text, anchor: render(states.get(name)) } };
+      // Bounded wait for an in-flight issue only — never during the backoff.
+      if (shared.op !== undefined) await Promise.race([shared.op, wait(briefAwaitMs)]);
+      return {
+        ok: true,
+        result: { name, digest: brief.digest, text: brief.text, anchor: renderServerAnchor(shared.state) },
+      };
     },
 
     carryBrief(r, preBindScope) {
-      if (r.anchors?.brief !== undefined) return;
-      const states = briefStates.get(preBindScope);
-      if (states === undefined) return;
-      const first = [...states.values()].find((s) => s.status !== "failed");
-      if (first !== undefined) recordOn(r.runId, "brief")(first);
+      if (r.anchors?.brief !== undefined || deps.anchor === undefined) return;
+      for (const digest of scopeBriefs.get(preBindScope) ?? []) {
+        const shared = sharedBriefs.get(digest);
+        if (shared?.state !== undefined && shared.state.status !== "failed") {
+          attachRun(shared, r.runId);
+          return;
+        }
+      }
+    },
+
+    dropScope(scope) {
+      scopeBriefs.delete(scope);
     },
 
     scheduleFinal,
@@ -336,7 +407,12 @@ export function createServerAnchors(deps: {
 
     recover(job, aj) {
       if (deps.anchor === undefined) return;
-      if (aj.kind !== "terms" && aj.kind !== "brief" && aj.kind !== "final") return;
+      if (aj.kind === "brief") {
+        // M4: the shared per-digest anchor (deterministic commitment).
+        attachRun(ensureBriefAnchor(aj.digest), job.runId);
+        return;
+      }
+      if (aj.kind !== "terms" && aj.kind !== "final") return;
       const extra = aj.kind === "final" ? { receiptCount: aj.receiptCount ?? null } : {};
       // Re-issue: the deterministic commitmentId resolves the same object
       // with its current confirmation state. Still unchained.

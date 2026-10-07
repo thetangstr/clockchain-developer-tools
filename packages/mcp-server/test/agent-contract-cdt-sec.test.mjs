@@ -4,7 +4,8 @@
 // fix. Offline: loopback ports 19440-19459 only; every key is generated.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,6 +18,7 @@ import { buildServerCard } from "../dist/agent-contract/server-card.js";
 import { toolsListForRole, guidanceDigests } from "../dist/agent-contract/tools-list.js";
 import { eip191RecoverPublicKey, eip191SignDigest32, publicKeyToAddress } from "../dist/agent-contract/eip191.js";
 import { createPolicyRegistry, policyRegistrationDigest } from "../dist/agent-contract/policy-registry.js";
+import { parseContractBriefs } from "../dist/agent-contract/server-anchors.js";
 import {
   ACCEPT, HOST_ROOTS, POLICY, SIGNER, PRINCIPAL_ADDRESS, boot, agreePair, bookPair, signedSubmit, makeApproval,
   fakeAnchor, waitFor, uuid, keys,
@@ -440,4 +442,84 @@ test("M3: pre-bind chains per keyId are capped (oldest uncaptured evicted)", asy
     assert.equal(env.service.preBindFeed("kb1", "sess-0"), undefined, "the oldest went first");
     assert.ok(env.service.preBindFeed("kb1", "sess-23"));
   } finally { env.close(); }
+});
+
+// =============================================================================
+// M4 — one brief anchor per digest shared by every scope; ≥ 60 s backoff after
+// a failure. L6 — no keyId / session id / run id in the brief anchor subject.
+// =============================================================================
+
+function briefsFixture() {
+  const dir = mkdtempSync(path.join(tmpdir(), "cdt-sec-briefs-"));
+  const text = "# Family travel brief\n\nBook within the signed mandate only.\n";
+  writeFileSync(path.join(dir, "family-travel.md"), text);
+  const digest = `0x${createHash("sha256").update(text).digest("hex")}`;
+  return parseContractBriefs(`family-travel:${digest}`, dir);
+}
+
+/** A fake anchor whose brief writes fail while `failing.on` is true. */
+function switchableAnchor() {
+  const base = fakeAnchor();
+  const failing = { on: false };
+  return {
+    calls: base.calls, failing, confirm: base.confirm,
+    async anchor(input) {
+      if (failing.on && input.kind === "brief") {
+        base.calls.push({ ...input });
+        throw new Error("anchor substrate unreachable (fake)");
+      }
+      return base.anchor(input);
+    },
+  };
+}
+
+test("M4/L6: every scope shares one brief anchor, and its ledger subject names no tenant, session or run", async () => {
+  const anchor = fakeAnchor();
+  const env = await boot({ anchor, briefs: briefsFixture(), serverAnchors: true, maxRunsPerKey: 2 });
+  try {
+    const got = [];
+    for (const [token, suffix] of [["tb1", "A"], ["tb1", "B"], ["tb1", "C"], ["tb2", "A"]]) {
+      got.push(await viaSession(env, suffix).callTool(token, "contract_get_brief", { name: "family-travel" }));
+    }
+    const sA = viaSession(env, "A");
+    const { runId } = await agreePair(sA, uuid(1801), "tb1", "tp1");
+    got.push(await sA.callTool("tb1", "contract_get_brief", { name: "family-travel" }));
+    for (const g of got) assert.equal(g.anchor?.status, "anchored", JSON.stringify(g));
+    assert.equal(new Set(got.map((g) => g.anchor.anchorId)).size, 1, "one anchor id across scopes");
+    const briefCalls = anchor.calls.filter((c) => c.kind === "brief");
+    assert.equal(briefCalls.length, 1, JSON.stringify(briefCalls));
+    // L6: the subject is scope-free.
+    assert.equal(briefCalls[0].runId, "brief");
+    for (const c of briefCalls) assert.doesNotMatch(c.runId, /kb1|kb2|pre-bind|[0-9a-f]{8}-/);
+    // The run still reports the brief anchor it was served (R10(b) evidence).
+    assert.equal(env.service.runFor(runId).anchors.brief.anchorId, got[0].anchor.anchorId);
+  } finally { env.close(); }
+});
+
+test("M4: a failed brief anchor is not re-issued on every serve (backoff)", async () => {
+  const anchor = switchableAnchor();
+  anchor.failing.on = true;
+  const env = await boot({ anchor, briefs: briefsFixture(), serverAnchors: true, maxRunsPerKey: 2 });
+  try {
+    const first = await viaSession(env, "A").callTool("tb1", "contract_get_brief", { name: "family-travel" });
+    assert.equal(first.anchor?.status, "failed", JSON.stringify(first));
+    for (const suffix of ["A", "B", "C"]) {
+      const again = await viaSession(env, suffix).callTool("tb1", "contract_get_brief", { name: "family-travel" });
+      assert.equal(again.anchor?.status, "failed");
+    }
+    assert.equal(anchor.calls.filter((c) => c.kind === "brief").length, 1, "no retry inside the backoff window");
+  } finally { env.close(); }
+
+  // Past the backoff (shortened here) the next serve retries once.
+  const anchor2 = switchableAnchor();
+  anchor2.failing.on = true;
+  const env2 = await boot({ anchor: anchor2, briefs: briefsFixture(), serverAnchors: true, briefRetryMs: 50 });
+  try {
+    await env2.callTool("tb1", "contract_get_brief", { name: "family-travel" });
+    anchor2.failing.on = false;
+    await new Promise((r) => setTimeout(r, 80));
+    const retried = await env2.callTool("tb1", "contract_get_brief", { name: "family-travel" });
+    assert.equal(retried.anchor?.status, "anchored", JSON.stringify(retried));
+    assert.equal(anchor2.calls.filter((c) => c.kind === "brief").length, 2);
+  } finally { env2.close(); }
 });

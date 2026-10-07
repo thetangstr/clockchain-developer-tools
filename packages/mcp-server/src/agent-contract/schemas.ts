@@ -841,8 +841,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
   },
   {
     // Server-side brief anchoring: a frozen, digest-pinned brief template
-    // (CONTRACT_BRIEFS) served through the session; the first serve per
-    // scope anchors its digest before the result returns.
+    // (CONTRACT_BRIEFS) served through the session; one anchor per brief
+    // digest, shared by every scope (CDT-SEC M4), awaited before return.
     name: "contract_get_brief",
     role: "both",
     feature: "briefs",

@@ -141,7 +141,7 @@ const CONTRACT_TOOL_DESCRIPTORS: readonly ContractToolDescriptor[] = Object.free
   { name: "settlement_status", title: "Read settlement status", description: "Read the simulated settlement state for this contract session. SIMULATED." },
   { name: "contract_status", title: "Read contract status", description: "Read overall contract progress and terminal state. This is the resume anchor for both roles." },
   { name: "contract_register_policy", title: "Register a policy digest", description: "Register an approval policy digest for this buyer without a service restart. The registration must carry the family principal's signature over this server's signing key id and chain, this caller's key id, the digest and its expiry; the expiry may be at most a day ahead. A registration is single-use, counts for this caller's key id only, and stays capped per key." },
-  { name: "contract_get_brief", title: "Read a brief", description: "Read a frozen brief template by name, with its pinned digest. The service anchors the digest the first time it serves the brief in this session or contract, and reports the anchor outcome with the brief." },
+  { name: "contract_get_brief", title: "Read a brief", description: "Read a frozen brief template by name, with its pinned digest. The service anchors each brief digest once, the first time any caller is served it, and reports that anchor's outcome with the brief." },
 ]);
 
 const descriptorIndex = new Map(CONTRACT_TOOL_DESCRIPTORS.map((d) => [d.name, d]));

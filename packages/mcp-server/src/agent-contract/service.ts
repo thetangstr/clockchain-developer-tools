@@ -484,8 +484,8 @@ export interface ContractService {
    */
   registerPolicy: PolicyRegistry["register"];
   /**
-   * Server-side anchors: serve a pinned brief, anchoring its digest the
-   * first time per scope (the run, else the caller's pre-bind chain).
+   * Server-side anchors: serve a pinned brief; CDT-SEC M4: one anchor per
+   * brief digest shared by every scope (the run, else the pre-bind chain).
    */
   getBrief: ServerAnchors["getBrief"];
   /** Bounded wait for a terminal run's final anchor (contract_status awaits it before reporting). */
@@ -1072,6 +1072,8 @@ export function createContractService(options: {
    */
   policyRegistration?: boolean;
   briefAnchorAwaitMs?: number;
+  /** CDT-SEC M4: minimum wait before a failed brief anchor is retried (default 60 s). */
+  briefRetryMs?: number;
   finalAnchorAwaitMs?: number;
   /** Injectable for tests; defaults to an unref'd setTimeout. */
   sleep?: (ms: number) => Promise<void>;
@@ -1127,6 +1129,7 @@ export function createContractService(options: {
   };
   function forgetChain(chain: string): void {
     preBindChains.delete(chain);
+    serverAnchors.dropScope(briefScopeOf(chain));
     orphanedChains.delete(chain);
     const keyId = keyIdOfChain(chain);
     const set = chainsByKey.get(keyId);
@@ -1434,6 +1437,7 @@ export function createContractService(options: {
     router.dropRun(runId);
     boundChains.delete(`${runId}|buyer`);
     boundChains.delete(`${runId}|provider`);
+    serverAnchors.dropScope(`run:${runId}`);
     // M3: a dropped session's chain was kept only for this run's feed.
     for (const chain of [...orphanedChains]) {
       if (!chainCaptured(chain)) forgetChain(chain);
@@ -1930,6 +1934,8 @@ export function createContractService(options: {
     ...(options.briefs !== undefined ? { briefs: options.briefs } : {}),
     ...(options.briefAnchorAwaitMs !== undefined ? { briefAnchorAwaitMs: options.briefAnchorAwaitMs } : {}),
     ...(options.finalAnchorAwaitMs !== undefined ? { finalAnchorAwaitMs: options.finalAnchorAwaitMs } : {}),
+    ...(options.briefRetryMs !== undefined ? { briefRetryMs: options.briefRetryMs } : {}),
+    now,
   });
 
   const fireAnchor = (run: ContractRun, kind: "agreement" | "terminal"): void => {
