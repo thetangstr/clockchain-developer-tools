@@ -198,7 +198,7 @@ const milestoneEntryState = z.object({
   index: z.number().int().min(1).max(6),
   milestone: milestoneName,
   assetReferenceId: z.string().min(1).max(200),
-  source: z.enum(["own-write", "track-b-anchor"]).nullable(),
+  source: z.enum(["own-write", "track-b-anchor", "own-write (fallback)"]).nullable(),
   status: z.enum(["open", "not-reached", "interrupted", "awaiting-anchor", "anchoring", "pending", "anchored", "failed"]),
   digest: digestHex.nullable(),
   assetHash: digestHex.nullable(),

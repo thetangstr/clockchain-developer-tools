@@ -111,7 +111,8 @@ test("unit: index over anchors — terms covers discover, agreement covers agree
   feed(t, [[rcpt("contract_bind")], [rcpt("contract_bind")], [rcpt("offer_submit")], [rcpt("offer_accept_submit")],
     [rcpt("verification_submit")], [rcpt("settlement_authorize"), [], { terminal: true }]], opts);
   assert.deepEqual(t.entries.map((e) => e.source),
-    ["track-b-anchor", "own-write", "own-write", "track-b-anchor", "own-write", "track-b-anchor"]);
+    ["track-b-anchor", "own-write", "own-write", "track-b-anchor", "own-write", "own-write"],
+    "settlement is always written, even when final covers it");
   assert.deepEqual(t.entries[0].payload.anchorRef, { kind: "terms", digest: D("1") });
   assert.deepEqual(t.entries[3].payload.anchorRef, { kind: "agreement", digest: D("2") });
   assert.deepEqual(t.entries[5].payload.anchorRef, { kind: "final", digest: null });
@@ -134,7 +135,10 @@ test("unit: index over anchors — terms covers discover, agreement covers agree
   assert.equal(rows[0].anchoredAt, ledger.time);
   assert.equal(rows[3].status, "failed");
   assert.equal(rows[3].error, "boom");
-  assert.equal(rows[5].status, "awaiting-anchor", "final not fired yet");
+  assert.equal(rows[5].status, "anchoring", "settlement's own write");
+  assert.deepEqual(rows[5].anchorRef, { kind: "final", digest: null }, "final not fired yet");
+  // A referenced anchor that has not fired reads awaiting-anchor.
+  assert.equal(renderMilestones(RUN, t, {}).at(0).status, "awaiting-anchor");
   assert.equal(rows[1].assetHash, rows[1].digest, "an own write's asset hash is its digest");
 });
 
@@ -195,7 +199,8 @@ test("unit: render — open while live, interrupted when the run was lost", () =
 // as N4b-9 F17. Records land pending (blockHeight null) or confirmed.
 // ============================================================================
 
-function fakeGateway({ pending = false, failMilestoneLog = false } = {}) {
+function fakeGateway({ pending = false, failMilestoneLog = false, failTsaWrite = 0 } = {}) {
+  let tsaWrites = 0;
   const records = [];
   const logCalls = [];
   const searches = [];
@@ -211,6 +216,7 @@ function fakeGateway({ pending = false, failMilestoneLog = false } = {}) {
     async log(req) {
       logCalls.push(req);
       if (failMilestoneLog && req.assetReferenceId.startsWith("ac-milestone:")) throw new Error("gateway unreachable (fake)");
+      if (!req.assetReferenceId.startsWith("ac-milestone:") && ++tsaWrites === failTsaWrite) throw new Error("tsa write refused (fake)");
       n += 1;
       const rec = {
         ledgerId: `ledger-${n}`, assetReferenceId: req.assetReferenceId, assetHash: req.assetHash,
@@ -366,25 +372,65 @@ test("integration: flag on — six chained entries; agreement indexed to its anc
   } finally { env.close(); }
 });
 
-test("integration: with CONTRACT_SERVER_ANCHORS terms covers discover and final covers settlement — 3 own writes", async () => {
+test("integration: with CONTRACT_SERVER_ANCHORS terms covers discover; settlement names final AND is written — 4 own writes", async () => {
   const gw = fakeGateway();
   const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, serverAnchors: true, anchorConfirmDelayMs: 0 });
   try {
     const runId = await negotiatedSettledRun(env, 706);
-    await waitFor(() => env.service.runFor(runId)?.anchors?.final?.status === "anchored" && gw.milestoneWrites().length === 3);
-    assert.deepEqual(gw.milestoneWrites().map((c) => c.assetReferenceId), ownRefs(runId, ["proposal", "negotiation", "execution"]));
+    await waitFor(() => env.service.runFor(runId)?.anchors?.final?.status === "anchored" && gw.milestoneWrites().length === 4 &&
+      ownEntries(env.service.runFor(runId)?.milestoneLog).every((e) => e.status === "anchored"));
+    assert.deepEqual(gw.milestoneWrites().map((c) => c.assetReferenceId), ownRefs(runId, ["proposal", "negotiation", "execution", "settlement"]));
     const st = await env.callTool("tb1", "contract_status", {});
     assert.equal(statusSchema.safeParse(st).success, true, JSON.stringify(statusSchema.safeParse(st).error));
     const rows = st.anchors.milestones;
-    assert.deepEqual(rows.map((r) => r.source), ["track-b-anchor", "own-write", "own-write", "track-b-anchor", "own-write", "track-b-anchor"]);
+    assert.deepEqual(rows.map((r) => r.source), ["track-b-anchor", "own-write", "own-write", "track-b-anchor", "own-write", "own-write"]);
     assert.ok(rows.every((r) => r.status === "anchored"), JSON.stringify(rows.map((r) => [r.milestone, r.status])));
     assert.deepEqual(rows[0].anchorRef, { kind: "terms", digest: st.anchors.terms.digest });
     assert.equal(rows[0].assetHash, st.anchors.terms.eventHash);
     assert.deepEqual(rows[5].anchorRef, { kind: "final", digest: st.anchors.final.digest }, "final's subject is filled in once it fires");
     assert.equal(rows[5].payload.anchorRef.digest, null);
-    assert.equal(rows[5].ledgerId, st.anchors.final.ledger.ledgerId);
-    // terms + agreement + terminal + final writes, 3 milestone writes + 3 lookups.
-    assert.deepEqual(st.anchors.clockchainCalls, { writes: 7, lookups: 3 });
+    assert.equal(rows[5].assetHash, rows[5].digest, "the chain head's own payload hash is on the ledger");
+    assert.equal(gw.milestoneWrites()[3].assetHash, rows[5].digest.slice(2));
+    // terms + agreement + terminal + final writes, 4 milestone writes + 4 lookups = 12.
+    assert.deepEqual(st.anchors.clockchainCalls, { writes: 8, lookups: 4 });
+  } finally { env.close(); }
+});
+
+test("integration: a failed agreement anchor makes agreement fall back to its own write", async () => {
+  const gw = fakeGateway({ failTsaWrite: 1 }); // the first tsa write is the agreement anchor
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  try {
+    const runId = await negotiatedSettledRun(env, 711);
+    await waitFor(() => gw.milestoneWrites().length === 6 && ownEntries(env.service.runFor(runId)?.milestoneLog).length === 5 &&
+      env.service.runFor(runId).milestoneLog.entries.every((e) => e.status === "anchored"));
+    const st = await env.callTool("tb1", "contract_status", {});
+    assert.equal(statusSchema.safeParse(st).success, true, JSON.stringify(statusSchema.safeParse(st).error));
+    assert.equal(st.anchors.agreement.status, "failed");
+    const row = st.anchors.milestones[3];
+    assert.equal(row.source, "own-write (fallback)");
+    assert.equal(row.status, "anchored");
+    assert.deepEqual(row.anchorRef, { kind: "agreement", digest: st.anchors.agreement.digest }, "it still names the anchor it was indexed to");
+    assert.equal(row.assetHash, row.digest);
+    assert.equal(row.anchorId, row.assetReferenceId);
+    assert.ok(gw.milestoneWrites().some((c) => c.assetReferenceId === `ac-milestone:${runId}:4-agreement`));
+    assert.equal(st.anchors.milestones[4].payload.prevEntryDigest, row.digest, "the chain is unchanged");
+    // agreement attempt + terminal, 6 milestone writes and 6 lookups.
+    assert.deepEqual(st.anchors.clockchainCalls, { writes: 8, lookups: 6 });
+    assert.equal(env.service.terminalJobFor(runId).milestoneLog.entries[3].source, "own-write (fallback)");
+  } finally { env.close(); }
+});
+
+test("integration: a failed terms anchor makes discover fall back to its own write", async () => {
+  const gw = fakeGateway({ failTsaWrite: 1 }); // the first tsa write is the terms anchor at the first bind
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, serverAnchors: true, anchorConfirmDelayMs: 0 });
+  try {
+    const runId = await negotiatedSettledRun(env, 712);
+    await waitFor(() => gw.milestoneWrites().length === 5 && env.service.runFor(runId)?.anchors?.final?.status === "anchored");
+    const rows = (await env.callTool("tb1", "contract_status", {})).anchors.milestones;
+    assert.deepEqual(rows.map((r) => r.source), ["own-write (fallback)", "own-write", "own-write", "track-b-anchor", "own-write", "own-write"]);
+    assert.equal(rows[0].payload.anchorRef.kind, "terms");
+    assert.deepEqual(gw.milestoneWrites().map((c) => c.assetReferenceId),
+      ownRefs(runId, ["discover", "proposal", "negotiation", "execution", "settlement"]));
   } finally { env.close(); }
 });
 

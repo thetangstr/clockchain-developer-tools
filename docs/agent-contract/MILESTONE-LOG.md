@@ -3,7 +3,8 @@
 Status: local implementation on `track-c/milestone-log`, based on CDT `a5559a7`, which is live. It has not been
 deployed, nothing has been written to Clockchain, and it is off by default. Design: travel harness
 `docs/travel-mvp/design/MILESTONE-TIMELINE.md` §4 ("Option A", branch `track-c`), with the founder's answers of
-2026-10-06 applied.
+2026-10-06 applied, plus the follow-up rules: a failed referenced anchor falls back to an own write, and settlement is
+always written.
 
 ## What it does
 
@@ -43,9 +44,9 @@ new:
 |---|---|---|
 | discover | `terms` (the certificate's signed statement digest, anchored at the first bind), else the run's `brief` anchor | `CONTRACT_SERVER_ANCHORS=1` |
 | agreement | `agreement` (the agreement digest) | always, with the anchor enabled |
-| settlement | `final` (the run chain head once the terminal job finishes: it covers every receipt, the settling call included) | `CONTRACT_SERVER_ANCHORS=1` |
+| settlement | `final` (the run chain head once the terminal job finishes: it covers every receipt, the settling call included) | `CONTRACT_SERVER_ANCHORS=1`. **Settlement is still always written too** (see below). |
 
-Every other milestone, and any of these without its anchor, gets its own write:
+Every other milestone, any of these without its anchor, and **settlement in every case** gets its own write:
 
 - `asset_reference_id = ac-milestone:<runId>:<n>-<milestone>`
 - `asset_hash = digest`, sent as bare lower hex
@@ -55,15 +56,24 @@ Every other milestone, and any of these without its anchor, gets its own write:
 appended, so it would not cover that receipt.
 
 A referenced entry's own payload is still committed on chain, because the next own write's `prevEntryDigest` covers
-it. A settlement entry indexed to `final` is the chain's tail, so its payload is not itself on chain. It is verified by
-checking its `receiptIds` against the receipt chain whose head `final` anchors. `final`'s subject digest is known only
-once it fires, so the payload carries `{kind: "final", digest: null}`. A run has exactly one final anchor, under
-`agent-contract:<runId>`, and `contract_status` fills in its digest once it has fired.
+it.
+
+**Settlement is always an own write.** It still names `final` in `anchorRef` when server anchors are on. It is the
+chain's last entry, so writing it puts the chain head's own payload hash on Clockchain, and that hash transitively
+commits to all six entries. `final`'s subject digest is known only once it fires, so the payload carries
+`{kind: "final", digest: null}`. A run has exactly one final anchor, under `agent-contract:<runId>`, and
+`contract_status` fills in its digest once it has fired.
+
+**A failed referenced anchor falls back to an own write.** If the anchor a discover or agreement entry is indexed to
+reaches `failed`, the entry is written as its own `ac-milestone` record, and its row reads
+`source: "own-write (fallback)"`. The payload and digest are unchanged, so `anchorRef` still names the failed anchor
+and the chain is unaffected. This happens whether the failure lands before or after the seal, while the run is live,
+after it ends, or at boot. Each fallback adds one write and one lookup.
 
 | Configuration | Own writes per completed deal |
 |---|---|
-| Today's production (`CONTRACT_SERVER_ANCHORS` off) | 5: discover, proposal, negotiation, execution, settlement |
-| With `CONTRACT_SERVER_ANCHORS=1` | 3: proposal, negotiation, execution |
+| `CONTRACT_SERVER_ANCHORS` off | 5: discover, proposal, negotiation, execution, settlement |
+| `CONTRACT_SERVER_ANCHORS=1` (production since the 2026-10-07 window, Stage 3) | 4: proposal, negotiation, execution, settlement |
 
 ## When each milestone completes
 
@@ -106,7 +116,8 @@ What the server cannot observe:
   it is re-confirmed on the same delay and attempt budget as agreement/terminal. `anchored` means block and time are
   confirmed. `failed` carries the error. Writes are serialized per run, so ledger order matches index order.
 - **States for referenced entries:** they show the referenced anchor's state live, or `awaiting-anchor` until it fires.
-  A failed referenced anchor shows as `failed`; it does not fall back to an own write (see the open questions).
+  If the referenced anchor fails, the entry falls back to an own write (above), and its row then shows the own write's
+  state.
 - **Unchained:** entry outcomes are never minted as receipts, and no other anchor waits for them.
 - **Durability (founder answer 5):** the whole tracker (per-milestone receipt lists, poll counts, seal count, chain
   head and entries) is persisted on the run's terminal job:
@@ -132,7 +143,7 @@ event:
 
 ```
 { index, milestone, assetReferenceId,
-  source: "own-write" | "track-b-anchor" | null,      // null until sealed
+  source: "own-write" | "track-b-anchor" | "own-write (fallback)" | null,   // null until sealed
   status: open | not-reached | interrupted | awaiting-anchor | anchoring | pending | anchored | failed,
   digest,          // the entry's chain digest (sha256 of payload)
   assetHash,       // what is on the ledger: own write = digest; track-b = the referenced anchor's event hash
@@ -150,8 +161,16 @@ answer 4):
 - milestone lookups and writes.
 
 The shared per-digest brief anchor is not counted, because it is not any one run's call. The count is kept on the job,
-so it survives a restart. A completed deal is 7 writes and 5 lookups without server anchors, and 7 writes and 3 lookups
-with them; confirm reads for pending writes add lookups. Both are within the founder's budget of about 12 calls.
+so it survives a restart. Calls per completed deal:
+
+| Configuration | Writes | Lookups | Total |
+|---|---|---|---|
+| Server anchors off | 7 (agreement, terminal, 5 milestone) | 5 | 12 |
+| Server anchors on | 8 (terms, agreement, terminal, final, 4 milestone) | 4 | 12 |
+| Each fallback | +1 | +1 | +2 |
+| Each confirm read of a pending write | | +1 | +1 |
+
+Both completed-deal totals are within the founder's budget of about 12 calls. A run that ends early makes fewer calls.
 
 The rows are present on a live run and on a terminal run read after a restart (from the job). With the flag on,
 `anchors` is an object even before any anchor fires. The `anchor` summary still covers only agreement/terminal.
@@ -170,7 +189,7 @@ The rows are present on a live run and on a terminal run read after a restart (f
 |---|---|
 | `CONTRACT_MILESTONE_LOG` (`0`/`1`, default off; anything else is a boot misconfiguration) | `config.ts` → `createContractService({ milestoneLog })` |
 | Requires `CONTRACT_ANCHOR_ENABLED=1` | otherwise it loads but is inert, and `check-config` warns |
-| `CONTRACT_SERVER_ANCHORS=1` (optional) | lets terms cover discover and final cover settlement |
+| `CONTRACT_SERVER_ANCHORS=1` (optional) | lets terms cover discover; settlement then also names final |
 | SSM `/clockchain/mcp/CONTRACT_MILESTONE_LOG` (optional) | `compose-up.sh` `read_optional_env`, and `docker-compose.yml` `"${CONTRACT_MILESTONE_LOG:-}"` |
 | Pre-flight | `check-config-from-ssm.mjs` `ENV_PARAMETERS`; `check-config` reports `features.milestoneLog` and the warning |
 
@@ -186,6 +205,8 @@ Tests: `test/agent-contract-milestone-log.test.mjs`. It covers:
 
 - unit tests;
 - integration with the fake gateway through the production adapter, with server anchors off and on;
+- settlement always written;
+- fallback when the agreement or terms anchor fails;
 - pending and failed writes;
 - boot recovery;
 - two crash-between-end-and-seal cases;
@@ -201,8 +222,8 @@ Tests: `test/agent-contract-milestone-log.test.mjs`. It covers:
 2. **Code deploy** of this branch, after review and merge, in a production window, with `CONTRACT_MILESTONE_LOG`
    absent. The behaviour is unchanged. `check-config-from-ssm` should report `milestoneLog: off` and no warnings.
 3. **Flip the flag:** put SSM `/clockchain/mcp/CONTRACT_MILESTONE_LOG = 1` (`CONTRACT_ANCHOR_ENABLED` is already `1`).
-   Optionally set `CONTRACT_SERVER_ANCHORS=1` for 3 own writes instead of 5. Re-run `check-config-from-ssm.mjs` and
-   restart through `compose-up.sh`.
+   Re-run `check-config-from-ssm.mjs` and restart through `compose-up.sh`. The step-by-step sheet is
+   `MILESTONE-LOG-WINDOW.md`.
 4. **Verify on one real run:**
    - all six rows reach `anchored`, and `clockchainCalls` stays within budget;
    - for each own write, `get_log_entry(ledgerId).assetHash == digest` (without `0x`), the hash recomputed from
@@ -213,8 +234,5 @@ Tests: `test/agent-contract-milestone-log.test.mjs`. It covers:
 
 ## Open questions
 
-- If a referenced server anchor fails, should the milestone fall back to its own write? Today it shows `failed`
-  honestly.
 - `verified` status polls count toward settlement's `pollCount`, because execution seals at `verification_submit`.
-- The settlement tail indexed to `final` is not itself on chain (see above). Should the settlement entry also be
-  written when the founder wants every payload hash on chain? That would be one more write.
+- A referenced anchor that stays `pending` for good, and never reaches `failed`, does not trigger a fallback.

@@ -25,8 +25,11 @@
  *   settlement → final (one per run; covers every receipt incl. the settling call) [CONTRACT_SERVER_ANCHORS]
  * Every other milestone (and any of these without its anchor) is an OWN
  * write: the digest as asset hash under `ac-milestone:<runId>:<n>-<milestone>`.
- * A referenced entry's own payload is still committed on chain by the next
- * own write's prevEntryDigest.
+ * Settlement is ALWAYS also an own write (it still names `final` in
+ * anchorRef), so the chain head's own payload hash is on Clockchain. A
+ * referenced entry's payload is committed by the next own write's
+ * prevEntryDigest. If a referenced anchor FAILS, the entry falls back to its
+ * own write ("own-write (fallback)") — same payload, same digest.
  *
  * Transitions (server-observable):
  *   discover    both contract binds succeeded
@@ -112,6 +115,9 @@ export interface MilestonePayload {
   prevEntryDigest: string | null;
 }
 
+export type EntrySource = "own-write" | "track-b-anchor" | "own-write (fallback)";
+const writes = (e: { source: EntrySource }): boolean => e.source !== "track-b-anchor";
+
 export interface MilestoneEntryState {
   index: number;
   milestone: Milestone;
@@ -119,7 +125,7 @@ export interface MilestoneEntryState {
   /** sha256(canonicalJson(payload)). Own write: the anchored asset hash. */
   digest: string;
   payload: MilestonePayload;
-  source: "own-write" | "track-b-anchor";
+  source: EntrySource;
   /** ISO time the entry was sealed (server clock). */
   sealedAt: string;
   /** Own write state; "referenced" = the state is the referenced anchor's. */
@@ -214,9 +220,10 @@ function sealThrough(t: MilestoneTracker, ctx: SealContext, k: number): Mileston
     t.sealed += 1;
     const entry: MilestoneEntryState = {
       index: i + 1, milestone: m, referenceId: milestoneReferenceId(ctx.runId, m), digest, payload,
-      source: anchorRef === null ? "own-write" : "track-b-anchor",
+      // Settlement is always written too: the chain head's payload goes on chain.
+      source: anchorRef === null || m === "settlement" ? "own-write" : "track-b-anchor",
       sealedAt: new Date(ctx.now).toISOString(),
-      status: anchorRef === null ? "anchoring" : "referenced",
+      status: anchorRef === null || m === "settlement" ? "anchoring" : "referenced",
     };
     t.entries.push(entry);
     out.push(entry);
@@ -287,8 +294,11 @@ export interface RenderedMilestone {
   index: number;
   milestone: Milestone;
   assetReferenceId: string;
-  /** own-write: our ac-milestone record · track-b-anchor: the referenced server anchor. Null until sealed. */
-  source: "own-write" | "track-b-anchor" | null;
+  /**
+   * own-write: our ac-milestone record · track-b-anchor: the referenced server anchor ·
+   * own-write (fallback): the referenced anchor failed, so we wrote our own. Null until sealed.
+   */
+  source: EntrySource | null;
   /**
    * open: not complete · not-reached: the run ended before it · interrupted: the run was lost before it completed ·
    * awaiting-anchor: indexed to a server anchor that has not fired yet · anchoring/pending/anchored/failed.
@@ -364,6 +374,8 @@ export interface MilestoneLog {
   dropped(run: ContractRun): void;
   /** Boot: close a terminal job never closed, interrupt a lost live run, re-drive pending own writes. */
   recover(job: TerminalJob): void;
+  /** A run anchor reached `failed`: referenced entries indexed to a failed anchor fall back to own writes. */
+  anchorFailed(runId: string): void;
 }
 
 export function createMilestoneLog(deps: {
@@ -449,7 +461,7 @@ export function createMilestoneLog(deps: {
 
   function enqueue(runId: string, entries: readonly MilestoneEntryState[]): void {
     for (const entry of entries) {
-      if (entry.source !== "own-write") continue;
+      if (!writes(entry)) continue;
       const prev = queues.get(runId) ?? Promise.resolve();
       const op = prev.then(() => write(runId, entry));
       queues.set(runId, op);
@@ -462,6 +474,32 @@ export function createMilestoneLog(deps: {
     if (sealed.length === 0 && !closedNow) return;
     persistTracker(runId, t);
     enqueue(runId, sealed);
+    // A referenced anchor that already failed before the seal: fall back now.
+    if (sealed.some((e) => e.source === "track-b-anchor")) fallback(runId);
+  }
+
+  /**
+   * Founder rule: a referenced entry whose anchor FAILED is written as its
+   * own ac-milestone record — same payload and digest (anchorRef still names
+   * the failed anchor), source "own-write (fallback)".
+   */
+  function fallback(runId: string): void {
+    const run = deps.getRun(runId);
+    const job = deps.getJob(runId);
+    const t = run?.milestoneLog ?? (job?.milestoneLog !== undefined ? structuredClone(job.milestoneLog) : undefined);
+    if (t === undefined) return;
+    const anchors = (run?.anchors ?? job?.anchors) as Partial<Record<string, { status: string }>> | undefined;
+    const switched: MilestoneEntryState[] = [];
+    t.entries.forEach((e, i) => {
+      if (e.source !== "track-b-anchor") return;
+      if (anchors?.[e.payload.anchorRef!.kind]?.status !== "failed") return;
+      const next: MilestoneEntryState = { ...e, source: "own-write (fallback)", status: "anchoring" };
+      t.entries[i] = next;
+      switched.push(next);
+    });
+    if (switched.length === 0) return;
+    persistTracker(runId, t);
+    enqueue(runId, switched);
   }
 
   return {
@@ -492,6 +530,9 @@ export function createMilestoneLog(deps: {
         } catch { /* a milestone bug must never fault the terminal path */ }
       });
     },
+    anchorFailed(runId) {
+      fallback(runId);
+    },
     snapshot(run) {
       return run.milestoneLog === undefined ? undefined : structuredClone(run.milestoneLog);
     },
@@ -521,7 +562,9 @@ export function createMilestoneLog(deps: {
       }
       // Re-issue: the adapter finds an existing record under the same reference + hash (no second write).
       // Entries the close just sealed were enqueued above; these are the older pending ones.
-      enqueue(job.runId, ml.entries.filter((e) => e.status === "anchoring" || e.status === "pending"));
+      enqueue(job.runId, ml.entries.filter((e) => writes(e) && (e.status === "anchoring" || e.status === "pending")));
+      // A referenced anchor that failed while we were down.
+      fallback(job.runId);
     },
   };
 }

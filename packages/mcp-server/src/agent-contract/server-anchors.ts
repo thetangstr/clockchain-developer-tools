@@ -187,6 +187,8 @@ export function createServerAnchors(deps: {
    */
   roleBriefs?: Partial<Record<"buyer" | "provider", string>>;
   now?: () => number;
+  /** Milestone log (CONTRACT_MILESTONE_LOG): a run-scoped anchor slot reached `failed`. Absent when off. */
+  onRunAnchorFailed?: (runId: string) => void;
 }): ServerAnchors {
   const briefAwaitMs = deps.briefAnchorAwaitMs ?? 10_000;
   const finalAwaitMs = deps.finalAnchorAwaitMs ?? 5_000;
@@ -282,10 +284,14 @@ export function createServerAnchors(deps: {
   const recordOn = (runId: string, kind: ServerAnchorSlot) => (s: AnchorRunState): void => {
     const live = deps.getRun(runId);
     if (live !== undefined) (live.anchors ??= {})[kind] = s;
-    if (deps.getJob(runId) === undefined) return;
-    deps.updateJob(runId, (job) => {
-      job.anchors = { ...job.anchors, [kind]: { kind, ...s } };
-    });
+    if (deps.getJob(runId) !== undefined) {
+      deps.updateJob(runId, (job) => {
+        job.anchors = { ...job.anchors, [kind]: { kind, ...s } };
+      });
+    }
+    if (s.status === "failed") {
+      try { deps.onRunAnchorFailed?.(runId); } catch { /* never fault the anchor path */ }
+    }
   };
 
   /** M4: remember which brief a scope was served (bounded; evicted at scope end). */

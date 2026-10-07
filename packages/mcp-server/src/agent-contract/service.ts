@@ -2127,6 +2127,8 @@ export function createContractService(options: {
     ...(options.briefRetryMs !== undefined ? { briefRetryMs: options.briefRetryMs } : {}),
     ...(roleBriefDigests !== undefined ? { roleBriefs: roleBriefDigests } : {}),
     now,
+    // Milestone log: a failed referenced anchor makes its milestone fall back to an own write.
+    ...(milestoneLogOn ? { onRunAnchorFailed: (runId: string) => milestoneLog?.anchorFailed(runId) } : {}),
   });
   // Milestone log (CONTRACT_MILESTONE_LOG, default off): undefined = every
   // hook below is a no-op and no run or job carries milestone state.
@@ -2219,6 +2221,7 @@ export function createContractService(options: {
         anchors[kind] = next;
         persistAnchor(next);
         receiptOutcome("anchor_failed", { error });
+        try { milestoneLog?.anchorFailed(run.runId); } catch { /* never fault the anchor path */ }
       });
     trackAnchorOp(op, run.runId);
   };
