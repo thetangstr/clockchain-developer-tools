@@ -45,6 +45,8 @@ export function featureVerdicts(env, cfg) {
     serverAnchors: cfg.service.serverAnchors ? "on" : "off",
     expireAtTtl: isOn(env, "CONTRACT_EXPIRE_AT_TTL") ? "on" : "off",
     roleBriefs: cfg.service.roleBriefs ? "on" : "off",
+    // CONTRACT_MILESTONE_LOG (MILESTONE-LOG.md): the per-milestone Clockchain log.
+    milestoneLog: isOn(env, "CONTRACT_MILESTONE_LOG") ? "on" : "off",
     briefs: listCount(env, "CONTRACT_BRIEFS"),
     directory: listCount(env, "CONTRACT_DIRECTORY"),
   };
@@ -55,6 +57,9 @@ export function featureWarnings(env, cfg) {
   const warnings = [];
   if (cfg.service.serverAnchors && !cfg.anchorEnabled) {
     warnings.push("CONTRACT_SERVER_ANCHORS=1 without CONTRACT_ANCHOR_ENABLED=1: no server-side anchor will fire");
+  }
+  if (isOn(env, "CONTRACT_MILESTONE_LOG") && !cfg.anchorEnabled) {
+    warnings.push("CONTRACT_MILESTONE_LOG=1 without CONTRACT_ANCHOR_ENABLED=1: no milestone entry will be written");
   }
   if (cfg.telemetryLanes === undefined && trimmed(env, "TELEMETRY_SINK_KEY_ID") !== "") {
     warnings.push("TELEMETRY_SINK_KEY_ID is set but TELEMETRY_LANES is off: it is ignored");

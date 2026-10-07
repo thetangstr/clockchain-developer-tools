@@ -102,6 +102,7 @@ services:
       CONTRACT_BRIEFS: "${CONTRACT_BRIEFS:-}"
       CONTRACT_BRIEFS_DIR: "${CONTRACT_BRIEFS_DIR:-}"
       CONTRACT_ROLE_BRIEFS: "${CONTRACT_ROLE_BRIEFS:-}"
+      CONTRACT_MILESTONE_LOG: "${CONTRACT_MILESTONE_LOG:-}"
     volumes:
       - mcp_state:/app/state
     expose:

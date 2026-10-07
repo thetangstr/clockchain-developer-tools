@@ -83,6 +83,7 @@ misconfiguration (route 503s); run `check-config-from-ssm.mjs` first.
 | `CONTRACT_BRIEFS` | String | no | comma list `name:0x<64 lower hex sha256>`; each text is `CONTRACT_BRIEFS_DIR/<name>.md` and must hash to its pin at boot. Serves `contract_get_brief` |
 | `CONTRACT_BRIEFS_DIR` | String | iff briefs | ABSOLUTE path **inside the mcp container**. Production value: `/app/packages/mcp-server/assets/briefs` — the frozen briefs are committed at `packages/mcp-server/assets/briefs/<name>.md` and the image ships them (the Dockerfile runtime stage copies `packages/mcp-server/assets`). No compose volume, no box-side write. `check-config-from-ssm.mjs` maps that path onto the checkout and refuses any other `/app/...` path |
 | `CONTRACT_ROLE_BRIEFS` | String | no | `buyer:<brief>,provider:<brief>` — names from `CONTRACT_BRIEFS`. REQUIRES `CONTRACT_SERVER_ANCHORS=1` and `CONTRACT_BRIEFS` |
+| `CONTRACT_MILESTONE_LOG` | String | no | `0` \| `1`. `1` writes the six per-milestone Clockchain entries (`ac-milestone:<runId>:<n>-<milestone>`) and reports them in `contract_status.anchors.milestones` — a no-op unless `CONTRACT_ANCHOR_ENABLED=1` (check-config warns). See `MILESTONE-LOG.md` |
 
 **Frozen brief delivery.** A brief is pinned twice: its bytes are committed in
 the repo under `packages/mcp-server/assets/briefs/<name>.md` (so they reach the

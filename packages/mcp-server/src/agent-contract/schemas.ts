@@ -184,6 +184,40 @@ const serverAnchorState = z.object({
   error: z.string().nullable(),
 }).strict();
 
+/**
+ * Milestone log (milestone-log.ts, CONTRACT_MILESTONE_LOG): one of the six
+ * per-milestone entries as contract_status reports it. `payload` is the
+ * preimage — sha256(canonicalJson(payload)) === digest — null until sealed.
+ */
+const milestoneName = z.enum(["discover", "proposal", "negotiation", "agreement", "execution", "settlement"]);
+const milestoneEntryState = z.object({
+  index: z.number().int().min(1).max(6),
+  milestone: milestoneName,
+  assetReferenceId: z.string().min(1).max(200),
+  status: z.enum(["open", "not-reached", "lost", "anchoring", "pending", "anchored", "failed"]),
+  digest: digestHex.nullable(),
+  anchorId: z.string().min(1).max(200).nullable(),
+  eventHash: digestHex.nullable(),
+  ledger: z.object({
+    ledgerId: z.string(),
+    blockHeight: z.string().nullable(),
+    time: z.string().nullable(),
+    status: z.string(),
+  }).strict().nullable(),
+  error: z.string().nullable(),
+  payload: z.object({
+    schema: z.literal("ac.milestone-log/v1"),
+    runId: z.string().min(1).max(128),
+    milestone: milestoneName,
+    index: z.number().int().min(1).max(6),
+    firstTs: z.string().nullable(),
+    lastTs: z.string().nullable(),
+    receiptIds: z.array(digestHex),
+    approvalDigests: z.array(digestHex),
+    prevEntryDigest: digestHex.nullable(),
+  }).strict().nullable(),
+}).strict();
+
 export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<ContractToolDef[]>([
   // -- rendezvous / discovery ------------------------------------------------
   {
@@ -775,6 +809,9 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
           /** Receipts on the run chain the final head covers. */
           receiptCount: z.number().int().nonnegative().nullable(),
         }).strict().nullable().optional(),
+        // CONTRACT_MILESTONE_LOG (default off; absent when off): the six
+        // per-milestone Clockchain entries, in order.
+        milestones: z.array(milestoneEntryState).length(6).optional(),
       }).strict().nullable(),
       // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
       // the caller's own run — absent on pre-bind and recovered-terminal

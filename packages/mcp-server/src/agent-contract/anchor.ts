@@ -55,6 +55,19 @@ export interface ContractAnchor {
    * (idempotent — deterministic commitmentId).
    */
   confirm?(anchorId: string): Promise<AnchorWrite["anchor"]>;
+  /**
+   * Milestone log (milestone-log.ts, CONTRACT_MILESTONE_LOG — default off):
+   * anchor `digestHex` as the asset hash under the caller's own reference id
+   * (`ac-milestone:<runId>:<n>-<milestone>`), not under a TSA commitment.
+   * Idempotent per (referenceId, digest): an existing record with the same
+   * hash under that reference is returned instead of a second write, so a
+   * re-issue (confirm fallback, boot recovery) never spends twice. The
+   * returned `anchorId` is the reference id. REJECTS on any failure.
+   * Optional: a backing without it leaves the milestone log inert.
+   */
+  log?(input: { referenceId: string; digestHex: string; additionalInfo: string }): Promise<AnchorWrite>;
+  /** Re-read a milestone log record's confirmation state by its ledger id. */
+  confirmLog?(ledgerId: string): Promise<AnchorWrite["anchor"]>;
 }
 
 /**
@@ -94,6 +107,31 @@ export function createTsaContractAnchor(client: ClockchainClient): ContractAncho
         status: deriveAnchorStatus(latest?.blockHeight ?? null),
       };
     },
+    // Milestone log: a plain `/log` write of the entry digest under its own
+    // reference. searchAsset first (exact-match on the reference) makes the
+    // write idempotent across re-issues and restarts.
+    async log({ referenceId, digestHex, additionalInfo }) {
+      const eventHash = normalizeDigestHex(digestHex);
+      const bare = eventHash.slice(2);
+      const existing = (await client.searchAsset(referenceId))
+        .find((r) => typeof r.assetHash === "string" && r.assetHash.toLowerCase().replace(/^0x/, "") === bare);
+      const record = existing ?? await client.log({ assetHash: bare, assetReferenceId: referenceId, additionalInfo });
+      return { anchorId: referenceId, eventHash, anchor: ledgerOf(record) };
+    },
+    async confirmLog(ledgerId) {
+      return ledgerOf(await client.getLedgerEntry(ledgerId));
+    },
+  };
+}
+
+/** A gateway log record as the contract's ledger view (honest status from blockHeight). */
+function ledgerOf(record: { ledgerId: string; blockHeight?: string | null; createdTimestamp?: string | null }): AnchorWrite["anchor"] {
+  const blockHeight = record.blockHeight ?? null;
+  return {
+    ledgerId: record.ledgerId,
+    blockHeight,
+    time: record.createdTimestamp ?? null,
+    status: deriveAnchorStatus(blockHeight),
   };
 }
 

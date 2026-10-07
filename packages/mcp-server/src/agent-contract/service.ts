@@ -24,6 +24,7 @@ import { eip191RecoverPublicKey, isCanonicalEip191Signature, publicKeyToAddress 
 import { createRunRouter, keyIdOfChain } from "./run-routing.js";
 import { createPolicyRegistry, type PolicyRegistry } from "./policy-registry.js";
 import { createServerAnchors, termsDigestOf, type ContractBrief, type ServerAnchors } from "./server-anchors.js";
+import { createMilestoneLog, type MilestoneLog, type MilestoneTracker } from "./milestone-log.js";
 
 /**
  * Run-scoped contract state and the `contract_bind` decision logic
@@ -272,6 +273,12 @@ export interface ContractRun {
     briefBuyer?: AnchorRunState;
     briefProvider?: AnchorRunState;
   };
+  /**
+   * Milestone log (milestone-log.ts, CONTRACT_MILESTONE_LOG — default off):
+   * per-milestone receipt attribution and the sealed entries' write states.
+   * Absent whenever the flag is off.
+   */
+  milestoneLog?: MilestoneTracker;
   stage: ContractStage;
   /**
    * M4: per-run HMAC salt for cap-bearing call argsDigests — generated at
@@ -511,6 +518,12 @@ export interface ContractService {
   readonly serverAnchors: boolean;
   /** CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS is configured (per-role brief anchors). */
   readonly roleBriefs: boolean;
+  /**
+   * CONTRACT_MILESTONE_LOG=1 with a log-capable anchor configured: the six
+   * per-milestone entries are written and contract_status reports them
+   * (anchors.milestones). Off = no milestone state, no surface change.
+   */
+  readonly milestoneLog: boolean;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
@@ -1093,6 +1106,12 @@ export function createContractService(options: {
   briefs?: ReadonlyMap<string, ContractBrief>;
   /** M5: CONTRACT_SERVER_ANCHORS=1 (default off) — fire terms/brief/final anchors. */
   serverAnchors?: boolean;
+  /**
+   * CONTRACT_MILESTONE_LOG=1 (default off) — write the per-milestone
+   * Clockchain log (milestone-log.ts) through `anchor.log`. Inert without
+   * an anchor that implements `log`.
+   */
+  milestoneLog?: boolean;
   /**
    * CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS (default off) — role → brief NAME
    * (a key of `briefs`). Each role's brief is anchored in its own slot and
@@ -1937,6 +1956,7 @@ export function createContractService(options: {
     };
     run.receipts.push(receipt);
     run.receiptsByPrincipal.set(principal.keyId, principalReceipts + 1);
+    try { milestoneLog?.observe(run, receipt); } catch { /* a milestone bug must never break a bind */ }
     if (run.bound.buyer !== undefined && run.bound.provider !== undefined) run.stage = "bound";
     if (existing === undefined) runs.set(runId, run);
     router.set(principal.keyId, slot, runId);
@@ -2040,6 +2060,22 @@ export function createContractService(options: {
     ...(roleBriefDigests !== undefined ? { roleBriefs: roleBriefDigests } : {}),
     now,
   });
+  // Milestone log (CONTRACT_MILESTONE_LOG, default off): undefined = every
+  // hook below is a no-op and no run or job carries milestone state.
+  const milestoneAnchor = options.anchor;
+  const milestoneLog: MilestoneLog | undefined =
+    options.milestoneLog === true && milestoneAnchor?.log !== undefined
+      ? createMilestoneLog({
+          anchor: milestoneAnchor as ContractAnchor & Required<Pick<ContractAnchor, "log">>,
+          getRun: (runId) => runs.get(runId),
+          getJob: (runId) => outbox.get(runId),
+          updateJob: (runId, mutate) => void updateJob(runId, mutate),
+          track: (p) => trackAnchorOp(p),
+          sleep,
+          confirmDelayMs: anchorConfirmDelayMs,
+          confirmMaxAttempts: anchorConfirmMaxAttempts,
+        })
+      : undefined;
 
   const fireAnchor = (run: ContractRun, kind: "agreement" | "terminal"): void => {
     const anchor = options.anchor;
@@ -2293,6 +2329,9 @@ export function createContractService(options: {
         const st = run.anchors?.[k];
         if (st !== undefined) job.anchors = { ...job.anchors, [k]: { kind: k, ...st } };
       }
+      // Milestone log: the entries sealed so far join the job (flag off: none).
+      const ml = milestoneLog?.snapshot(run);
+      if (ml !== undefined) job.milestoneLog = ml;
       if (receipt !== undefined) {
         job.receipt = receipt;
         job.receiptDigest = canonicalDigest(receipt);
@@ -2317,6 +2356,8 @@ export function createContractService(options: {
         options.onTerminalRun?.(run, terminalState, principal, receipt);
       }
     } catch { /* an emitter bug must never break the terminal transition */ }
+    // Milestone log: seal what is left once the terminal call's own receipt is in.
+    try { milestoneLog?.terminal(run); } catch { /* never break the terminal transition */ }
     serverAnchors.scheduleFinal(run.runId);
   };
   const business = createBusinessOps({
@@ -2373,6 +2414,7 @@ export function createContractService(options: {
     }
     run.receipts.push(receipt);
     run.receiptsByPrincipal.set(fields.principal.keyId, count + 1);
+    try { milestoneLog?.observe(run, receipt); } catch { /* a milestone bug must never fault a receipt */ }
     return { ok: true, receipt };
   };
 
@@ -2396,6 +2438,8 @@ export function createContractService(options: {
           serverAnchors.recover(job, aj);
         }
       }
+      // Milestone log entries re-drive unchained (idempotent re-issue).
+      for (const entry of job.milestoneLog?.entries ?? []) milestoneLog?.recover(job, entry);
     }
   }
 
@@ -2416,6 +2460,7 @@ export function createContractService(options: {
     features,
     serverAnchors: serverAnchorsOn,
     roleBriefs: roleBriefDigests !== undefined,
+    milestoneLog: milestoneLog !== undefined,
     registerPolicy: (principal, input) => features.policyRegistration === true
       ? policyRegistry.register(principal, input)
       : { ok: false, code: "NOT_FOUND" },

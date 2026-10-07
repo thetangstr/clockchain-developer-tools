@@ -416,6 +416,8 @@ read_optional_env CONTRACT_EXPIRE_AT_TTL /clockchain/mcp/CONTRACT_EXPIRE_AT_TTL
 read_optional_env CONTRACT_BRIEFS /clockchain/mcp/CONTRACT_BRIEFS
 read_optional_env CONTRACT_BRIEFS_DIR /clockchain/mcp/CONTRACT_BRIEFS_DIR
 read_optional_env CONTRACT_ROLE_BRIEFS /clockchain/mcp/CONTRACT_ROLE_BRIEFS
+# Milestone log (0|1, default off): the per-milestone Clockchain entries; needs CONTRACT_ANCHOR_ENABLED=1.
+read_optional_env CONTRACT_MILESTONE_LOG /clockchain/mcp/CONTRACT_MILESTONE_LOG
 # Agent Handshake v2 per-call receipts (opt-in, off unless HANDSHAKE_V2_RECEIPTS=1). Dedicated key — never
 # the contract server key. All optional reads, like the contract block above.
 read_optional_env HANDSHAKE_V2_RECEIPTS /clockchain/mcp/HANDSHAKE_V2_RECEIPTS

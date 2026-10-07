@@ -32,6 +32,7 @@ const CDT_NAMES = [
   "TELEMETRY_LANES", "TELEMETRY_SINK_KEY_ID", "CONTRACT_DIRECTORY", "CONTRACT_MAX_RUNS_PER_KEY",
   "CONTRACT_POLICY_REGISTRATION", "CONTRACT_SERVER_ANCHORS", "CONTRACT_EXPIRE_AT_TTL",
   "CONTRACT_BRIEFS", "CONTRACT_BRIEFS_DIR", "CONTRACT_ROLE_BRIEFS",
+  "CONTRACT_MILESTONE_LOG",
 ];
 /** What compose injects for every one of them when its SSM parameter is absent. */
 const COMPOSE_ABSENT = Object.fromEntries(CDT_NAMES.map((n) => [n, ""]));
@@ -78,6 +79,7 @@ function allOnEnv() {
       CONTRACT_BRIEFS: briefs.raw,
       CONTRACT_BRIEFS_DIR: briefs.dir,
       CONTRACT_ROLE_BRIEFS: "buyer:family-travel,provider:family-travel",
+      CONTRACT_MILESTONE_LOG: "1",
     }),
     briefs,
   };
@@ -183,7 +185,7 @@ test("wiring: \"\" and truly unset load the same config (the compose passthrough
   assert.deepEqual(strip(b.report), strip(a.report));
   assert.deepEqual(b.report.features, {
     telemetryLanes: "off", telemetrySinkKeyId: "absent", policyRegistration: "off", serverAnchors: "off",
-    expireAtTtl: "off", roleBriefs: "off", briefs: 0, directory: 0,
+    expireAtTtl: "off", roleBriefs: "off", milestoneLog: "off", briefs: 0, directory: 0,
   });
   assert.equal(b.report.limits.maxRunsPerKey, 1);
   assert.deepEqual(b.report.warnings, []);
@@ -199,7 +201,7 @@ test("check-config: all CDT features on → on/configured verdicts and counts, n
   assert.equal(out.exitCode, 0, JSON.stringify(out.report));
   assert.deepEqual(out.report.features, {
     telemetryLanes: "on", telemetrySinkKeyId: "configured", policyRegistration: "on", serverAnchors: "on",
-    expireAtTtl: "on", roleBriefs: "on", briefs: 1, directory: 1,
+    expireAtTtl: "on", roleBriefs: "on", milestoneLog: "on", briefs: 1, directory: 1,
   });
   assert.equal(out.report.limits.maxRunsPerKey, 4);
   assert.deepEqual(out.report.warnings, []);
@@ -397,7 +399,7 @@ test("check-config-from-ssm: Track C's production shape (registration on, role b
   assert.equal(out.report.briefsDir, "image");
   assert.deepEqual(out.report.features, {
     telemetryLanes: "off", telemetrySinkKeyId: "absent", policyRegistration: "on", serverAnchors: "on",
-    expireAtTtl: "off", roleBriefs: "on", briefs: 1, directory: 0,
+    expireAtTtl: "off", roleBriefs: "on", milestoneLog: "off", briefs: 1, directory: 0,
   });
   assert.equal(out.report.limits.maxRunsPerKey, 1);
   assert.deepEqual(out.report.warnings, []);
@@ -443,7 +445,7 @@ test("check-config-from-ssm: Track C's revised shape with the committed family-t
   assert.equal(out.report.briefsDir, "image");
   assert.deepEqual(out.report.features, {
     telemetryLanes: "off", telemetrySinkKeyId: "absent", policyRegistration: "on", serverAnchors: "on",
-    expireAtTtl: "off", roleBriefs: "off", briefs: 1, directory: 0,
+    expireAtTtl: "off", roleBriefs: "off", milestoneLog: "off", briefs: 1, directory: 0,
   });
   assert.equal(out.report.limits.maxRunsPerKey, 1);
   assert.equal(out.report.parameters.CONTRACT_ROLE_BRIEFS, "absent");

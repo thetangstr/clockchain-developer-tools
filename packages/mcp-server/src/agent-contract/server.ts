@@ -15,6 +15,7 @@ import { newServerNonce, type ReceiptFields, type ServerReceipt } from "./receip
 import type { ContractService, ContractPrincipal, ContractRun } from "./service.js";
 import type { CertificateResolver } from "./certificate-resolver.js";
 import { renderFinalAnchor, renderServerAnchor } from "./server-anchors.js";
+import { renderMilestones } from "./milestone-log.js";
 import { TELEMETRY_OPEN_TOOL, type TelemetryLanes } from "./telemetry-lanes.js";
 
 /**
@@ -130,6 +131,8 @@ export function buildContractServer(options: {
   // lack the field — absent means every feature off.
   const features = service.features ?? NO_CONTRACT_FEATURES;
   const serverAnchorsOn = service.serverAnchors === true;
+  // CONTRACT_MILESTONE_LOG: anchors.milestones is reported only when on.
+  const milestoneLogOn = service.milestoneLog === true;
   const POLL_TOOLS = new Set(["rendezvous_inbox", "contract_status"]);
   /**
    * Calls an agent makes BEFORE it binds its next run. When the keyId's
@@ -439,8 +442,8 @@ export function buildContractServer(options: {
               : anchorJobs.some((a) => a!.status === "failed") ? "failed"
               : anchorJobs.some((a) => a!.status === "anchoring" || a!.status === "pending") ? "pending"
               : "ok",
-            anchors: job.anchors === undefined ? null : {
-              agreement: job.anchors.agreement === undefined ? null : {
+            anchors: job.anchors === undefined && !milestoneLogOn ? null : {
+              agreement: job.anchors?.agreement === undefined ? null : {
                 status: job.anchors.agreement.status,
                 digest: job.anchors.agreement.digest,
                 anchorId: job.anchors.agreement.anchorId ?? null,
@@ -448,7 +451,7 @@ export function buildContractServer(options: {
                 ledger: job.anchors.agreement.ledger ?? null,
                 error: job.anchors.agreement.error ?? null,
               },
-              terminal: job.anchors.terminal === undefined ? null : {
+              terminal: job.anchors?.terminal === undefined ? null : {
                 status: job.anchors.terminal.status,
                 digest: job.anchors.terminal.digest,
                 anchorId: job.anchors.terminal.anchorId ?? null,
@@ -458,12 +461,14 @@ export function buildContractServer(options: {
               },
               // M5: reported only with CONTRACT_SERVER_ANCHORS=1.
               ...(serverAnchorsOn ? {
-                terms: renderServerAnchor(job.anchors.terms),
+                terms: renderServerAnchor(job.anchors?.terms),
                 brief: service.roleBriefs
-                  ? { buyer: renderServerAnchor(job.anchors.briefBuyer), provider: renderServerAnchor(job.anchors.briefProvider) }
-                  : renderServerAnchor(job.anchors.brief),
-                final: renderFinalAnchor(job.anchors.final),
+                  ? { buyer: renderServerAnchor(job.anchors?.briefBuyer), provider: renderServerAnchor(job.anchors?.briefProvider) }
+                  : renderServerAnchor(job.anchors?.brief),
+                final: renderFinalAnchor(job.anchors?.final),
               } : {}),
+              // CONTRACT_MILESTONE_LOG: the six entries from the durable job.
+              ...(milestoneLogOn ? { milestones: renderMilestones(job.runId, job.milestoneLog, true) } : {}),
             },
             // PR #180 F4: the recovered terminal run is the caller's PRIOR run.
             priorRun: true,
@@ -520,8 +525,8 @@ export function buildContractServer(options: {
           receiptDigest: run.telemetryClose.receiptDigest,
         },
         anchor: anchorSummary,
-        anchors: anchorStates === undefined ? null : {
-          agreement: anchorStates.agreement === undefined ? null : {
+        anchors: anchorStates === undefined && !milestoneLogOn ? null : {
+          agreement: anchorStates?.agreement === undefined ? null : {
             status: anchorStates.agreement.status,
             digest: anchorStates.agreement.digest,
             anchorId: anchorStates.agreement.anchorId ?? null,
@@ -529,7 +534,7 @@ export function buildContractServer(options: {
             ledger: anchorStates.agreement.ledger ?? null,
             error: anchorStates.agreement.error ?? null,
           },
-          terminal: anchorStates.terminal === undefined ? null : {
+          terminal: anchorStates?.terminal === undefined ? null : {
             status: anchorStates.terminal.status,
             digest: anchorStates.terminal.digest,
             anchorId: anchorStates.terminal.anchorId ?? null,
@@ -539,13 +544,17 @@ export function buildContractServer(options: {
           },
           // Server-side anchors — recorded here, never chained receipts.
           ...(serverAnchorsOn ? {
-            terms: renderServerAnchor(anchorStates.terms),
+            terms: renderServerAnchor(anchorStates?.terms),
             // CDT-GAPS gap 1: with CONTRACT_ROLE_BRIEFS, one record per role.
             brief: service.roleBriefs
-              ? { buyer: renderServerAnchor(anchorStates.briefBuyer), provider: renderServerAnchor(anchorStates.briefProvider) }
-              : renderServerAnchor(anchorStates.brief),
-            final: renderFinalAnchor(anchorStates.final),
+              ? { buyer: renderServerAnchor(anchorStates?.briefBuyer), provider: renderServerAnchor(anchorStates?.briefProvider) }
+              : renderServerAnchor(anchorStates?.brief),
+            final: renderFinalAnchor(anchorStates?.final),
           } : {}),
+          // CONTRACT_MILESTONE_LOG: the six per-milestone entries (open /
+          // anchoring / pending / anchored / failed / not-reached). A live
+          // run's tracker always closes, so an unsealed row reads "open".
+          ...(milestoneLogOn ? { milestones: renderMilestones(run.runId, run.milestoneLog, false) } : {}),
         },
         // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
         // this run's offers (+ the one this caller may accept), agreement,

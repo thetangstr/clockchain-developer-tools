@@ -469,6 +469,11 @@ export function loadContractConfig(
   // "expired_unbound") with the full terminal path instead of being dropped.
   const expireAtTtl = flag("CONTRACT_EXPIRE_AT_TTL");
   if (typeof expireAtTtl === "string") return misconfigured(expireAtTtl);
+  // Milestone log (MILESTONE-TIMELINE.md §4 Option A): the six per-milestone
+  // Clockchain entries, written through the run anchor. A no-op unless
+  // CONTRACT_ANCHOR_ENABLED=1 (check-config warns).
+  const milestoneLog = flag("CONTRACT_MILESTONE_LOG");
+  if (typeof milestoneLog === "string") return misconfigured(milestoneLog);
   // CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS=buyer:<name>,provider:<name> — each
   // role's brief (a CONTRACT_BRIEFS name) is anchored at start-up, recorded
   // in its own slot and bound by that role's contract_bind. Needs the
@@ -613,6 +618,7 @@ export function loadContractConfig(
       ...(policyRegistration ? { policyRegistration: true } : {}),
       ...(serverAnchors ? { serverAnchors: true } : {}),
       ...(expireAtTtl ? { expireAtTtl: true } : {}),
+      ...(milestoneLog ? { milestoneLog: true } : {}),
       ...(roleBriefs !== undefined ? { roleBriefs } : {}),
       maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
       maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,

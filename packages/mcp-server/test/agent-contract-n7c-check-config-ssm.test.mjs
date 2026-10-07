@@ -74,6 +74,7 @@ function ssmFixture(stateDir, overrides = {}) {
     CONTRACT_BRIEFS: "",
     CONTRACT_BRIEFS_DIR: "",
     CONTRACT_ROLE_BRIEFS: "",
+    CONTRACT_MILESTONE_LOG: "0",
     ...overrides,
   };
   return new Map(

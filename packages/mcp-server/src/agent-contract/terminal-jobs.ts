@@ -48,6 +48,24 @@ export interface TerminalAnchorJob {
   error?: string;
 }
 
+/**
+ * Milestone log (milestone-log.ts, CONTRACT_MILESTONE_LOG): one persisted
+ * entry — the preimage payload, its digest (the anchored asset hash) and the
+ * write outcome. Unchained, like the server-side anchors.
+ */
+export interface TerminalMilestoneJob {
+  index: number;
+  milestone: string;
+  referenceId: string;
+  digest: string;
+  payload: Record<string, unknown>;
+  status: "anchoring" | "pending" | "anchored" | "failed";
+  anchorId?: string;
+  eventHash?: string;
+  ledger?: { ledgerId: string; blockHeight: string | null; time: string | null; status: string };
+  error?: string;
+}
+
 export interface TerminalCloseJob {
   status: "delivering" | "delivered" | "failed";
   attempts: number;
@@ -89,6 +107,11 @@ export interface TerminalJob {
     briefBuyer?: TerminalAnchorJob;
     briefProvider?: TerminalAnchorJob;
   };
+  /**
+   * Milestone log (CONTRACT_MILESTONE_LOG; absent when off): the run's
+   * sealed entries, and whether the terminal close sealed the last one.
+   */
+  milestoneLog?: { closed: boolean; entries: TerminalMilestoneJob[] };
   /** Post-transition evidence receipts (mirror of the live run chain). */
   evidence: ServerReceipt[];
   updatedAtMs: number;
@@ -127,9 +150,11 @@ function loadTerminalJobs(stateDir: string): Map<string, TerminalJob> {
  */
 function anchorJobOpen(j: TerminalJob): boolean {
   const a = j.anchors;
-  return a !== undefined && [a.agreement, a.terminal, a.terms, a.brief, a.final, a.briefBuyer, a.briefProvider].some(
-    (x) => x !== undefined && (x.status === "anchoring" || x.status === "pending"),
-  );
+  const open = (x: { status: string } | undefined): boolean =>
+    x !== undefined && (x.status === "anchoring" || x.status === "pending");
+  return (a !== undefined && [a.agreement, a.terminal, a.terms, a.brief, a.final, a.briefBuyer, a.briefProvider].some(open)) ||
+    // Milestone log entries still owed a write/confirmation keep the job (absent when the flag is off).
+    (j.milestoneLog?.entries.some(open) ?? false);
 }
 
 function isFinishedJob(j: TerminalJob): boolean {
