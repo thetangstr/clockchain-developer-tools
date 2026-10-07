@@ -103,6 +103,7 @@ case "$MODE" in
     # unset, so compose passes "" = off, exactly the pre-wiring sink). Any other read error, or a
     # value other than ""/0/1, refuses BEFORE the build so a bad value never reaches a boot loop.
     RSH_ERR=$(mktemp)
+    trap 'rm -f "$RSH_ERR"' EXIT
     if RSH=$(aws --region "$AWS_REGION" ssm get-parameter --name "$RUN_SET_HEAD_PARAM" \
         --query Parameter.Value --output text </dev/null 2>"$RSH_ERR"); then
       export TELEMETRY_RUN_SET_HEAD="$RSH"

@@ -118,7 +118,7 @@ test("check-config-from-ssm loads SSM values into env and reports ready (exit 0)
   assert.deepEqual(fetched.sort(), [...ENV_PARAMETERS, ...SINK_PARAMETERS].map((n) => `${PREFIX}/${n}`).sort());
 });
 
-test("absent parameters leave env untouched and report absent", async () => {
+test("absent parameters are cleared from env (never inherited from the shell) and report absent", async () => {
   const stateDir = mkdtempSync(path.join(tmpdir(), "n7c-ssm-"));
   const found = ssmFixture(stateDir);
   found.delete(`${PREFIX}/CONTRACT_OBSERVER_TOKEN`);
@@ -133,9 +133,10 @@ test("absent parameters leave env untouched and report absent", async () => {
     fetchParameter: recordingFetch(found),
   });
   assert.equal(out.exitCode, 0);
-  // Untouched: the pre-existing values survived; the unset one stays unset.
-  assert.equal(env.CONTRACT_OBSERVER_TOKEN, "pre-existing-obs");
-  assert.equal(env.CONTRACT_VERIFIER_TOKEN, "pre-existing-ver");
+  // Cleared: a value left in the operator's shell is not what the container gets
+  // (compose passes absent as ""), so the check must not see it either.
+  assert.equal(env.CONTRACT_OBSERVER_TOKEN, undefined);
+  assert.equal(env.CONTRACT_VERIFIER_TOKEN, undefined);
   assert.equal(env.CONTRACT_HOST_ROOTS, undefined);
   assert.equal(out.report.parameters.CONTRACT_OBSERVER_TOKEN, "absent");
   assert.equal(out.report.parameters.CONTRACT_VERIFIER_TOKEN, "absent");
