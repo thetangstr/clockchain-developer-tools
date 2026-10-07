@@ -563,7 +563,8 @@ test("TELEMETRY_ANCHOR_TOKEN_FILE: read and trimmed; both-set, empty, missing, a
   writeFileSync(file, "anchor-test-value\n");
   chmodSync(file, 0o600);
   assert.equal(resolveAnchorToken({ TELEMETRY_ANCHOR_TOKEN_FILE: file }), "anchor-test-value");
-  assert.equal(resolveAnchorToken({ TELEMETRY_ANCHOR_TOKEN: "plain" }), "plain", "legacy env still accepted");
+  // CDT-SEC L7: the legacy plaintext env is a staging-only form now (production refuses it — cdt-sec.test.mjs).
+  assert.equal(resolveAnchorToken({ TELEMETRY_ENV: "staging", TELEMETRY_ANCHOR_TOKEN: "plain" }), "plain", "legacy env still accepted in staging");
   assert.equal(resolveAnchorToken({}), undefined);
   assert.throws(() => resolveAnchorToken({ TELEMETRY_ANCHOR_TOKEN_FILE: file, TELEMETRY_ANCHOR_TOKEN: "plain" }), /not both/);
   assert.throws(() => resolveAnchorToken({ TELEMETRY_ANCHOR_TOKEN_FILE: path.join(dir, "missing") }), /not readable/);

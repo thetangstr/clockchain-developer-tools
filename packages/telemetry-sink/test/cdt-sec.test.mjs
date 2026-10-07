@@ -1,5 +1,6 @@
 // CDT-SEC (state/ledger/notes/cdt-integration-security-review.md): sink-side
-// fixes for L4 (lane store pruning) and L5 (audience, lane release).
+// fixes for L4 (lane store pruning), L5 (audience, lane release) and L7
+// (no plaintext anchor token in production).
 // Loopback ports 19460-19469 only; every key is generated.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
@@ -15,6 +16,7 @@ import {
   createTelemetrySinkServer,
   createTokenStore,
   enrollParty,
+  resolveAnchorToken,
   laneOpenMessage,
   runLinkMessage,
 } from "../dist/index.js";
@@ -202,4 +204,17 @@ test("L5 sink: the close listener serves POST /v1/lanes/release", async (t) => {
   const good = await post(laneRelease({ laneId: opened.laneId, mcpSessionId: "sess-http", ts: T0 }));
   assert.equal(good.status, 200);
   assert.deepEqual(await good.json(), { released: true, laneId: opened.laneId });
+});
+
+test("L7: production refuses the plaintext TELEMETRY_ANCHOR_TOKEN env; only _FILE is accepted", () => {
+  for (const env of [{ TELEMETRY_ANCHOR_TOKEN: "plain" }, { TELEMETRY_ENV: "production", TELEMETRY_ANCHOR_TOKEN: "plain" },
+    { TELEMETRY_ANCHOR_TOKEN: "" }]) {
+    assert.throws(() => resolveAnchorToken(env), /refused in production; use TELEMETRY_ANCHOR_TOKEN_FILE/, JSON.stringify(env));
+  }
+  // The error never echoes the value.
+  try { resolveAnchorToken({ TELEMETRY_ANCHOR_TOKEN: "anchor-secret-test-value" }); } catch (err) {
+    assert.doesNotMatch(String(err), /anchor-secret-test-value/);
+  }
+  assert.equal(resolveAnchorToken({ TELEMETRY_ENV: "staging", TELEMETRY_ANCHOR_TOKEN: "plain" }), "plain");
+  assert.equal(resolveAnchorToken({}), undefined);
 });

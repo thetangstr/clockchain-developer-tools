@@ -22,7 +22,8 @@ import { createTokenStore } from "./tokens.js";
  *   - contract keys  TELEMETRY_CONTRACT_KEYS  (JSON {keyId: pem-or-jwk PUBLIC key} — close authority)
  *   - windows        TELEMETRY_RUN_WINDOW_MS / TELEMETRY_FLUSH_GRACE_MS (optional)
  *   - anchor         TELEMETRY_ANCHOR_MCP_URL + (TELEMETRY_ANCHOR_TOKEN_FILE — a
- *                    mounted secret file, preferred — or TELEMETRY_ANCHOR_TOKEN)
+ *                    mounted secret file; the plaintext TELEMETRY_ANCHOR_TOKEN
+ *                    is accepted only with TELEMETRY_ENV=staging — CDT-SEC L7)
  *   - O-1 lanes      enrollments.json (admin-written by enroll-cli) and
  *                    lanes.json (server-written) on the state volume
  *
@@ -78,12 +79,19 @@ function publicKeyBytes(key: KeyObject): string {
  * the value never appears in the container env or `docker inspect`) or the
  * legacy TELEMETRY_ANCHOR_TOKEN. Both set is ambiguous and refuses boot; an
  * empty or unreadable file refuses boot. The token is never logged.
+ * CDT-SEC L7: in production (TELEMETRY_ENV unset or "production") the
+ * plaintext env refuses boot whatever its value — only _FILE is accepted,
+ * so the token never sits in `docker inspect` or a process environment.
+ * Staging keeps the legacy form.
  */
 export function resolveAnchorToken(env: NodeJS.ProcessEnv): string | undefined {
   const file = env.TELEMETRY_ANCHOR_TOKEN_FILE;
   const plain = env.TELEMETRY_ANCHOR_TOKEN;
   if (file !== undefined && plain !== undefined) {
     throw new Error("set TELEMETRY_ANCHOR_TOKEN_FILE or TELEMETRY_ANCHOR_TOKEN, not both");
+  }
+  if (plain !== undefined && (env.TELEMETRY_ENV ?? "production") !== "staging") {
+    throw new Error("TELEMETRY_ANCHOR_TOKEN (plaintext env) is refused in production; use TELEMETRY_ANCHOR_TOKEN_FILE");
   }
   if (file === undefined) return plain;
   if (file === "") throw new Error("TELEMETRY_ANCHOR_TOKEN_FILE is empty");
