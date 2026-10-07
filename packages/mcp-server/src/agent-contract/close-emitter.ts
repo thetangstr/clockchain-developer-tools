@@ -26,6 +26,21 @@ import { canonicalJson, canonicalDigest } from "./canonical.js";
 import type { ContractSigner } from "./envelope.js";
 import type { TerminalReceiptV2 } from "./telemetry-lanes.js";
 
+/**
+ * CDT-SEC L9 / CDT-GAPS gap 4: what a refused delivery persists — the HTTP
+ * status and the sink's refusal code (`{"error": "<code>"}` or
+ * `{"code": "<code>"}`) when it is a plain lowercase code, never the body
+ * itself. Shared by the close emitter and the O-1 link delivery.
+ */
+export function refusalErrorOf(status: number, text: string): string {
+  let code: unknown;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; code?: unknown };
+    code = parsed?.error ?? parsed?.code;
+  } catch { /* not JSON: status only */ }
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? `http ${status} ${code}` : `http ${status}`;
+}
+
 /** The signed close authority the sink verifies. */
 export interface TerminalReceiptV1 {
   schema: "ac-terminal-receipt/v1";
@@ -234,7 +249,12 @@ export function createCloseEmitter(options: CloseEmitterOptions): CloseEmitter {
           options.recordOutcome?.("delivered", { runId, receiptDigest, attempts: attempt, response });
           return;
         }
-        lastError = `http ${res.status}: ${res.text.slice(0, 200)}`;
+        // CDT-GAPS gap 4 (L9 treatment): the HTTP status and the sink's
+        // refusal code only — never the response body, which a sink (or
+        // anything answering at its address) could fill with request
+        // content that would then reach contract_status, the outbox job
+        // and the failed-close receipt.
+        lastError = refusalErrorOf(res.status, res.text);
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
       }

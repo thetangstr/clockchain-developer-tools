@@ -43,7 +43,7 @@ import {
 import path from "node:path";
 
 import { canonicalDigest, canonicalJson } from "./canonical.js";
-import { mintTerminalReceipt, type TerminalReceipt, type TerminalReceiptFields } from "./close-emitter.js";
+import { mintTerminalReceipt, refusalErrorOf, type TerminalReceipt, type TerminalReceiptFields } from "./close-emitter.js";
 import type { ContractSigner } from "./envelope.js";
 import type { ContractRole } from "./schemas.js";
 
@@ -96,18 +96,9 @@ export interface TerminalReceiptV2 {
 
 /**
  * CDT-SEC L9: what a refused link delivery persists — the HTTP status and
- * the sink's refusal code (`{"error": "<code>"}`) when it is a plain code,
- * never the body itself, so a future sink that echoed request content could
- * not get it written to telemetry-lanes.json.
+ * the sink's refusal code, never the body (shared with the close emitter).
  */
-export function linkErrorOf(status: number, text: string): string {
-  let code: unknown;
-  try {
-    const parsed = JSON.parse(text) as { error?: unknown; code?: unknown };
-    code = parsed?.error ?? parsed?.code;
-  } catch { /* not JSON: status only */ }
-  return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? `http ${status} ${code}` : `http ${status}`;
-}
+export const linkErrorOf = refusalErrorOf;
 
 const signHex = (message: string, signer: ContractSigner): `0x${string}` =>
   `0x${edSign(null, Buffer.from(message, "utf8"), signer.privateKey).toString("hex")}`;
