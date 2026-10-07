@@ -201,6 +201,14 @@ function send(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
+// A refusal sent before the request body is read: drain the body and close the
+// connection, so the client sees the status instead of a reset socket.
+function refuse(req: IncomingMessage, res: ServerResponse, status: number, payload: unknown): void {
+  req.resume();
+  res.setHeader("connection", "close");
+  send(res, status, payload);
+}
+
 export function createLaneForwarder(options: {
   listen: { host: string; port: number };
   control?: { host: string; port: number };
@@ -364,7 +372,7 @@ export function createLaneForwarder(options: {
       try {
         const url = new URL(req.url ?? "/", "http://loopback.invalid");
         if (req.method !== "POST" || url.pathname !== "/v1/lane-token") {
-          send(res, 404, { error: "not_found" });
+          refuse(req, res, 404, { error: "not_found" });
           return;
         }
         // L8: only the holder of this start's secret file may deliver — the
@@ -373,11 +381,11 @@ export function createLaneForwarder(options: {
         const auth = req.headers.authorization ?? "";
         const presented = auth.startsWith("Bearer ") ? auth.slice(7) : "";
         if (!timingSafeEqual(sha256(presented), expected)) {
-          send(res, 401, { error: "unauthorized" });
+          refuse(req, res, 401, { error: "unauthorized" });
           return;
         }
         if (token !== null) {
-          send(res, 409, { error: "already_delivered" });
+          refuse(req, res, 409, { error: "already_delivered" });
           return;
         }
         const raw = await readCapped(req, 64 * 1024);
