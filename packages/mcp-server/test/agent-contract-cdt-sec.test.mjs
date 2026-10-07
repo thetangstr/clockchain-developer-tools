@@ -771,3 +771,40 @@ test("L5: above cap 1 a dropped session routed to no run is released; a routed o
     assert.deepEqual(cap1, [], "cap 1 links every unlinked lane of the keyId at bind — nothing is released");
   } finally { env1.close(); }
 });
+
+// --- L9: a refused link persists only the status and the sink's refusal code -------
+
+test("L9: lastError keeps the HTTP status and a plain refusal code, never the sink's body", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "cdt-sec-l9-"));
+  let n = 0;
+  const linkReplies = {
+    "run-a": { status: 409, text: JSON.stringify({ error: "link_conflict", echo: "ECHOED-REQUEST-CONTENT" }) },
+    "run-b": { status: 500, text: "<html>ECHOED-REQUEST-CONTENT</html>" },
+    "run-c": { status: 400, text: JSON.stringify({ error: "Not A Code ECHOED-REQUEST-CONTENT" }) },
+  };
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (url.endsWith("/v1/lanes/open")) {
+      const laneId = `lane:${(++n).toString(16).padStart(32, "0")}`;
+      return { status: 200, text: async () => JSON.stringify({
+        laneId, role: body.role, keyId: body.keyId, mcpSessionId: body.mcpSessionId, sealedBox: { ct: "opaque" },
+      }) };
+    }
+    const reply = linkReplies[body.runId];
+    return { status: reply.status, text: async () => reply.text };
+  };
+  const lanes = createTelemetryLanes({
+    signer: SIGNER, sinkAudience: "ac-telemetry-test", closeUrl: "http://127.0.0.1:19459", stateDir, fetchImpl,
+    backoffMs: [0], sleep: async () => {},
+  });
+  for (const [i, runId] of ["run-a", "run-b", "run-c"].entries()) {
+    await lanes.open({ keyId: `kb${i}`, role: "buyer" }, `sess-${i}`);
+    lanes.onRunBound({ runId, bound: { buyer: { principalKeyId: `kb${i}` } } });
+  }
+  await lanes.flush();
+  assert.equal(lanes.linkFor("run-a").status, "failed");
+  assert.equal(lanes.linkFor("run-a").lastError, "http 409 link_conflict");
+  assert.equal(lanes.linkFor("run-b").lastError, "http 500");
+  assert.equal(lanes.linkFor("run-c").lastError, "http 400");
+  assert.doesNotMatch(readFileSync(path.join(stateDir, "telemetry-lanes.json"), "utf8"), /ECHOED-REQUEST-CONTENT/);
+});

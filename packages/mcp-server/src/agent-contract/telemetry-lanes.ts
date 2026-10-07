@@ -94,6 +94,21 @@ export interface TerminalReceiptV2 {
   signature: Ed25519Signature;
 }
 
+/**
+ * CDT-SEC L9: what a refused link delivery persists — the HTTP status and
+ * the sink's refusal code (`{"error": "<code>"}`) when it is a plain code,
+ * never the body itself, so a future sink that echoed request content could
+ * not get it written to telemetry-lanes.json.
+ */
+export function linkErrorOf(status: number, text: string): string {
+  let code: unknown;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; code?: unknown };
+    code = parsed?.error ?? parsed?.code;
+  } catch { /* not JSON: status only */ }
+  return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? `http ${status} ${code}` : `http ${status}`;
+}
+
 const signHex = (message: string, signer: ContractSigner): `0x${string}` =>
   `0x${edSign(null, Buffer.from(message, "utf8"), signer.privateKey).toString("hex")}`;
 
@@ -402,7 +417,7 @@ export function createTelemetryLanes(options: TelemetryLanesOptions): TelemetryL
           delete link.lastError;
           break;
         }
-        link.lastError = `http ${res.status}: ${res.text.slice(0, 200)}`;
+        link.lastError = linkErrorOf(res.status, res.text);
       } catch (err) {
         link.lastError = err instanceof Error ? err.message : String(err);
       }
