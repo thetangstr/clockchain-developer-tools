@@ -14,10 +14,48 @@
  * It also reads the sink's SINK_PARAMETERS (never into env) and adds a
  * `sink` verdict block; an invalid sink value is a refusal (exit 1).
  *
+ * CONTRACT_BRIEFS_DIR must be IMAGE_BRIEFS_DIR; the committed brief files in
+ * this checkout are then checked against their pinned digests
+ * (`briefsDir: "image"`). Any other /app/ path is refused.
+ *
  * No parameter VALUE is ever printed — the report adds names only.
  */
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { checkConfig } from "./check-config.mjs";
+
+/**
+ * The frozen brief files ship IN THE IMAGE: they are committed under
+ * packages/mcp-server/assets/briefs/<name>.md and the Dockerfile's runtime
+ * stage copies packages/mcp-server/assets to this path. No compose volume, no
+ * box-side file write, no extra deploy-box drift file.
+ */
+export const IMAGE_BRIEFS_DIR = "/app/packages/mcp-server/assets/briefs";
+/** This checkout's root (scripts/agent-contract → packages/mcp-server → packages → root). */
+const CHECKOUT_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
+
+/**
+ * The checker runs on the operator's machine from the W checkout, where
+ * the image's /app is this checkout. Map the image briefs dir onto it so the
+ * committed files are checked against their pinned digests exactly as the
+ * container will check them. Any other /app/ path is a dir this checker
+ * cannot see (e.g. the mcp_state volume) — refused. Non-/app paths pass
+ * through unchanged (local use).
+ *   → { dir } | { refusal } | {} (nothing to do)
+ */
+export function briefsDirForCheck(raw, checkoutRoot = CHECKOUT_ROOT) {
+  const dir = (raw ?? "").trim();
+  if (dir === "") return {};
+  if (dir === IMAGE_BRIEFS_DIR) {
+    return { dir: path.join(checkoutRoot, "packages", "mcp-server", "assets", "briefs"), source: "image" };
+  }
+  if (dir.startsWith("/app/")) {
+    return { refusal: `CONTRACT_BRIEFS_DIR must be ${IMAGE_BRIEFS_DIR} (briefs committed in the checkout and shipped in the image)` };
+  }
+  return { dir, source: "local" };
+}
 
 /**
  * The complete contract env surface — every CONTRACT_ and TELEMETRY_ name
@@ -158,7 +196,7 @@ export async function loadEnvFromSsm({
  * checker's own convention (exit 1, status misconfigured) and carries only
  * the error NAME — SDK messages can echo request detail we keep off stdout.
  */
-export async function checkConfigFromSsm({ region, prefix, env, fetchParameter, stateDir } = {}) {
+export async function checkConfigFromSsm({ region, prefix, env, fetchParameter, stateDir, checkoutRoot } = {}) {
   const target = env ?? process.env;
   let parameters;
   try {
@@ -173,6 +211,19 @@ export async function checkConfigFromSsm({ region, prefix, env, fetchParameter, 
   // N11f: --state-dir wins over the pulled CONTRACT_STATE_DIR so the probe can
   // use a scratch dir (the live dir is lock-held by the running service).
   if (stateDir !== undefined) target.CONTRACT_STATE_DIR = stateDir;
+  // CDT wiring: CONTRACT_BRIEFS_DIR names a path inside the image; check the
+  // committed files it will hold (names and verdicts only, never the path or text).
+  let briefsDir = "absent";
+  if ((target.CONTRACT_BRIEFS ?? "").trim() !== "") {
+    const mapped = briefsDirForCheck(target.CONTRACT_BRIEFS_DIR, checkoutRoot);
+    if (mapped.refusal !== undefined) {
+      return { exitCode: 1, report: { status: "misconfigured", reason: mapped.refusal, parameters } };
+    }
+    if (mapped.dir !== undefined) {
+      target.CONTRACT_BRIEFS_DIR = mapped.dir;
+      briefsDir = mapped.source;
+    }
+  }
   const { exitCode, report } = await checkConfig(target);
   let sink;
   try {
@@ -183,7 +234,7 @@ export async function checkConfigFromSsm({ region, prefix, env, fetchParameter, 
     const name = err instanceof Error ? err.name : "Error";
     return { exitCode: 1, report: { status: "misconfigured", reason: `ssm fetch failed (${name})`, parameters } };
   }
-  const out = { ...report, parameters, sink };
+  const out = { ...report, parameters, briefsDir, sink };
   // Lanes close on the sink: the sink must hold this server's PUBLIC key.
   if (report.features?.telemetryLanes === "on") {
     const warnings = [...(out.warnings ?? [])];

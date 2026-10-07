@@ -88,7 +88,7 @@ const expectedContractEnv = {
   CONTRACT_SERVER_ANCHORS: "server-anchors-on\n",
   CONTRACT_EXPIRE_AT_TTL: "expire-at-ttl-on\n",
   CONTRACT_BRIEFS: "family-travel:0x9999999999999999999999999999999999999999999999999999999999999999\n",
-  CONTRACT_BRIEFS_DIR: "/app/state/briefs\n",
+  CONTRACT_BRIEFS_DIR: "/app/packages/mcp-server/assets/briefs\n",
   CONTRACT_ROLE_BRIEFS: "buyer:family-travel,provider:family-travel\n",
   HANDSHAKE_V2_RECEIPTS: "1\n",
   HANDSHAKE_V2_RECEIPT_ED25519_SEED: "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\n",
@@ -356,7 +356,7 @@ case "$name" in
   /clockchain/mcp/CONTRACT_SERVER_ANCHORS) value=$'server-anchors-on\\n' ;;
   /clockchain/mcp/CONTRACT_EXPIRE_AT_TTL) value=$'expire-at-ttl-on\\n' ;;
   /clockchain/mcp/CONTRACT_BRIEFS) value=$'family-travel:0x9999999999999999999999999999999999999999999999999999999999999999\\n' ;;
-  /clockchain/mcp/CONTRACT_BRIEFS_DIR) value=$'/app/state/briefs\\n' ;;
+  /clockchain/mcp/CONTRACT_BRIEFS_DIR) value=$'/app/packages/mcp-server/assets/briefs\\n' ;;
   /clockchain/mcp/CONTRACT_ROLE_BRIEFS) value=$'buyer:family-travel,provider:family-travel\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPTS) value=$'1\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_ED25519_SEED) value=$'ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\\n' ;;

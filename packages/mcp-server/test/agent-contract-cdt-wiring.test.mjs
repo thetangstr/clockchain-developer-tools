@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,7 +19,7 @@ import { loadContractConfig } from "../dist/agent-contract/config.js";
 import { buildServerCard } from "../dist/agent-contract/server-card.js";
 import { checkConfig } from "../scripts/agent-contract/check-config.mjs";
 import {
-  ENV_PARAMETERS, SINK_PARAMETERS, checkConfigFromSsm,
+  ENV_PARAMETERS, IMAGE_BRIEFS_DIR, SINK_PARAMETERS, briefsDirForCheck, checkConfigFromSsm,
 } from "../scripts/agent-contract/check-config-from-ssm.mjs";
 import { ACCEPT, HOST_ROOTS, POLICY } from "./n4b9-harness.mjs";
 
@@ -327,4 +327,91 @@ test("check-config-from-ssm: lanes on warns when the sink's public key set is ab
   const priv = await run({ TELEMETRY_CONTRACT_KEYS: JSON.stringify({ k: { kty: "OKP", x: "AA", d: "BB" } }) });
   assert.equal(priv.exitCode, 1);
   assert.equal(priv.report.sink.contractKeys, "invalid");
+});
+
+// =============================================================================
+// Frozen briefs: committed under packages/mcp-server/assets/briefs and shipped
+// in the image (no compose volume, no box-side write, no extra drift file).
+// Track C's production shape: registration on, role briefs on, directory off,
+// one run per key.
+// =============================================================================
+
+const REPO_ROOT = path.resolve(here, "..", "..", "..");
+
+test("briefs ship in the image: the runtime stage copies packages/mcp-server/assets to /app; .dockerignore keeps nested .md files", () => {
+  const dockerfile = readFileSync(path.join(REPO_ROOT, "Dockerfile"), "utf8");
+  const runtime = dockerfile.slice(dockerfile.indexOf("AS runtime"));
+  assert.ok(runtime.length < dockerfile.length, "a runtime stage exists");
+  assert.match(runtime, /^WORKDIR \/app$/m);
+  assert.match(runtime, /^COPY --from=build \/app\/packages\/mcp-server\/assets \.\/packages\/mcp-server\/assets$/m);
+  assert.match(dockerfile, /^COPY packages\/mcp-server packages\/mcp-server$/m, "the build stage takes the whole package");
+  assert.equal(IMAGE_BRIEFS_DIR, "/app/packages/mcp-server/assets/briefs");
+  // .dockerignore patterns are root-anchored: "*.md" drops root-level docs only.
+  const ignore = readFileSync(path.join(REPO_ROOT, ".dockerignore"), "utf8").split("\n").map((l) => l.trim())
+    .filter((l) => l !== "" && !l.startsWith("#"));
+  for (const pattern of ignore) {
+    assert.ok(!/^\*\*\/\*\.md$|assets|briefs|^packages\/mcp-server\/?$|^packages\/?$/.test(pattern), `.dockerignore would drop the briefs: ${pattern}`);
+  }
+});
+
+function checkoutWithBrief(name, text) {
+  const root = mkdtempSync(path.join(tmpdir(), "cdt-wiring-checkout-"));
+  const dir = path.join(root, "packages", "mcp-server", "assets", "briefs");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, `${name}.md`), text);
+  return { root, digest: `0x${createHash("sha256").update(text).digest("hex")}` };
+}
+
+test("briefsDirForCheck: the image dir maps onto the checkout; another /app path is refused; a host path passes", () => {
+  assert.deepEqual(briefsDirForCheck("", "/r"), {});
+  assert.deepEqual(briefsDirForCheck(IMAGE_BRIEFS_DIR, "/r"), { dir: "/r/packages/mcp-server/assets/briefs", source: "image" });
+  assert.match(briefsDirForCheck("/app/state/briefs", "/r").refusal, /CONTRACT_BRIEFS_DIR must be \/app\/packages\/mcp-server\/assets\/briefs/);
+  assert.deepEqual(briefsDirForCheck("/tmp/b", "/r"), { dir: "/tmp/b", source: "local" });
+});
+
+test("check-config-from-ssm: Track C's production shape (registration on, role briefs on, directory off, 1 run per key) is ready; names and verdicts only", async () => {
+  const text = "# family travel door brief (wiring fixture)\n";
+  const { root, digest } = checkoutWithBrief("family-travel-door", text);
+  const stateDir = mkdtempSync(path.join(tmpdir(), "cdt-wiring-ssm-"));
+  const shape = {
+    ...baseEnv(), CONTRACT_STATE_DIR: stateDir,
+    CONTRACT_ANCHOR_ENABLED: "1",
+    CONTRACT_POLICY_REGISTRATION: "1",
+    CONTRACT_SERVER_ANCHORS: "1",
+    CONTRACT_BRIEFS: `family-travel-door:${digest}`,
+    CONTRACT_BRIEFS_DIR: IMAGE_BRIEFS_DIR,
+    CONTRACT_ROLE_BRIEFS: "buyer:family-travel-door,provider:family-travel-door",
+    CONTRACT_MAX_RUNS_PER_KEY: "1",
+  };
+  const env = {};
+  const out = await checkConfigFromSsm({ env, checkoutRoot: root, fetchParameter: ssmFetch(shape) });
+  assert.equal(out.exitCode, 0, JSON.stringify(out.report));
+  assert.equal(out.report.status, "ready");
+  assert.equal(out.report.briefsDir, "image");
+  assert.deepEqual(out.report.features, {
+    telemetryLanes: "off", telemetrySinkKeyId: "absent", policyRegistration: "on", serverAnchors: "on",
+    expireAtTtl: "off", roleBriefs: "on", briefs: 1, directory: 0,
+  });
+  assert.equal(out.report.limits.maxRunsPerKey, 1);
+  assert.deepEqual(out.report.warnings, []);
+  assert.equal(out.report.parameters.CONTRACT_DIRECTORY, "absent");
+  const printed = JSON.stringify(out.report);
+  for (const value of [digest, root, text.trim(), "family-travel-door", SEED_B64]) {
+    assert.equal(printed.includes(value), false, `report leaks ${value}`);
+  }
+
+  // Refusals, each naming the setting (never the brief text or the checkout path).
+  const refuse = async (extra, re, checkoutRoot = root) => {
+    const r = await checkConfigFromSsm({ env: {}, checkoutRoot, fetchParameter: ssmFetch({ ...shape, CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "cdt-wiring-ssm-")), ...extra }) });
+    assert.equal(r.exitCode, 1, JSON.stringify(extra));
+    assert.equal(r.report.status, "misconfigured", JSON.stringify(r.report));
+    assert.match(r.report.reason, re);
+    assert.equal(JSON.stringify(r.report).includes(text.trim()), false);
+  };
+  await refuse({ CONTRACT_BRIEFS: `family-travel-door:0x${"ab".repeat(32)}` }, /does not match its pinned digest/);
+  await refuse({}, /no brief file for family-travel-door/, mkdtempSync(path.join(tmpdir(), "cdt-wiring-empty-")));
+  await refuse({ CONTRACT_BRIEFS_DIR: "/app/state/briefs" }, /CONTRACT_BRIEFS_DIR must be/);
+  await refuse({ CONTRACT_ROLE_BRIEFS: "buyer:other-brief" }, /CONTRACT_ROLE_BRIEFS: other-brief is not a CONTRACT_BRIEFS name/);
+  await refuse({ CONTRACT_SERVER_ANCHORS: "" }, /CONTRACT_ROLE_BRIEFS requires CONTRACT_SERVER_ANCHORS=1/);
+  await refuse({ CONTRACT_BRIEFS: "", CONTRACT_BRIEFS_DIR: "" }, /CONTRACT_ROLE_BRIEFS requires CONTRACT_BRIEFS/);
 });

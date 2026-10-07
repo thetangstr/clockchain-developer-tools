@@ -404,7 +404,8 @@ read_optional_env CONTRACT_TRUST_PROXY /clockchain/mcp/CONTRACT_TRUST_PROXY
 # CDT features (all default-off; absent or "" == the b04059e surface and behaviour).
 # config.ts validates them at boot: TELEMETRY_LANES=1 needs TELEMETRY_CLOSE_URL and
 # TELEMETRY_SINK_KEY_ID; CONTRACT_ROLE_BRIEFS needs CONTRACT_SERVER_ANCHORS=1 + CONTRACT_BRIEFS;
-# CONTRACT_BRIEFS_DIR is a path INSIDE the mcp container (e.g. under /app/state).
+# CONTRACT_BRIEFS_DIR is a path INSIDE the mcp container: /app/packages/mcp-server/assets/briefs
+# (the briefs are committed in the repo and shipped in the image; no volume, no box-side write).
 read_optional_env TELEMETRY_LANES /clockchain/mcp/TELEMETRY_LANES
 read_optional_env TELEMETRY_SINK_KEY_ID /clockchain/mcp/TELEMETRY_SINK_KEY_ID
 read_optional_env CONTRACT_DIRECTORY /clockchain/mcp/CONTRACT_DIRECTORY

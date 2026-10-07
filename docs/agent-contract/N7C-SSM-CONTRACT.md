@@ -81,8 +81,26 @@ misconfiguration (route 503s); run `check-config-from-ssm.mjs` first.
 | `CONTRACT_SERVER_ANCHORS` | String | no | `0` \| `1`. `1` fires the server-side terms / brief / final anchors — a no-op unless `CONTRACT_ANCHOR_ENABLED=1` (check-config warns) |
 | `CONTRACT_EXPIRE_AT_TTL` | String | no | `0` \| `1`. `1` ends a run non-terminal at its TTL as `expired` / `expired_unbound` through the full terminal path (receipt, close, anchor) instead of dropping it |
 | `CONTRACT_BRIEFS` | String | no | comma list `name:0x<64 lower hex sha256>`; each text is `CONTRACT_BRIEFS_DIR/<name>.md` and must hash to its pin at boot. Serves `contract_get_brief` |
-| `CONTRACT_BRIEFS_DIR` | String | iff briefs | ABSOLUTE path **inside the mcp container** (e.g. `/app/state/briefs` on the `mcp_state` volume — the files must be put there before the restart; the image does not ship them) |
+| `CONTRACT_BRIEFS_DIR` | String | iff briefs | ABSOLUTE path **inside the mcp container**. Production value: `/app/packages/mcp-server/assets/briefs` — the frozen briefs are committed at `packages/mcp-server/assets/briefs/<name>.md` and the image ships them (the Dockerfile runtime stage copies `packages/mcp-server/assets`). No compose volume, no box-side write. `check-config-from-ssm.mjs` maps that path onto the checkout and refuses any other `/app/...` path |
 | `CONTRACT_ROLE_BRIEFS` | String | no | `buyer:<brief>,provider:<brief>` — names from `CONTRACT_BRIEFS`. REQUIRES `CONTRACT_SERVER_ANCHORS=1` and `CONTRACT_BRIEFS` |
+
+**Frozen brief delivery.** A brief is pinned twice: its bytes are committed in
+the repo under `packages/mcp-server/assets/briefs/<name>.md` (so they reach the
+box in the image built by the code deploy), and its sha256 is pinned in
+`CONTRACT_BRIEFS`. The mcp refuses to boot (route 503) if a file is missing or
+its bytes do not hash to the pin. Changing a brief is a code deploy plus an
+SSM pin change, never an edit on the box. Neither the image path nor the
+asset files are in the deploy-box drift list (Caddyfile, docker-compose.yml,
+the systemd unit, the installer, compose-up.sh), so this adds no drift file.
+
+**Track C production shape** (the deploy window): `CONTRACT_POLICY_REGISTRATION=1`,
+`CONTRACT_SERVER_ANCHORS=1` (with `CONTRACT_ANCHOR_ENABLED=1`),
+`CONTRACT_BRIEFS=<door brief>:0x<pinned digest>`,
+`CONTRACT_BRIEFS_DIR=/app/packages/mcp-server/assets/briefs`,
+`CONTRACT_ROLE_BRIEFS=` naming that brief, `CONTRACT_DIRECTORY` absent,
+`CONTRACT_MAX_RUNS_PER_KEY=1`. `check-config-from-ssm.mjs` prints
+`roleBriefs: on`, `briefs: 1`, `directory: 0`, `briefsDir: image` — names and
+verdicts only, never the brief name, digest or text.
 
 ### Telemetry sink parameters (read by `telemetry-sink/sink-up.sh up`)
 
