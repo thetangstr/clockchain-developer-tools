@@ -222,3 +222,65 @@ test("docker compose: CDT settings absent on the host resolve to \"\" (off); pre
   assert.equal(present.services.mcp.environment.TELEMETRY_RUN_SET_HEAD, undefined);
   for (const name of CDT_MCP_NAMES) assert.equal(present.services["telemetry-sink"].environment[name], undefined, name);
 });
+
+// R13(b) head anchor (N4b-8): docker-compose.anchor.yml, applied ONLY by sink-up.sh when
+// /clockchain/mcp/TELEMETRY_ANCHOR is 1. The base file stays anchor-free (absent, never "").
+const anchorFile = path.join(repoRoot, "infra", "clockchain-mcp", "docker-compose.anchor.yml");
+const sinkUp = path.join(repoRoot, "infra", "clockchain-mcp", "telemetry-sink", "sink-up.sh");
+
+function composeConfigWith(files) {
+  const base = { ...process.env, HANDSHAKE_APP_ROOT: "/tmp/handshake-app", COMPOSE_PROFILES: "" };
+  for (const name of [...CDT_MCP_NAMES, "TELEMETRY_RUN_SET_HEAD", "TELEMETRY_ANCHOR_MCP_URL", "TELEMETRY_ANCHOR_TOKEN_FILE"]) delete base[name];
+  const res = spawnSync("docker", ["compose", ...files.flatMap((f) => ["-f", f]), "--profile", "telemetry", "config", "--format", "json"], {
+    cwd: repoRoot, encoding: "utf8", env: base,
+  });
+  assert.equal(res.status, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+test("anchor override: sink-only, fixed internal URL + file-sourced secret, no plaintext token", async () => {
+  const source = await readFile(anchorFile, "utf8");
+  const code = source.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  assert.doesNotMatch(code, /TELEMETRY_ANCHOR_TOKEN(?!_FILE)/);
+  assert.doesNotMatch(code, /\$\{/, "no interpolation: the values are fixed, never \"\"");
+  const services = code.slice(code.indexOf("services:\n"), code.search(/^secrets:/m));
+  assert.deepEqual([...services.matchAll(/^  ([\w-]+):\s*$/gm)].map((m) => m[1]), ["telemetry-sink"]);
+  const svc = serviceBlock(code.replace(/^secrets:/m, "volumes:"), "telemetry-sink");
+  assert.match(svc, /^      TELEMETRY_ANCHOR_MCP_URL:\s*"http:\/\/mcp:8080\/mcp"\s*$/m);
+  assert.match(svc, /^      TELEMETRY_ANCHOR_TOKEN_FILE:\s*"\/run\/secrets\/telemetry_anchor_token"\s*$/m);
+  assert.equal(envBlock(svc).trim().split("\n").length, 2, "exactly the two anchor variables");
+  assert.match(svc, /^    secrets:\n      - telemetry_anchor_token\s*$/m);
+  assert.doesNotMatch(svc, /volumes:|ports:|user:|build:|image:/);
+  const top = code.match(/^secrets:\n((?:^  .*\n?)+)/m);
+  assert.ok(top);
+  assert.match(top[1], /^  telemetry_anchor_token:\n    file:\s*\/opt\/clockchain-mcp\/secrets\/telemetry-anchor-token\s*$/m);
+  assert.doesNotMatch(top[1], /environment:/);
+  // The host path is the one sink-up.sh writes.
+  const script = await readFile(sinkUp, "utf8");
+  assert.match(script, /ANCHOR_SECRET_DIR="\$\{TELEMETRY_ANCHOR_SECRET_DIR:-\/opt\/clockchain-mcp\/secrets\}"/);
+  assert.match(script, /ANCHOR_SECRET_FILE="\$ANCHOR_SECRET_DIR\/telemetry-anchor-token"/);
+  assert.match(script, /ANCHOR_OVERRIDE=infra\/clockchain-mcp\/docker-compose\.anchor\.yml/);
+});
+
+test("docker compose: base = no anchor variables at all; with the override = both on the sink only", () => {
+  const off = composeConfigWith([composeFile]);
+  for (const svc of Object.values(off.services)) {
+    assert.equal(svc.environment?.TELEMETRY_ANCHOR_MCP_URL, undefined);
+    assert.equal(svc.environment?.TELEMETRY_ANCHOR_TOKEN_FILE, undefined);
+  }
+  assert.equal(off.secrets, undefined);
+  const on = composeConfigWith([composeFile, anchorFile]);
+  const sink = on.services["telemetry-sink"];
+  assert.equal(sink.environment.TELEMETRY_ANCHOR_MCP_URL, "http://mcp:8080/mcp");
+  assert.equal(sink.environment.TELEMETRY_ANCHOR_TOKEN_FILE, "/run/secrets/telemetry_anchor_token");
+  assert.deepEqual(sink.secrets, [{ source: "telemetry_anchor_token", target: "/run/secrets/telemetry_anchor_token" }]);
+  assert.equal(on.secrets.telemetry_anchor_token.file, "/opt/clockchain-mcp/secrets/telemetry-anchor-token");
+  assert.equal(sink.user, "10001:10001");
+  // Everything else on the sink is unchanged by the override; no other service sees it.
+  const offSink = off.services["telemetry-sink"];
+  const { TELEMETRY_ANCHOR_MCP_URL: _u, TELEMETRY_ANCHOR_TOKEN_FILE: _f, ...rest } = sink.environment;
+  assert.deepEqual(rest, offSink.environment);
+  assert.deepEqual(sink.volumes, offSink.volumes);
+  for (const name of ["mcp", "host", "caddy"]) assert.deepEqual(on.services[name], off.services[name], name);
+  assert.equal(on.name, off.name, "same compose project");
+});

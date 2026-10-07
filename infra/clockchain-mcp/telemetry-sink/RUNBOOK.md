@@ -14,6 +14,7 @@ Founder decision D22: same box, own container, code-only deploy, **never
 | Box-side script | `infra/clockchain-mcp/telemetry-sink/sink-up.sh` (`preflight`, `up`, `reload-caddy [rev]`, `status`, `stop`) |
 | Config (public, String) | SSM `/clockchain/mcp/TELEMETRY_CONTRACT_KEYS` = `{keyId: public ed25519 JWK}` of the contract server, the only close authority |
 | Optional switch (String) | SSM `/clockchain/mcp/TELEMETRY_RUN_SET_HEAD` = `0`\|`1` (per-run run-set head). Absent = unset = off (the pre-wiring sink); any other value refuses `sink-up.sh up` before the build. Read at sink start only — changing it needs a deliberate sink stop/up |
+| Optional switch (String) | SSM `/clockchain/mcp/TELEMETRY_ANCHOR` = `0`\|`1` (R13(b) head anchor, N4b-8). Absent/`0` = off: no override, no token file (a stale one is removed). `1` = `sink-up.sh up` reads SecureString `/clockchain/mcp/TELEMETRY_ANCHOR_TOKEN` into `/opt/clockchain-mcp/secrets/telemetry-anchor-token` (dir root 0711, file 10001:10001 0400) and adds `docker-compose.anchor.yml`. Read at sink start only. See "Head anchor" below |
 | Tests | `infra/test/telemetry-sink-compose.test.mjs`, `infra/test/caddy-contract.test.mjs`, `infra/test/telemetry-sink-up.test.mjs`, `packages/telemetry-sink/test/*` |
 
 The default `docker compose up`, `compose-up.sh` (systemd, `deploy-box.sh`
@@ -49,8 +50,50 @@ until the close path is wired (step 8).
   (uid 10002, own volume) and `/staging/telemetry/*` routes, and export the
   staging set in `sink-up.sh up`. Prod and staging sets must be disjoint (boot
   check).
-- **Not wired:** `TELEMETRY_ANCHOR_MCP_URL` / `TELEMETRY_ANCHOR_TOKEN` (the
-  token is a secret). Heads carry no anchor; the ready line shows `anchor:false`.
+- **Head anchor (R13(b), N4b-8):** off unless SSM `TELEMETRY_ANCHOR` is `1`.
+  Then the sink calls `tsa_issue` on `http://mcp:8080/mcp` (compose DNS, never
+  public) with its own dedicated MCP bearer before it signs each lane/run-set
+  head, and the anchor rides inside the signed head. The ready line shows
+  `anchor:true`. Procedure and rollback: "Head anchor" below.
+
+## Head anchor (R13(b))
+
+The override `infra/clockchain-mcp/docker-compose.anchor.yml` adds exactly
+`TELEMETRY_ANCHOR_MCP_URL=http://mcp:8080/mcp` and
+`TELEMETRY_ANCHOR_TOKEN_FILE=/run/secrets/telemetry_anchor_token` (a
+file-sourced compose secret) to `telemetry-sink`. It is a separate file because
+the variables must be absent when off (`${X:-}` would pass `""`, which the sink
+refuses). The plaintext `TELEMETRY_ANCHOR_TOKEN` env var is refused in
+production. Defaults apply: agent id `telemetry-sink`, backoff `250,1000,4000`
+(10 s per attempt; worst case ~45 s per head before it signs
+`anchor:{status:"failed"}`, after which the sink answers that run's queries
+`ANCHOR_FAILED`).
+
+Switch on (no open run anywhere: a sink restart drops open runs and in-memory
+run-set heads; save every finished run set first):
+
+1. Mint a **new, dedicated** bearer (`openssl rand -hex 32`, never a role
+   bearer or a person's key). Append it to SecureString
+   `/clockchain/mcp/MCP_AUTH_TOKENS` with the existing `,` separator, keeping
+   every live entry byte-identical (same Type/KeyId/Tier, `--overwrite`), and
+   check the read-back sha256. Put the same value in the new SecureString
+   `/clockchain/mcp/TELEMETRY_ANCHOR_TOKEN`. Never echo either value.
+2. `scripts/deploy-box.sh <sha> --yes` (code-only mcp recreate) so mcp reads
+   the new token list. Gate: canaries; then from inside the sink container a
+   `tools/list` POST to `http://mcp:8080/mcp` with the new bearer (read from a
+   file, never argv) answers 200.
+3. `aws ssm put-parameter --type String --name /clockchain/mcp/TELEMETRY_ANCHOR --value 1`,
+   then `box "bash $SINK stop"` and `box "bash $SINK up"`. Gate: `anchor flag: on
+   (token file 400 10001:10001 …)`, ready line `anchor:true`, `runSetHead:true`
+   and the **same keyId** (a new keyId means `telemetry_state` was lost: stop
+   and roll back), `mcp -> telemetry-sink:8081/v1/health 200`.
+4. Canary: the next lane run's run-set head carries `anchor.status:"anchored"`.
+
+Rollback: `put-parameter --overwrite /clockchain/mcp/TELEMETRY_ANCHOR 0`, then
+`sink-up.sh stop` + `up` (ready line `anchor:false`, same keyId; the token file
+is removed). To revoke the bearer: restore the previous `MCP_AUTH_TOKENS`
+version (`put-parameter` of that value), `delete-parameter
+/clockchain/mcp/TELEMETRY_ANCHOR_TOKEN`, and a code-only `deploy-box.sh`.
 
 ## Deploy (orchestrator, D22)
 

@@ -1,0 +1,25 @@
+# R13(b) / N4b-8 head anchor for the telemetry sink. An OVERRIDE, applied ONLY by
+# `telemetry-sink/sink-up.sh up` when SSM /clockchain/mcp/TELEMETRY_ANCHOR is "1":
+#
+#   docker compose -f docker-compose.yml -f docker-compose.anchor.yml --profile telemetry ...
+#
+# It is a separate file because the variables must be ABSENT when anchoring is off:
+# `${X:-}` would pass "" and the sink refuses an empty TELEMETRY_ANCHOR_MCP_URL at boot.
+#
+# The bearer is a dedicated MCP auth token (one entry of /clockchain/mcp/MCP_AUTH_TOKENS,
+# copied as SecureString /clockchain/mcp/TELEMETRY_ANCHOR_TOKEN). sink-up.sh writes it to
+# the host file below (root dir 0711, file 10001:10001 0400) and compose mounts it as a
+# file-sourced secret: never an env value, never in `docker inspect`. The plaintext
+# TELEMETRY_ANCHOR_TOKEN env var is refused by the sink in production (CDT-SEC L7).
+# mcp is reached over compose DNS on clockchain_edge, never the public URL.
+services:
+  telemetry-sink:
+    environment:
+      TELEMETRY_ANCHOR_MCP_URL: "http://mcp:8080/mcp"
+      TELEMETRY_ANCHOR_TOKEN_FILE: "/run/secrets/telemetry_anchor_token"
+    secrets:
+      - telemetry_anchor_token
+
+secrets:
+  telemetry_anchor_token:
+    file: /opt/clockchain-mcp/secrets/telemetry-anchor-token

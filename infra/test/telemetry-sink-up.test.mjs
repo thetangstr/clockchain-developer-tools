@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,7 +17,11 @@ const PROD_KEYS = '{"contract-server-v1":{"kty":"OKP","crv":"Ed25519","x":"J3iUR
 // runSetHead: undefined = the optional /clockchain/mcp/TELEMETRY_RUN_SET_HEAD parameter is
 // absent (ParameterNotFound); a string = its value; DENIED = a non-NotFound read error.
 const DENIED = Symbol("denied");
-function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, runSetHead, sinkRunning = false, inspect = 'echo "/c created=2026-10-01T00:00:00Z started=2026-10-01T00:00:00Z"' } = {}) {
+// anchor: the optional /clockchain/mcp/TELEMETRY_ANCHOR switch, same encoding as runSetHead.
+// anchorToken: the SecureString /clockchain/mcp/TELEMETRY_ANCHOR_TOKEN as `aws --output text`
+// prints it (value + newline); null = unreadable.
+const ANCHOR_TOKEN = "a".repeat(24) + "5ec7e7" + "b".repeat(34);
+function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, runSetHead, anchor, anchorToken = `${ANCHOR_TOKEN}\n`, sinkRunning = false, inspect = 'echo "/c created=2026-10-01T00:00:00Z started=2026-10-01T00:00:00Z"' } = {}) {
   const temp = mkdtempSync(path.join(tmpdir(), "sink-up-"));
   const bin = path.join(temp, "bin");
   const app = path.join(temp, "app");
@@ -39,9 +43,19 @@ function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, runSetHead, sinkRun
     : runSetHead === DENIED
       ? "echo 'An error occurred (AccessDeniedException) when calling the GetParameter operation' >&2; exit 254"
       : `printf '%s\\n' ${JSON.stringify(runSetHead)}`;
+  const ancBody = anchor === undefined
+    ? "echo 'An error occurred (ParameterNotFound) when calling the GetParameter operation' >&2; exit 254"
+    : anchor === DENIED
+      ? "echo 'An error occurred (AccessDeniedException) when calling the GetParameter operation' >&2; exit 254"
+      : `printf '%s\\n' ${JSON.stringify(anchor)}`;
+  const tokBody = anchorToken === null
+    ? "echo 'An error occurred (AccessDeniedException) when calling the GetParameter operation' >&2; exit 254"
+    : `printf '%b' ${JSON.stringify(anchorToken)}`;
   fake("aws", `
 case "$*" in
   *"--name /clockchain/mcp/TELEMETRY_RUN_SET_HEAD "*) ${rshBody} ;;
+  *"--name /clockchain/mcp/TELEMETRY_ANCHOR_TOKEN "*) ${tokBody} ;;
+  *"--name /clockchain/mcp/TELEMETRY_ANCHOR "*) ${ancBody} ;;
   *) ${keysBody} ;;
 esac`);
   fake("docker", `
@@ -59,7 +73,14 @@ esac`);
   fake("git", 'case "$*" in *"status --short"*) true ;; *"rev-parse"*) echo abc1234 ;; *show*) echo "mcp.clockchain.network {\n}" ;; esac');
   fake("sha256sum", 'echo "deadbeef  $1"');
   fake("stat", "echo ubuntu");
-  return { temp, app, log, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLOCKCHAIN_MCP_APP_ROOT: app } };
+  // Not root in tests: the owner/dir calls are recorded, not executed (chmod stays real).
+  fake("chown", "true");
+  fake("install", 'mkdir -p "${@: -1}"');
+  const secretDir = path.join(temp, "secrets");
+  return {
+    temp, app, log, secretDir, secretFile: path.join(secretDir, "telemetry-anchor-token"),
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLOCKCHAIN_MCP_APP_ROOT: app, TELEMETRY_ANCHOR_SECRET_DIR: secretDir },
+  };
 }
 
 function runScript(fx, args) {
@@ -92,10 +113,11 @@ test("up: reads the PUBLIC keys param (no decryption), builds + starts only the 
   const r = runScript(fx, ["up"]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const ssm = r.calls.filter((c) => c.startsWith("aws "));
-  // The PUBLIC keys param, then the optional run-set-head switch; neither decrypted.
-  assert.equal(ssm.length, 2, ssm.join("\n"));
+  // The PUBLIC keys param, then the optional run-set-head and anchor switches; none decrypted.
+  assert.equal(ssm.length, 3, ssm.join("\n"));
   assert.match(ssm[0], /ssm get-parameter --name \/clockchain\/mcp\/TELEMETRY_CONTRACT_KEYS\b/);
   assert.match(ssm[1], /ssm get-parameter --name \/clockchain\/mcp\/TELEMETRY_RUN_SET_HEAD\b/);
+  assert.match(ssm[2], /ssm get-parameter --name \/clockchain\/mcp\/TELEMETRY_ANCHOR --query\b/);
   for (const c of ssm) assert.doesNotMatch(c, /with-decryption/);
   assert.ok(r.calls.some((c) => /docker compose -f infra\/clockchain-mcp\/docker-compose\.yml --profile telemetry build telemetry-sink$/.test(c)), r.calls.join("\n"));
   assert.ok(r.calls.some((c) => /--profile telemetry up -d --no-deps --wait --wait-timeout \d+ telemetry-sink$/.test(c)), r.calls.join("\n"));
@@ -205,4 +227,74 @@ test("up refuses before build on an invalid TELEMETRY_RUN_SET_HEAD or a non-NotF
     // The bad value itself is never echoed.
     if (typeof opts.runSetHead === "string") assert.doesNotMatch(r.stdout + r.stderr, new RegExp(`\\b${opts.runSetHead}\\b`));
   }
+});
+
+// R13(b) head anchor (N4b-8): TELEMETRY_ANCHOR switch + the dedicated MCP bearer as a 0400 secret file.
+
+const OVERRIDE_RE = /-f infra\/clockchain-mcp\/docker-compose\.anchor\.yml\b/;
+const composeCalls = (calls) => calls.filter((c) => /^docker compose /.test(c));
+const assertNoToken = (r) => {
+  assert.doesNotMatch(r.stdout + r.stderr, /5ec7e7/, "the token is never printed");
+  assert.doesNotMatch(r.calls.join("\n"), /5ec7e7/, "the token is never on a command line");
+};
+
+test("up: TELEMETRY_ANCHOR absent or 0 = no override, no token read, no token file (an old one is removed)", () => {
+  for (const [anchor, verdict] of [[undefined, "absent"], ["0", "off"], ["", "off"]]) {
+    const fx = fixture({ anchor });
+    mkdirSync(fx.secretDir, { recursive: true });
+    writeFileSync(fx.secretFile, "stale\n");
+    const r = runScript(fx, ["up"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`anchor flag: ${verdict}`));
+    assert.match(r.stdout, /anchor token file removed/);
+    assert.ok(!existsSync(fx.secretFile));
+    for (const c of composeCalls(r.calls)) assert.doesNotMatch(c, OVERRIDE_RE, c);
+    assert.ok(!r.calls.some((c) => /TELEMETRY_ANCHOR_TOKEN|with-decryption/.test(c)), r.calls.join("\n"));
+    assertNeverTouchesOthers(r.calls);
+  }
+});
+
+test("up: TELEMETRY_ANCHOR=1 writes the token to a 0400 file for uid 10001 and adds the override to build + up", () => {
+  const fx = fixture({ anchor: "1" });
+  const r = runScript(fx, ["up"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /anchor flag: on/);
+  const tokenRead = r.calls.filter((c) => /--name \/clockchain\/mcp\/TELEMETRY_ANCHOR_TOKEN /.test(c));
+  assert.equal(tokenRead.length, 1);
+  assert.match(tokenRead[0], /--with-decryption/);
+  assert.equal(readFileSync(fx.secretFile, "utf8"), `${ANCHOR_TOKEN}\n`);
+  assert.equal(statSync(fx.secretFile).mode & 0o777, 0o400);
+  assert.ok(r.calls.some((c) => new RegExp(`^chown 10001:10001 ${fx.secretDir}/`).test(c)), r.calls.join("\n"));
+  assert.ok(r.calls.some((c) => new RegExp(`^install -d -m 0711 -o root -g root ${fx.secretDir}$`).test(c)), r.calls.join("\n"));
+  const build = composeCalls(r.calls).find((c) => / build telemetry-sink$/.test(c));
+  const up = composeCalls(r.calls).find((c) => / up -d /.test(c));
+  assert.match(build, OVERRIDE_RE);
+  assert.match(up, OVERRIDE_RE);
+  assert.match(up, /docker-compose\.yml -f infra\/clockchain-mcp\/docker-compose\.anchor\.yml --profile telemetry up -d --no-deps --wait --wait-timeout \d+ telemetry-sink$/);
+  assertNeverTouchesOthers(r.calls);
+  assertNoToken(r);
+});
+
+test("up refuses before build on a bad TELEMETRY_ANCHOR, a denied read, or an unusable token", () => {
+  for (const opts of [
+    { anchor: "yes" }, { anchor: "true" }, { anchor: DENIED },
+    { anchor: "1", anchorToken: null },
+    { anchor: "1", anchorToken: "\n" },
+    { anchor: "1", anchorToken: `${ANCHOR_TOKEN} ${ANCHOR_TOKEN}\n` },
+    { anchor: "1", anchorToken: `${ANCHOR_TOKEN},${ANCHOR_TOKEN}\n${ANCHOR_TOKEN}\n` },
+  ]) {
+    const fx = fixture(opts);
+    const r = runScript(fx, ["up"]);
+    assert.equal(r.status, 4, String(opts.anchor?.toString()) + r.stdout + r.stderr);
+    assert.match(r.stdout, /REFUSING: .*TELEMETRY_ANCHOR/);
+    assert.ok(!r.calls.some((c) => /^docker compose .* (build|up) /.test(c)), "no build/up");
+    assert.ok(!existsSync(fx.secretFile), "no token file left behind");
+    assertNoToken(r);
+  }
+});
+
+test("status prints the ready line's anchor field", () => {
+  const r = runScript(fixture(), ["status"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^anchor: unknown$/m); // the fixture's ready line has no anchor field
 });

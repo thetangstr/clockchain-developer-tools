@@ -7,18 +7,28 @@
 #   sink-up.sh up                 build + start ONLY telemetry-sink (--no-deps); refuses if running
 #   sink-up.sh reload-caddy [rev] docker cp the checkout's (or <rev>'s) Caddyfile into the RUNNING
 #                                 caddy and `caddy reload` it — caddy is never recreated
-#   sink-up.sh status             sink state + its ready line (public keyIds only)
+#   sink-up.sh status             sink state + its ready line (public keyIds only) + its anchor flag
 #   sink-up.sh stop               stop the sink; telemetry_state (sink key, tokens, ledger) is kept
 #
 # Never: compose down, --full-restart, systemctl, or any up/recreate of caddy, host or mcp.
-# Prints no secrets: the SSM values read are the PUBLIC contract-key set (not echoed) and the
-# optional TELEMETRY_RUN_SET_HEAD switch (0/1; only on/off/absent is printed).
+# Prints no secrets: the SSM values read are the PUBLIC contract-key set (not echoed), the
+# optional TELEMETRY_RUN_SET_HEAD and TELEMETRY_ANCHOR switches (0/1; only on/off/absent is
+# printed) and, only when TELEMETRY_ANCHOR is 1, the SecureString TELEMETRY_ANCHOR_TOKEN, which
+# goes straight to a 0400 file for uid 10001 (docker-compose.anchor.yml mounts it as a compose
+# secret) and is never echoed, exported or passed on a command line.
 set -euo pipefail
 
 APP_ROOT="${CLOCKCHAIN_MCP_APP_ROOT:-/opt/clockchain-mcp/app}"
 AWS_REGION="${AWS_REGION:-us-west-2}"
 KEYS_PARAM="${TELEMETRY_CONTRACT_KEYS_PARAM:-/clockchain/mcp/TELEMETRY_CONTRACT_KEYS}"
 RUN_SET_HEAD_PARAM="${TELEMETRY_RUN_SET_HEAD_PARAM:-/clockchain/mcp/TELEMETRY_RUN_SET_HEAD}"
+ANCHOR_PARAM="${TELEMETRY_ANCHOR_PARAM:-/clockchain/mcp/TELEMETRY_ANCHOR}"
+ANCHOR_TOKEN_PARAM="${TELEMETRY_ANCHOR_TOKEN_PARAM:-/clockchain/mcp/TELEMETRY_ANCHOR_TOKEN}"
+# Must equal the secret `file:` in docker-compose.anchor.yml (tests pin both).
+ANCHOR_SECRET_DIR="${TELEMETRY_ANCHOR_SECRET_DIR:-/opt/clockchain-mcp/secrets}"
+ANCHOR_SECRET_FILE="$ANCHOR_SECRET_DIR/telemetry-anchor-token"
+ANCHOR_OVERRIDE=infra/clockchain-mcp/docker-compose.anchor.yml
+SINK_UID=10001
 WAIT_TIMEOUT="${SINK_WAIT_TIMEOUT:-180}"
 CADDYFILE=infra/clockchain-mcp/Caddyfile
 
@@ -119,6 +129,51 @@ case "$MODE" in
       1) echo "runSetHead flag: on" ;;
       *) echo "REFUSING: TELEMETRY_RUN_SET_HEAD wants 0 or 1 (from $RUN_SET_HEAD_PARAM or the environment)"; exit 4 ;;
     esac
+    # R13(b) head anchor (N4b-8). Same rules as the run-set-head switch: absent = off; only
+    # ""/0/1; anything else (or a non-NotFound read error) refuses before the build. When on,
+    # the dedicated MCP bearer is fetched with decryption straight into a 0400 file and the
+    # override adds TELEMETRY_ANCHOR_MCP_URL + the file-sourced secret. The token never enters
+    # this shell's variables, the environment, argv or stdout.
+    ANC_ERR=$(mktemp)
+    trap 'rm -f "$RSH_ERR" "$ANC_ERR"' EXIT
+    ANCHOR=__absent__
+    if ANC=$(aws --region "$AWS_REGION" ssm get-parameter --name "$ANCHOR_PARAM" \
+        --query Parameter.Value --output text </dev/null 2>"$ANC_ERR"); then
+      ANCHOR="$ANC"
+    elif ! grep -q 'ParameterNotFound' "$ANC_ERR"; then
+      echo "REFUSING: cannot read optional $ANCHOR_PARAM (not ParameterNotFound)"
+      exit 4
+    fi
+    case "$ANCHOR" in
+      __absent__|""|0)
+        if [[ "$ANCHOR" == __absent__ ]]; then echo "anchor flag: absent"; else echo "anchor flag: off"; fi
+        if [[ -e "$ANCHOR_SECRET_FILE" ]]; then
+          rm -f "$ANCHOR_SECRET_FILE"
+          echo "anchor token file removed (anchoring off)"
+        fi
+        ;;
+      1)
+        install -d -m 0711 -o root -g root "$ANCHOR_SECRET_DIR"
+        TOKEN_TMP=$(umask 077; mktemp "$ANCHOR_SECRET_DIR/.telemetry-anchor-token.XXXXXX")
+        trap 'rm -f "$RSH_ERR" "$ANC_ERR" "$TOKEN_TMP"' EXIT
+        if ! (umask 077; aws --region "$AWS_REGION" ssm get-parameter --name "$ANCHOR_TOKEN_PARAM" \
+            --with-decryption --query Parameter.Value --output text </dev/null >"$TOKEN_TMP" 2>/dev/null); then
+          echo "REFUSING: anchor flag is on but $ANCHOR_TOKEN_PARAM cannot be read"
+          exit 4
+        fi
+        # Exactly one line holding one non-empty token without whitespace.
+        if [[ "$(wc -l <"$TOKEN_TMP")" -ne 1 ]] || ! grep -Eq '^[^[:space:]]+$' "$TOKEN_TMP"; then
+          echo "REFUSING: $ANCHOR_TOKEN_PARAM is not exactly one token on one line"
+          exit 4
+        fi
+        chown "$SINK_UID:$SINK_UID" "$TOKEN_TMP"
+        chmod 0400 "$TOKEN_TMP"
+        mv -f "$TOKEN_TMP" "$ANCHOR_SECRET_FILE"
+        echo "anchor flag: on (token file $(stat -c '%a %u:%g' "$ANCHOR_SECRET_FILE"), sha256 prefix $(sha256sum <"$ANCHOR_SECRET_FILE" | cut -c1-12))"
+        SDC=("${DC[@]}" -f "$ANCHOR_OVERRIDE" --profile telemetry)
+        ;;
+      *) echo "REFUSING: TELEMETRY_ANCHOR wants 0 or 1 (from $ANCHOR_PARAM)"; exit 4 ;;
+    esac
     BEFORE=$(container_times)
     echo "box: sink build $(date -u +%FT%TZ)"
     "${SDC[@]}" build telemetry-sink </dev/null 2>&1 | tail -3
@@ -164,7 +219,10 @@ case "$MODE" in
 
   status)
     "${SDC[@]}" ps telemetry-sink </dev/null 2>/dev/null || true
-    echo "ready: $(ready_line)"
+    READY=$(ready_line)
+    echo "ready: $READY"
+    ANCHOR_FIELD=$(jq -r 'if has("anchor") then .anchor else "unknown" end' <<<"$READY" 2>/dev/null || true)
+    echo "anchor: ${ANCHOR_FIELD:-unknown}"
     container_times
     ;;
 
