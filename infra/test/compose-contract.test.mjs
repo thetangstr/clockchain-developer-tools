@@ -82,7 +82,23 @@ const CONTRACT_ENV_NAMES = [
   "CONTRACT_ANCHOR_ENABLED",
   "CONTRACT_SETTLEMENT_RAIL",
   "CONTRACT_TRUST_PROXY",
+  // CDT wiring (default-off; see CDT_FEATURE_ENV_NAMES below).
+  "TELEMETRY_LANES",
+  "TELEMETRY_SINK_KEY_ID",
+  "CONTRACT_DIRECTORY",
+  "CONTRACT_MAX_RUNS_PER_KEY",
+  "CONTRACT_POLICY_REGISTRATION",
+  "CONTRACT_SERVER_ANCHORS",
+  "CONTRACT_EXPIRE_AT_TTL",
+  "CONTRACT_BRIEFS",
+  "CONTRACT_BRIEFS_DIR",
+  "CONTRACT_ROLE_BRIEFS",
 ];
+
+// CDT wiring: the settings b04059e does not read. Each must be an optional SSM
+// read in compose-up.sh (absent leaves it unset → compose injects "" → off) and
+// a "${NAME:-}" passthrough on the mcp service.
+const CDT_FEATURE_ENV_NAMES = CONTRACT_ENV_NAMES.slice(CONTRACT_ENV_NAMES.indexOf("TELEMETRY_LANES"));
 
 test("the mcp service carries the full /contract/mcp environment surface", async () => {
   const source = await readFile(composeFile, "utf8");
@@ -115,6 +131,20 @@ test("the mcp service carries the handshake v2 receipts env and compose-up reads
   for (const name of HANDSHAKE_RECEIPT_ENV_NAMES) {
     assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
     assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
+  }
+});
+
+test("CDT wiring: compose-up reads every new contract setting optionally and compose passes it through", async () => {
+  assert.equal(CDT_FEATURE_ENV_NAMES.length, 10);
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  for (const name of CDT_FEATURE_ENV_NAMES) {
+    assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
+    assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
+    // Never a required read, never a secret read, never a default that turns it on.
+    assert.doesNotMatch(up, new RegExp(`^read_(secret|optional_secret|required_env) ${name} `, "m"), name);
+    assert.doesNotMatch(mcpBlock, new RegExp(`${name}:\\s*"\\$\\{${name}:-[^}]`), `${name} must have an empty default`);
   }
 });
 

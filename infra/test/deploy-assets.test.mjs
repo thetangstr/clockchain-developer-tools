@@ -78,6 +78,18 @@ const expectedContractEnv = {
   CONTRACT_ANCHOR_ENABLED: "1\n",
   CONTRACT_SETTLEMENT_RAIL: "simulated\n",
   CONTRACT_TRUST_PROXY: "disabled\n",
+  // CDT wiring: the default-off feature settings b04059e does not read. Synthetic,
+  // non-degenerate values (the wrapper only passes them through; config.ts validates).
+  TELEMETRY_LANES: "1\n",
+  TELEMETRY_SINK_KEY_ID: "telemetry-sink-key-2026-10\n",
+  CONTRACT_DIRECTORY: "roma-travel:kp1\n",
+  CONTRACT_MAX_RUNS_PER_KEY: "16\n",
+  CONTRACT_POLICY_REGISTRATION: "policy-registration-on\n",
+  CONTRACT_SERVER_ANCHORS: "server-anchors-on\n",
+  CONTRACT_EXPIRE_AT_TTL: "expire-at-ttl-on\n",
+  CONTRACT_BRIEFS: "family-travel:0x9999999999999999999999999999999999999999999999999999999999999999\n",
+  CONTRACT_BRIEFS_DIR: "/app/state/briefs\n",
+  CONTRACT_ROLE_BRIEFS: "buyer:family-travel,provider:family-travel\n",
   HANDSHAKE_V2_RECEIPTS: "1\n",
   HANDSHAKE_V2_RECEIPT_ED25519_SEED: "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\n",
   HANDSHAKE_V2_RECEIPT_KEY_ID: "handshake-v2-receipts-2026-10\n",
@@ -272,7 +284,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "$with_decryption" == 1 ]]
-if [[ "\${AWS_PARAMETER_NOT_FOUND:-}" == "$name" ]]; then
+# AWS_PARAMETER_NOT_FOUND: one name or a comma-separated list.
+if [[ ",\${AWS_PARAMETER_NOT_FOUND:-}," == *",$name,"* ]]; then
   echo "An error occurred (ParameterNotFound) when calling the GetParameter operation: Parameter $name not found." >&2
   exit 254
 fi
@@ -335,6 +348,16 @@ case "$name" in
   /clockchain/mcp/CONTRACT_ANCHOR_ENABLED) value=$'1\\n' ;;
   /clockchain/mcp/CONTRACT_SETTLEMENT_RAIL) value=$'simulated\\n' ;;
   /clockchain/mcp/CONTRACT_TRUST_PROXY) value=$'disabled\\n' ;;
+  /clockchain/mcp/TELEMETRY_LANES) value=$'1\\n' ;;
+  /clockchain/mcp/TELEMETRY_SINK_KEY_ID) value=$'telemetry-sink-key-2026-10\\n' ;;
+  /clockchain/mcp/CONTRACT_DIRECTORY) value=$'roma-travel:kp1\\n' ;;
+  /clockchain/mcp/CONTRACT_MAX_RUNS_PER_KEY) value=$'16\\n' ;;
+  /clockchain/mcp/CONTRACT_POLICY_REGISTRATION) value=$'policy-registration-on\\n' ;;
+  /clockchain/mcp/CONTRACT_SERVER_ANCHORS) value=$'server-anchors-on\\n' ;;
+  /clockchain/mcp/CONTRACT_EXPIRE_AT_TTL) value=$'expire-at-ttl-on\\n' ;;
+  /clockchain/mcp/CONTRACT_BRIEFS) value=$'family-travel:0x9999999999999999999999999999999999999999999999999999999999999999\\n' ;;
+  /clockchain/mcp/CONTRACT_BRIEFS_DIR) value=$'/app/state/briefs\\n' ;;
+  /clockchain/mcp/CONTRACT_ROLE_BRIEFS) value=$'buyer:family-travel,provider:family-travel\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPTS) value=$'1\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_ED25519_SEED) value=$'ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_ID) value=$'handshake-v2-receipts-2026-10\\n' ;;
@@ -1056,6 +1079,55 @@ test("compose wrapper reads the /contract/mcp surface optionally — absent para
       assert.equal(result.stdout.includes(secret), false);
       assert.equal(result.stderr.includes(secret), false);
     }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+// CDT wiring: the settings b04059e does not read.
+const cdtFeatureNames = [
+  "TELEMETRY_LANES", "TELEMETRY_SINK_KEY_ID", "CONTRACT_DIRECTORY", "CONTRACT_MAX_RUNS_PER_KEY",
+  "CONTRACT_POLICY_REGISTRATION", "CONTRACT_SERVER_ANCHORS", "CONTRACT_EXPIRE_AT_TTL",
+  "CONTRACT_BRIEFS", "CONTRACT_BRIEFS_DIR", "CONTRACT_ROLE_BRIEFS",
+];
+
+test("CDT wiring: each new contract setting is read from SSM and exported byte-for-byte", async () => {
+  // The full-surface fixture already asserts every value; pin that the new names are in it,
+  // in compose-up's read order (after CONTRACT_TRUST_PROXY, before the HANDSHAKE_V2_* block).
+  const names = Object.keys(expectedContractEnv);
+  const at = names.indexOf("CONTRACT_TRUST_PROXY");
+  assert.deepEqual(names.slice(at + 1, at + 1 + cdtFeatureNames.length), cdtFeatureNames);
+  const up = await readFile(path.join(deployDir, "compose-up.sh"), "utf8");
+  for (const name of cdtFeatureNames) {
+    assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), name);
+  }
+});
+
+test("CDT wiring: all new contract settings absent in SSM leave every one of them unset (b04059e env)", async () => {
+  const { temp, callsFile, dockerOkFile, env } = await createWrapperFixture({
+    env: {
+      AWS_PARAMETER_NOT_FOUND: cdtFeatureNames.map((n) => `/clockchain/mcp/${n}`).join(","),
+      EXPECTED_UNSET: cdtFeatureNames.join(","),
+    },
+  });
+
+  try {
+    const expectedWithout = Object.fromEntries(
+      Object.entries(expectedEnv).filter(([name]) => !cdtFeatureNames.includes(name)),
+    );
+    await writeFile(env.EXPECTED_ENV_FILE, JSON.stringify(expectedWithout), "utf8");
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
+    assert.deepEqual(
+      calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
+      "every new parameter is still fetched — only the export is skipped",
+    );
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+    for (const name of cdtFeatureNames) assert.doesNotMatch(result.stderr, new RegExp(name), name);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }

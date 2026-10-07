@@ -14,7 +14,10 @@ const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
 const script = path.join(repoRoot, "infra", "clockchain-mcp", "telemetry-sink", "sink-up.sh");
 const PROD_KEYS = '{"contract-server-v1":{"kty":"OKP","crv":"Ed25519","x":"J3iURWKkx4kAg-leW-NDKp7AUZQNdowUfLb5HHlQ0xU"}}';
 
-function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, sinkRunning = false, inspect = 'echo "/c created=2026-10-01T00:00:00Z started=2026-10-01T00:00:00Z"' } = {}) {
+// runSetHead: undefined = the optional /clockchain/mcp/TELEMETRY_RUN_SET_HEAD parameter is
+// absent (ParameterNotFound); a string = its value; DENIED = a non-NotFound read error.
+const DENIED = Symbol("denied");
+function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, runSetHead, sinkRunning = false, inspect = 'echo "/c created=2026-10-01T00:00:00Z started=2026-10-01T00:00:00Z"' } = {}) {
   const temp = mkdtempSync(path.join(tmpdir(), "sink-up-"));
   const bin = path.join(temp, "bin");
   const app = path.join(temp, "app");
@@ -28,15 +31,26 @@ function fixture({ ssmValue = PROD_KEYS, ssmMissing = false, sinkRunning = false
     writeFileSync(file, `#!/usr/bin/env bash\nprintf '%s %s\\n' ${name} "$*" >> ${JSON.stringify(log)}\n${body}\n`);
     chmodSync(file, 0o755);
   };
-  fake("aws", ssmMissing
+  const keysBody = ssmMissing
     ? "echo 'ParameterNotFound' >&2; exit 254"
-    : `printf '%s\\n' ${JSON.stringify(ssmValue)}`);
+    : `printf '%s\\n' ${JSON.stringify(ssmValue)}`;
+  const rshBody = runSetHead === undefined
+    ? "echo 'An error occurred (ParameterNotFound) when calling the GetParameter operation' >&2; exit 254"
+    : runSetHead === DENIED
+      ? "echo 'An error occurred (AccessDeniedException) when calling the GetParameter operation' >&2; exit 254"
+      : `printf '%s\\n' ${JSON.stringify(runSetHead)}`;
+  fake("aws", `
+case "$*" in
+  *"--name /clockchain/mcp/TELEMETRY_RUN_SET_HEAD "*) ${rshBody} ;;
+  *) ${keysBody} ;;
+esac`);
   fake("docker", `
 case "$*" in
   *"ps -q telemetry-sink"*) ${sinkRunning ? "echo sinkcid" : "true"} ;;
   *"ps -q caddy"*) echo caddycid ;;
   *"ps -q mcp"*) echo mcpcid ;;
   *"ps -aq caddy host mcp"*) printf 'caddycid\\nhostcid\\nmcpcid\\n' ;;
+  *"up -d"*) printf 'sink-env TELEMETRY_RUN_SET_HEAD=%s\\n' "\${TELEMETRY_RUN_SET_HEAD-<unset>}" >> ${JSON.stringify(log)} ;;
   *"logs"*) echo '{"event":"telemetry-sink-ready","keyId":"sink-ed25519-x","keyCreated":true,"contractKeyIds":["contract-server-v1"],"peerEnv":"none"}' ;;
   inspect*) ${inspect} ;;
   *) true ;;
@@ -78,9 +92,11 @@ test("up: reads the PUBLIC keys param (no decryption), builds + starts only the 
   const r = runScript(fx, ["up"]);
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const ssm = r.calls.filter((c) => c.startsWith("aws "));
-  assert.equal(ssm.length, 1, ssm.join("\n"));
+  // The PUBLIC keys param, then the optional run-set-head switch; neither decrypted.
+  assert.equal(ssm.length, 2, ssm.join("\n"));
   assert.match(ssm[0], /ssm get-parameter --name \/clockchain\/mcp\/TELEMETRY_CONTRACT_KEYS\b/);
-  assert.doesNotMatch(ssm[0], /with-decryption/);
+  assert.match(ssm[1], /ssm get-parameter --name \/clockchain\/mcp\/TELEMETRY_RUN_SET_HEAD\b/);
+  for (const c of ssm) assert.doesNotMatch(c, /with-decryption/);
   assert.ok(r.calls.some((c) => /docker compose -f infra\/clockchain-mcp\/docker-compose\.yml --profile telemetry build telemetry-sink$/.test(c)), r.calls.join("\n"));
   assert.ok(r.calls.some((c) => /--profile telemetry up -d --no-deps --wait --wait-timeout \d+ telemetry-sink$/.test(c)), r.calls.join("\n"));
   assertNeverTouchesOthers(r.calls);
@@ -155,4 +171,38 @@ test("up tolerates host's self-restart (started= moves) but fails on a recreate 
   const bad = runScript(fixture({ inspect: counter("created") }), ["up"]);
   assert.equal(bad.status, 1, bad.stdout + bad.stderr);
   assert.match(bad.stdout, /RECREATED/);
+});
+
+// CDT wiring: TELEMETRY_RUN_SET_HEAD (CDT-GAPS gap 4) is an optional SSM switch for the sink.
+
+test("up: TELEMETRY_RUN_SET_HEAD absent in SSM leaves it unset — the pre-wiring sink env", () => {
+  const fx = fixture();
+  const env = { ...fx.env };
+  delete env.TELEMETRY_RUN_SET_HEAD;
+  const r = runScript({ ...fx, env }, ["up"]);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /runSetHead flag: absent/);
+  assert.ok(r.calls.includes("sink-env TELEMETRY_RUN_SET_HEAD=<unset>"), r.calls.join("\n"));
+  assertNeverTouchesOthers(r.calls);
+});
+
+test("up: TELEMETRY_RUN_SET_HEAD=1 / 0 in SSM is exported to the sink build/up; only on/off is printed", () => {
+  for (const [value, verdict] of [["1", "on"], ["0", "off"]]) {
+    const r = runScript(fixture({ runSetHead: value }), ["up"]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, new RegExp(`runSetHead flag: ${verdict}`));
+    assert.ok(r.calls.includes(`sink-env TELEMETRY_RUN_SET_HEAD=${value}`), r.calls.join("\n"));
+    assertNeverTouchesOthers(r.calls);
+  }
+});
+
+test("up refuses before build on an invalid TELEMETRY_RUN_SET_HEAD or a non-NotFound read error", () => {
+  for (const opts of [{ runSetHead: "yes" }, { runSetHead: "true" }, { runSetHead: DENIED }]) {
+    const r = runScript(fixture(opts), ["up"]);
+    assert.equal(r.status, 4, String(opts.runSetHead?.toString()) + r.stdout + r.stderr);
+    assert.match(r.stdout, /REFUSING: .*TELEMETRY_RUN_SET_HEAD/);
+    assert.ok(!r.calls.some((c) => /^docker compose .* (build|up) /.test(c)), "no build/up");
+    // The bad value itself is never echoed.
+    if (typeof opts.runSetHead === "string") assert.doesNotMatch(r.stdout + r.stderr, new RegExp(`\\b${opts.runSetHead}\\b`));
+  }
 });

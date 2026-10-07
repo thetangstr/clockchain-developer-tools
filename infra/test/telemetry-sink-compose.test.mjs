@@ -183,3 +183,41 @@ test("docker compose: default config has no sink; --profile telemetry adds exact
   assert.deepEqual(composeServices([]), ["caddy", "host", "mcp"]);
   assert.deepEqual(composeServices(["--profile", "telemetry"]), ["caddy", "host", "mcp", "telemetry-sink"]);
 });
+
+// CDT wiring: TELEMETRY_RUN_SET_HEAD (CDT-GAPS gap 4) reaches the sink from the
+// deploy env (sink-up.sh reads the optional SSM switch); the new mcp settings
+// reach mcp. Absent on the host = "" in the container = off (today's behaviour).
+const CDT_MCP_NAMES = [
+  "TELEMETRY_LANES", "TELEMETRY_SINK_KEY_ID", "CONTRACT_DIRECTORY", "CONTRACT_MAX_RUNS_PER_KEY",
+  "CONTRACT_POLICY_REGISTRATION", "CONTRACT_SERVER_ANCHORS", "CONTRACT_EXPIRE_AT_TTL",
+  "CONTRACT_BRIEFS", "CONTRACT_BRIEFS_DIR", "CONTRACT_ROLE_BRIEFS",
+];
+
+test("sink environment wires TELEMETRY_RUN_SET_HEAD with an empty default", async () => {
+  const env = envBlock(serviceBlock(await readFile(composeFile, "utf8"), "telemetry-sink") ?? "");
+  assert.match(env, /^      TELEMETRY_RUN_SET_HEAD:\s*"\$\{TELEMETRY_RUN_SET_HEAD:-\}"\s*$/m);
+});
+
+function composeConfigJson(extraEnv) {
+  const base = { ...process.env, HANDSHAKE_APP_ROOT: "/tmp/handshake-app", COMPOSE_PROFILES: "" };
+  for (const name of [...CDT_MCP_NAMES, "TELEMETRY_RUN_SET_HEAD"]) delete base[name];
+  const res = spawnSync("docker", ["compose", "-f", composeFile, "--profile", "telemetry", "config", "--format", "json"], {
+    cwd: repoRoot, encoding: "utf8", env: { ...base, ...extraEnv },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+test("docker compose: CDT settings absent on the host resolve to \"\" (off); present ones pass through verbatim", () => {
+  const absent = composeConfigJson({});
+  for (const name of CDT_MCP_NAMES) assert.equal(absent.services.mcp.environment[name], "", name);
+  assert.equal(absent.services["telemetry-sink"].environment.TELEMETRY_RUN_SET_HEAD, "");
+
+  const set = Object.fromEntries(CDT_MCP_NAMES.map((n, i) => [n, `v${i}-${n.toLowerCase()}`]));
+  const present = composeConfigJson({ ...set, TELEMETRY_RUN_SET_HEAD: "1" });
+  for (const name of CDT_MCP_NAMES) assert.equal(present.services.mcp.environment[name], set[name], name);
+  assert.equal(present.services["telemetry-sink"].environment.TELEMETRY_RUN_SET_HEAD, "1");
+  // The sink switch never leaks into mcp, nor the mcp settings into the sink.
+  assert.equal(present.services.mcp.environment.TELEMETRY_RUN_SET_HEAD, undefined);
+  for (const name of CDT_MCP_NAMES) assert.equal(present.services["telemetry-sink"].environment[name], undefined, name);
+});

@@ -16,6 +16,7 @@
 import { loadContractConfig } from "../../dist/agent-contract/config.js";
 import { parseContractTokens } from "../../dist/agent-contract/http-handler.js";
 import { PUBLISHED_HOST_ROOTS } from "../../dist/agent-contract/certificate.js";
+import { DEFAULT_MAX_RUNS_PER_KEY } from "../../dist/agent-contract/run-routing.js";
 
 const PRODUCTION_ROOTS = PUBLISHED_HOST_ROOTS.map(
   (r) => `${r.kid}:${r.fingerprint}`,
@@ -23,6 +24,45 @@ const PRODUCTION_ROOTS = PUBLISHED_HOST_ROOTS.map(
 
 function isProductionRoot(root) {
   return PRODUCTION_ROOTS.includes(`${root.kid}:${root.fingerprint}`);
+}
+
+const trimmed = (env, name) => (env[name] ?? "").trim();
+const isOn = (env, name) => trimmed(env, name) === "1";
+/** Entry count of a comma list (CONTRACT_BRIEFS / CONTRACT_DIRECTORY) — never the entries. */
+const listCount = (env, name) => trimmed(env, name).split(",").map((x) => x.trim()).filter((x) => x !== "").length;
+
+/**
+ * CDT wiring: verdicts for the default-off CDT feature switches. Every
+ * switch was already validated by loadContractConfig (a malformed value is
+ * a misconfiguration before we get here); this reports on/off/configured and
+ * counts only — never a value. All "off"/"absent" == the b04059e surface.
+ */
+export function featureVerdicts(env, cfg) {
+  return {
+    telemetryLanes: cfg.telemetryLanes !== undefined ? "on" : "off",
+    telemetrySinkKeyId: trimmed(env, "TELEMETRY_SINK_KEY_ID") === "" ? "absent" : "configured",
+    policyRegistration: cfg.service.features.policyRegistration === true ? "on" : "off",
+    serverAnchors: cfg.service.serverAnchors ? "on" : "off",
+    expireAtTtl: isOn(env, "CONTRACT_EXPIRE_AT_TTL") ? "on" : "off",
+    roleBriefs: cfg.service.roleBriefs ? "on" : "off",
+    briefs: listCount(env, "CONTRACT_BRIEFS"),
+    directory: listCount(env, "CONTRACT_DIRECTORY"),
+  };
+}
+
+/** Settings that load but do nothing as combined — warnings, never a refusal. */
+export function featureWarnings(env, cfg) {
+  const warnings = [];
+  if (cfg.service.serverAnchors && !cfg.anchorEnabled) {
+    warnings.push("CONTRACT_SERVER_ANCHORS=1 without CONTRACT_ANCHOR_ENABLED=1: no server-side anchor will fire");
+  }
+  if (cfg.telemetryLanes === undefined && trimmed(env, "TELEMETRY_SINK_KEY_ID") !== "") {
+    warnings.push("TELEMETRY_SINK_KEY_ID is set but TELEMETRY_LANES is off: it is ignored");
+  }
+  if (trimmed(env, "CONTRACT_BRIEFS") === "" && trimmed(env, "CONTRACT_BRIEFS_DIR") !== "") {
+    warnings.push("CONTRACT_BRIEFS_DIR is set without CONTRACT_BRIEFS: it is ignored");
+  }
+  return warnings;
 }
 
 /**
@@ -111,7 +151,12 @@ export async function checkConfig(env, deps) {
       runTtlMs: cfg.runTtlMs,
       certGraceMs: cfg.certGraceMs,
       sessionTtlMs: cfg.sessionTtlMs,
+      // O-3: live runs per keyId (validated 1..limit by loadContractConfig; default 1 = b04059e).
+      maxRunsPerKey: Number(env.CONTRACT_MAX_RUNS_PER_KEY || String(DEFAULT_MAX_RUNS_PER_KEY)),
     },
+    // CDT wiring: default-off feature switches (verdicts and counts only).
+    features: featureVerdicts(env, cfg),
+    warnings: featureWarnings(env, cfg),
   };
 
   // Release the state-dir lock before exiting — the check must not make a

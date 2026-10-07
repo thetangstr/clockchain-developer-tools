@@ -91,6 +91,17 @@ services:
       CONTRACT_ANCHOR_ENABLED: "${CONTRACT_ANCHOR_ENABLED:-}"
       CONTRACT_SETTLEMENT_RAIL: "${CONTRACT_SETTLEMENT_RAIL:-}"
       CONTRACT_TRUST_PROXY: "${CONTRACT_TRUST_PROXY:-}"
+      # CDT features (default-off; "" == absent == the b04059e surface).
+      TELEMETRY_LANES: "${TELEMETRY_LANES:-}"
+      TELEMETRY_SINK_KEY_ID: "${TELEMETRY_SINK_KEY_ID:-}"
+      CONTRACT_DIRECTORY: "${CONTRACT_DIRECTORY:-}"
+      CONTRACT_MAX_RUNS_PER_KEY: "${CONTRACT_MAX_RUNS_PER_KEY:-}"
+      CONTRACT_POLICY_REGISTRATION: "${CONTRACT_POLICY_REGISTRATION:-}"
+      CONTRACT_SERVER_ANCHORS: "${CONTRACT_SERVER_ANCHORS:-}"
+      CONTRACT_EXPIRE_AT_TTL: "${CONTRACT_EXPIRE_AT_TTL:-}"
+      CONTRACT_BRIEFS: "${CONTRACT_BRIEFS:-}"
+      CONTRACT_BRIEFS_DIR: "${CONTRACT_BRIEFS_DIR:-}"
+      CONTRACT_ROLE_BRIEFS: "${CONTRACT_ROLE_BRIEFS:-}"
     volumes:
       - mcp_state:/app/state
     expose:
@@ -167,6 +178,9 @@ services:
       TELEMETRY_PEER_ENV: "none"
       TELEMETRY_RUN_WINDOW_MS: "${TELEMETRY_RUN_WINDOW_MS:-21600000}"
       TELEMETRY_FLUSH_GRACE_MS: "${TELEMETRY_FLUSH_GRACE_MS:-30000}"
+      # CDT-GAPS gap 4: per-run run-set head ("" == absent == off; "1" == on).
+      # Set by sink-up.sh from /clockchain/mcp/TELEMETRY_RUN_SET_HEAD when present.
+      TELEMETRY_RUN_SET_HEAD: "${TELEMETRY_RUN_SET_HEAD:-}"
     volumes:
       - telemetry_state:/telemetry/state
     # 8081 ingest (/telemetry/v1/*), 8082 query + keys (/telemetry/query/*,

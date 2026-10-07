@@ -401,6 +401,20 @@ read_optional_env CONTRACT_ERC8004_REGISTRY_ADDRESS /clockchain/mcp/CONTRACT_ERC
 read_optional_env CONTRACT_ANCHOR_ENABLED /clockchain/mcp/CONTRACT_ANCHOR_ENABLED
 read_optional_env CONTRACT_SETTLEMENT_RAIL /clockchain/mcp/CONTRACT_SETTLEMENT_RAIL
 read_optional_env CONTRACT_TRUST_PROXY /clockchain/mcp/CONTRACT_TRUST_PROXY
+# CDT features (all default-off; absent or "" == the b04059e surface and behaviour).
+# config.ts validates them at boot: TELEMETRY_LANES=1 needs TELEMETRY_CLOSE_URL and
+# TELEMETRY_SINK_KEY_ID; CONTRACT_ROLE_BRIEFS needs CONTRACT_SERVER_ANCHORS=1 + CONTRACT_BRIEFS;
+# CONTRACT_BRIEFS_DIR is a path INSIDE the mcp container (e.g. under /app/state).
+read_optional_env TELEMETRY_LANES /clockchain/mcp/TELEMETRY_LANES
+read_optional_env TELEMETRY_SINK_KEY_ID /clockchain/mcp/TELEMETRY_SINK_KEY_ID
+read_optional_env CONTRACT_DIRECTORY /clockchain/mcp/CONTRACT_DIRECTORY
+read_optional_env CONTRACT_MAX_RUNS_PER_KEY /clockchain/mcp/CONTRACT_MAX_RUNS_PER_KEY
+read_optional_env CONTRACT_POLICY_REGISTRATION /clockchain/mcp/CONTRACT_POLICY_REGISTRATION
+read_optional_env CONTRACT_SERVER_ANCHORS /clockchain/mcp/CONTRACT_SERVER_ANCHORS
+read_optional_env CONTRACT_EXPIRE_AT_TTL /clockchain/mcp/CONTRACT_EXPIRE_AT_TTL
+read_optional_env CONTRACT_BRIEFS /clockchain/mcp/CONTRACT_BRIEFS
+read_optional_env CONTRACT_BRIEFS_DIR /clockchain/mcp/CONTRACT_BRIEFS_DIR
+read_optional_env CONTRACT_ROLE_BRIEFS /clockchain/mcp/CONTRACT_ROLE_BRIEFS
 # Agent Handshake v2 per-call receipts (opt-in, off unless HANDSHAKE_V2_RECEIPTS=1). Dedicated key — never
 # the contract server key. All optional reads, like the contract block above.
 read_optional_env HANDSHAKE_V2_RECEIPTS /clockchain/mcp/HANDSHAKE_V2_RECEIPTS

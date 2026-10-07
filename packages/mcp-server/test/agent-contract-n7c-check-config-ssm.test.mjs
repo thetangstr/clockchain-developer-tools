@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   ENV_PARAMETERS,
+  SINK_PARAMETERS,
   checkConfigFromSsm,
   loadEnvFromSsm,
   parseArgs,
@@ -62,6 +63,17 @@ function ssmFixture(stateDir, overrides = {}) {
     CONTRACT_ANCHOR_ENABLED: "0",
     CONTRACT_SETTLEMENT_RAIL: "simulated",
     CONTRACT_TRUST_PROXY: "0",
+    // CDT wiring: present but off (values compose would pass; "" == absent).
+    TELEMETRY_LANES: "0",
+    TELEMETRY_SINK_KEY_ID: "",
+    CONTRACT_DIRECTORY: "",
+    CONTRACT_MAX_RUNS_PER_KEY: "1",
+    CONTRACT_POLICY_REGISTRATION: "0",
+    CONTRACT_SERVER_ANCHORS: "0",
+    CONTRACT_EXPIRE_AT_TTL: "0",
+    CONTRACT_BRIEFS: "",
+    CONTRACT_BRIEFS_DIR: "",
+    CONTRACT_ROLE_BRIEFS: "",
     ...overrides,
   };
   return new Map(
@@ -101,8 +113,9 @@ test("check-config-from-ssm loads SSM values into env and reports ready (exit 0)
   for (const name of ENV_PARAMETERS) {
     assert.equal(out.report.parameters[name], "present", name);
   }
+  // CDT wiring: plus the two sink parameters (a verdict only, never written to env).
   const fetched = calls.map((c) => c.name);
-  assert.deepEqual(fetched.sort(), ENV_PARAMETERS.map((n) => `${PREFIX}/${n}`).sort());
+  assert.deepEqual(fetched.sort(), [...ENV_PARAMETERS, ...SINK_PARAMETERS].map((n) => `${PREFIX}/${n}`).sort());
 });
 
 test("absent parameters leave env untouched and report absent", async () => {

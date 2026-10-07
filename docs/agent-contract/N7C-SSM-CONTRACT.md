@@ -63,6 +63,41 @@ marked required falls back to the shown default or stays off.
 | `TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS` | String | no | integer ms, 100..120000 (default 10000) |
 | `TELEMETRY_CLOSE_DEADLINE_MS` | String | no | integer ms, 1000..600000 (default 90000) |
 
+### CDT features (track-b/cdt-wiring) — all default-off
+
+Every row below is optional. Absent (or `""`, which compose injects for an
+unset host variable) gives exactly the b04059e surface and behaviour —
+`infra/clockchain-mcp/compose-up.sh` reads each with `read_optional_env` and
+`docker-compose.yml` passes `"${NAME:-}"`. A malformed value is a boot-time
+misconfiguration (route 503s); run `check-config-from-ssm.mjs` first.
+
+| Parameter (suffix of `/clockchain/mcp/`) | Type | Required | Format / semantics |
+|---|---|---|---|
+| `TELEMETRY_LANES` | String | no | `0` \| `1`. `1` serves `telemetry_open`, links runs to provider lanes and uses the v2 close. REQUIRES `TELEMETRY_CLOSE_URL` and `TELEMETRY_SINK_KEY_ID`; the sink's `TELEMETRY_CONTRACT_KEYS` must carry this server's signer keyId |
+| `TELEMETRY_SINK_KEY_ID` | String | iff lanes on | the sink's signing keyId (public; the lane-open audience), `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`. Read it off the sink's ready line / `/telemetry/keys`. Ignored (check-config warns) while lanes are off |
+| `CONTRACT_DIRECTORY` | String | no | comma list `name:providerKeyId`; each keyId must have a provider token in `CONTRACT_AUTH_TOKENS`. Append-only like the principal pins |
+| `CONTRACT_MAX_RUNS_PER_KEY` | String | no (default `1`) | integer `1..64` — live runs per keyId. `1` = b04059e routing |
+| `CONTRACT_POLICY_REGISTRATION` | String | no | `0` \| `1`. `1` serves `contract_register_policy` (principal-signed buyer policy registrations, persisted in `registered-policies.json`) |
+| `CONTRACT_SERVER_ANCHORS` | String | no | `0` \| `1`. `1` fires the server-side terms / brief / final anchors — a no-op unless `CONTRACT_ANCHOR_ENABLED=1` (check-config warns) |
+| `CONTRACT_EXPIRE_AT_TTL` | String | no | `0` \| `1`. `1` ends a run non-terminal at its TTL as `expired` / `expired_unbound` through the full terminal path (receipt, close, anchor) instead of dropping it |
+| `CONTRACT_BRIEFS` | String | no | comma list `name:0x<64 lower hex sha256>`; each text is `CONTRACT_BRIEFS_DIR/<name>.md` and must hash to its pin at boot. Serves `contract_get_brief` |
+| `CONTRACT_BRIEFS_DIR` | String | iff briefs | ABSOLUTE path **inside the mcp container** (e.g. `/app/state/briefs` on the `mcp_state` volume — the files must be put there before the restart; the image does not ship them) |
+| `CONTRACT_ROLE_BRIEFS` | String | no | `buyer:<brief>,provider:<brief>` — names from `CONTRACT_BRIEFS`. REQUIRES `CONTRACT_SERVER_ANCHORS=1` and `CONTRACT_BRIEFS` |
+
+### Telemetry sink parameters (read by `telemetry-sink/sink-up.sh up`)
+
+These are the sink container's environment, not the mcp's. `compose-up.sh`
+never reads them.
+
+| Parameter (suffix of `/clockchain/mcp/`) | Type | Required | Format / semantics |
+|---|---|---|---|
+| `TELEMETRY_CONTRACT_KEYS` | String | **yes** for the sink | non-empty JSON `{keyId: public key}` (no private JWK member) — the contract server's PUBLIC keys, the only close authority. `sink-up.sh` refuses to build without it |
+| `TELEMETRY_RUN_SET_HEAD` | String | no | `0` \| `1` (no decryption needed). `1` = per-run run-set head (CDT-GAPS gap 4). Absent leaves it unset (compose passes `""` = off = the pre-wiring sink). Any other value, or a read error other than ParameterNotFound, makes `sink-up.sh` refuse BEFORE building. It prints `runSetHead flag: on\|off\|absent`, never the value |
+
+The contract public-key pin is `TELEMETRY_CONTRACT_KEYS` above. Enrollment
+and lane state live in the sink's `TELEMETRY_STATE_DIR` (`/telemetry/state`,
+the `telemetry_state` volume) — no parameter.
+
 ## §Tokens — `CONTRACT_AUTH_TOKENS` for the D20 pairing
 
 Format per entry: `token:role:keyId:agentId:side` — five non-empty,
@@ -142,8 +177,13 @@ node packages/mcp-server/scripts/agent-contract/check-config-from-ssm.mjs \
 
 Reads the same parameters `compose-up.sh` will read, loads them into the
 process environment only, and prints the same redacted verdict as
-`check-config.mjs` plus a `present`/`absent` map per parameter. Values are
-never printed. Exit codes: `0` ready, `1` misconfigured/refused, `2` disabled
+`check-config.mjs` plus a `present`/`absent` map per parameter. The report
+also carries `features` (on/off/configured verdicts and entry counts for the
+CDT rows), `limits.maxRunsPerKey`, `warnings` (settings that load but do
+nothing as combined) and a `sink` block for the two sink parameters
+(`runSetHead: on|off|absent|invalid`, `contractKeys: valid|invalid|absent`,
+whether the signer keyId is published). An invalid sink value is a refusal
+(exit 1). Values are never printed. Exit codes: `0` ready, `1` misconfigured/refused, `2` disabled
 (route flag absent — expected until the enable step of D20).
 
 The contract route ships **disabled**: `CONTRACT_MCP_ENABLED` is itself an SSM

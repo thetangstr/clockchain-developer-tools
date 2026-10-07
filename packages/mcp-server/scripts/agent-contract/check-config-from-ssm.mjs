@@ -11,6 +11,9 @@
  *
  * Exit codes:  0 ready · 1 misconfigured/refused/ssm-failure · 2 disabled.
  *
+ * It also reads the sink's SINK_PARAMETERS (never into env) and adds a
+ * `sink` verdict block; an invalid sink value is a refusal (exit 1).
+ *
  * No parameter VALUE is ever printed — the report adds names only.
  */
 
@@ -37,7 +40,68 @@ export const ENV_PARAMETERS = [
   "CONTRACT_SESSION_TTL_MS", "CONTRACT_STATE_DIR",
   "CONTRACT_ERC8004_CHAIN_ID", "CONTRACT_ERC8004_REGISTRY_ADDRESS",
   "CONTRACT_ANCHOR_ENABLED", "CONTRACT_SETTLEMENT_RAIL", "CONTRACT_TRUST_PROXY",
+  // CDT wiring (default-off; absent == the b04059e surface). Same order as
+  // infra/clockchain-mcp/compose-up.sh reads them.
+  "TELEMETRY_LANES", "TELEMETRY_SINK_KEY_ID", "CONTRACT_DIRECTORY", "CONTRACT_MAX_RUNS_PER_KEY",
+  "CONTRACT_POLICY_REGISTRATION", "CONTRACT_SERVER_ANCHORS", "CONTRACT_EXPIRE_AT_TTL",
+  "CONTRACT_BRIEFS", "CONTRACT_BRIEFS_DIR", "CONTRACT_ROLE_BRIEFS",
 ];
+
+/**
+ * The telemetry-sink parameters sink-up.sh reads (the sink container's env,
+ * not the mcp's). Fetched for a verdict only — NEVER written into env.
+ */
+export const SINK_PARAMETERS = ["TELEMETRY_CONTRACT_KEYS", "TELEMETRY_RUN_SET_HEAD"];
+
+/** Fetch one optional parameter: value, or undefined on ParameterNotFound. */
+async function fetchOptional(fetchParameter, region, name) {
+  try {
+    return await fetchParameter({ region, name });
+  } catch (err) {
+    if (err instanceof Error && err.name === "ParameterNotFound") return undefined;
+    throw err;
+  }
+}
+
+/**
+ * Sink verdicts (names, on/off, keyIds-present booleans — never a value).
+ * `refusals` mirror what sink-up.sh would refuse BEFORE building the sink.
+ */
+export async function checkSinkFromSsm({ region, prefix = "/clockchain/mcp", fetchParameter = fetchParameterAws, signerKeyId } = {}) {
+  const values = {};
+  const parameters = {};
+  for (const name of SINK_PARAMETERS) {
+    values[name] = await fetchOptional(fetchParameter, region, `${prefix}/${name}`);
+    parameters[name] = values[name] === undefined ? "absent" : "present";
+  }
+  const refusals = [];
+  const rsh = values.TELEMETRY_RUN_SET_HEAD;
+  let runSetHead;
+  if (rsh === undefined) runSetHead = "absent";
+  else if (rsh === "" || rsh === "0") runSetHead = "off";
+  else if (rsh === "1") runSetHead = "on";
+  else {
+    runSetHead = "invalid";
+    refusals.push("TELEMETRY_RUN_SET_HEAD wants 0 or 1 (sink-up.sh refuses before build)");
+  }
+  let contractKeys = "absent";
+  let signerKeyPublished = null;
+  if (values.TELEMETRY_CONTRACT_KEYS !== undefined) {
+    let parsed;
+    try { parsed = JSON.parse(values.TELEMETRY_CONTRACT_KEYS); } catch { parsed = undefined; }
+    const ok = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      && Object.keys(parsed).length > 0
+      && Object.values(parsed).every((v) => typeof v === "string" || (v !== null && typeof v === "object" && !("d" in v)));
+    if (ok) {
+      contractKeys = "valid";
+      if (signerKeyId !== undefined) signerKeyPublished = Object.hasOwn(parsed, signerKeyId);
+    } else {
+      contractKeys = "invalid";
+      refusals.push("TELEMETRY_CONTRACT_KEYS is not a non-empty {keyId: public key} object (sink-up.sh refuses)");
+    }
+  }
+  return { parameters, runSetHead, contractKeys, signerKeyPublished, refusals };
+}
 
 /**
  * AWS-backed fetch: ONE GetParameterCommand for `name` with WithDecryption
@@ -110,7 +174,32 @@ export async function checkConfigFromSsm({ region, prefix, env, fetchParameter, 
   // use a scratch dir (the live dir is lock-held by the running service).
   if (stateDir !== undefined) target.CONTRACT_STATE_DIR = stateDir;
   const { exitCode, report } = await checkConfig(target);
-  return { exitCode, report: { ...report, parameters } };
+  let sink;
+  try {
+    sink = await checkSinkFromSsm({
+      region, prefix, fetchParameter, signerKeyId: report.signer?.keyId,
+    });
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "Error";
+    return { exitCode: 1, report: { status: "misconfigured", reason: `ssm fetch failed (${name})`, parameters } };
+  }
+  const out = { ...report, parameters, sink };
+  // Lanes close on the sink: the sink must hold this server's PUBLIC key.
+  if (report.features?.telemetryLanes === "on") {
+    const warnings = [...(out.warnings ?? [])];
+    if (sink.contractKeys === "absent") {
+      warnings.push("TELEMETRY_LANES=1 but TELEMETRY_CONTRACT_KEYS is absent: the sink cannot verify lane opens/closes");
+    } else if (sink.signerKeyPublished === false) {
+      warnings.push("TELEMETRY_LANES=1 but TELEMETRY_CONTRACT_KEYS does not carry this server's signer keyId");
+    }
+    out.warnings = warnings;
+  }
+  if (sink.refusals.length > 0) {
+    out.status = "refused";
+    out.refusals = [...(out.refusals ?? []), ...sink.refusals];
+    return { exitCode: 1, report: out };
+  }
+  return { exitCode, report: out };
 }
 
 const USAGE = `usage: node check-config-from-ssm.mjs [--region <r>] [--prefix <p>] [--state-dir <d>]

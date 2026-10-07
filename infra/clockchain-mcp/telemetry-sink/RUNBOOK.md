@@ -13,6 +13,7 @@ Founder decision D22: same box, own container, code-only deploy, **never
 | Public routes | `infra/clockchain-mcp/Caddyfile`: `/telemetry/v1/*` → 8081, `/telemetry/query/*` → 8082 `/v1/*`, `/telemetry/keys` → 8082 `/v1/keys`. **8083 is never routed**; mcp reaches it as `http://telemetry-sink:8083` |
 | Box-side script | `infra/clockchain-mcp/telemetry-sink/sink-up.sh` (`preflight`, `up`, `reload-caddy [rev]`, `status`, `stop`) |
 | Config (public, String) | SSM `/clockchain/mcp/TELEMETRY_CONTRACT_KEYS` = `{keyId: public ed25519 JWK}` of the contract server, the only close authority |
+| Optional switch (String) | SSM `/clockchain/mcp/TELEMETRY_RUN_SET_HEAD` = `0`\|`1` (per-run run-set head). Absent = unset = off (the pre-wiring sink); any other value refuses `sink-up.sh up` before the build. Read at sink start only — changing it needs a deliberate sink stop/up |
 | Tests | `infra/test/telemetry-sink-compose.test.mjs`, `infra/test/caddy-contract.test.mjs`, `infra/test/telemetry-sink-up.test.mjs`, `packages/telemetry-sink/test/*` |
 
 The default `docker compose up`, `compose-up.sh` (systemd, `deploy-box.sh`

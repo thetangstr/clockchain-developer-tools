@@ -11,12 +11,14 @@
 #   sink-up.sh stop               stop the sink; telemetry_state (sink key, tokens, ledger) is kept
 #
 # Never: compose down, --full-restart, systemctl, or any up/recreate of caddy, host or mcp.
-# Prints no secrets: the only SSM value read is the PUBLIC contract-key set, and it is not echoed.
+# Prints no secrets: the SSM values read are the PUBLIC contract-key set (not echoed) and the
+# optional TELEMETRY_RUN_SET_HEAD switch (0/1; only on/off/absent is printed).
 set -euo pipefail
 
 APP_ROOT="${CLOCKCHAIN_MCP_APP_ROOT:-/opt/clockchain-mcp/app}"
 AWS_REGION="${AWS_REGION:-us-west-2}"
 KEYS_PARAM="${TELEMETRY_CONTRACT_KEYS_PARAM:-/clockchain/mcp/TELEMETRY_CONTRACT_KEYS}"
+RUN_SET_HEAD_PARAM="${TELEMETRY_RUN_SET_HEAD_PARAM:-/clockchain/mcp/TELEMETRY_RUN_SET_HEAD}"
 WAIT_TIMEOUT="${SINK_WAIT_TIMEOUT:-180}"
 CADDYFILE=infra/clockchain-mcp/Caddyfile
 
@@ -97,6 +99,25 @@ case "$MODE" in
     export TELEMETRY_CONTRACT_KEYS="$KEYS"
     # Production runs with TELEMETRY_PEER_ENV=none (compose): no staging peer set may be passed.
     unset TELEMETRY_CONTRACT_KEYS_STAGING
+    # Optional CDT-GAPS gap 4 switch. Absent parameter = the variable is left as it is (normally
+    # unset, so compose passes "" = off, exactly the pre-wiring sink). Any other read error, or a
+    # value other than ""/0/1, refuses BEFORE the build so a bad value never reaches a boot loop.
+    RSH_ERR=$(mktemp)
+    if RSH=$(aws --region "$AWS_REGION" ssm get-parameter --name "$RUN_SET_HEAD_PARAM" \
+        --query Parameter.Value --output text </dev/null 2>"$RSH_ERR"); then
+      export TELEMETRY_RUN_SET_HEAD="$RSH"
+    elif ! grep -q 'ParameterNotFound' "$RSH_ERR"; then
+      rm -f "$RSH_ERR"
+      echo "REFUSING: cannot read optional $RUN_SET_HEAD_PARAM (not ParameterNotFound)"
+      exit 4
+    fi
+    rm -f "$RSH_ERR"
+    case "${TELEMETRY_RUN_SET_HEAD-__absent__}" in
+      __absent__) echo "runSetHead flag: absent" ;;
+      ""|0) echo "runSetHead flag: off" ;;
+      1) echo "runSetHead flag: on" ;;
+      *) echo "REFUSING: TELEMETRY_RUN_SET_HEAD wants 0 or 1 (from $RUN_SET_HEAD_PARAM or the environment)"; exit 4 ;;
+    esac
     BEFORE=$(container_times)
     echo "box: sink build $(date -u +%FT%TZ)"
     "${SDC[@]}" build telemetry-sink </dev/null 2>&1 | tail -3
