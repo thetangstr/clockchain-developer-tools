@@ -164,12 +164,12 @@ test("register_policy: wrong signer, expired, too-long, replayed and provider ca
 });
 
 // CDT-SEC M1 replaced the shared per-role union cap (64) with a per-keyId cap
-// (MAX_REGISTRATIONS_PER_KEY = 8 distinct digests; env ∪ own still ≤ 64), so
+// (MAX_REGISTRATIONS_PER_KEY = 16 distinct digests; env ∪ own still ≤ 64), so
 // one key can no longer fill the role's allowed set for every other key.
 test("register_policy: the per-keyId cap counts that key's live registrations", async () => {
   const env = await boot({ policyRegistration: true });
   try {
-    for (let i = 1; i <= 8; i += 1) {
+    for (let i = 1; i <= 16; i += 1) {
       const digest = `0x${i.toString(16).padStart(64, "0")}`;
       const r = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ digest }));
       assert.equal(r.ok, true, `registration ${i}`);

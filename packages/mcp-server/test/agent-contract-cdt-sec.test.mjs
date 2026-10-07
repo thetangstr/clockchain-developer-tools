@@ -280,12 +280,12 @@ test("M1: a registration for kb1 does not authorize kb2's settlement, even under
 test("M1: the cap is per keyId — kb1 cannot exhaust the allowed set of kb2", async () => {
   const env = await boot({ policyRegistration: true });
   try {
-    for (let i = 1; i <= 8; i += 1) {
+    for (let i = 1; i <= 16; i += 1) {
       assert.equal(env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ digest: digestN(i) })).ok, true, `kb1 #${i}`);
     }
-    const ninth = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ digest: digestN(9) }));
-    assert.deepEqual(ninth, { ok: false, code: "RATE_LIMITED" });
-    const kb2 = env.service.registerPolicy({ keyId: "kb2" }, signPolicy({ tokenKeyId: "kb2", digest: digestN(9) }));
+    const over = env.service.registerPolicy({ keyId: "kb1" }, signPolicy({ digest: digestN(17) }));
+    assert.deepEqual(over, { ok: false, code: "RATE_LIMITED" });
+    const kb2 = env.service.registerPolicy({ keyId: "kb2" }, signPolicy({ tokenKeyId: "kb2", digest: digestN(17) }));
     assert.equal(kb2.ok, true, JSON.stringify(kb2));
   } finally { env.close(); }
 });

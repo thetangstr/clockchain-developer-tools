@@ -42,8 +42,9 @@ export const REGISTERED_POLICIES_FILE = "registered-policies.json";
 export const REGISTERED_POLICIES_SCHEMA = "ac-registered-policies/v1";
 /** A registration may live at most 24 h (the buyer batch TTL). */
 export const MAX_POLICY_REGISTRATION_TTL_MS = 24 * 3600_000;
-/** M1: distinct live registered digests per buyer keyId. */
-export const MAX_REGISTRATIONS_PER_KEY = 8;
+/** M1: distinct live registered digests per buyer keyId (16: two 8-entry
+ * founder batches can overlap inside their 24 h TTLs). */
+export const MAX_REGISTRATIONS_PER_KEY = 16;
 /** M1: live registrations across every keyId (a memory bound only — approval is per keyId). */
 export const MAX_REGISTRATIONS_TOTAL = 1024;
 /** M2: remembered recovery outcomes (signed digest + signature → recovered address). */
