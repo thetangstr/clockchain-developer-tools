@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign as signEd25519 } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import test from "node:test";
 
@@ -1199,7 +1199,7 @@ async function createBoundedWaitHarness(overrides = {}) {
   let registrationAvailable = overrides.registrationAvailable ?? true;
   const harness = { onWaitPoll: overrides.onWaitPoll };
   const relay = {
-    fetchDiscovery: async () => discovery,
+    fetchDiscovery: async () => overrides.discovery ?? discovery,
     getMessages: async ({ after = "0", waitMs = 0 } = {}) => {
       messageCalls.push({ after, waitMs });
       if (waitMs > 0) {
@@ -1759,4 +1759,106 @@ test("agent_handshake_next waits across certificate availability in one call", a
   assert.equal(certificate.certificateSummary.outcome, "VERIFIED");
   assert.equal(certificate.localAction.operation, "verify-certificate");
   assert.ok(harness.waitPolls().length >= 1);
+});
+
+// --- Host session-failed notice (agent_v2_session_failed) -------------------
+// Production P8 (2026-10-07): the host abandoned a session after the relay
+// refused its snapshot, and both roles long-polled agent_handshake_next until
+// the 10-minute deadline. The host now posts a notice signed by its certified
+// per-session key; next() must end at once on a valid one and ignore forgeries.
+function hostSessionKey() {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const raw = publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
+  return { privateKey, raw };
+}
+
+function discoveryWithSessionKey(raw) {
+  return {
+    ...discovery,
+    hostSessionKeyCertificate: {
+      ...discovery.hostSessionKeyCertificate,
+      certificate: { ...discovery.hostSessionKeyCertificate.certificate, sessionPublicKey: raw },
+    },
+  };
+}
+
+function sessionFailedNotice(privateKey, reasonCode, { forSession = sessionId } = {}) {
+  const bytes = Buffer.from(`clockchain.agent-handshake-session-failed/v1\n${forSession}\n${reasonCode}`, "utf8");
+  return {
+    externalBusinessActionPerformed: false,
+    reasonCode,
+    sessionSignature: signEd25519(null, bytes, privateKey).toString("base64"),
+  };
+}
+
+test("verifiedHostSessionFailure accepts only a host notice signed by the certified session key", () => {
+  const { verifiedHostSessionFailure } = v2CoordinatorModule;
+  const host = hostSessionKey();
+  const other = hostSessionKey();
+  const certificate = discoveryWithSessionKey(host.raw).hostSessionKeyCertificate;
+  const entry = (body, role = "host") => ({ kind: "agent_v2_session_failed", role, body, seq: "9", sessionId });
+  const code = "AGENT_HANDSHAKE_V2_SNAPSHOT_REJECTED";
+  assert.equal(verifiedHostSessionFailure([entry(sessionFailedNotice(host.privateKey, code))], sessionId, certificate), code);
+  assert.equal(verifiedHostSessionFailure([entry(sessionFailedNotice(other.privateKey, code))], sessionId, certificate), null);
+  assert.equal(verifiedHostSessionFailure([entry(sessionFailedNotice(host.privateKey, code, { forSession: randomUUID() }))], sessionId, certificate), null);
+  assert.equal(verifiedHostSessionFailure([entry(sessionFailedNotice(host.privateKey, code), "initiator")], sessionId, certificate), null);
+  const signed = sessionFailedNotice(host.privateKey, code);
+  assert.equal(verifiedHostSessionFailure([entry({ ...signed, reasonCode: "AGENT_HANDSHAKE_V2_INVITATION_EXPIRED" })], sessionId, certificate), null);
+  assert.equal(verifiedHostSessionFailure([entry({ externalBusinessActionPerformed: false, reasonCode: code })], sessionId, certificate), null);
+  assert.equal(verifiedHostSessionFailure([entry({ ...signed, reasonCode: "lowercase" })], sessionId, certificate), null);
+  assert.equal(verifiedHostSessionFailure([entry(signed)], sessionId, null), null);
+  // A forged notice before a genuine one does not hide the genuine one.
+  assert.equal(verifiedHostSessionFailure([entry(sessionFailedNotice(other.privateKey, code)), entry(signed)], sessionId, certificate), code);
+});
+
+test("agent_handshake_next ends both roles at once on a signed host invitation-expiry notice", async () => {
+  const host = hostSessionKey();
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true, discovery: discoveryWithSessionKey(host.raw) });
+  await harness.join("initiator");
+  await harness.join("responder");
+  harness.messages.push({
+    seq: String(harness.messages.length + 1), kind: "agent_v2_session_failed", role: "host",
+    body: sessionFailedNotice(host.privateKey, "AGENT_HANDSHAKE_V2_INVITATION_EXPIRED"), sessionId,
+  });
+  for (const role of ["initiator", "responder"]) {
+    await assert.rejects(
+      () => harness.coordinator.next({ access: harness.accesses[role], waitMs: 10_000 }),
+      (error) => error.name === "V2SessionInvitationExpiredError" &&
+        error.reasonCode === "AGENT_HANDSHAKE_V2_INVITATION_EXPIRED" &&
+        error instanceof v2CoordinatorModule.V2CoordinatorError,
+    );
+  }
+  assert.deepEqual(harness.waitPolls(), []);
+});
+
+test("agent_handshake_next ends a long-poll as soon as a signed host failure lands", async () => {
+  const host = hostSessionKey();
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true, discovery: discoveryWithSessionKey(host.raw) });
+  await harness.join("initiator");
+  harness.onWaitPoll = ({ poll }) => {
+    if (poll === 2) {
+      harness.messages.push({
+        seq: String(harness.messages.length + 1), kind: "agent_v2_session_failed", role: "host",
+        body: sessionFailedNotice(host.privateKey, "AGENT_HANDSHAKE_V2_SNAPSHOT_REJECTED"), sessionId,
+      });
+    }
+  };
+  await assert.rejects(
+    () => harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 15_000 }),
+    (error) => error.name === "V2SessionFailedError" && error.reasonCode === "AGENT_HANDSHAKE_V2_SNAPSHOT_REJECTED",
+  );
+  assert.equal(harness.waitPolls().length, 2);
+});
+
+test("agent_handshake_next ignores an unsigned or forged host failure notice", async () => {
+  const host = hostSessionKey();
+  const forger = hostSessionKey();
+  const harness = await createBoundedWaitHarness({ advanceClockOnWaitPoll: true, discovery: discoveryWithSessionKey(host.raw) });
+  await harness.join("initiator");
+  harness.messages.push(
+    { seq: String(harness.messages.length + 1), kind: "agent_v2_session_failed", role: "host", body: { externalBusinessActionPerformed: false, reasonCode: "AGENT_HANDSHAKE_V2_SNAPSHOT_REJECTED" }, sessionId },
+    { seq: String(harness.messages.length + 2), kind: "agent_v2_session_failed", role: "host", body: sessionFailedNotice(forger.privateKey, "AGENT_HANDSHAKE_V2_SNAPSHOT_REJECTED"), sessionId },
+  );
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 0 });
+  assert.equal(outcome.stage, "awaiting_funding");
 });

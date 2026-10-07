@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
 import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
@@ -158,6 +158,25 @@ export class V2SigningWindowExpiredError extends V2CoordinatorError {
 // token.
 export class V2FundingTimeoutError extends V2CoordinatorError {
   constructor() { super(); this.name = "V2FundingTimeoutError"; }
+}
+// The generic host ended this session and said so on the relay log
+// (agent_v2_session_failed, signed by its certified per-session key): a snapshot
+// the relay refused, an invitation that expired unclaimed or was claimed too
+// late, a failed identity preparation or verdict. Terminal for both roles, so
+// agent_handshake_next stops at once instead of waiting out the deadline.
+export class V2SessionFailedError extends V2CoordinatorError {
+  readonly reasonCode: string;
+  constructor(reasonCode: string) {
+    super(`host.${reasonCode.toLowerCase()}`.slice(0, 64));
+    this.name = "V2SessionFailedError";
+    this.reasonCode = reasonCode;
+  }
+}
+export class V2SessionInvitationExpiredError extends V2SessionFailedError {
+  constructor(reasonCode: string) {
+    super(reasonCode);
+    this.name = "V2SessionInvitationExpiredError";
+  }
 }
 export class V2TransientCoordinatorError extends Error {
   readonly retryAfterMs?: number;
@@ -491,6 +510,54 @@ function find(entries: readonly JsonObject[], kind: string, role?: string): Json
   return [...entries].reverse().find((entry) => entry?.kind === kind && (role === undefined || entry?.role === role));
 }
 
+const SESSION_FAILED_KIND = "agent_v2_session_failed";
+const SESSION_FAILED_DOMAIN = "clockchain.agent-handshake-session-failed/v1";
+const HOST_REASON_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const BASE64_SIGNATURE = /^[A-Za-z0-9+/]{86}==$/;
+
+// The relay is an unauthenticated mailbox, so a host failure notice counts only
+// when its Ed25519 signature verifies under the host's certified per-session
+// key (discovery.hostSessionKeyCertificate.certificate.sessionPublicKey) over
+// the domain-separated session id and reason code. Anything else is ignored.
+export function verifiedHostSessionFailure(
+  entries: readonly JsonObject[],
+  sessionId: string,
+  hostSessionKeyCertificate: unknown,
+): string | null {
+  const sessionPublicKey = (hostSessionKeyCertificate as { certificate?: { sessionPublicKey?: unknown } } | null)
+    ?.certificate?.sessionPublicKey;
+  if (typeof sessionPublicKey !== "string") return null;
+  const raw = Buffer.from(sessionPublicKey, "base64");
+  if (raw.length !== 32 || raw.toString("base64") !== sessionPublicKey) return null;
+  let publicKey;
+  try {
+    publicKey = createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, raw]), format: "der", type: "spki" });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (entry?.kind !== SESSION_FAILED_KIND || entry?.role !== "host") continue;
+    const body = entry.body as JsonObject | undefined;
+    const reasonCode = body?.reasonCode;
+    const signature = body?.sessionSignature;
+    if (
+      typeof reasonCode !== "string" || !HOST_REASON_CODE.test(reasonCode) ||
+      typeof signature !== "string" || !BASE64_SIGNATURE.test(signature)
+    ) continue;
+    const bytes = Buffer.from(`${SESSION_FAILED_DOMAIN}\n${sessionId}\n${reasonCode}`, "utf8");
+    let valid = false;
+    try { valid = verifySignature(null, bytes, publicKey, Buffer.from(signature, "base64")); } catch { valid = false; }
+    if (valid) return reasonCode;
+  }
+  return null;
+}
+
+function hostSessionFailed(reasonCode: string): never {
+  if (reasonCode === "AGENT_HANDSHAKE_V2_INVITATION_EXPIRED") throw new V2SessionInvitationExpiredError(reasonCode);
+  throw new V2SessionFailedError(reasonCode);
+}
+
 function funded(entries: readonly JsonObject[], role: V2Role, address: string): boolean {
   return entries.some((entry) => entry?.kind === "agent_v2_funding_record" && entry?.role === "host" && entry?.body?.role === role && entry?.body?.address === address);
 }
@@ -590,11 +657,12 @@ export function createV2Coordinator(options: {
     });
   }
 
-  async function refresh(keyValue: HandshakeKey): Promise<CoordinatorData> {
+  async function refresh(keyValue: HandshakeKey, observed?: { entries?: readonly JsonObject[] }): Promise<CoordinatorData> {
     const record = await store.get(keyValue);
     if (!record) fail();
     const current = data(record);
     const entries = (await options.relay.getMessages({ sessionId: keyValue.session })).messages;
+    if (observed) observed.entries = entries;
     const other = keyValue.role === "initiator" ? "responder" : "initiator";
     const ready = find(entries, "agent_v2_party_ready", other);
     const patch: Partial<CoordinatorData> = {};
@@ -725,7 +793,16 @@ export function createV2Coordinator(options: {
   }
 
   async function evaluateNext(auth: Awaited<ReturnType<typeof authorize>>, role: V2Role): Promise<JsonObject> {
-    let current = await refresh(auth.keyValue);
+    const observed: { entries?: readonly JsonObject[] } = {};
+    let current = await refresh(auth.keyValue, observed);
+    // A signed host failure notice ends the session for both roles before any
+    // other step: there is nothing left to sign, fund or wait for.
+    const hostFailure = verifiedHostSessionFailure(
+      observed.entries ?? [],
+      auth.keyValue.session,
+      current.discovery?.hostSessionKeyCertificate,
+    );
+    if (hostFailure !== null) hostSessionFailed(hostFailure);
     if (!current.policyDigest || !current.sessionKeyAddress) {
       return joinRequired(role, auth.keyValue.session);
     }
