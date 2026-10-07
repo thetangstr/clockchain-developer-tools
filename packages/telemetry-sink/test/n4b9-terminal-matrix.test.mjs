@@ -23,6 +23,8 @@ const PRODUCER_TERMINAL_STATES = [
   "harness_error",
   "cancelled",
   "expired_unbound",
+  // CDT-GAPS gap 2: a fully bound run reaching its TTL (CONTRACT_EXPIRE_AT_TTL=1).
+  "expired",
 ];
 
 const sinkKeys = generateKeyPairSync("ed25519");

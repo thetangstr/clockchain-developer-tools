@@ -465,6 +465,10 @@ export function loadContractConfig(
   if (typeof policyRegistration === "string") return misconfigured(policyRegistration);
   const serverAnchors = flag("CONTRACT_SERVER_ANCHORS");
   if (typeof serverAnchors === "string") return misconfigured(serverAnchors);
+  // CDT-GAPS gap 2: a run non-terminal at its TTL ends "expired" (or
+  // "expired_unbound") with the full terminal path instead of being dropped.
+  const expireAtTtl = flag("CONTRACT_EXPIRE_AT_TTL");
+  if (typeof expireAtTtl === "string") return misconfigured(expireAtTtl);
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN || "4096");
   const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL || "512");
   const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS || String(24 * 3600_000));
@@ -589,6 +593,7 @@ export function loadContractConfig(
       ...(briefs !== undefined ? { briefs } : {}),
       ...(policyRegistration ? { policyRegistration: true } : {}),
       ...(serverAnchors ? { serverAnchors: true } : {}),
+      ...(expireAtTtl ? { expireAtTtl: true } : {}),
       maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
       maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
       runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,

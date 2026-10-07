@@ -211,6 +211,9 @@ export const TERMINAL_STATES = new Set([
   // Half-bound run release: the contract server ends a run that never got
   // both parties bound before its certificate expired with "expired_unbound".
   "expired_unbound",
+  // CDT-GAPS gap 2: a fully bound run that reached its TTL non-terminal
+  // (contract server CONTRACT_EXPIRE_AT_TTL=1) ends with "expired".
+  "expired",
 ]);
 export type TerminalState =
   | "settled"
@@ -220,7 +223,8 @@ export type TerminalState =
   | "budget_exhausted"
   | "harness_error"
   | "cancelled"
-  | "expired_unbound";
+  | "expired_unbound"
+  | "expired";
 
 export type SinkRefusalCode =
   | "UNAUTHORIZED"

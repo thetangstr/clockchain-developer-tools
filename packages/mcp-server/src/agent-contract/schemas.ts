@@ -104,6 +104,9 @@ export const CONTRACT_TERMINAL_STATES = Object.freeze([
   // Half-bound run release: a run still missing a party once its handshake
   // certificate can no longer verify (validUntil + grace) can never complete.
   "expired_unbound",
+  // CDT-GAPS gap 2 (CONTRACT_EXPIRE_AT_TTL=1): a fully bound run still
+  // non-terminal at its TTL (24 h default) ends "expired".
+  "expired",
 ] as const);
 
 const terminalState = z.enum(CONTRACT_TERMINAL_STATES);

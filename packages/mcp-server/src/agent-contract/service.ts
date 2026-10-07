@@ -972,6 +972,20 @@ export function createContractService(options: {
   maxReceiptsPerRun?: number;
   maxReceiptsPerPrincipal?: number;
   runTtlMs?: number;
+  /**
+   * CDT-GAPS gap 2: CONTRACT_EXPIRE_AT_TTL=1 (default off). A run still
+   * non-terminal at its TTL is ENDED, not silently dropped: terminal state
+   * `expired` (both roles bound) or `expired_unbound` (a role missing), with
+   * the terminal job, terminal anchor, close and final anchor of any other
+   * terminal transition. Off: the run is dropped at its TTL as before.
+   */
+  expireAtTtl?: boolean;
+  /**
+   * CDT-GAPS gap 2: how long a TTL-expired run stays in memory (observable,
+   * its close/anchor outcomes chained on the live run) before it is dropped
+   * (default 15 min).
+   */
+  expiredHoldMs?: number;
   /** Optional pin: certificates must attest this exact ERC-8004 chain+registry. */
   expectedErc8004?: { chainId: string; registryAddress: string };
   /** Test seam (CDT-SEC M2): the policy-registration secp256k1 recovery. */
@@ -1101,6 +1115,10 @@ export function createContractService(options: {
   const maxReceiptsPerRun = options.maxReceiptsPerRun ?? DEFAULT_MAX_RECEIPTS_PER_RUN;
   const maxReceiptsPerPrincipal = options.maxReceiptsPerPrincipal ?? DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL;
   const runTtlMs = options.runTtlMs ?? RUN_TTL_MS;
+  const expireAtTtl = options.expireAtTtl === true;
+  const expiredHoldMs = options.expiredHoldMs ?? 15 * 60_000;
+  /** CDT-GAPS gap 2: runId → when its TTL expiry was made terminal. */
+  const ttlExpiredAt = new Map<string, number>();
   // Fail closed at construction: without the policy pins every approval
   // check would be ambiguous — never silently degrade.
   const policyDigests = normalizePolicyDigests(options.policyDigests);
@@ -1440,6 +1458,7 @@ export function createContractService(options: {
 
   function dropRun(runId: string): void {
     runs.delete(runId);
+    ttlExpiredAt.delete(runId);
     router.dropRun(runId);
     boundChains.delete(`${runId}|buyer`);
     boundChains.delete(`${runId}|provider`);
@@ -1450,15 +1469,50 @@ export function createContractService(options: {
     }
   }
 
+  const pastTtl = (run: ContractRun): boolean => now() >= run.createdAtMs + runTtlMs;
+
+  /**
+   * CDT-GAPS gap 2 (CONTRACT_EXPIRE_AT_TTL=1): a run still non-terminal at
+   * its TTL ends like any other terminal transition — `expired` when both
+   * roles are bound, `expired_unbound` when one is missing (the same state
+   * the half-bound bind-deadline release uses). endRun is write-once and its
+   * enqueue fail-closed; a failure leaves the run for the next sweep.
+   */
+  function expireTtlRuns(): void {
+    if (!expireAtTtl) return;
+    for (const run of runs.values()) {
+      if (run.terminalState !== null || !pastTtl(run)) continue;
+      const bothBound = run.bound.buyer !== undefined && run.bound.provider !== undefined;
+      // Marked held BEFORE endRun: its hooks (close emitter state, anchor
+      // outcomes) re-enter evictEnded synchronously and must not drop it.
+      ttlExpiredAt.set(run.runId, now());
+      try {
+        endRun(run, bothBound ? "expired" : "expired_unbound");
+      } catch {
+        ttlExpiredAt.delete(run.runId); // fail-closed enqueue: retried on the next sweep
+      }
+    }
+  }
+
   /**
    * M4/M5: TTL-expired runs are always removed. Terminal-but-fresh runs stay
    * observable (contract_status, receipt feed) and are only dropped under
    * capacity pressure — evidence survives the terminal transition.
+   * CDT-GAPS gap 2: a run made terminal BY its TTL is held for expiredHoldMs
+   * like a fresh terminal run — observable in contract_status and the feed,
+   * its close and anchor outcomes chained on the live run, the final anchor
+   * covering them with a receiptCount — then dropped (capacity pressure may
+   * drop it sooner, as for any ended run).
    */
   function evictEnded(): void {
     expireUnboundRuns();
+    expireTtlRuns();
     for (const [runId, run] of runs) {
-      if (now() >= run.createdAtMs + runTtlMs) dropRun(runId);
+      if (!pastTtl(run)) continue;
+      const heldSince = ttlExpiredAt.get(runId);
+      if (heldSince !== undefined && now() < heldSince + expiredHoldMs) continue;
+      ttlExpiredAt.delete(runId);
+      dropRun(runId);
     }
   }
   function evictForCapacity(): void {
