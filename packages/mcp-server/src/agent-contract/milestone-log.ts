@@ -1,74 +1,65 @@
 /**
- * Milestone log (MILESTONE-TIMELINE.md §4, "Option A"): a server-side,
- * per-milestone Clockchain log written by the contract server at each
- * business-milestone transition. Behind CONTRACT_MILESTONE_LOG=1 (default
- * off); off, nothing here runs and no surface changes.
+ * Milestone log (MILESTONE-TIMELINE.md §4, "Option A", with the founder's
+ * 2026-10-06 answers): a server-side, per-milestone Clockchain log kept by
+ * the contract server at each business-milestone transition. Behind
+ * CONTRACT_MILESTONE_LOG=1 (default off); off, nothing here runs and no
+ * surface changes.
  *
  * Six milestones, in order: discover, proposal, negotiation, agreement,
- * execution, settlement. Every run-chain receipt (business/handshake
- * surface; never the server's own `anchoring` evidence) is attributed to
- * one milestone. When a milestone completes, its entry is SEALED:
+ * execution, settlement. Each run-chain receipt of a state-changing or
+ * fixed-milestone tool is a MEMBER of one milestone; status polls are not
+ * members but are counted (`pollCount`) so nothing is hidden. The server's
+ * own `anchoring`-surface receipts are neither. When a milestone completes
+ * its entry is SEALED:
  *
  *   payload = { schema: "ac.milestone-log/v1", runId, milestone, index,
- *               firstTs, lastTs, receiptIds[], approvalDigests[],
- *               prevEntryDigest }
+ *               firstTs, lastTs, receiptIds[], approvalDigests[], pollCount,
+ *               anchorRef, prevEntryDigest }
  *   digest  = sha256(canonicalJson(payload))   (0x hex; canonical.ts)
  *
- * and written through the run's ContractAnchor (`log`) as that asset hash
- * under `ac-milestone:<runId>:<n>-<milestone>`. `prevEntryDigest` is the
- * previous sealed entry's digest (null for discover), so the entries form
- * one chain a verifier walks in order. The payload holds only ids, digests
- * and times — receipt ids are digests of signed receipts; approval digests
- * are the receipt-linked digests the observer feed already publishes.
+ * `prevEntryDigest` chains all six entries. "Index over anchors": where the
+ * run already has a server anchor for the milestone (`anchorRef`) the entry
+ * references it and writes nothing new:
+ *   discover   → terms (else the run's brief anchor)   [CONTRACT_SERVER_ANCHORS]
+ *   agreement  → agreement                             [always, with an anchor]
+ *   settlement → final (one per run; covers every receipt incl. the settling call) [CONTRACT_SERVER_ANCHORS]
+ * Every other milestone (and any of these without its anchor) is an OWN
+ * write: the digest as asset hash under `ac-milestone:<runId>:<n>-<milestone>`.
+ * A referenced entry's own payload is still committed on chain by the next
+ * own write's prevEntryDigest.
  *
- * When a milestone completes (what the server can observe):
- *   - discover:    the buyer's mandate_submit succeeds. That needs both
- *                  binds (a mandate needs a fully bound run), so it covers
- *                  binds + mandate. Pre-bind calls (rendezvous, handshake)
- *                  are not run receipts; each bind receipt's `preBindHead`
- *                  commits to that principal's pre-bind chain instead.
- *   - proposal:    the first offer_submit succeeds (once discover sealed;
- *                  a provider offer made before the mandate is held until
- *                  the mandate seals discover).
- *   - negotiation: an agreement forms (offer_accept_submit). Empty when the
- *                  first offer was accepted — sealed with no receipts.
- *   - agreement:   offer_accept_submit succeeds.
- *   - execution:   verification_submit succeeds.
- *   - settlement:  the terminal transition.
- * At ANY terminal transition every milestone up to the last one that holds
- * a receipt is sealed; later milestones are never written ("not-reached").
+ * Transitions (server-observable):
+ *   discover    both contract binds succeeded
+ *   proposal    the first offer_submit succeeded (the mandate is proposal)
+ *   negotiation an agreement formed (empty when the first offer was accepted)
+ *   agreement   offer_accept_submit succeeded
+ *   execution   verification_submit succeeded
+ *   settlement  the terminal transition
+ * Any terminal transition seals through the last milestone with evidence;
+ * later milestones are never written ("not-reached").
  *
- * Attribution: a tool with a fixed milestone (MILESTONE_TOOL_CLASS) goes to
- * that milestone, unless it is already sealed — then to the first open one.
- * Stage-agnostic tools (status reads, contract_withdraw, …) take the first
- * open milestone, i.e. the deal stage at that moment.
- *
- * Writes: one per sealed entry, serialized per run (ledger order == index
- * order), idempotent per (reference, digest) in the adapter, with the same
- * honest anchoring → pending → anchored | failed states, bounded confirm
- * loop and boot recovery as the server-side anchors. Entries are recorded on
- * the run and its durable terminal job — never chained as receipts.
- *
- * Restart limits (documented in docs/agent-contract/MILESTONE-LOG.md): live
- * runs are in-memory, so a live run's open milestones die with it (as its
- * receipts do). Entries already on a terminal job are recovered; entries a
- * crash prevented from sealing at terminal render as "lost".
+ * Durability: the whole tracker (buckets, seal count, chain head, entries)
+ * is persisted on the run's terminal job at every seal and inside endRun's
+ * durable enqueue. At boot a terminal job whose close never ran is closed
+ * from its persisted buckets; pending own writes are re-driven (idempotent
+ * per reference + digest in the adapter). A non-terminal run lost to a
+ * restart is "interrupted": its sealed entries are still written.
  */
 import type { AnchorWrite, ContractAnchor } from "./anchor.js";
 import { canonicalDigest } from "./canonical.js";
 import type { ServerReceipt } from "./receipts.js";
-import type { ContractRun } from "./service.js";
-import type { TerminalJob, TerminalMilestoneJob } from "./terminal-jobs.js";
+import type { AnchorRunState, ContractRun } from "./service.js";
+import type { TerminalAnchorJob, TerminalJob } from "./terminal-jobs.js";
 
 export const MILESTONE_LOG_SCHEMA = "ac.milestone-log/v1" as const;
 export const MILESTONES = ["discover", "proposal", "negotiation", "agreement", "execution", "settlement"] as const;
 export type Milestone = (typeof MILESTONES)[number];
 
-/** Tools whose receipts belong to a fixed milestone. Every other run-chain tool takes the first open milestone. */
+/** Tools whose receipts belong to a fixed milestone. */
 export const MILESTONE_TOOL_CLASS: Readonly<Record<string, Milestone>> = Object.freeze({
   contract_bind: "discover",
-  mandate_prepare: "discover",
-  mandate_submit: "discover",
+  mandate_prepare: "proposal",
+  mandate_submit: "proposal",
   catalog_quote: "proposal",
   offer_prepare: "proposal",
   offer_submit: "proposal",
@@ -86,8 +77,14 @@ export const MILESTONE_TOOL_CLASS: Readonly<Record<string, Milestone>> = Object.
   settlement_authorize: "settlement",
 });
 
+/** Stage-agnostic reads: never members, counted as the open milestone's pollCount. */
+export const MILESTONE_POLL_TOOLS: ReadonlySet<string> = new Set([
+  "contract_status", "settlement_status", "agreement_get", "rendezvous_inbox", "contract_get_brief",
+]);
+
 /** An `ok` receipt of these tools completes every milestone through the named one. */
 const CLOSERS: Readonly<Record<string, Milestone>> = Object.freeze({
+  offer_submit: "proposal",
   offer_accept_submit: "agreement",
   verification_submit: "execution",
 });
@@ -96,6 +93,10 @@ export const milestoneReferenceId = (runId: string, m: Milestone): string =>
   `ac-milestone:${runId}:${MILESTONES.indexOf(m) + 1}-${m}`;
 /** Plain text only — the gateway strips punctuation from additional_info. */
 export const milestoneAdditionalInfo = (m: Milestone): string => `agent contract milestone ${m}`;
+
+export type AnchorKind = "terms" | "brief" | "briefBuyer" | "briefProvider" | "agreement" | "final";
+/** A server anchor the milestone is indexed to; `digest` is its subject (final: null until it fires). */
+export interface AnchorRef { kind: AnchorKind; digest: string | null }
 
 export interface MilestonePayload {
   schema: typeof MILESTONE_LOG_SCHEMA;
@@ -106,6 +107,8 @@ export interface MilestonePayload {
   lastTs: string | null;
   receiptIds: string[];
   approvalDigests: string[];
+  pollCount: number;
+  anchorRef: AnchorRef | null;
   prevEntryDigest: string | null;
 }
 
@@ -113,32 +116,37 @@ export interface MilestoneEntryState {
   index: number;
   milestone: Milestone;
   referenceId: string;
-  /** sha256(canonicalJson(payload)) — the anchored asset hash. */
+  /** sha256(canonicalJson(payload)). Own write: the anchored asset hash. */
   digest: string;
   payload: MilestonePayload;
-  status: "anchoring" | "pending" | "anchored" | "failed";
+  source: "own-write" | "track-b-anchor";
+  /** ISO time the entry was sealed (server clock). */
+  sealedAt: string;
+  /** Own write state; "referenced" = the state is the referenced anchor's. */
+  status: "anchoring" | "pending" | "anchored" | "failed" | "referenced";
   anchorId?: string;
   eventHash?: string;
   ledger?: AnchorWrite["anchor"];
   error?: string;
 }
 
-interface Bucket {
+export interface MilestoneBucket {
   receiptIds: string[];
   approvalDigests: string[];
   firstTs: number | null;
   lastTs: number | null;
+  pollCount: number;
 }
 
-/** Per-run, in-memory attribution state (on ContractRun.milestoneLog). */
+/** Per-run attribution state — JSON-serializable; the same object is persisted on the terminal job. */
 export interface MilestoneTracker {
-  buckets: Bucket[];
+  buckets: MilestoneBucket[];
   /** How many milestones are sealed (0..6) — the first open one is MILESTONES[sealed]. */
   sealed: number;
   /** The terminal close ran: nothing more is attributed or sealed. */
   closed: boolean;
-  mandateSeen: boolean;
-  offerSeen: boolean;
+  /** The run was lost (restart / dropped) before it ended: unsealed milestones never complete. */
+  interrupted?: boolean;
   /** run.approvalRecords already attributed. */
   approvalsSeen: number;
   prevDigest: string | null;
@@ -147,36 +155,68 @@ export interface MilestoneTracker {
 
 export function createMilestoneTracker(): MilestoneTracker {
   return {
-    buckets: MILESTONES.map(() => ({ receiptIds: [], approvalDigests: [], firstTs: null, lastTs: null })),
-    sealed: 0, closed: false, mandateSeen: false, offerSeen: false, approvalsSeen: 0, prevDigest: null, entries: [],
+    buckets: MILESTONES.map(() => ({ receiptIds: [], approvalDigests: [], firstTs: null, lastTs: null, pollCount: 0 })),
+    sealed: 0, closed: false, approvalsSeen: 0, prevDigest: null, entries: [],
   };
+}
+
+type AnchorStates = Partial<Record<string, { digest: string } | undefined>>;
+
+/** The server anchor a milestone is indexed to, from the anchors recorded so far. */
+export function anchorRefFor(m: Milestone, anchors: AnchorStates | undefined, finalAnchors: boolean): AnchorRef | null {
+  const a = anchors ?? {};
+  if (m === "discover") {
+    for (const kind of ["terms", "brief", "briefBuyer", "briefProvider"] as const) {
+      const s = a[kind];
+      if (s !== undefined) return { kind, digest: s.digest };
+    }
+    return null;
+  }
+  if (m === "agreement") return a.agreement !== undefined ? { kind: "agreement", digest: a.agreement.digest } : null;
+  if (m === "settlement" && finalAnchors) return { kind: "final", digest: a.final?.digest ?? null };
+  return null;
+}
+
+export interface SealContext {
+  runId: string;
+  /** ms clock for sealedAt. */
+  now: number;
+  anchors: AnchorStates | undefined;
+  /** CONTRACT_SERVER_ANCHORS: a final anchor will cover settlement. */
+  finalAnchors: boolean;
 }
 
 const iso = (ms: number | null): string | null => (ms === null ? null : new Date(ms).toISOString());
 
 /** Seal every open milestone up to and including index `k` (0-based), in order. */
-function sealThrough(t: MilestoneTracker, runId: string, k: number): MilestoneEntryState[] {
+function sealThrough(t: MilestoneTracker, ctx: SealContext, k: number): MilestoneEntryState[] {
   const out: MilestoneEntryState[] = [];
   while (t.sealed <= k && t.sealed < MILESTONES.length) {
     const i = t.sealed;
     const m = MILESTONES[i]!;
     const b = t.buckets[i]!;
+    const anchorRef = anchorRefFor(m, ctx.anchors, ctx.finalAnchors);
     const payload: MilestonePayload = {
       schema: MILESTONE_LOG_SCHEMA,
-      runId,
+      runId: ctx.runId,
       milestone: m,
       index: i + 1,
       firstTs: iso(b.firstTs),
       lastTs: iso(b.lastTs),
       receiptIds: [...b.receiptIds].sort(),
       approvalDigests: [...b.approvalDigests],
+      pollCount: b.pollCount,
+      anchorRef,
       prevEntryDigest: t.prevDigest,
     };
     const digest = canonicalDigest(payload);
     t.prevDigest = digest;
     t.sealed += 1;
     const entry: MilestoneEntryState = {
-      index: i + 1, milestone: m, referenceId: milestoneReferenceId(runId, m), digest, payload, status: "anchoring",
+      index: i + 1, milestone: m, referenceId: milestoneReferenceId(ctx.runId, m), digest, payload,
+      source: anchorRef === null ? "own-write" : "track-b-anchor",
+      sealedAt: new Date(ctx.now).toISOString(),
+      status: anchorRef === null ? "anchoring" : "referenced",
     };
     t.entries.push(entry);
     out.push(entry);
@@ -188,89 +228,127 @@ function sealThrough(t: MilestoneTracker, runId: string, k: number): MilestoneEn
  * Terminal close: seal through the last milestone holding any evidence (or
  * the last already sealed). Milestones after it are never written.
  */
-export function closeMilestones(t: MilestoneTracker, runId: string): MilestoneEntryState[] {
+export function closeMilestones(t: MilestoneTracker, ctx: SealContext): MilestoneEntryState[] {
   if (t.closed) return [];
   t.closed = true;
   let last = t.sealed - 1;
   t.buckets.forEach((b, i) => {
     if (b.receiptIds.length > 0 || b.approvalDigests.length > 0) last = Math.max(last, i);
   });
-  return sealThrough(t, runId, last);
+  return sealThrough(t, ctx, last);
 }
 
 /**
  * Pure attribution step for one appended run-chain receipt. `approvals` are
- * the approval digests the service verified during this call. Returns the
- * entries this receipt sealed (in order), already marked "anchoring".
+ * the approval digests verified during this call; `bothBound` is the run's
+ * binding state after it. Returns the entries this receipt sealed, in order.
  */
 export function observeMilestoneReceipt(
   t: MilestoneTracker,
-  runId: string,
   receipt: Pick<ServerReceipt, "receiptId" | "tool" | "surface" | "outcome" | "ts">,
   approvals: readonly string[],
-  runTerminal: boolean,
+  run: { bothBound: boolean; terminal: boolean },
+  ctx: SealContext,
 ): MilestoneEntryState[] {
   if (t.closed || receipt.surface === "anchoring") return [];
   const sealed: MilestoneEntryState[] = [];
   if (t.sealed < MILESTONES.length) {
-    const cls = MILESTONE_TOOL_CLASS[receipt.tool];
-    const i = Math.max(cls === undefined ? 0 : MILESTONES.indexOf(cls), t.sealed);
-    const b = t.buckets[i]!;
-    b.receiptIds.push(receipt.receiptId);
-    b.approvalDigests.push(...approvals);
-    b.firstTs ??= receipt.ts;
-    b.lastTs = receipt.ts;
+    const open = t.buckets[t.sealed]!;
+    if (MILESTONE_POLL_TOOLS.has(receipt.tool)) {
+      open.pollCount += 1;
+    } else {
+      const cls = MILESTONE_TOOL_CLASS[receipt.tool];
+      const i = Math.max(cls === undefined ? 0 : MILESTONES.indexOf(cls), t.sealed);
+      const b = t.buckets[i]!;
+      b.receiptIds.push(receipt.receiptId);
+      b.firstTs ??= receipt.ts;
+      b.lastTs = receipt.ts;
+    }
+    // Approvals ride the call that verified them (polls verify none).
+    if (approvals.length > 0) {
+      const cls = MILESTONE_TOOL_CLASS[receipt.tool];
+      t.buckets[Math.max(cls === undefined ? 0 : MILESTONES.indexOf(cls), t.sealed)]!.approvalDigests.push(...approvals);
+    }
     if (receipt.outcome === "ok") {
-      if (receipt.tool === "mandate_submit") {
-        t.mandateSeen = true;
-        sealed.push(...sealThrough(t, runId, MILESTONES.indexOf(t.offerSeen ? "proposal" : "discover")));
-      } else if (receipt.tool === "offer_submit") {
-        t.offerSeen = true;
-        if (t.mandateSeen) sealed.push(...sealThrough(t, runId, MILESTONES.indexOf("proposal")));
+      if (receipt.tool === "contract_bind" && run.bothBound) {
+        sealed.push(...sealThrough(t, ctx, MILESTONES.indexOf("discover")));
       } else {
         const closer = CLOSERS[receipt.tool];
-        if (closer !== undefined) sealed.push(...sealThrough(t, runId, MILESTONES.indexOf(closer)));
+        if (closer !== undefined) sealed.push(...sealThrough(t, ctx, MILESTONES.indexOf(closer)));
       }
     }
   }
-  if (runTerminal) sealed.push(...closeMilestones(t, runId));
+  if (run.terminal) sealed.push(...closeMilestones(t, ctx));
   return sealed;
 }
 
-/** One contract_status row per milestone (always six, in order). */
+/** One contract_status row per milestone (always six, in order) — what the UI shows per logging event. */
 export interface RenderedMilestone {
   index: number;
   milestone: Milestone;
   assetReferenceId: string;
-  /** open: not complete yet · not-reached: the run ended before it · lost: the run ended but a restart lost its evidence before it sealed. */
-  status: "open" | "not-reached" | "lost" | "anchoring" | "pending" | "anchored" | "failed";
+  /** own-write: our ac-milestone record · track-b-anchor: the referenced server anchor. Null until sealed. */
+  source: "own-write" | "track-b-anchor" | null;
+  /**
+   * open: not complete · not-reached: the run ended before it · interrupted: the run was lost before it completed ·
+   * awaiting-anchor: indexed to a server anchor that has not fired yet · anchoring/pending/anchored/failed.
+   */
+  status: "open" | "not-reached" | "interrupted" | "awaiting-anchor" | "anchoring" | "pending" | "anchored" | "failed";
+  /** sha256(canonicalJson(payload)) — the entry's chain digest. */
   digest: string | null;
+  /** The hash actually on the ledger: own write = digest; track-b = the referenced anchor's event hash. */
+  assetHash: string | null;
+  anchorRef: AnchorRef | null;
   anchorId: string | null;
-  eventHash: string | null;
-  ledger: AnchorWrite["anchor"] | null;
+  ledgerId: string | null;
+  blockHeight: string | null;
+  sealedAt: string | null;
+  anchoredAt: string | null;
   error: string | null;
   payload: MilestonePayload | null;
 }
 
 export function renderMilestones(
   runId: string,
-  src: { closed: boolean; entries: readonly (MilestoneEntryState | TerminalMilestoneJob)[] } | undefined,
-  /** The run ended (terminal) — unsealed rows are not-reached (closed) or lost (never closed). */
-  ended: boolean,
+  t: MilestoneTracker | undefined,
+  anchors: Partial<Record<string, AnchorRunState | TerminalAnchorJob | undefined>> | undefined,
 ): RenderedMilestone[] {
   return MILESTONES.map((m, i) => {
-    const e = src?.entries.find((x) => x.index === i + 1);
+    const e = t?.entries.find((x) => x.index === i + 1);
+    const base = { index: i + 1, milestone: m, assetReferenceId: milestoneReferenceId(runId, m) };
     if (e === undefined) {
       return {
-        index: i + 1, milestone: m, assetReferenceId: milestoneReferenceId(runId, m),
-        status: src?.closed === true ? "not-reached" : ended ? "lost" : "open",
-        digest: null, anchorId: null, eventHash: null, ledger: null, error: null, payload: null,
+        ...base, source: null,
+        status: t?.interrupted === true ? "interrupted" : t?.closed === true ? "not-reached" : "open",
+        digest: null, assetHash: null, anchorRef: null, anchorId: null, ledgerId: null, blockHeight: null,
+        sealedAt: null, anchoredAt: null, error: null, payload: null,
+      };
+    }
+    let state: { status: RenderedMilestone["status"]; ledger?: AnchorWrite["anchor"]; anchorId?: string; assetHash?: string; error?: string };
+    if (e.source === "track-b-anchor") {
+      const a = anchors?.[e.payload.anchorRef!.kind];
+      state = a === undefined
+        ? { status: "awaiting-anchor" }
+        : { status: a.status, ledger: a.ledger, anchorId: a.anchorId, assetHash: a.eventHash, error: a.error };
+    } else {
+      state = {
+        status: e.status as RenderedMilestone["status"], ledger: e.ledger, anchorId: e.anchorId,
+        assetHash: e.eventHash ?? e.digest, error: e.error,
       };
     }
     return {
-      index: e.index, milestone: m, assetReferenceId: e.referenceId, status: e.status,
-      digest: e.digest, anchorId: e.anchorId ?? null, eventHash: e.eventHash ?? null,
-      ledger: e.ledger ?? null, error: e.error ?? null, payload: e.payload as MilestonePayload,
+      ...base, assetReferenceId: e.referenceId, source: e.source, status: state.status,
+      digest: e.digest, assetHash: state.assetHash ?? null,
+      anchorRef: e.payload.anchorRef?.kind === "final" && e.payload.anchorRef.digest === null && anchors?.final !== undefined
+        ? { kind: "final", digest: anchors.final.digest }
+        : e.payload.anchorRef,
+      anchorId: state.anchorId ?? null,
+      ledgerId: state.ledger?.ledgerId || null,
+      blockHeight: state.ledger?.blockHeight ?? null,
+      sealedAt: e.sealedAt,
+      anchoredAt: state.status === "anchored" ? state.ledger?.time ?? null : null,
+      error: state.error ?? null,
+      payload: e.payload,
     };
   });
 }
@@ -280,91 +358,87 @@ export interface MilestoneLog {
   observe(run: ContractRun, receipt: ServerReceipt): void;
   /** At the terminal transition (endRun): close on the next macrotask if no receipt closed it first. */
   terminal(run: ContractRun): void;
-  /** endRun, inside the durable enqueue: the run's milestone state for its job. */
-  snapshot(run: ContractRun): TerminalJob["milestoneLog"] | undefined;
-  /** Boot recovery for a persisted entry left anchoring/pending. */
-  recover(job: TerminalJob, entry: TerminalMilestoneJob): void;
+  /** endRun, inside the durable enqueue: the run's tracker for its job. */
+  snapshot(run: ContractRun): MilestoneTracker | undefined;
+  /** A live run dropped before it ended: its unsealed milestones are interrupted. */
+  dropped(run: ContractRun): void;
+  /** Boot: close a terminal job never closed, interrupt a lost live run, re-drive pending own writes. */
+  recover(job: TerminalJob): void;
 }
 
 export function createMilestoneLog(deps: {
   anchor: ContractAnchor & Required<Pick<ContractAnchor, "log">>;
   getRun(runId: string): ContractRun | undefined;
   getJob(runId: string): TerminalJob | undefined;
+  /** Get-or-create + mutate + persist (a seal creates the job before the terminal transition). */
   updateJob(runId: string, mutate: (job: TerminalJob) => void): void;
   track(p: Promise<void>): void;
   sleep(ms: number): Promise<void>;
   confirmDelayMs: number;
   confirmMaxAttempts: number;
+  /** CONTRACT_SERVER_ANCHORS: the final anchor covers settlement. */
+  finalAnchors: boolean;
+  now(): number;
 }): MilestoneLog {
   const anchor = deps.anchor;
-  /** Per-run write queue: entries are issued strictly in index order. */
+  /** Per-run write queue: own writes are issued strictly in index order. */
   const queues = new Map<string, Promise<void>>();
 
-  const toJob = (e: MilestoneEntryState | TerminalMilestoneJob): TerminalMilestoneJob => structuredClone({
-    index: e.index, milestone: e.milestone, referenceId: e.referenceId, digest: e.digest,
-    payload: e.payload as unknown as Record<string, unknown>, status: e.status,
-    ...(e.anchorId !== undefined ? { anchorId: e.anchorId } : {}),
-    ...(e.eventHash !== undefined ? { eventHash: e.eventHash } : {}),
-    ...(e.ledger !== undefined ? { ledger: e.ledger } : {}),
-    ...(e.error !== undefined ? { error: e.error } : {}),
-  });
+  const ctxFor = (runId: string, anchors: AnchorStates | undefined): SealContext =>
+    ({ runId, now: deps.now(), anchors, finalAnchors: deps.finalAnchors });
 
-  /** Record an entry state on the live run and (when one exists) its terminal job — never creates a job. */
-  function record(runId: string, next: MilestoneEntryState | TerminalMilestoneJob): void {
+  /** Persist the run's whole tracker on its job (creating the job if needed). */
+  function persistTracker(runId: string, t: MilestoneTracker): void {
+    deps.updateJob(runId, (job) => { job.milestoneLog = structuredClone(t); });
+  }
+
+  /** Record an own-write state on the live tracker and on the job. */
+  function record(runId: string, next: MilestoneEntryState): void {
     const t = deps.getRun(runId)?.milestoneLog;
     if (t !== undefined) {
       const i = t.entries.findIndex((x) => x.index === next.index);
-      if (i >= 0) t.entries[i] = { ...(next as MilestoneEntryState) };
+      if (i >= 0) t.entries[i] = { ...next };
     }
-    if (deps.getJob(runId) === undefined) return;
+    if (deps.getJob(runId)?.milestoneLog === undefined) return;
     deps.updateJob(runId, (job) => {
-      const ml = (job.milestoneLog ??= { closed: false, entries: [] });
+      const ml = job.milestoneLog!;
       const i = ml.entries.findIndex((x) => x.index === next.index);
-      if (i >= 0) ml.entries[i] = toJob(next);
-      else ml.entries.push(toJob(next));
+      if (i >= 0) ml.entries[i] = structuredClone(next);
     });
   }
 
-  function markClosed(runId: string): void {
-    if (deps.getJob(runId) === undefined) return;
-    deps.updateJob(runId, (job) => {
-      const ml = (job.milestoneLog ??= { closed: false, entries: [] });
-      ml.closed = true;
-    });
-  }
-
-  function confirm(runId: string, prior: MilestoneEntryState | TerminalMilestoneJob, attempt: number): void {
+  function confirm(runId: string, prior: MilestoneEntryState, attempt: number): void {
     if (deps.confirmDelayMs <= 0 || attempt > deps.confirmMaxAttempts) return;
     const ledgerId = prior.ledger?.ledgerId;
     deps.track(deps.sleep(deps.confirmDelayMs)
       .then(() => anchor.confirmLog !== undefined && ledgerId !== undefined && ledgerId !== ""
         ? anchor.confirmLog(ledgerId)
-        : anchor.log({ referenceId: prior.referenceId, digestHex: prior.digest, additionalInfo: milestoneAdditionalInfo(prior.milestone as Milestone) })
+        : anchor.log({ referenceId: prior.referenceId, digestHex: prior.digest, additionalInfo: milestoneAdditionalInfo(prior.milestone) })
           .then((w) => w.anchor))
       .then((ledger) => {
         const confirmed = ledger.status === "anchored" && ledger.blockHeight !== null && ledger.time !== null;
-        const next = { ...prior, status: confirmed ? "anchored" as const : "pending" as const, ledger };
+        const next: MilestoneEntryState = { ...prior, status: confirmed ? "anchored" : "pending", ledger };
         record(runId, next);
         if (!confirmed) confirm(runId, next, attempt + 1);
       })
       .catch(() => confirm(runId, prior, attempt + 1)));
   }
 
-  /** Issue one entry (idempotent in the adapter); record every state. */
-  function write(runId: string, entry: MilestoneEntryState | TerminalMilestoneJob): Promise<void> {
+  /** Issue one own write (idempotent in the adapter); record every state. */
+  function write(runId: string, entry: MilestoneEntryState): Promise<void> {
     return Promise.resolve()
       .then(() => anchor.log({
         referenceId: entry.referenceId,
         digestHex: entry.digest,
-        additionalInfo: milestoneAdditionalInfo(entry.milestone as Milestone),
+        additionalInfo: milestoneAdditionalInfo(entry.milestone),
       }))
       .then((w) => {
         const confirmed = w.anchor.status === "anchored" && w.anchor.blockHeight !== null && w.anchor.time !== null;
-        const next = {
-          ...entry, status: confirmed ? "anchored" as const : "pending" as const,
+        const next: MilestoneEntryState = {
+          ...entry, status: confirmed ? "anchored" : "pending",
           anchorId: w.anchorId, eventHash: w.eventHash, ledger: w.anchor,
         };
-        delete (next as { error?: string }).error;
+        delete next.error;
         record(runId, next);
         if (!confirmed) confirm(runId, next, 1);
       })
@@ -373,8 +447,9 @@ export function createMilestoneLog(deps: {
       });
   }
 
-  function enqueue(runId: string, entries: readonly (MilestoneEntryState | TerminalMilestoneJob)[]): void {
+  function enqueue(runId: string, entries: readonly MilestoneEntryState[]): void {
     for (const entry of entries) {
+      if (entry.source !== "own-write") continue;
       const prev = queues.get(runId) ?? Promise.resolve();
       const op = prev.then(() => write(runId, entry));
       queues.set(runId, op);
@@ -383,19 +458,10 @@ export function createMilestoneLog(deps: {
     }
   }
 
-  /** Close the run's tracker (terminal): seal what is left, persist, write. */
-  function close(run: ContractRun): void {
-    const t = run.milestoneLog;
-    if (t === undefined || t.closed) return;
-    const sealed = closeMilestones(t, run.runId);
-    afterSeal(run, sealed);
-  }
-
-  function afterSeal(run: ContractRun, sealed: readonly MilestoneEntryState[]): void {
-    const t = run.milestoneLog!;
-    if (sealed.length > 0) for (const e of sealed) record(run.runId, e);
-    if (t.closed) markClosed(run.runId);
-    enqueue(run.runId, sealed);
+  function afterSeal(runId: string, t: MilestoneTracker, sealed: readonly MilestoneEntryState[], closedNow: boolean): void {
+    if (sealed.length === 0 && !closedNow) return;
+    persistTracker(runId, t);
+    enqueue(runId, sealed);
   }
 
   return {
@@ -405,8 +471,13 @@ export function createMilestoneLog(deps: {
       const recs = run.approvalRecords ?? [];
       const approvals = recs.slice(t.approvalsSeen).map(({ record: r, boundDigest }) => boundDigest ?? r.digest);
       t.approvalsSeen = recs.length;
-      const sealed = observeMilestoneReceipt(t, run.runId, receipt, approvals, run.terminalState !== null);
-      afterSeal(run, sealed);
+      const terminal = run.terminalState !== null;
+      const sealed = observeMilestoneReceipt(
+        t, receipt, approvals,
+        { bothBound: run.bound.buyer !== undefined && run.bound.provider !== undefined, terminal },
+        ctxFor(run.runId, run.anchors),
+      );
+      afterSeal(run.runId, t, sealed, terminal);
     },
     terminal(run) {
       run.milestoneLog ??= createMilestoneTracker();
@@ -414,19 +485,43 @@ export function createMilestoneLog(deps: {
       // observe() closes on it. This deferred close covers sweeps (TTL,
       // half-bound release) where no receipt follows.
       setImmediate(() => {
-        try { close(run); } catch { /* a milestone bug must never fault the terminal path */ }
+        try {
+          const t = run.milestoneLog!;
+          if (t.closed) return;
+          afterSeal(run.runId, t, closeMilestones(t, ctxFor(run.runId, run.anchors)), true);
+        } catch { /* a milestone bug must never fault the terminal path */ }
       });
     },
     snapshot(run) {
-      const t = run.milestoneLog;
-      if (t === undefined) return undefined;
-      return { closed: t.closed, entries: t.entries.map(toJob) };
+      return run.milestoneLog === undefined ? undefined : structuredClone(run.milestoneLog);
     },
-    recover(job, entry) {
-      if (entry.status !== "anchoring" && entry.status !== "pending") return;
-      // Re-issue: the adapter finds the existing record under the same
-      // reference + hash (no second write) and reports its current state.
-      enqueue(job.runId, [entry]);
+    dropped(run) {
+      const t = run.milestoneLog;
+      if (t === undefined || t.closed || run.terminalState !== null) return;
+      t.closed = true;
+      t.interrupted = true;
+      if (deps.getJob(run.runId)?.milestoneLog !== undefined) persistTracker(run.runId, t);
+    },
+    recover(job) {
+      const ml = job.milestoneLog;
+      if (ml === undefined) return;
+      if (!ml.closed) {
+        const t = structuredClone(ml);
+        if (job.terminalState !== null) {
+          // Crash between the terminal transition and the close: seal from the persisted buckets.
+          const sealed = closeMilestones(t, ctxFor(job.runId, job.anchors as AnchorStates | undefined));
+          persistTracker(job.runId, t);
+          enqueue(job.runId, sealed);
+        } else {
+          // The live run died with the process: what it reached stays sealed; nothing more can complete.
+          t.closed = true;
+          t.interrupted = true;
+          persistTracker(job.runId, t);
+        }
+      }
+      // Re-issue: the adapter finds an existing record under the same reference + hash (no second write).
+      // Entries the close just sealed were enqueued above; these are the older pending ones.
+      enqueue(job.runId, ml.entries.filter((e) => e.status === "anchoring" || e.status === "pending"));
     },
   };
 }

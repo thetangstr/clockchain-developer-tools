@@ -10,7 +10,7 @@ import { z } from "zod";
 import { canonicalDigest } from "./canonical.js";
 import { guidanceDigests, type GuidanceDigests } from "./tools-list.js";
 import { verifyCertificateEnvelope, type HostRootPin } from "./certificate.js";
-import type { ContractAnchor } from "./anchor.js";
+import type { AnchorWrite, ContractAnchor } from "./anchor.js";
 import { mintTerminalReceipt, type TerminalReceipt, type TerminalReceiptFields } from "./close-emitter.js";
 import { createTerminalOutbox, type TerminalAnchorJob, type TerminalJob } from "./terminal-jobs.js";
 import { makeReceipt, checkReceiptDraft, chainHead, type ReceiptFields, type ServerReceipt, RECEIPT_CHAIN_GENESIS } from "./receipts.js";
@@ -23,7 +23,7 @@ import { createSimWorld, type SimFaults, type SimRun, type SimTicket, type SimWo
 import { eip191RecoverPublicKey, isCanonicalEip191Signature, publicKeyToAddress } from "./eip191.js";
 import { createRunRouter, keyIdOfChain } from "./run-routing.js";
 import { createPolicyRegistry, type PolicyRegistry } from "./policy-registry.js";
-import { createServerAnchors, termsDigestOf, type ContractBrief, type ServerAnchors } from "./server-anchors.js";
+import { BRIEF_ANCHOR_SUBJECT, createServerAnchors, termsDigestOf, type ContractBrief, type ServerAnchors } from "./server-anchors.js";
 import { createMilestoneLog, type MilestoneLog, type MilestoneTracker } from "./milestone-log.js";
 
 /**
@@ -524,6 +524,8 @@ export interface ContractService {
    * (anchors.milestones). Off = no milestone state, no surface change.
    */
   readonly milestoneLog: boolean;
+  /** CONTRACT_MILESTONE_LOG: this run's Clockchain calls (writes + lookups) through the run anchor; undefined when off. */
+  clockchainCallsFor(runId: string): { writes: number; lookups: number } | undefined;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
@@ -1162,6 +1164,68 @@ export function createContractService(options: {
     ...((options.briefs?.size ?? 0) > 0 ? { briefs: true } : {}),
   });
   const serverAnchorsOn = options.serverAnchors === true;
+  // CONTRACT_MILESTONE_LOG (default off) — live only with a log-capable anchor.
+  const milestoneLogOn = options.milestoneLog === true && options.anchor?.log !== undefined;
+  /**
+   * Milestone log: per-run Clockchain call counts (writes + lookups through
+   * the run anchor), reported in contract_status. Shared brief anchors are
+   * not a run's calls. Off: no wrapper — `runAnchor` IS options.anchor.
+   */
+  const clockchainCalls = new Map<string, { writes: number; lookups: number }>();
+  /** anchorId / ledgerId → runId, so a confirm (which names no run) is counted. */
+  const callOwner = new Map<string, string>();
+  const countCall = (runId: string | undefined, writes: number, lookups: number): void => {
+    if (runId === undefined || (writes === 0 && lookups === 0)) return;
+    const c = clockchainCalls.get(runId) ?? { writes: 0, lookups: 0 };
+    c.writes += writes;
+    c.lookups += lookups;
+    clockchainCalls.set(runId, c);
+    if (outbox.get(runId) !== undefined) updateJob(runId, (job) => { job.clockchainCalls = { ...c }; });
+  };
+  const milestoneRunOf = (referenceId: string): string | undefined =>
+    /^ac-milestone:(.+):[1-6]-[a-z]+$/.exec(referenceId)?.[1];
+  const runAnchor: ContractAnchor | undefined = !milestoneLogOn || options.anchor === undefined
+    ? options.anchor
+    : (() => {
+        const base = options.anchor;
+        const owned = (runId: string | undefined, w: AnchorWrite): AnchorWrite => {
+          if (runId !== undefined) {
+            callOwner.set(w.anchorId, runId);
+            if (w.anchor.ledgerId !== "") callOwner.set(w.anchor.ledgerId, runId);
+          }
+          return w;
+        };
+        return {
+          async anchor(input) {
+            const runId = input.runId === BRIEF_ANCHOR_SUBJECT ? undefined : input.runId;
+            countCall(runId, 1, 0);
+            return owned(runId, await base.anchor(input));
+          },
+          ...(base.confirm !== undefined ? {
+            async confirm(anchorId: string) {
+              countCall(callOwner.get(anchorId), 0, 1);
+              return base.confirm!(anchorId);
+            },
+          } : {}),
+          async log(input) {
+            const runId = milestoneRunOf(input.referenceId);
+            try {
+              const w = await base.log!(input);
+              countCall(runId, w.reused === true ? 0 : 1, 1);
+              return owned(runId, w);
+            } catch (err) {
+              countCall(runId, 0, 1);
+              throw err;
+            }
+          },
+          ...(base.confirmLog !== undefined ? {
+            async confirmLog(ledgerId: string) {
+              countCall(callOwner.get(ledgerId), 0, 1);
+              return base.confirmLog!(ledgerId);
+            },
+          } : {}),
+        };
+      })();
   // CDT-GAPS gap 1: role → brief digest. An unknown name fails construction.
   const roleBriefDigests: Partial<Record<ContractRole, string>> | undefined = (() => {
     if (options.roleBriefs === undefined) return undefined;
@@ -1502,6 +1566,10 @@ export function createContractService(options: {
   }
 
   function dropRun(runId: string): void {
+    const dropped = runs.get(runId);
+    if (dropped !== undefined) {
+      try { milestoneLog?.dropped(dropped); } catch { /* never block a drop */ }
+    }
     runs.delete(runId);
     ttlExpiredAt.delete(runId);
     router.dropRun(runId);
@@ -2045,7 +2113,7 @@ export function createContractService(options: {
   // in-process ContractAnchor, outcomes recorded on run + job, never chained.
   const serverAnchors = createServerAnchors({
     // M5: without CONTRACT_SERVER_ANCHORS=1 every server-side anchor is a no-op.
-    anchor: serverAnchorsOn ? options.anchor : undefined,
+    anchor: serverAnchorsOn ? runAnchor : undefined,
     getRun: (runId) => runs.get(runId),
     getJob: (runId) => outbox.get(runId),
     updateJob: (runId, mutate) => void updateJob(runId, mutate),
@@ -2062,23 +2130,27 @@ export function createContractService(options: {
   });
   // Milestone log (CONTRACT_MILESTONE_LOG, default off): undefined = every
   // hook below is a no-op and no run or job carries milestone state.
-  const milestoneAnchor = options.anchor;
-  const milestoneLog: MilestoneLog | undefined =
-    options.milestoneLog === true && milestoneAnchor?.log !== undefined
-      ? createMilestoneLog({
-          anchor: milestoneAnchor as ContractAnchor & Required<Pick<ContractAnchor, "log">>,
-          getRun: (runId) => runs.get(runId),
-          getJob: (runId) => outbox.get(runId),
-          updateJob: (runId, mutate) => void updateJob(runId, mutate),
-          track: (p) => trackAnchorOp(p),
-          sleep,
-          confirmDelayMs: anchorConfirmDelayMs,
-          confirmMaxAttempts: anchorConfirmMaxAttempts,
-        })
-      : undefined;
+  const milestoneLog: MilestoneLog | undefined = milestoneLogOn
+    ? createMilestoneLog({
+        anchor: runAnchor as ContractAnchor & Required<Pick<ContractAnchor, "log">>,
+        getRun: (runId) => runs.get(runId),
+        getJob: (runId) => outbox.get(runId),
+        updateJob: (runId, mutate) => void updateJob(runId, (job) => {
+          mutate(job);
+          const c = clockchainCalls.get(runId);
+          if (c !== undefined) job.clockchainCalls = { ...c };
+        }),
+        track: (p) => trackAnchorOp(p),
+        sleep,
+        confirmDelayMs: anchorConfirmDelayMs,
+        confirmMaxAttempts: anchorConfirmMaxAttempts,
+        finalAnchors: serverAnchorsOn,
+        now,
+      })
+    : undefined;
 
   const fireAnchor = (run: ContractRun, kind: "agreement" | "terminal"): void => {
-    const anchor = options.anchor;
+    const anchor = runAnchor;
     if (anchor === undefined) return;
     const digest = kind === "agreement" ? run.agreement?.agreementDigest : chainHead(run.receipts);
     if (digest === null || digest === undefined) return;
@@ -2160,7 +2232,7 @@ export function createContractService(options: {
    * job then rests as "pending" and restart recovery resumes it.
    */
   const scheduleAnchorConfirm = (run: ContractRun, kind: "agreement" | "terminal", digest: string, anchorId: string, attempt: number): void => {
-    const anchor = options.anchor;
+    const anchor = runAnchor;
     if (anchor === undefined || anchorConfirmDelayMs <= 0) return;
     const op = sleep(anchorConfirmDelayMs)
       .then(() => anchor.confirm !== undefined
@@ -2223,7 +2295,7 @@ export function createContractService(options: {
    * for the next boot.
    */
   const recoverAnchorJob = (job: TerminalJob, aj: TerminalAnchorJob, attempt = 1): void => {
-    const anchor = options.anchor;
+    const anchor = runAnchor;
     if (anchor === undefined) return;
     const runId = job.runId;
     const persist = (status: TerminalAnchorJob["status"], extra?: Partial<TerminalAnchorJob>): void =>
@@ -2332,6 +2404,8 @@ export function createContractService(options: {
       // Milestone log: the entries sealed so far join the job (flag off: none).
       const ml = milestoneLog?.snapshot(run);
       if (ml !== undefined) job.milestoneLog = ml;
+      const calls = milestoneLog !== undefined ? clockchainCalls.get(run.runId) : undefined;
+      if (calls !== undefined) job.clockchainCalls = { ...calls };
       if (receipt !== undefined) {
         job.receipt = receipt;
         job.receiptDigest = canonicalDigest(receipt);
@@ -2438,8 +2512,16 @@ export function createContractService(options: {
           serverAnchors.recover(job, aj);
         }
       }
-      // Milestone log entries re-drive unchained (idempotent re-issue).
-      for (const entry of job.milestoneLog?.entries ?? []) milestoneLog?.recover(job, entry);
+      // Milestone log: seed the call counts and owners, then close / interrupt /
+      // re-drive (idempotent re-issue).
+      if (milestoneLog !== undefined) {
+        if (job.clockchainCalls !== undefined) clockchainCalls.set(job.runId, { ...job.clockchainCalls });
+        for (const a of Object.values(job.anchors ?? {})) if (a?.anchorId !== undefined) callOwner.set(a.anchorId, job.runId);
+        for (const e of job.milestoneLog?.entries ?? []) {
+          if (e.ledger?.ledgerId) callOwner.set(e.ledger.ledgerId, job.runId);
+        }
+        milestoneLog.recover(job);
+      }
     }
   }
 
@@ -2461,6 +2543,11 @@ export function createContractService(options: {
     serverAnchors: serverAnchorsOn,
     roleBriefs: roleBriefDigests !== undefined,
     milestoneLog: milestoneLog !== undefined,
+    clockchainCallsFor: (runId) => {
+      if (milestoneLog === undefined) return undefined;
+      const c = clockchainCalls.get(runId) ?? outbox.get(runId)?.clockchainCalls;
+      return c === undefined ? { writes: 0, lookups: 0 } : { ...c };
+    },
     registerPolicy: (principal, input) => features.policyRegistration === true
       ? policyRegistry.register(principal, input)
       : { ok: false, code: "NOT_FOUND" },

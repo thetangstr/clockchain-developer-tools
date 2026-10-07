@@ -468,7 +468,10 @@ export function buildContractServer(options: {
                 final: renderFinalAnchor(job.anchors?.final),
               } : {}),
               // CONTRACT_MILESTONE_LOG: the six entries from the durable job.
-              ...(milestoneLogOn ? { milestones: renderMilestones(job.runId, job.milestoneLog, true) } : {}),
+              ...(milestoneLogOn ? {
+                milestones: renderMilestones(job.runId, job.milestoneLog, job.anchors),
+                clockchainCalls: service.clockchainCallsFor(job.runId) ?? { writes: 0, lookups: 0 },
+              } : {}),
             },
             // PR #180 F4: the recovered terminal run is the caller's PRIOR run.
             priorRun: true,
@@ -551,10 +554,12 @@ export function buildContractServer(options: {
               : renderServerAnchor(anchorStates?.brief),
             final: renderFinalAnchor(anchorStates?.final),
           } : {}),
-          // CONTRACT_MILESTONE_LOG: the six per-milestone entries (open /
-          // anchoring / pending / anchored / failed / not-reached). A live
-          // run's tracker always closes, so an unsealed row reads "open".
-          ...(milestoneLogOn ? { milestones: renderMilestones(run.runId, run.milestoneLog, false) } : {}),
+          // CONTRACT_MILESTONE_LOG: the six per-milestone entries (one row per
+          // logging event) and this run's Clockchain call count.
+          ...(milestoneLogOn ? {
+            milestones: renderMilestones(run.runId, run.milestoneLog, anchorStates),
+            clockchainCalls: service.clockchainCallsFor(run.runId) ?? { writes: 0, lookups: 0 },
+          } : {}),
         },
         // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
         // this run's offers (+ the one this caller may accept), agreement,

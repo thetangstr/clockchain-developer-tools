@@ -32,6 +32,8 @@ export interface AnchorWrite {
     time: string | null;
     status: string;
   };
+  /** log only: true when an existing record was found (no write was made). */
+  reused?: boolean;
 }
 
 export interface ContractAnchor {
@@ -116,7 +118,7 @@ export function createTsaContractAnchor(client: ClockchainClient): ContractAncho
       const existing = (await client.searchAsset(referenceId))
         .find((r) => typeof r.assetHash === "string" && r.assetHash.toLowerCase().replace(/^0x/, "") === bare);
       const record = existing ?? await client.log({ assetHash: bare, assetReferenceId: referenceId, additionalInfo });
-      return { anchorId: referenceId, eventHash, anchor: ledgerOf(record) };
+      return { anchorId: referenceId, eventHash, anchor: ledgerOf(record), reused: existing !== undefined };
     },
     async confirmLog(ledgerId) {
       return ledgerOf(await client.getLedgerEntry(ledgerId));

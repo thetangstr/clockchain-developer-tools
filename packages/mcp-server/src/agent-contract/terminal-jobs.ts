@@ -28,6 +28,7 @@ import {
 import path from "node:path";
 
 import type { TerminalReceipt } from "./close-emitter.js";
+import type { MilestoneTracker } from "./milestone-log.js";
 import type { ServerReceipt } from "./receipts.js";
 
 export const TERMINAL_JOBS_FILE = "terminal-jobs.json";
@@ -42,24 +43,6 @@ export interface TerminalAnchorJob {
   status: "anchoring" | "pending" | "anchored" | "failed";
   /** final only: the run-chain length the final head covers (null after a restart). */
   receiptCount?: number | null;
-  anchorId?: string;
-  eventHash?: string;
-  ledger?: { ledgerId: string; blockHeight: string | null; time: string | null; status: string };
-  error?: string;
-}
-
-/**
- * Milestone log (milestone-log.ts, CONTRACT_MILESTONE_LOG): one persisted
- * entry — the preimage payload, its digest (the anchored asset hash) and the
- * write outcome. Unchained, like the server-side anchors.
- */
-export interface TerminalMilestoneJob {
-  index: number;
-  milestone: string;
-  referenceId: string;
-  digest: string;
-  payload: Record<string, unknown>;
-  status: "anchoring" | "pending" | "anchored" | "failed";
   anchorId?: string;
   eventHash?: string;
   ledger?: { ledgerId: string; blockHeight: string | null; time: string | null; status: string };
@@ -108,10 +91,14 @@ export interface TerminalJob {
     briefProvider?: TerminalAnchorJob;
   };
   /**
-   * Milestone log (CONTRACT_MILESTONE_LOG; absent when off): the run's
-   * sealed entries, and whether the terminal close sealed the last one.
+   * Milestone log (CONTRACT_MILESTONE_LOG; absent when off): the run's whole
+   * milestone tracker — buckets, seal count, chain head and entries —
+   * persisted at every seal, so a restart re-drives exactly what is owed.
+   * Its presence may create the job before the terminal transition.
    */
-  milestoneLog?: { closed: boolean; entries: TerminalMilestoneJob[] };
+  milestoneLog?: MilestoneTracker;
+  /** CONTRACT_MILESTONE_LOG: this run's Clockchain calls through the contract anchor. */
+  clockchainCalls?: { writes: number; lookups: number };
   /** Post-transition evidence receipts (mirror of the live run chain). */
   evidence: ServerReceipt[];
   updatedAtMs: number;
@@ -153,8 +140,9 @@ function anchorJobOpen(j: TerminalJob): boolean {
   const open = (x: { status: string } | undefined): boolean =>
     x !== undefined && (x.status === "anchoring" || x.status === "pending");
   return (a !== undefined && [a.agreement, a.terminal, a.terms, a.brief, a.final, a.briefBuyer, a.briefProvider].some(open)) ||
-    // Milestone log entries still owed a write/confirmation keep the job (absent when the flag is off).
-    (j.milestoneLog?.entries.some(open) ?? false);
+    // Milestone log (absent when the flag is off): a tracker not yet closed, or
+    // an own write still owed a write/confirmation, keeps the job.
+    (j.milestoneLog !== undefined && (!j.milestoneLog.closed || j.milestoneLog.entries.some(open)));
 }
 
 function isFinishedJob(j: TerminalJob): boolean {

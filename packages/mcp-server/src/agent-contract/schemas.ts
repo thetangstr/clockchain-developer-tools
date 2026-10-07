@@ -190,20 +190,24 @@ const serverAnchorState = z.object({
  * preimage — sha256(canonicalJson(payload)) === digest — null until sealed.
  */
 const milestoneName = z.enum(["discover", "proposal", "negotiation", "agreement", "execution", "settlement"]);
+const milestoneAnchorRef = z.object({
+  kind: z.enum(["terms", "brief", "briefBuyer", "briefProvider", "agreement", "final"]),
+  digest: digestHex.nullable(),
+}).strict();
 const milestoneEntryState = z.object({
   index: z.number().int().min(1).max(6),
   milestone: milestoneName,
   assetReferenceId: z.string().min(1).max(200),
-  status: z.enum(["open", "not-reached", "lost", "anchoring", "pending", "anchored", "failed"]),
+  source: z.enum(["own-write", "track-b-anchor"]).nullable(),
+  status: z.enum(["open", "not-reached", "interrupted", "awaiting-anchor", "anchoring", "pending", "anchored", "failed"]),
   digest: digestHex.nullable(),
+  assetHash: digestHex.nullable(),
+  anchorRef: milestoneAnchorRef.nullable(),
   anchorId: z.string().min(1).max(200).nullable(),
-  eventHash: digestHex.nullable(),
-  ledger: z.object({
-    ledgerId: z.string(),
-    blockHeight: z.string().nullable(),
-    time: z.string().nullable(),
-    status: z.string(),
-  }).strict().nullable(),
+  ledgerId: z.string().min(1).nullable(),
+  blockHeight: z.string().nullable(),
+  sealedAt: z.string().nullable(),
+  anchoredAt: z.string().nullable(),
   error: z.string().nullable(),
   payload: z.object({
     schema: z.literal("ac.milestone-log/v1"),
@@ -214,6 +218,8 @@ const milestoneEntryState = z.object({
     lastTs: z.string().nullable(),
     receiptIds: z.array(digestHex),
     approvalDigests: z.array(digestHex),
+    pollCount: z.number().int().nonnegative(),
+    anchorRef: milestoneAnchorRef.nullable(),
     prevEntryDigest: digestHex.nullable(),
   }).strict().nullable(),
 }).strict();
@@ -812,6 +818,12 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         // CONTRACT_MILESTONE_LOG (default off; absent when off): the six
         // per-milestone Clockchain entries, in order.
         milestones: z.array(milestoneEntryState).length(6).optional(),
+        // CONTRACT_MILESTONE_LOG: this run's Clockchain calls through the run
+        // anchor (tsa writes, confirm lookups, milestone lookups/writes).
+        clockchainCalls: z.object({
+          writes: z.number().int().nonnegative(),
+          lookups: z.number().int().nonnegative(),
+        }).strict().optional(),
       }).strict().nullable(),
       // AGENT-TOOLS-BY-REFERENCE S1 + S2: read-only, caller-scoped views of
       // the caller's own run — absent on pre-bind and recovered-terminal

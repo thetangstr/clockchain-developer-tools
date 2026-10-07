@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,7 +9,7 @@ import { createTsaContractAnchor } from "../dist/agent-contract/anchor.js";
 import { canonicalDigest, canonicalJson } from "../dist/agent-contract/canonical.js";
 import { loadContractConfig } from "../dist/agent-contract/config.js";
 import {
-  MILESTONES, MILESTONE_LOG_SCHEMA, closeMilestones, createMilestoneTracker, milestoneReferenceId,
+  MILESTONES, MILESTONE_LOG_SCHEMA, anchorRefFor, closeMilestones, createMilestoneTracker, milestoneReferenceId,
   observeMilestoneReceipt, renderMilestones,
 } from "../dist/agent-contract/milestone-log.js";
 import { checkConfig } from "../scripts/agent-contract/check-config.mjs";
@@ -23,7 +23,7 @@ import {
 // CONTRACT_MILESTONE_LOG=1 (default off).
 
 // ============================================================================
-// Unit: attribution, sealing and the entry chain (pure tracker).
+// Unit: attribution, sealing, index-over-anchors and the entry chain (pure tracker).
 // ============================================================================
 
 const RUN = "11111111-2222-4333-8444-555555555555";
@@ -31,13 +31,16 @@ let seq = 0;
 const T0 = Date.parse("2026-10-06T12:00:00.000Z");
 const rid = () => `0x${(++seq).toString(16).padStart(64, "0")}`;
 const rcpt = (tool, outcome = "ok", surface = "business") => ({ receiptId: rid(), tool, outcome, surface, ts: T0 + seq * 1000 });
+const D = (c) => `0x${c.repeat(64)}`;
 
-/** Feed receipts; returns every entry sealed along the way. */
-function feed(t, steps, { terminalAt = -1 } = {}) {
+/** Feed receipts; `steps` are [receipt, approvals?, {bothBound?, terminal?}?]. Returns every entry sealed. */
+function feed(t, steps, { anchors = {}, finalAnchors = false } = {}) {
   const sealed = [];
-  steps.forEach(([r, approvals = []], i) => {
-    sealed.push(...observeMilestoneReceipt(t, RUN, r, approvals, i === terminalAt));
-  });
+  for (const [r, approvals = [], run = {}] of steps) {
+    sealed.push(...observeMilestoneReceipt(t, r, approvals,
+      { bothBound: run.bothBound ?? true, terminal: run.terminal ?? false },
+      { runId: RUN, now: T0, anchors, finalAnchors }));
+  }
   return sealed;
 }
 
@@ -45,46 +48,43 @@ test("unit: a negotiated, settled deal seals six chained entries at their transi
   const t = createMilestoneTracker();
   const bindB = rcpt("contract_bind");
   const bindP = rcpt("contract_bind");
+  assert.deepEqual(feed(t, [[bindB, [], { bothBound: false }]]), [], "one bind does not complete discover");
+  const afterBinds = feed(t, [[bindP]]);
+  assert.deepEqual(afterBinds.map((e) => e.milestone), ["discover"], "both binds complete discover");
+  assert.deepEqual(afterBinds[0].payload.receiptIds, [bindB, bindP].map((r) => r.receiptId).sort());
+
   const mPrep = rcpt("mandate_prepare");
   const mSub = rcpt("mandate_submit");
-  assert.deepEqual(feed(t, [[bindB], [bindP], [mPrep]]), [], "binds alone do not complete discover");
-  const afterMandate = feed(t, [[mSub]]);
-  assert.deepEqual(afterMandate.map((e) => e.milestone), ["discover"]);
-  assert.deepEqual(afterMandate[0].payload.receiptIds, [bindB, bindP, mPrep, mSub].map((r) => r.receiptId).sort());
-
   const quote = rcpt("catalog_quote");
+  const poll1 = rcpt("contract_status");
   const oPrep = rcpt("offer_prepare");
   const oSub = rcpt("offer_submit");
-  const afterOffer = feed(t, [[quote], [oPrep], [oSub]]);
+  const afterOffer = feed(t, [[mPrep], [mSub], [quote], [poll1], [oPrep], [oSub]]);
   assert.deepEqual(afterOffer.map((e) => e.milestone), ["proposal"], "the first offer completes proposal");
+  assert.deepEqual(afterOffer[0].payload.receiptIds, [mPrep, mSub, quote, oPrep, oSub].map((r) => r.receiptId).sort(),
+    "the mandate is proposal; the poll is not a member");
+  assert.equal(afterOffer[0].payload.pollCount, 1);
 
   const cPrep = rcpt("offer_prepare");
   const cSub = rcpt("offer_submit");
   const poll = rcpt("contract_status");
   const aPrep = rcpt("offer_accept_prepare");
   const aSub = rcpt("offer_accept_submit");
-  const afterAccept = feed(t, [[cPrep], [cSub], [poll], [aPrep], [aSub]]);
+  const afterAccept = feed(t, [[cPrep], [cSub], [poll], [rcpt("settlement_status")], [aPrep], [aSub]]);
   assert.deepEqual(afterAccept.map((e) => e.milestone), ["negotiation", "agreement"]);
-  assert.deepEqual(afterAccept[0].payload.receiptIds, [cPrep, cSub, poll].map((r) => r.receiptId).sort(),
-    "a counter after the first offer and a status poll in that stage are negotiation");
+  assert.deepEqual(afterAccept[0].payload.receiptIds, [cPrep, cSub].map((r) => r.receiptId).sort());
+  assert.equal(afterAccept[0].payload.pollCount, 2);
 
-  const bPrep = rcpt("booking_prepare");
-  const bExec = rcpt("booking_execute");
-  const vPrep = rcpt("verification_prepare");
-  const vSub = rcpt("verification_submit");
-  const bookApproval = `0x${"b0".repeat(32)}`;
-  const afterVerify = feed(t, [[bPrep], [bExec, [bookApproval]], [vPrep], [vSub]]);
+  const bookApproval = D("b");
+  const afterVerify = feed(t, [[rcpt("booking_prepare")], [rcpt("booking_execute"), [bookApproval]], [rcpt("verification_prepare")], [rcpt("verification_submit")]]);
   assert.deepEqual(afterVerify.map((e) => e.milestone), ["execution"]);
   assert.deepEqual(afterVerify[0].payload.approvalDigests, [bookApproval]);
 
-  const sPrep = rcpt("settlement_prepare");
-  const sAuth = rcpt("settlement_authorize");
-  const settleApproval = `0x${"5e".repeat(32)}`;
-  const afterSettle = feed(t, [[sPrep], [sAuth, [settleApproval]]], { terminalAt: 1 });
+  const settleApproval = D("5");
+  const afterSettle = feed(t, [[rcpt("settlement_prepare")], [rcpt("settlement_authorize"), [settleApproval], { terminal: true }]]);
   assert.deepEqual(afterSettle.map((e) => e.milestone), ["settlement"]);
   assert.equal(t.closed, true);
 
-  // The chain: index order, reference ids, prevEntryDigest links, digest == sha256(canonicalJson(payload)).
   let prev = null;
   t.entries.forEach((e, i) => {
     assert.equal(e.index, i + 1);
@@ -93,15 +93,49 @@ test("unit: a negotiated, settled deal seals six chained entries at their transi
     assert.equal(e.payload.schema, MILESTONE_LOG_SCHEMA);
     assert.equal(e.payload.prevEntryDigest, prev);
     assert.equal(e.digest, `0x${createHash("sha256").update(canonicalJson(e.payload), "utf8").digest("hex")}`);
-    assert.match(e.payload.firstTs, /^2026-10-06T12:/);
-    assert.equal(e.status, "anchoring");
+    assert.equal(e.source, "own-write", "no server anchors were recorded");
+    assert.equal(e.payload.anchorRef, null);
+    assert.equal(e.sealedAt, new Date(T0).toISOString());
     prev = e.digest;
   });
   assert.deepEqual(Object.keys(t.entries[0].payload).sort(), [
-    "approvalDigests", "firstTs", "index", "lastTs", "milestone", "prevEntryDigest", "receiptIds", "runId", "schema",
+    "anchorRef", "approvalDigests", "firstTs", "index", "lastTs", "milestone", "pollCount", "prevEntryDigest", "receiptIds", "runId", "schema",
   ]);
-  // Nothing more is attributed once closed.
-  assert.deepEqual(feed(t, [[rcpt("contract_status")]]), []);
+  assert.deepEqual(feed(t, [[rcpt("contract_status")]]), [], "nothing is attributed once closed");
+});
+
+test("unit: index over anchors — terms covers discover, agreement covers agreement, final covers settlement", () => {
+  const t = createMilestoneTracker();
+  const anchors = { terms: { digest: D("1") }, agreement: { digest: D("2") } };
+  const opts = { anchors, finalAnchors: true };
+  feed(t, [[rcpt("contract_bind")], [rcpt("contract_bind")], [rcpt("offer_submit")], [rcpt("offer_accept_submit")],
+    [rcpt("verification_submit")], [rcpt("settlement_authorize"), [], { terminal: true }]], opts);
+  assert.deepEqual(t.entries.map((e) => e.source),
+    ["track-b-anchor", "own-write", "own-write", "track-b-anchor", "own-write", "track-b-anchor"]);
+  assert.deepEqual(t.entries[0].payload.anchorRef, { kind: "terms", digest: D("1") });
+  assert.deepEqual(t.entries[3].payload.anchorRef, { kind: "agreement", digest: D("2") });
+  assert.deepEqual(t.entries[5].payload.anchorRef, { kind: "final", digest: null });
+  // The chain still runs through every entry.
+  for (let i = 1; i < 6; i++) assert.equal(t.entries[i].payload.prevEntryDigest, t.entries[i - 1].digest);
+  // Without CONTRACT_SERVER_ANCHORS: no terms, no final → own writes.
+  assert.equal(anchorRefFor("discover", { agreement: { digest: D("2") } }, false), null);
+  assert.equal(anchorRefFor("settlement", {}, false), null);
+  assert.deepEqual(anchorRefFor("discover", { brief: { digest: D("3") } }, true), { kind: "brief", digest: D("3") });
+
+  // Render: a referenced row takes the referenced anchor's state.
+  const ledger = { ledgerId: "L-7", blockHeight: "77", time: "2026-10-06T12:01:00Z", status: "anchored" };
+  const rows = renderMilestones(RUN, t, {
+    terms: { status: "anchored", digest: D("1"), anchorId: "tsa:t", eventHash: D("a"), ledger },
+    agreement: { status: "failed", digest: D("2"), error: "boom" },
+  });
+  assert.equal(rows[0].status, "anchored");
+  assert.equal(rows[0].assetHash, D("a"));
+  assert.equal(rows[0].ledgerId, "L-7");
+  assert.equal(rows[0].anchoredAt, ledger.time);
+  assert.equal(rows[3].status, "failed");
+  assert.equal(rows[3].error, "boom");
+  assert.equal(rows[5].status, "awaiting-anchor", "final not fired yet");
+  assert.equal(rows[1].assetHash, rows[1].digest, "an own write's asset hash is its digest");
 });
 
 test("unit: accepting the first offer seals negotiation EMPTY, still chained", () => {
@@ -112,61 +146,47 @@ test("unit: accepting the first offer seals negotiation EMPTY, still chained", (
   const neg = sealed[0];
   assert.deepEqual(neg.payload.receiptIds, []);
   assert.equal(neg.payload.firstTs, null);
-  assert.equal(neg.payload.lastTs, null);
   assert.equal(neg.payload.prevEntryDigest, t.entries[1].digest);
   assert.equal(sealed[1].payload.prevEntryDigest, neg.digest);
 });
 
-test("unit: a provider offer before the mandate is held; the mandate seals discover then proposal", () => {
-  const t = createMilestoneTracker();
-  const pOffer = rcpt("offer_submit");
-  const sealedEarly = feed(t, [[rcpt("contract_bind")], [rcpt("contract_bind")], [pOffer]]);
-  assert.deepEqual(sealedEarly, []);
-  const mandate = rcpt("mandate_submit");
-  const sealed = feed(t, [[mandate]]);
-  assert.deepEqual(sealed.map((e) => e.milestone), ["discover", "proposal"]);
-  assert.ok(sealed[0].payload.receiptIds.includes(mandate.receiptId));
-  assert.deepEqual(sealed[1].payload.receiptIds, [pOffer.receiptId]);
-});
-
 test("unit: refusals are members but never transitions; late fixed-class calls go to the open milestone", () => {
   const t = createMilestoneTracker();
-  const refused = rcpt("mandate_submit", "MANDATE_INVALID");
-  assert.deepEqual(feed(t, [[rcpt("contract_bind")], [refused]]), []);
-  feed(t, [[rcpt("mandate_submit")], [rcpt("offer_submit")]]);
+  const refused = rcpt("contract_bind", "CERTIFICATE_INVALID");
+  assert.deepEqual(feed(t, [[refused]]), []);
+  feed(t, [[rcpt("contract_bind")], [rcpt("offer_submit")]]);
   const lateQuote = rcpt("catalog_quote");
   const lateMandatePrep = rcpt("mandate_prepare");
   feed(t, [[lateQuote], [lateMandatePrep]]);
-  const negBucket = t.buckets[MILESTONES.indexOf("negotiation")];
-  assert.deepEqual(negBucket.receiptIds, [lateQuote.receiptId, lateMandatePrep.receiptId]);
+  assert.deepEqual(t.buckets[MILESTONES.indexOf("negotiation")].receiptIds, [lateQuote.receiptId, lateMandatePrep.receiptId]);
   assert.ok(t.entries[0].payload.receiptIds.includes(refused.receiptId));
 });
 
-test("unit: anchoring-surface receipts are never milestone members", () => {
+test("unit: anchoring-surface receipts are never members or polls", () => {
   const t = createMilestoneTracker();
-  feed(t, [[rcpt("contract_bind")], [rcpt("anchor", "anchor_anchored", "anchoring")], [rcpt("telemetry_close", "telemetry_close_delivered", "anchoring")]]);
+  feed(t, [[rcpt("contract_bind"), [], { bothBound: false }], [rcpt("anchor", "anchor_anchored", "anchoring")], [rcpt("telemetry_close", "telemetry_close_delivered", "anchoring")]]);
   assert.equal(t.buckets[0].receiptIds.length, 1);
+  assert.equal(t.buckets[0].pollCount, 0);
 });
 
 test("unit: a walk-away during negotiation seals through negotiation; the rest is not-reached", () => {
   const t = createMilestoneTracker();
   feed(t, [[rcpt("contract_bind")], [rcpt("contract_bind")], [rcpt("mandate_submit")], [rcpt("offer_submit")], [rcpt("offer_reject")]]);
-  const sealed = feed(t, [[rcpt("contract_withdraw")]], { terminalAt: 0 });
+  const sealed = feed(t, [[rcpt("contract_withdraw"), [], { terminal: true }]]);
   assert.deepEqual(sealed.map((e) => e.milestone), ["negotiation"]);
-  const rows = renderMilestones(RUN, t, true);
+  const rows = renderMilestones(RUN, t, {});
   assert.deepEqual(rows.map((r) => r.status), ["anchoring", "anchoring", "anchoring", "not-reached", "not-reached", "not-reached"]);
   assert.equal(rows[3].assetReferenceId, milestoneReferenceId(RUN, "agreement"));
   assert.equal(rows[3].payload, null);
 });
 
-test("unit: render — open while live, lost when a terminal job never closed", () => {
+test("unit: render — open while live, interrupted when the run was lost", () => {
   const t = createMilestoneTracker();
-  assert.deepEqual(renderMilestones(RUN, t, false).map((r) => r.status), Array(6).fill("open"));
-  assert.deepEqual(renderMilestones(RUN, undefined, false).map((r) => r.status), Array(6).fill("open"));
-  assert.deepEqual(renderMilestones(RUN, { closed: false, entries: [] }, true).map((r) => r.status), Array(6).fill("lost"));
-  // An empty close (sweep of a run that only ever bound) writes discover only.
-  feed(t, [[rcpt("contract_bind")]]);
-  assert.deepEqual(closeMilestones(t, RUN).map((e) => e.milestone), ["discover"]);
+  assert.deepEqual(renderMilestones(RUN, t, {}).map((r) => r.status), Array(6).fill("open"));
+  assert.deepEqual(renderMilestones(RUN, undefined, undefined).map((r) => r.status), Array(6).fill("open"));
+  assert.deepEqual(renderMilestones(RUN, { ...t, closed: true, interrupted: true }, {}).map((r) => r.status), Array(6).fill("interrupted"));
+  feed(t, [[rcpt("contract_bind"), [], { bothBound: false }]]);
+  assert.deepEqual(closeMilestones(t, { runId: RUN, now: T0, anchors: {}, finalAnchors: false }).map((e) => e.milestone), ["discover"]);
 });
 
 // ============================================================================
@@ -274,63 +294,97 @@ async function negotiatedSettledRun(env, n) {
   return runId;
 }
 
-test("integration: flag on — six chained entries, written in order through the gateway and reported in contract_status", async () => {
+const OWN_WITHOUT_SERVER_ANCHORS = ["discover", "proposal", "negotiation", "execution", "settlement"];
+const ownRefs = (runId, names) => names.map((m) => `ac-milestone:${runId}:${MILESTONES.indexOf(m) + 1}-${m}`);
+const ownEntries = (t) => (t?.entries ?? []).filter((e) => e.source === "own-write");
+
+test("integration: flag on — six chained entries; agreement indexed to its anchor, the rest written in order", async () => {
   const gw = fakeGateway();
   const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
   try {
     assert.equal(env.service.milestoneLog, true);
     const runId = await negotiatedSettledRun(env, 701);
-    await waitFor(() => gw.milestoneWrites().length === 6 && env.service.runFor(runId)?.milestoneLog?.entries.every((e) => e.status === "anchored"));
-    assert.deepEqual(gw.milestoneWrites().map((c) => c.assetReferenceId),
-      MILESTONES.map((m, i) => `ac-milestone:${runId}:${i + 1}-${m}`), "one write per milestone, in index order");
+    await waitFor(() => gw.milestoneWrites().length === 5 && ownEntries(env.service.runFor(runId)?.milestoneLog).every((e) => e.status === "anchored"));
+    assert.deepEqual(gw.milestoneWrites().map((c) => c.assetReferenceId), ownRefs(runId, OWN_WITHOUT_SERVER_ANCHORS),
+      "one write per uncovered milestone, in index order");
 
     const st = await env.callTool("tb1", "contract_status", {});
     assert.equal(statusSchema.safeParse(st).success, true, JSON.stringify(statusSchema.safeParse(st).error));
     const rows = st.anchors.milestones;
     assert.equal(rows.length, 6);
     let prev = null;
-    for (const [i, row] of rows.entries()) {
+    for (const row of rows) {
       assert.equal(row.status, "anchored", `${row.milestone}: ${row.error}`);
-      assert.equal(row.anchorId, row.assetReferenceId);
-      // Anyone can recompute the anchored hash from the published preimage.
-      const recomputed = canonicalDigest(row.payload);
-      assert.equal(row.digest, recomputed);
-      assert.equal(gw.milestoneWrites()[i].assetHash, recomputed.slice(2));
+      assert.equal(row.digest, canonicalDigest(row.payload), "anyone can recompute the chain digest");
       assert.equal(row.payload.prevEntryDigest, prev);
-      assert.equal(row.ledger.blockHeight !== null, true);
+      assert.ok(row.ledgerId && row.blockHeight && row.sealedAt && row.anchoredAt, JSON.stringify(row));
       prev = row.digest;
     }
+    const own = rows.filter((r) => r.source === "own-write");
+    assert.deepEqual(own.map((r) => r.milestone), OWN_WITHOUT_SERVER_ANCHORS);
+    own.forEach((row, i) => {
+      assert.equal(row.anchorId, row.assetReferenceId);
+      assert.equal(row.assetHash, row.digest);
+      assert.equal(gw.milestoneWrites()[i].assetHash, row.digest.slice(2));
+    });
+    const agreementRow = rows[3];
+    assert.equal(agreementRow.source, "track-b-anchor");
+    assert.deepEqual(agreementRow.anchorRef, { kind: "agreement", digest: st.anchors.agreement.digest });
+    assert.equal(agreementRow.assetHash, st.anchors.agreement.eventHash);
+    assert.equal(agreementRow.ledgerId, st.anchors.agreement.ledger.ledgerId);
 
     // Membership against the signed receipt feed.
     const feedOut = env.service.receiptFeed(runId);
     const byTool = (tool) => feedOut.receipts.filter((r) => r.tool === tool).map((r) => r.receiptId);
     const [discover, proposal, negotiation, agreement, execution, settlement] = rows.map((r) => r.payload);
-    for (const id of [...byTool("contract_bind"), ...byTool("mandate_prepare"), ...byTool("mandate_submit")]) {
-      assert.ok(discover.receiptIds.includes(id), "binds and mandate are discover");
+    assert.deepEqual(discover.receiptIds, [...byTool("contract_bind")].sort(), "discover is exactly the two binds");
+    for (const id of [...byTool("mandate_prepare"), ...byTool("mandate_submit"), ...byTool("catalog_quote")]) {
+      assert.ok(proposal.receiptIds.includes(id), "the mandate and the quote are proposal");
     }
-    assert.equal(byTool("contract_bind").length, 2);
-    assert.ok(byTool("catalog_quote").every((id) => proposal.receiptIds.includes(id)));
     const [firstOffer, counter] = byTool("offer_submit");
     assert.ok(proposal.receiptIds.includes(firstOffer));
     assert.ok(negotiation.receiptIds.includes(counter));
+    assert.equal(negotiation.pollCount, 1, "the status poll is counted, not a member");
+    assert.ok(byTool("contract_status").every((id) => !rows.some((r) => r.payload.receiptIds.includes(id))));
     assert.ok(byTool("offer_accept_submit").every((id) => agreement.receiptIds.includes(id)));
     assert.ok(byTool("verification_submit").every((id) => execution.receiptIds.includes(id)));
     assert.ok(byTool("settlement_authorize").every((id) => settlement.receiptIds.includes(id)),
       "the terminal call's own receipt is in settlement");
-    // Approval digests are the feed's receipt-linked approval digests.
     const approvals = feedOut.approvalRecords;
     assert.deepEqual(execution.approvalDigests, approvals.filter((a) => a.action === "booking").map((a) => a.digest));
     assert.deepEqual(settlement.approvalDigests, approvals.filter((a) => a.action === "settlement").map((a) => a.digest));
-    // No secret or business value rides the payload.
     const text = JSON.stringify(rows.map((r) => r.payload));
     for (const leak of ["IT-QW-ONESTOP", "12000", "kb1", "tb1", "orderRef", "Minor"]) assert.equal(text.includes(leak), false, leak);
+    assert.equal(feedOut.receipts.some((r) => /milestone/.test(r.tool)), false, "unchained");
 
-    // Unchained: no extra receipt names the milestone log.
-    assert.equal(feedOut.receipts.some((r) => /milestone/.test(r.tool)), false);
-    // The durable job carries the closed log.
+    // Clockchain calls: agreement + terminal tsa writes, 5 milestone writes, 5 milestone lookups.
+    assert.deepEqual(st.anchors.clockchainCalls, { writes: 7, lookups: 5 });
+    assert.ok(st.anchors.clockchainCalls.writes + st.anchors.clockchainCalls.lookups <= 12);
     const job = env.service.terminalJobFor(runId);
     assert.equal(job.milestoneLog.closed, true);
-    assert.deepEqual(job.milestoneLog.entries.map((e) => e.status), Array(6).fill("anchored"));
+    assert.deepEqual(job.clockchainCalls, { writes: 7, lookups: 5 });
+  } finally { env.close(); }
+});
+
+test("integration: with CONTRACT_SERVER_ANCHORS terms covers discover and final covers settlement — 3 own writes", async () => {
+  const gw = fakeGateway();
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, serverAnchors: true, anchorConfirmDelayMs: 0 });
+  try {
+    const runId = await negotiatedSettledRun(env, 706);
+    await waitFor(() => env.service.runFor(runId)?.anchors?.final?.status === "anchored" && gw.milestoneWrites().length === 3);
+    assert.deepEqual(gw.milestoneWrites().map((c) => c.assetReferenceId), ownRefs(runId, ["proposal", "negotiation", "execution"]));
+    const st = await env.callTool("tb1", "contract_status", {});
+    assert.equal(statusSchema.safeParse(st).success, true, JSON.stringify(statusSchema.safeParse(st).error));
+    const rows = st.anchors.milestones;
+    assert.deepEqual(rows.map((r) => r.source), ["track-b-anchor", "own-write", "own-write", "track-b-anchor", "own-write", "track-b-anchor"]);
+    assert.ok(rows.every((r) => r.status === "anchored"), JSON.stringify(rows.map((r) => [r.milestone, r.status])));
+    assert.deepEqual(rows[0].anchorRef, { kind: "terms", digest: st.anchors.terms.digest });
+    assert.equal(rows[0].assetHash, st.anchors.terms.eventHash);
+    assert.deepEqual(rows[5].anchorRef, { kind: "final", digest: st.anchors.final.digest }, "final's subject is filled in once it fires");
+    assert.equal(rows[5].payload.anchorRef.digest, null);
+    assert.equal(rows[5].ledgerId, st.anchors.final.ledger.ledgerId);
+    // terms + agreement + terminal + final writes, 3 milestone writes + 3 lookups.
+    assert.deepEqual(st.anchors.clockchainCalls, { writes: 7, lookups: 3 });
   } finally { env.close(); }
 });
 
@@ -344,47 +398,155 @@ test("integration: a pending write is re-confirmed to anchored; a failed write i
     assert.ok(pend.anchors.milestones.every((r) => r.status === "pending" || r.status === "anchoring"), JSON.stringify(pend.anchors.milestones.map((r) => r.status)));
     assert.equal(statusSchema.safeParse(pend).success, true);
     gw.confirmAll();
-    const ok = await waitFor(() => env.service.runFor(runId)?.milestoneLog?.entries.every((e) => e.status === "anchored"));
+    const ok = await waitFor(() => ownEntries(env.service.runFor(runId)?.milestoneLog).every((e) => e.status === "anchored"));
     assert.ok(ok, "confirmLog resolved every pending entry");
     assert.ok(gw.reads.length > 0, "confirmed by ledger read, not by re-writing");
-    assert.equal(gw.milestoneWrites().length, 6);
+    assert.equal(gw.milestoneWrites().length, 5);
+    const st = await env.callTool("tb1", "contract_status", {});
+    assert.ok(st.anchors.clockchainCalls.lookups > 5, "confirm reads are counted");
   } finally { env.close(); }
 
   const gw2 = fakeGateway({ failMilestoneLog: true });
   const env2 = await boot({ anchor: createTsaContractAnchor(gw2), milestoneLog: true, anchorConfirmDelayMs: 0 });
   try {
     const runId = await negotiatedSettledRun(env2, 703);
-    await waitFor(() => env2.service.runFor(runId)?.milestoneLog?.entries.filter((e) => e.status === "failed").length === 6);
+    await waitFor(() => ownEntries(env2.service.runFor(runId)?.milestoneLog).filter((e) => e.status === "failed").length === 5);
     const st = await env2.callTool("tb1", "contract_status", {});
     assert.equal(st.terminalState, "settled");
-    assert.ok(st.anchors.milestones.every((r) => r.status === "failed" && /gateway unreachable/.test(r.error)));
-    // The contract's own anchors are untouched by milestone failures.
+    const own = st.anchors.milestones.filter((r) => r.source === "own-write");
+    assert.ok(own.every((r) => r.status === "failed" && /gateway unreachable/.test(r.error)));
+    assert.equal(st.anchors.milestones[3].status, "anchored", "the referenced agreement anchor is unaffected");
     assert.equal(st.anchors.agreement.status, "anchored");
   } finally { env2.close(); }
 });
 
-test("integration: boot recovery re-drives a pending entry from the terminal job without a second write", async () => {
+test("integration: boot recovery re-drives pending entries from the terminal job without a second write", async () => {
   const stateDir = mkdtempSync(path.join(tmpdir(), "milestone-log-"));
   const gw = fakeGateway({ pending: true });
   const env = await boot({ stateDir, anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
   let runId;
   try {
     runId = await negotiatedSettledRun(env, 704);
-    await waitFor(() => env.service.terminalJobFor(runId)?.milestoneLog?.entries.filter((e) => e.status === "pending").length === 6);
+    await waitFor(() => ownEntries(env.service.terminalJobFor(runId)?.milestoneLog).filter((e) => e.status === "pending").length === 5);
   } finally { env.close(); }
-  assert.equal(gw.milestoneWrites().length, 6);
+  assert.equal(gw.milestoneWrites().length, 5);
   gw.confirmAll();
 
   const env2 = await boot({ stateDir, anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
   try {
-    const done = await waitFor(() => env2.service.terminalJobFor(runId)?.milestoneLog?.entries.every((e) => e.status === "anchored"));
+    const done = await waitFor(() => {
+      const job = env2.service.terminalJobFor(runId);
+      return ownEntries(job?.milestoneLog).every((e) => e.status === "anchored") && job?.anchors?.agreement?.status === "anchored";
+    });
     assert.ok(done, JSON.stringify(env2.service.terminalJobFor(runId)?.milestoneLog?.entries.map((e) => e.status)));
-    assert.equal(gw.milestoneWrites().length, 6, "recovery found the records by reference + hash");
-    // Post-restart contract_status renders from the durable job.
+    assert.equal(gw.milestoneWrites().length, 5, "recovery found the records by reference + hash");
     const st = await env2.callTool("tb1", "contract_status", {});
     assert.equal(st.priorRun, true);
     assert.equal(statusSchema.safeParse(st).success, true, JSON.stringify(statusSchema.safeParse(st).error));
     assert.deepEqual(st.anchors.milestones.map((r) => r.status), Array(6).fill("anchored"));
+    assert.ok(st.anchors.clockchainCalls.writes >= 7, "counts survive the restart");
+  } finally { env2.close(); }
+});
+
+/** Copy the durable terminal-jobs file as it is NOW — the disk a crash at this instant leaves. */
+function crashCopy(stateDir) {
+  const dir = mkdtempSync(path.join(tmpdir(), "milestone-crash-"));
+  copyFileSync(path.join(stateDir, "terminal-jobs.json"), path.join(dir, "terminal-jobs.json"));
+  return dir;
+}
+
+test("integration: crash between the terminal transition and the seal — a restart seals and writes it, nothing lost", async () => {
+  const gw = fakeGateway();
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  let runId;
+  let crashDir;
+  let lastOfferId;
+  try {
+    runId = await bindPair(env, uuid(707), "tb1", "tp1");
+    const prepM = await env.callTool("tb1", "mandate_prepare", signMandate());
+    await signedSubmit(env, { token: "tb1", role: "buyer", prepared: prepM, submitTool: "mandate_submit" });
+    const prepO = await env.callTool("tb1", "offer_prepare", { itineraryId: "IT-QW-ONESTOP", feeMinor: 10_000 });
+    await signedSubmit(env, { token: "tb1", role: "buyer", prepared: prepO, submitTool: "offer_submit" });
+    await waitFor(() => gw.milestoneWrites().length === 2);
+    // The run ends (a harness_error) — and the process dies before the close macrotask runs.
+    const run = env.service.runFor(runId);
+    env.service.endRun(run, "harness_error");
+    crashDir = crashCopy(env.stateDir);
+    lastOfferId = run.receipts.at(-1).receiptId;
+  } finally { env.close(); }
+  const onDisk = JSON.parse(readFileSync(path.join(crashDir, "terminal-jobs.json"), "utf8")).jobs.find((j) => j.runId === runId);
+  assert.equal(onDisk.terminalState, "harness_error");
+  assert.equal(onDisk.milestoneLog.closed, false, "the crash landed before the close");
+  assert.equal(onDisk.milestoneLog.sealed, 2);
+
+  const gw2 = fakeGateway();
+  const env2 = await boot({ stateDir: crashDir, anchor: createTsaContractAnchor(gw2), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  try {
+    const closed = await waitFor(() => env2.service.terminalJobFor(runId)?.milestoneLog?.closed === true &&
+      ownEntries(env2.service.terminalJobFor(runId).milestoneLog).every((e) => e.status === "anchored"));
+    assert.ok(closed);
+    const rows = (await env2.callTool("tb1", "contract_status", {})).anchors.milestones;
+    // The offer was the last evidence: proposal was already sealed, so the close seals nothing new;
+    // nothing reads "lost" or "interrupted" — the unreached ones are not-reached.
+    assert.deepEqual(rows.map((r) => r.status), ["anchored", "anchored", ...Array(4).fill("not-reached")]);
+    assert.ok(rows[1].payload.receiptIds.includes(lastOfferId));
+  } finally { env2.close(); }
+});
+
+test("integration: crash after evidence accumulated past the last seal — the restart seals it from the persisted buckets", async () => {
+  const gw = fakeGateway();
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  let runId;
+  let crashDir;
+  let rejectId;
+  try {
+    runId = await bindPair(env, uuid(708), "tb1", "tp1");
+    const prepM = await env.callTool("tb1", "mandate_prepare", signMandate());
+    await signedSubmit(env, { token: "tb1", role: "buyer", prepared: prepM, submitTool: "mandate_submit" });
+    const prepO = await env.callTool("tb1", "offer_prepare", { itineraryId: "IT-QW-ONESTOP", feeMinor: 10_000 });
+    const offered = await signedSubmit(env, { token: "tb1", role: "buyer", prepared: prepO, submitTool: "offer_submit" });
+    const rejected = await env.callTool("tp1", "offer_reject", { offerId: offered.offerId });
+    assert.ok(!rejected.error, JSON.stringify(rejected));
+    await waitFor(() => gw.milestoneWrites().length === 2);
+    const run = env.service.runFor(runId);
+    rejectId = run.receipts.at(-1).receiptId;
+    env.service.endRun(run, "no_agreement");
+    crashDir = crashCopy(env.stateDir);
+  } finally { env.close(); }
+
+  const gw2 = fakeGateway();
+  const env2 = await boot({ stateDir: crashDir, anchor: createTsaContractAnchor(gw2), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  try {
+    await waitFor(() => ownEntries(env2.service.terminalJobFor(runId)?.milestoneLog).length === 3 &&
+      ownEntries(env2.service.terminalJobFor(runId).milestoneLog).every((e) => e.status === "anchored"));
+    assert.deepEqual(gw2.milestoneWrites().map((c) => c.assetReferenceId), ownRefs(runId, ["negotiation"]),
+      "only the entry the crash left unsealed is written; sealed ones were already on the ledger");
+    const rows = (await env2.callTool("tb1", "contract_status", {})).anchors.milestones;
+    assert.deepEqual(rows.map((r) => r.status), ["anchored", "anchored", "anchored", "not-reached", "not-reached", "not-reached"]);
+    assert.deepEqual(rows[2].payload.receiptIds, [rejectId]);
+    assert.equal(rows[2].payload.prevEntryDigest, rows[1].digest);
+  } finally { env2.close(); }
+});
+
+test("integration: a live run lost to a restart is interrupted — its sealed entries still land", async () => {
+  const gw = fakeGateway({ pending: true });
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  let runId;
+  let crashDir;
+  try {
+    runId = await bindPair(env, uuid(709), "tb1", "tp1");
+    await waitFor(() => env.service.terminalJobFor(runId)?.milestoneLog?.entries[0]?.status === "pending");
+    crashDir = crashCopy(env.stateDir);
+  } finally { env.close(); }
+  gw.confirmAll();
+  const env2 = await boot({ stateDir: crashDir, anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  try {
+    const ok = await waitFor(() => env2.service.terminalJobFor(runId)?.milestoneLog?.entries[0]?.status === "anchored");
+    assert.ok(ok);
+    const ml = env2.service.terminalJobFor(runId).milestoneLog;
+    assert.equal(ml.interrupted, true);
+    assert.equal(gw.milestoneWrites().length, 1, "re-driven without a second write");
+    assert.equal(env2.service.pendingTerminalJobs().some((j) => j.runId === runId), false, "the job is finished");
   } finally { env2.close(); }
 });
 
@@ -402,10 +564,10 @@ test("integration: a TTL sweep closes an unfinished run; only reached milestones
     await waitFor(() => gw.milestoneWrites().length === 1);
     clock += 61_000;
     env.service.runFor(runId); // the sweep ends it "expired"
-    await waitFor(() => env.service.runFor(runId)?.milestoneLog?.closed === true);
+    await waitFor(() => env.service.runFor(runId)?.milestoneLog?.closed === true && gw.milestoneWrites().length === 2);
     const rows = (await env.callTool("tb1", "contract_status", {})).anchors.milestones;
-    assert.deepEqual(rows.map((r) => r.status), ["anchored", ...Array(5).fill("not-reached")]);
-    assert.equal(gw.milestoneWrites().length, 1);
+    assert.deepEqual(rows.map((r) => r.status), ["anchored", "anchored", ...Array(4).fill("not-reached")]);
+    assert.ok(rows[1].payload.receiptIds.length >= 2, "the mandate is proposal evidence");
   } finally { env.close(); }
 });
 
@@ -433,7 +595,9 @@ test("flag off: no milestone state, no write, contract_status unchanged — even
     assert.equal(r.run.milestoneLog, undefined);
     assert.equal("milestoneLog" in r.job, false);
     assert.equal("milestones" in r.st.anchors, false);
-    assert.deepEqual(Object.keys(r.st.anchors).sort(), ["agreement", "terminal"]);
+    assert.deepEqual(Object.keys(r.st.anchors).sort(), ["agreement", "terminal"], "no milestones, no clockchainCalls");
+    assert.equal(r.env.service.clockchainCallsFor(r.runId), undefined);
+    assert.equal("clockchainCalls" in r.job, false);
   }
   // Identical status shape and anchor kinds either way.
   const shape = (st) => JSON.stringify(st, (k, v) => (typeof v === "string" ? typeof v : v));
