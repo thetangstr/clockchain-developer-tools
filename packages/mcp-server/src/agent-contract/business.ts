@@ -127,6 +127,8 @@ export interface BusinessOps {
     tool: string,
     args: Record<string, unknown>,
     serverNonce: string,
+    /** CDT-SEC L2: aborts an inbox long-poll when the caller is gone. */
+    control?: { signal?: AbortSignal },
   ): BusinessOutcome | Promise<BusinessOutcome>;
   /**
    * Non-mutating probe (LOW, N4b-3): is `listingId` a live listing owned by
@@ -180,11 +182,14 @@ const MAX_INBOX_MESSAGES = 256;
 const MAX_DELIVERIES_PER_MINUTE = 12;
 /**
  * O-2: a delivery on a standing listing that the provider never acks is
- * dropped after this long. It must outlive the handshake claim window the
- * sealed invitation carries (coordinator.ts INVITATION_CLAIM_RUNWAY_MS,
- * 180 s) — after that the invitation can no longer be claimed anyway.
+ * dropped after this long, freeing its sender's pending slot. CDT-SEC L2:
+ * one minute (was five) so that MAX_PENDING_PER_LISTING senders cannot keep
+ * a listing full for real travelers at little cost. A provider that
+ * long-polls (≤ 25 s holds) reads a delivery within seconds; once read, the
+ * claim runs on the handshake coordinator (its own 180 s runway,
+ * coordinator.ts INVITATION_CLAIM_RUNWAY_MS) — not on this inbox entry.
  */
-const STANDING_DELIVERY_TTL_MS = 5 * 60_000;
+export const STANDING_DELIVERY_TTL_MS = 60_000;
 /** O-2: inbox long-poll bound — well inside the ~25 s worst-case claim runway. */
 export const MAX_INBOX_WAIT_MS = 25_000;
 /** O-2: concurrent inbox long-polls across all providers (one per keyId). */
@@ -736,17 +741,21 @@ export function createBusinessOps(options: {
    * O-2: hold an inbox read until a delivery reaches this provider or
    * `ms` passes. Bounded: one hold per keyId (a newer one supersedes),
    * MAX_INBOX_WAITERS overall (past it the read answers at once).
+   * CDT-SEC L2: an aborted `signal` (the client disconnected, or its MCP
+   * session closed) ends the hold at once and frees its waiter slot.
    */
-  function waitForDelivery(providerKeyId: string, ms: number): Promise<void> {
+  function waitForDelivery(providerKeyId: string, ms: number, signal?: AbortSignal): Promise<void> {
     wakeInbox(providerKeyId);
-    if (inboxWaiters.size >= MAX_INBOX_WAITERS) return Promise.resolve();
+    if (inboxWaiters.size >= MAX_INBOX_WAITERS || signal?.aborted === true) return Promise.resolve();
     return new Promise((resolve) => {
       const done = (): void => {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
         if (inboxWaiters.get(providerKeyId) === done) inboxWaiters.delete(providerKeyId);
         resolve();
       };
       const timer = setTimeout(done, ms);
+      signal?.addEventListener("abort", done, { once: true });
       inboxWaiters.set(providerKeyId, done);
     });
   }
@@ -819,6 +828,7 @@ export function createBusinessOps(options: {
     tool: string,
     args: Record<string, unknown>,
     serverNonce: string,
+    control?: { signal?: AbortSignal },
   ): BusinessOutcome | Promise<BusinessOutcome> {
     // N4b-4: a signer past its published validUntil signs nothing — no
     // envelope, no receipt — so no business call can dispatch at all.
@@ -1038,7 +1048,7 @@ export function createBusinessOps(options: {
         if (messages.length > 0 || waitMs <= 0) {
           return ok({ messages: structuredClone(messages), serverNonce });
         }
-        return waitForDelivery(principal.keyId, waitMs).then(() => {
+        return waitForDelivery(principal.keyId, waitMs, control?.signal).then(() => {
           purgeListings();
           return ok({ messages: structuredClone(read()), serverNonce });
         });

@@ -19,6 +19,8 @@ import { toolsListForRole, guidanceDigests } from "../dist/agent-contract/tools-
 import { eip191RecoverPublicKey, eip191SignDigest32, publicKeyToAddress } from "../dist/agent-contract/eip191.js";
 import { createPolicyRegistry, policyRegistrationDigest } from "../dist/agent-contract/policy-registry.js";
 import { parseContractBriefs } from "../dist/agent-contract/server-anchors.js";
+import { createBusinessOps } from "../dist/agent-contract/business.js";
+import { createSimWorld } from "../dist/agent-contract/sim/index.js";
 import {
   ACCEPT, HOST_ROOTS, POLICY, SIGNER, PRINCIPAL_ADDRESS, boot, agreePair, bookPair, signedSubmit, makeApproval,
   fakeAnchor, waitFor, uuid, keys,
@@ -522,4 +524,65 @@ test("M4: a failed brief anchor is not re-issued on every serve (backoff)", asyn
     assert.equal(retried.anchor?.status, "anchored", JSON.stringify(retried));
     assert.equal(anchor2.calls.filter((c) => c.kind === "brief").length, 2);
   } finally { env2.close(); }
+});
+
+// =============================================================================
+// L2 — standing-listing pending slots free after one minute; an inbox
+// long-poll ends when its client disconnects.
+// =============================================================================
+
+const SEAL_KEY = `0x${"11".repeat(32)}`;
+const sealN = (n) => ({
+  v: 2,
+  epk: `0x${n.toString(16).padStart(2, "0").repeat(32)}`,
+  iv: `0x${"cd".repeat(12)}`,
+  ct: `0x${n.toString(16).padStart(2, "0").repeat(48)}`,
+  tag: `0x${"01".repeat(16)}`,
+});
+const NONCE = `0x${"0".repeat(32)}`;
+const providerP = (keyId) => ({ keyId, role: "provider", agentId: "9453", side: "responder" });
+const buyerP = (keyId) => ({ keyId, role: "buyer", agentId: "9452", side: "initiator" });
+
+test("L2: an unacked standing delivery frees its pending slot after one minute", () => {
+  let clock = Date.parse("2026-10-06T10:00:00.000Z");
+  const now = () => clock;
+  const ops = createBusinessOps({
+    signer: SIGNER, sim: createSimWorld({ now }), now, policyDigests: POLICY, endRun() {},
+    allowLegacySealV2: true, directory: new Map([["roma-travel", "kp1"]]),
+  });
+  const listingId = ops.dispatch(providerP("kp1"), undefined, "rendezvous_publish_listing", {
+    title: "Roma Travel", summary: "x", sealedBoxPublicKeyHex: SEAL_KEY, directoryName: "roma-travel", standing: true,
+  }, NONCE).result.listingId;
+  const send = (k, n) => ops.dispatch(buyerP(k), undefined, "rendezvous_send_invitation", { listingId, sealedInvitation: sealN(n) }, NONCE);
+  for (let i = 0; i < 16; i += 1) assert.equal(send(`kx${i}`, i + 1).ok, true);
+  assert.equal(send("kx16", 0xee).code, "LISTING_UNAVAILABLE", "16 squatters fill the listing");
+  clock += 59_000;
+  assert.equal(send("kx16", 0xee).code, "LISTING_UNAVAILABLE");
+  clock += 1_000;
+  assert.equal(send("kx16", 0xee).ok, true, "one minute on, the slots are free for a real traveler");
+});
+
+test("L2: an inbox long-poll ends (and is receipted) as soon as its client disconnects", async () => {
+  const env = await boot({ directory: new Map([["roma-travel", "kp1"]]), allowLegacySealV2: true });
+  try {
+    await env.callTool("tp1", "rendezvous_inbox", {});
+    const sid = env.sessionIdOf("tp1");
+    const before = env.service.preBindFeed("kp1").receipts.length;
+    const ac = new AbortController();
+    const held = fetch(env.baseUrl, {
+      method: "POST",
+      signal: ac.signal,
+      headers: { "content-type": "application/json", accept: ACCEPT, authorization: "Bearer tp1", "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 9_001, method: "tools/call",
+        params: { name: "rendezvous_inbox", arguments: { waitMs: 20_000 } } }),
+    }).then((r) => r.text()).catch(() => "aborted");
+    await new Promise((r) => setTimeout(r, 200));
+    const t0 = Date.now();
+    ac.abort();
+    assert.equal(await held, "aborted");
+    // The hold released at once: its (refusal-free) receipt lands well before waitMs.
+    const done = await waitFor(() => env.service.preBindFeed("kp1").receipts.length > before, 3_000);
+    assert.ok(done, "the aborted long-poll returned and was receipted");
+    assert.ok(Date.now() - t0 < 3_000);
+  } finally { env.close(); }
 });

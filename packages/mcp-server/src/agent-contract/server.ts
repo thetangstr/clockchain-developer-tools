@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -38,6 +40,13 @@ interface CallOutcome {
   readonly body: Record<string, unknown>;
   readonly isError: boolean;
 }
+
+/**
+ * CDT-SEC L2: the transport runs each HTTP request inside this store with a
+ * signal that aborts when the client closes the request before its response
+ * finished — so an inbox long-poll never outlives its caller.
+ */
+export const httpRequestSignal = new AsyncLocalStorage<AbortSignal>();
 
 function refusal(
   code: ContractRefusalCode,
@@ -159,7 +168,7 @@ export function buildContractServer(options: {
     toolsListForRole(principal.role, features) as unknown as import("@modelcontextprotocol/sdk/types.js").ListToolsResult,
   );
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name;
     const serverNonce = newServerNonce();
     const callArgs = request.params.arguments ?? {};
@@ -552,8 +561,12 @@ export function buildContractServer(options: {
       // PR #180 F1: dispatch with the receipt target — for a pre-bind tool
       // whose run ENDED that is no run, so a `*` sender's invitation is
       // stamped unproven-pre-bind, never the released binding's agentId.
+      // CDT-SEC L2: a long-poll ends when its HTTP request closes early
+      // (httpRequestSignal, set by the transport) or its session closes.
+      const reqSignal = httpRequestSignal.getStore();
+      const signal = reqSignal === undefined ? extra.signal : AbortSignal.any([extra.signal, reqSignal]);
       dispatched = await service.business.dispatch(
-        principal, receiptRun, name, parsed.data, serverNonce,
+        principal, receiptRun, name, parsed.data, serverNonce, { signal },
       );
     } catch {
       dispatched = { ok: false as const, code: "CONTRACT_UNAVAILABLE" as const };

@@ -4,7 +4,7 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { limiter as keyedWindowLimiter } from "../standalone-handshake/public-server.js";
-import { buildContractServer } from "./server.js";
+import { buildContractServer, httpRequestSignal } from "./server.js";
 import type { CertificateResolver } from "./certificate-resolver.js";
 import type { TelemetryLanes } from "./telemetry-lanes.js";
 import { receiptClientInfoSchema } from "./receipts.js";
@@ -269,8 +269,12 @@ export function createContractHttpHandler(options: {
         }
         sess.lastSeenMs = now();
         sess.ctx.sourceIp = clientIp(req.headers, req.socket.remoteAddress, options.trustProxy === true);
+        // CDT-SEC L2: a request closed before its response finished aborts
+        // whatever it holds (an inbox long-poll).
+        const closed = new AbortController();
+        res.on("close", () => { if (!res.writableFinished) closed.abort(); });
         try {
-          await sess.transport.handleRequest(req, res);
+          await httpRequestSignal.run(closed.signal, () => sess.transport.handleRequest(req, res));
         } catch {
           if (!res.headersSent) writeJson(res, 500, { error: "internal_error" });
         }
