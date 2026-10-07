@@ -504,6 +504,7 @@ test("lane forwarder: fails closed and buffers until the token arrives; pre-hand
   });
   const fwdUrl = await listen(fwd.server);
   const ctlUrl = await listen(fwd.control);
+  // CDT-SEC L8: the control route needs this start's secret (cdt-sec.test.mjs covers its absence).
   t.after(() => { fwd.server.close(); fwd.control.close(); });
 
   // Before the handshake: buffered, nothing reaches the sink.
@@ -520,15 +521,15 @@ test("lane forwarder: fails closed and buffers until the token arrives; pre-hand
   const lane = (await openLane(env, { mcpSessionId: "fwd-1" })).body;
   // A box for another lane / role / recipient is refused and changes nothing.
   const other = (await openLane(env, { keyId: "provider-key", role: "provider", mcpSessionId: "fwd-p" })).body;
-  assert.equal((await postJson(ctlUrl, "/v1/lane-token", { laneId: other.laneId, sealedBox: other.sealedBox })).status, 400);
-  assert.equal((await postJson(ctlUrl, "/v1/lane-token", { laneId: other.laneId, sealedBox: lane.sealedBox })).status, 400);
+  assert.equal((await postJson(ctlUrl, "/v1/lane-token", { laneId: other.laneId, sealedBox: other.sealedBox }, fwd.controlSecret)).status, 400);
+  assert.equal((await postJson(ctlUrl, "/v1/lane-token", { laneId: other.laneId, sealedBox: lane.sealedBox }, fwd.controlSecret)).status, 400);
   assert.equal(fwd.status().tokenDelivered, false);
   // The control route is not on the OTLP port: posting the box there delivers nothing.
   assert.notEqual((await postJson(fwdUrl, "/v1/lane-token", { laneId: lane.laneId, sealedBox: lane.sealedBox })).status, 200);
   assert.equal(fwd.status().tokenDelivered, false);
-  const delivered = await postJson(ctlUrl, "/v1/lane-token", { laneId: lane.laneId, sealedBox: lane.sealedBox });
+  const delivered = await postJson(ctlUrl, "/v1/lane-token", { laneId: lane.laneId, sealedBox: lane.sealedBox }, fwd.controlSecret);
   assert.equal(delivered.status, 200);
-  assert.equal((await postJson(ctlUrl, "/v1/lane-token", { laneId: lane.laneId, sealedBox: lane.sealedBox })).status, 409, "write-once");
+  assert.equal((await postJson(ctlUrl, "/v1/lane-token", { laneId: lane.laneId, sealedBox: lane.sealedBox }, fwd.controlSecret)).status, 409, "write-once");
   await fwd.idle();
 
   const live = await postJson(fwdUrl, "/v1/traces", SPAN("live"));

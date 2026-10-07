@@ -98,6 +98,7 @@ export { createRunLedger, RUN_LEDGER_SCHEMA, type RunLedger, type RunMarker } fr
 export {
   createForwarder,
   createLaneForwarder,
+  writeControlSecretFile,
   type LaneForwarder,
   type LaneForwarderStatus,
 } from "./forward.js";

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { JsonWebKey } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual, type JsonWebKey } from "node:crypto";
+import { closeSync, fsyncSync, openSync, rmSync, writeSync } from "node:fs";
 
 import { openSealJwk, type SealedBox } from "./seal.js";
 import type { ContractRole } from "./tokens.js";
@@ -141,6 +142,12 @@ export interface LaneForwarderStatus {
 export interface LaneForwarder {
   server: Server;
   control: Server | null;
+  /**
+   * CDT-SEC L8: the per-start random secret the control listener requires
+   * as `Authorization: Bearer <secret>` (null without a control listener).
+   * The bin writes it to AC_CONTROL_SECRET_FILE (0600) for the adapter.
+   */
+  controlSecret: string | null;
   deliverLaneToken(laneId: string, sealedBox: unknown): void;
   status(): LaneForwarderStatus;
   /** resolves once every queued request has been relayed (or dropped). */
@@ -170,6 +177,24 @@ async function readCapped(req: IncomingMessage, maxBody: number): Promise<Buffer
   }
   return Buffer.concat(chunks);
 }
+
+/**
+ * CDT-SEC L8: write the control secret owner-only. Any existing file is
+ * removed first and the new one is created exclusively at 0600, so a stale
+ * or looser-mode file (or a planted symlink) is never written through.
+ */
+export function writeControlSecretFile(file: string, secret: string): void {
+  rmSync(file, { force: true });
+  const fd = openSync(file, "wx", 0o600);
+  try {
+    writeSync(fd, `${secret}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const sha256 = (v: string): Buffer => createHash("sha256").update(v, "utf8").digest();
 
 function send(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -332,12 +357,23 @@ export function createLaneForwarder(options: {
   });
 
   let control: Server | null = null;
+  const controlSecret = options.control === undefined ? null : randomBytes(32).toString("hex");
   if (options.control !== undefined) {
+    const expected = sha256(controlSecret as string);
     control = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
         const url = new URL(req.url ?? "/", "http://loopback.invalid");
         if (req.method !== "POST" || url.pathname !== "/v1/lane-token") {
           send(res, 404, { error: "not_found" });
+          return;
+        }
+        // L8: only the holder of this start's secret file may deliver — the
+        // first local writer no longer wins. Checked before anything else so
+        // an unauthenticated caller learns nothing (not even delivery state).
+        const auth = req.headers.authorization ?? "";
+        const presented = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+        if (!timingSafeEqual(sha256(presented), expected)) {
+          send(res, 401, { error: "unauthorized" });
           return;
         }
         if (token !== null) {
@@ -373,6 +409,7 @@ export function createLaneForwarder(options: {
   return {
     server,
     control,
+    controlSecret,
     deliverLaneToken,
     status: () => ({
       laneId,

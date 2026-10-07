@@ -17,6 +17,10 @@
  *                         (POST /v1/lane-token {laneId, sealedBox}).
  *   AC_CONTROL_LISTEN     lane mode; host:port of the control listener
  *                         (loopback literal, a different port from AC_LISTEN)
+ *   AC_CONTROL_SECRET_FILE lane mode; where this start's random control
+ *                         secret is written (mode 0600, replaced each start).
+ *                         The adapter reads it and sends
+ *                         `Authorization: Bearer <secret>` on /v1/lane-token.
  *   AC_SERVICES_KEY_FILE  path to the local-services x25519 private key (JWK).
  *                         MUST be mode 0600 — anything looser refuses startup.
  *
@@ -30,7 +34,7 @@ import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = (name) => pathToFileURL(path.join(here, "..", "dist", name)).href;
-const { createForwarder, createLaneForwarder } = await import(dist("forward.js"));
+const { createForwarder, createLaneForwarder, writeControlSecretFile } = await import(dist("forward.js"));
 const { readServicesKeyFile } = await import(dist("services-key.js"));
 
 const die = (msg) => { console.error(`ac-otlp-forward: ${msg}`); process.exit(2); };
@@ -57,6 +61,7 @@ if (laneMode) {
     "AC_CONTROL_LISTEN",
     process.env.AC_CONTROL_LISTEN ?? die("AC_CONTROL_LISTEN is required in lane mode"),
   );
+  const secretFile = process.env.AC_CONTROL_SECRET_FILE ?? die("AC_CONTROL_SECRET_FILE is required in lane mode");
   const fwd = createLaneForwarder({
     listen: { host: listenHost, port: listenPort },
     control: { host: controlHost, port: controlPort },
@@ -64,13 +69,19 @@ if (laneMode) {
     servicesPrivateKeyJwk: readServicesKeyFile(keyFile),
     role,
   });
+  // CDT-SEC L8: written before the control listener opens; never logged.
+  try {
+    writeControlSecretFile(secretFile, fwd.controlSecret);
+  } catch (err) {
+    die(`cannot write AC_CONTROL_SECRET_FILE ${secretFile}: ${err.code ?? "error"}`);
+  }
   fwd.server.listen(listenPort, listenHost, () => {
     const addr = fwd.server.address();
     console.log(`ac-otlp-forward ${role}@lane(pending) listening on ${addr.address}:${addr.port} -> ${sinkUrl}`);
   });
   fwd.control.listen(controlPort, controlHost, () => {
     const addr = fwd.control.address();
-    console.log(`ac-otlp-forward ${role} lane-token control on ${addr.address}:${addr.port}`);
+    console.log(`ac-otlp-forward ${role} lane-token control on ${addr.address}:${addr.port} (secret file ${secretFile})`);
   });
 } else {
   const runId = process.env.AC_RUN_ID ?? die("AC_RUN_ID is required");

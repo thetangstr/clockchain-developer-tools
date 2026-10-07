@@ -1,10 +1,10 @@
 // CDT-SEC (state/ledger/notes/cdt-integration-security-review.md): sink-side
 // fixes for L4 (lane store pruning), L5 (audience, lane release) and L7
-// (no plaintext anchor token in production).
+// (no plaintext anchor token in production), L8 (forwarder control secret).
 // Loopback ports 19460-19469 only; every key is generated.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -217,4 +217,37 @@ test("L7: production refuses the plaintext TELEMETRY_ANCHOR_TOKEN env; only _FIL
   }
   assert.equal(resolveAnchorToken({ TELEMETRY_ENV: "staging", TELEMETRY_ANCHOR_TOKEN: "plain" }), "plain");
   assert.equal(resolveAnchorToken({}), undefined);
+});
+
+test("L8: the lane-token control port requires this start's secret; the secret file is 0600 and replaced", async (t) => {
+  const services = generateKeyPairSync("x25519").privateKey.export({ format: "jwk" });
+  const make = () => sinkLib.createLaneForwarder({
+    listen: { host: "127.0.0.1", port: 0 }, control: { host: "127.0.0.1", port: 0 },
+    targetBaseUrl: "http://127.0.0.1:19469", servicesPrivateKeyJwk: services, role: "buyer",
+  });
+  const fwd = make();
+  assert.match(fwd.controlSecret, /^[0-9a-f]{64}$/);
+  assert.notEqual(make().controlSecret, fwd.controlSecret, "per start");
+  const url = await listenClose(fwd.control);
+  t.after(() => fwd.control.close());
+  const post = (auth) => fetch(`${url}/v1/lane-token`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(auth === undefined ? {} : { authorization: auth }) },
+    body: JSON.stringify({ laneId: `lane:${"0".repeat(32)}`, sealedBox: {} }),
+  });
+  for (const auth of [undefined, "Bearer ", `Bearer ${"f".repeat(64)}`, fwd.controlSecret]) {
+    const res = await post(auth);
+    assert.equal(res.status, 401, String(auth));
+    assert.deepEqual(await res.json(), { error: "unauthorized" });
+  }
+  // With the secret the request reaches the box check (a bogus box: 400, still undelivered).
+  assert.equal((await post(`Bearer ${fwd.controlSecret}`)).status, 400);
+  assert.equal(fwd.status().tokenDelivered, false);
+
+  const dir = mkdtempSync(path.join(tmpdir(), "cdt-sec-l8-"));
+  const file = path.join(dir, "control.secret");
+  writeFileSync(file, "stale\n", { mode: 0o644 });
+  sinkLib.writeControlSecretFile(file, fwd.controlSecret);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(readFileSync(file, "utf8"), `${fwd.controlSecret}\n`);
 });
