@@ -469,7 +469,7 @@ export function buildContractServer(options: {
               } : {}),
               // CONTRACT_MILESTONE_LOG: the six entries from the durable job.
               ...(milestoneLogOn ? {
-                milestones: renderMilestones(job.runId, job.milestoneLog, job.anchors),
+                milestones: renderMilestones(job.runId, job.milestoneLog, job.anchors, true),
                 clockchainCalls: service.clockchainCallsFor(job.runId) ?? { writes: 0, lookups: 0 },
               } : {}),
             },

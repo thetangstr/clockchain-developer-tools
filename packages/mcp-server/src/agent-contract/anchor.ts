@@ -67,7 +67,13 @@ export interface ContractAnchor {
    * returned `anchorId` is the reference id. REJECTS on any failure.
    * Optional: a backing without it leaves the milestone log inert.
    */
-  log?(input: { referenceId: string; digestHex: string; additionalInfo: string }): Promise<AnchorWrite>;
+  log?(input: {
+    referenceId: string;
+    digestHex: string;
+    additionalInfo: string;
+    /** The run this write belongs to — local bookkeeping only (call counts); never sent to the gateway. */
+    runId?: string;
+  }): Promise<AnchorWrite>;
   /** Re-read a milestone log record's confirmation state by its ledger id. */
   confirmLog?(ledgerId: string): Promise<AnchorWrite["anchor"]>;
 }

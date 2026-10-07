@@ -89,7 +89,8 @@ test("unit: a negotiated, settled deal seals six chained entries at their transi
   t.entries.forEach((e, i) => {
     assert.equal(e.index, i + 1);
     assert.equal(e.milestone, MILESTONES[i]);
-    assert.equal(e.referenceId, `ac-milestone:${RUN}:${i + 1}-${MILESTONES[i]}`);
+    assert.equal(e.referenceId, `ac-milestone:${createHash("sha256").update(RUN).digest("hex").slice(0, 32)}:${i + 1}-${MILESTONES[i]}`);
+    assert.equal(e.referenceId.includes(RUN), false, "L6: the runId never goes on the ledger");
     assert.equal(e.payload.schema, MILESTONE_LOG_SCHEMA);
     assert.equal(e.payload.prevEntryDigest, prev);
     assert.equal(e.digest, `0x${createHash("sha256").update(canonicalJson(e.payload), "utf8").digest("hex")}`);
@@ -136,7 +137,7 @@ test("unit: index over anchors — terms covers discover, agreement covers agree
   assert.equal(rows[3].status, "failed");
   assert.equal(rows[3].error, "boom");
   assert.equal(rows[5].status, "anchoring", "settlement's own write");
-  assert.deepEqual(rows[5].anchorRef, { kind: "final", digest: null }, "final not fired yet");
+  assert.deepEqual(rows[5].anchorRefLive, { kind: "final", digest: null }, "final not fired yet");
   // A referenced anchor that has not fired reads awaiting-anchor.
   assert.equal(renderMilestones(RUN, t, {}).at(0).status, "awaiting-anchor");
   assert.equal(rows[1].assetHash, rows[1].digest, "an own write's asset hash is its digest");
@@ -193,6 +194,28 @@ test("unit: render — open while live, interrupted when the run was lost", () =
   assert.deepEqual(closeMilestones(t, { runId: RUN, now: T0, anchors: {}, finalAnchors: false }).map((e) => e.milestone), ["discover"]);
 });
 
+test("unit (review M2): a chain tail indexed to a server anchor is also written as its own record", () => {
+  const t = createMilestoneTracker();
+  const anchors = { terms: { digest: D("1") } };
+  feed(t, [[rcpt("contract_bind"), [], { bothBound: false }], [rcpt("contract_bind")]], { anchors, finalAnchors: true });
+  assert.equal(t.entries[0].source, "track-b-anchor");
+  const sealed = closeMilestones(t, { runId: RUN, now: T0, anchors, finalAnchors: true });
+  assert.deepEqual(sealed.map((e) => [e.milestone, e.source]), [["discover", "own-write"]]);
+  assert.deepEqual(t.entries[0].payload.anchorRef, { kind: "terms", digest: D("1") }, "the hashed anchorRef is unchanged");
+  // A tail ending at agreement (walk-away after the deal formed) likewise.
+  const t2 = createMilestoneTracker();
+  const a2 = { terms: { digest: D("1") }, agreement: { digest: D("2") } };
+  feed(t2, [[rcpt("contract_bind"), [], { bothBound: false }], [rcpt("contract_bind")], [rcpt("offer_submit")], [rcpt("offer_accept_submit")]], { anchors: a2 });
+  const s2 = closeMilestones(t2, { runId: RUN, now: T0, anchors: a2, finalAnchors: false });
+  assert.deepEqual(s2.map((e) => [e.milestone, e.source]), [["agreement", "own-write"]]);
+  assert.equal(t2.entries[0].source, "track-b-anchor", "only the tail is written");
+});
+
+test("unit (review L1): a terminal job without a tracker renders not-reached, never open", () => {
+  assert.deepEqual(renderMilestones(RUN, undefined, {}, true).map((r) => r.status), Array(6).fill("not-reached"));
+  assert.deepEqual(renderMilestones(RUN, undefined, {}, false).map((r) => r.status), Array(6).fill("open"));
+});
+
 // ============================================================================
 // Fake anchoring gateway: a stateful ClockchainClient stub behind the
 // PRODUCTION adapter (createTsaContractAnchor) — the same stub-client pattern
@@ -207,15 +230,17 @@ function fakeGateway({ pending = false, failMilestoneLog = false, failTsaWrite =
   const reads = [];
   let n = 0;
   const view = (r) => ({ ...r });
-  return {
+  const g = {
+    failMilestoneLog,
     records, logCalls, searches, reads,
+    milestoneRecords: () => records.filter((r) => r.assetReferenceId.startsWith("ac-milestone:")),
     milestoneWrites: () => logCalls.filter((c) => c.assetReferenceId.startsWith("ac-milestone:")),
     confirmAll() {
       for (const r of records) if (r.blockHeight === null) r.blockHeight = String(900 + Number(r.ledgerId.split("-")[1]));
     },
     async log(req) {
       logCalls.push(req);
-      if (failMilestoneLog && req.assetReferenceId.startsWith("ac-milestone:")) throw new Error("gateway unreachable (fake)");
+      if (g.failMilestoneLog && req.assetReferenceId.startsWith("ac-milestone:")) throw new Error("gateway unreachable (fake)");
       if (!req.assetReferenceId.startsWith("ac-milestone:") && ++tsaWrites === failTsaWrite) throw new Error("tsa write refused (fake)");
       n += 1;
       const rec = {
@@ -237,12 +262,13 @@ function fakeGateway({ pending = false, failMilestoneLog = false, failTsaWrite =
       return view(r);
     },
   };
+  return g;
 }
 
 test("adapter: log writes the bare digest under the reference; a re-issue finds it and never writes twice", async () => {
   const gw = fakeGateway({ pending: true });
   const anchor = createTsaContractAnchor(gw);
-  const ref = `ac-milestone:${RUN}:1-discover`;
+  const ref = milestoneReferenceId(RUN, "discover");
   const digest = `0x${"ab".repeat(32)}`;
   const first = await anchor.log({ referenceId: ref, digestHex: digest, additionalInfo: "agent contract milestone discover" });
   assert.equal(first.anchorId, ref);
@@ -301,7 +327,7 @@ async function negotiatedSettledRun(env, n) {
 }
 
 const OWN_WITHOUT_SERVER_ANCHORS = ["discover", "proposal", "negotiation", "execution", "settlement"];
-const ownRefs = (runId, names) => names.map((m) => `ac-milestone:${runId}:${MILESTONES.indexOf(m) + 1}-${m}`);
+const ownRefs = (runId, names) => names.map((m) => milestoneReferenceId(runId, m));
 const ownEntries = (t) => (t?.entries ?? []).filter((e) => e.source === "own-write");
 
 test("integration: flag on — six chained entries; agreement indexed to its anchor, the rest written in order", async () => {
@@ -335,7 +361,7 @@ test("integration: flag on — six chained entries; agreement indexed to its anc
     });
     const agreementRow = rows[3];
     assert.equal(agreementRow.source, "track-b-anchor");
-    assert.deepEqual(agreementRow.anchorRef, { kind: "agreement", digest: st.anchors.agreement.digest });
+    assert.deepEqual(agreementRow.anchorRefLive, { kind: "agreement", digest: st.anchors.agreement.digest });
     assert.equal(agreementRow.assetHash, st.anchors.agreement.eventHash);
     assert.equal(agreementRow.ledgerId, st.anchors.agreement.ledger.ledgerId);
 
@@ -362,6 +388,16 @@ test("integration: flag on — six chained entries; agreement indexed to its anc
     const text = JSON.stringify(rows.map((r) => r.payload));
     for (const leak of ["IT-QW-ONESTOP", "12000", "kb1", "tb1", "orderRef", "Minor"]) assert.equal(text.includes(leak), false, leak);
     assert.equal(feedOut.receipts.some((r) => /milestone/.test(r.tool)), false, "unchained");
+    // Review L6: the runId (the handshake session id) never reaches the ledger.
+    for (const c of gw.milestoneWrites()) {
+      assert.equal(JSON.stringify(c).includes(runId), false, "no runId in a milestone write");
+      assert.match(c.assetReferenceId, /^ac-milestone:[0-9a-f]{32}:[1-6]-[a-z]+$/);
+    }
+    assert.equal(gw.searches.filter((q) => q.startsWith("ac-milestone:")).some((q) => q.includes(runId)), false);
+    // Review L3: the durable file holds the closed tracker WITH the terminal call's own receipt.
+    const onDisk = JSON.parse(readFileSync(path.join(env.stateDir, "terminal-jobs.json"), "utf8")).jobs.find((j) => j.runId === runId);
+    assert.equal(onDisk.milestoneLog.closed, true);
+    assert.ok(byTool("settlement_authorize").every((id) => onDisk.milestoneLog.entries[5].payload.receiptIds.includes(id)));
 
     // Clockchain calls: agreement + terminal tsa writes, 5 milestone writes, 5 milestone lookups.
     assert.deepEqual(st.anchors.clockchainCalls, { writes: 7, lookups: 5 });
@@ -385,9 +421,9 @@ test("integration: with CONTRACT_SERVER_ANCHORS terms covers discover; settlemen
     const rows = st.anchors.milestones;
     assert.deepEqual(rows.map((r) => r.source), ["track-b-anchor", "own-write", "own-write", "track-b-anchor", "own-write", "own-write"]);
     assert.ok(rows.every((r) => r.status === "anchored"), JSON.stringify(rows.map((r) => [r.milestone, r.status])));
-    assert.deepEqual(rows[0].anchorRef, { kind: "terms", digest: st.anchors.terms.digest });
+    assert.deepEqual(rows[0].anchorRefLive, { kind: "terms", digest: st.anchors.terms.digest });
     assert.equal(rows[0].assetHash, st.anchors.terms.eventHash);
-    assert.deepEqual(rows[5].anchorRef, { kind: "final", digest: st.anchors.final.digest }, "final's subject is filled in once it fires");
+    assert.deepEqual(rows[5].anchorRefLive, { kind: "final", digest: st.anchors.final.digest }, "final's subject is filled in once it fires");
     assert.equal(rows[5].payload.anchorRef.digest, null);
     assert.equal(rows[5].assetHash, rows[5].digest, "the chain head's own payload hash is on the ledger");
     assert.equal(gw.milestoneWrites()[3].assetHash, rows[5].digest.slice(2));
@@ -409,10 +445,10 @@ test("integration: a failed agreement anchor makes agreement fall back to its ow
     const row = st.anchors.milestones[3];
     assert.equal(row.source, "own-write (fallback)");
     assert.equal(row.status, "anchored");
-    assert.deepEqual(row.anchorRef, { kind: "agreement", digest: st.anchors.agreement.digest }, "it still names the anchor it was indexed to");
+    assert.deepEqual(row.payload.anchorRef, { kind: "agreement", digest: st.anchors.agreement.digest }, "it still names the anchor it was indexed to");
     assert.equal(row.assetHash, row.digest);
     assert.equal(row.anchorId, row.assetReferenceId);
-    assert.ok(gw.milestoneWrites().some((c) => c.assetReferenceId === `ac-milestone:${runId}:4-agreement`));
+    assert.ok(gw.milestoneWrites().some((c) => c.assetReferenceId === milestoneReferenceId(runId, "agreement")));
     assert.equal(st.anchors.milestones[4].payload.prevEntryDigest, row.digest, "the chain is unchanged");
     // agreement attempt + terminal, 6 milestone writes and 6 lookups.
     assert.deepEqual(st.anchors.clockchainCalls, { writes: 8, lookups: 6 });
@@ -452,17 +488,43 @@ test("integration: a pending write is re-confirmed to anchored; a failed write i
     assert.ok(st.anchors.clockchainCalls.lookups > 5, "confirm reads are counted");
   } finally { env.close(); }
 
+  // Review M1: a failed own write is NOT permanent — pending with its error, retried within the confirm budget.
   const gw2 = fakeGateway({ failMilestoneLog: true });
-  const env2 = await boot({ anchor: createTsaContractAnchor(gw2), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  const env2 = await boot({ anchor: createTsaContractAnchor(gw2), milestoneLog: true, anchorConfirmDelayMs: 20, anchorConfirmMaxAttempts: 200 });
   try {
     const runId = await negotiatedSettledRun(env2, 703);
-    await waitFor(() => ownEntries(env2.service.runFor(runId)?.milestoneLog).filter((e) => e.status === "failed").length === 5);
+    await waitFor(() => ownEntries(env2.service.runFor(runId)?.milestoneLog).filter((e) => e.status === "pending" && e.error).length === 5);
     const st = await env2.callTool("tb1", "contract_status", {});
-    assert.equal(st.terminalState, "settled");
+    assert.equal(st.terminalState, "settled", "a failing gateway never blocks the deal");
+    assert.equal(statusSchema.safeParse(st).success, true, JSON.stringify(statusSchema.safeParse(st).error));
     const own = st.anchors.milestones.filter((r) => r.source === "own-write");
-    assert.ok(own.every((r) => r.status === "failed" && /gateway unreachable/.test(r.error)));
+    assert.ok(own.every((r) => r.status === "pending" && /gateway unreachable/.test(r.error)), JSON.stringify(own.map((r) => [r.status, r.error])));
     assert.equal(st.anchors.milestones[3].status, "anchored", "the referenced agreement anchor is unaffected");
-    assert.equal(st.anchors.agreement.status, "anchored");
+    gw2.failMilestoneLog = false; // the gateway heals
+    const healed = await waitFor(() => ownEntries(env2.service.runFor(runId)?.milestoneLog).every((e) => e.status === "anchored" && e.error === undefined));
+    assert.ok(healed, "the retries landed every entry");
+    assert.equal(gw2.milestoneRecords().length, 5, "exactly one record per entry (searchAsset first)");
+  } finally { env2.close(); }
+});
+
+test("integration: a write still failing when the budget runs out rests pending and the next boot lands it", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "milestone-retry-"));
+  const gw = fakeGateway({ failMilestoneLog: true });
+  const env = await boot({ stateDir, anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 5, anchorConfirmMaxAttempts: 2 });
+  let runId;
+  try {
+    runId = await negotiatedSettledRun(env, 713);
+    await waitFor(() => ownEntries(env.service.terminalJobFor(runId)?.milestoneLog).filter((e) => e.status === "pending" && e.error).length === 5);
+    await env.service.drain(2_000);
+  } finally { env.close(); }
+  assert.equal(gw.milestoneRecords().length, 0);
+  assert.ok(env.service.pendingTerminalJobs().some((j) => j.runId === runId), "an owed write keeps the job unfinished");
+  gw.failMilestoneLog = false;
+  const env2 = await boot({ stateDir, anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  try {
+    const ok = await waitFor(() => ownEntries(env2.service.terminalJobFor(runId)?.milestoneLog).every((e) => e.status === "anchored"));
+    assert.ok(ok, JSON.stringify(env2.service.terminalJobFor(runId)?.milestoneLog?.entries.map((e) => [e.status, e.error])));
+    assert.equal(gw.milestoneRecords().length, 5);
   } finally { env2.close(); }
 });
 
@@ -614,6 +676,12 @@ test("integration: a TTL sweep closes an unfinished run; only reached milestones
     const rows = (await env.callTool("tb1", "contract_status", {})).anchors.milestones;
     assert.deepEqual(rows.map((r) => r.status), ["anchored", "anchored", ...Array(4).fill("not-reached")]);
     assert.ok(rows[1].payload.receiptIds.length >= 2, "the mandate is proposal evidence");
+    // Review L2: once the run is dropped its call bookkeeping moves to the job.
+    const before = env.service.clockchainCallsFor(runId);
+    clock += 16 * 60_000;
+    assert.equal(env.service.runFor(runId), undefined, "dropped after the expired hold");
+    assert.deepEqual(env.service.clockchainCallsFor(runId), before);
+    assert.deepEqual(env.service.terminalJobFor(runId).clockchainCalls, before);
   } finally { env.close(); }
 });
 

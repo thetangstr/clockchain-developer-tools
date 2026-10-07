@@ -202,7 +202,8 @@ const milestoneEntryState = z.object({
   status: z.enum(["open", "not-reached", "interrupted", "awaiting-anchor", "anchoring", "pending", "anchored", "failed"]),
   digest: digestHex.nullable(),
   assetHash: digestHex.nullable(),
-  anchorRef: milestoneAnchorRef.nullable(),
+  // Review L4: the referenced anchor as it stands now — NOT hashed; verifiers recompute from payload.
+  anchorRefLive: milestoneAnchorRef.nullable(),
   anchorId: z.string().min(1).max(200).nullable(),
   ledgerId: z.string().min(1).nullable(),
   blockHeight: z.string().nullable(),

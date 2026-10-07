@@ -1174,16 +1174,22 @@ export function createContractService(options: {
   const clockchainCalls = new Map<string, { writes: number; lookups: number }>();
   /** anchorId / ledgerId → runId, so a confirm (which names no run) is counted. */
   const callOwner = new Map<string, string>();
+  /**
+   * Review M3: counting never writes terminal-jobs.json by itself. A live
+   * run's count is in memory and rides the next tracker/entry save (and the
+   * endRun enqueue); a run no longer in memory counts onto its job object,
+   * persisted with the next save of the outbox.
+   */
   const countCall = (runId: string | undefined, writes: number, lookups: number): void => {
     if (runId === undefined || (writes === 0 && lookups === 0)) return;
-    const c = clockchainCalls.get(runId) ?? { writes: 0, lookups: 0 };
+    const job = runs.has(runId) ? undefined : outbox.get(runId);
+    const c = job !== undefined
+      ? (job.clockchainCalls ??= { writes: 0, lookups: 0 })
+      : clockchainCalls.get(runId) ?? { writes: 0, lookups: 0 };
     c.writes += writes;
     c.lookups += lookups;
-    clockchainCalls.set(runId, c);
-    if (outbox.get(runId) !== undefined) updateJob(runId, (job) => { job.clockchainCalls = { ...c }; });
+    if (job === undefined) clockchainCalls.set(runId, c);
   };
-  const milestoneRunOf = (referenceId: string): string | undefined =>
-    /^ac-milestone:(.+):[1-6]-[a-z]+$/.exec(referenceId)?.[1];
   const runAnchor: ContractAnchor | undefined = !milestoneLogOn || options.anchor === undefined
     ? options.anchor
     : (() => {
@@ -1208,7 +1214,7 @@ export function createContractService(options: {
             },
           } : {}),
           async log(input) {
-            const runId = milestoneRunOf(input.referenceId);
+            const runId = input.runId;
             try {
               const w = await base.log!(input);
               countCall(runId, w.reused === true ? 0 : 1, 1);
@@ -1569,6 +1575,15 @@ export function createContractService(options: {
     const dropped = runs.get(runId);
     if (dropped !== undefined) {
       try { milestoneLog?.dropped(dropped); } catch { /* never block a drop */ }
+    }
+    // Review L2: the per-run call bookkeeping goes with the run; its count
+    // moves onto the job object (persisted with the next outbox save).
+    if (milestoneLog !== undefined) {
+      const c = clockchainCalls.get(runId);
+      const job = outbox.get(runId);
+      if (c !== undefined && job !== undefined) job.clockchainCalls = { ...c };
+      clockchainCalls.delete(runId);
+      for (const [id, owner] of callOwner) if (owner === runId) callOwner.delete(id);
     }
     runs.delete(runId);
     ttlExpiredAt.delete(runId);
@@ -2138,6 +2153,11 @@ export function createContractService(options: {
         getRun: (runId) => runs.get(runId),
         getJob: (runId) => outbox.get(runId),
         updateJob: (runId, mutate) => void updateJob(runId, (job) => {
+          mutate(job);
+          const c = clockchainCalls.get(runId);
+          if (c !== undefined) job.clockchainCalls = { ...c };
+        }),
+        updateJobDurable: (runId, mutate) => void outbox.updateDurable(runId, now(), (job) => {
           mutate(job);
           const c = clockchainCalls.get(runId);
           if (c !== undefined) job.clockchainCalls = { ...c };

@@ -3,8 +3,9 @@
 Status: local implementation on `track-c/milestone-log`, based on CDT `a5559a7`, which is live. It has not been
 deployed, nothing has been written to Clockchain, and it is off by default. Design: travel harness
 `docs/travel-mvp/design/MILESTONE-TIMELINE.md` §4 ("Option A", branch `track-c`), with the founder's answers of
-2026-10-06 applied, plus the follow-up rules: a failed referenced anchor falls back to an own write, and settlement is
-always written.
+2026-10-06 applied, plus two follow-up rules: a failed referenced anchor falls back to an own write, and settlement is
+always written. It also includes the fixes from the independent review of `13f3e08`, listed in
+[Review fixes](#review-fixes-13f3e08).
 
 ## What it does
 
@@ -48,7 +49,9 @@ new:
 
 Every other milestone, any of these without its anchor, and **settlement in every case** gets its own write:
 
-- `asset_reference_id = ac-milestone:<runId>:<n>-<milestone>`
+- `asset_reference_id = ac-milestone:<runRef>:<n>-<milestone>`, where `runRef` is the first 32 hex characters of
+  `sha256(runId)`. The runId is the handshake session id, so it never goes on the public ledger (review L6). The
+  payload keeps `runId`, but only the payload's hash is published.
 - `asset_hash = digest`, sent as bare lower hex
 - `additional_info = "agent contract milestone <milestone>"`
 
@@ -112,17 +115,28 @@ What the server cannot observe:
 - **Production backing:** `createTsaContractAnchor.log` does `searchAsset(reference)` and then `log(assetHash,
   reference)`. If a record with the same hash already exists under that reference, it is returned (`reused`), so a
   re-issue never writes twice. Confirmation reads the record by ledger id (`getLedgerEntry`).
-- **States for own writes:** `anchoring` is in flight. `pending` means the write landed but has no block and time yet;
-  it is re-confirmed on the same delay and attempt budget as agreement/terminal. `anchored` means block and time are
-  confirmed. `failed` carries the error. Writes are serialized per run, so ledger order matches index order.
+- **States for own writes:** `anchoring` is in flight. `pending` means the write landed but has no block and time yet,
+  or that the write itself errored, in which case `error` carries the reason. A pending write is retried on the same
+  delay and attempt budget as agreement/terminal. The retry is a ledger read if a record exists, else a re-issue,
+  which runs `searchAsset` first so it never writes twice. Past the budget the write rests `pending`, its job stays
+  unfinished, and the next boot re-drives it. `anchored` means block and time are confirmed. **An own write is never
+  permanently `failed`** (review M1). Writes are serialized per run, so ledger order matches index order.
+- **The chain tail is always on Clockchain** (review M2). Settlement is always written. If a run ends earlier and its
+  last sealed entry is a referenced one (for example discover via terms, or agreement), that entry is also written as
+  its own record. `anchorRef` is unchanged.
 - **States for referenced entries:** they show the referenced anchor's state live, or `awaiting-anchor` until it fires.
   If the referenced anchor fails, the entry falls back to an own write (above), and its row then shows the own write's
   state.
 - **Unchained:** entry outcomes are never minted as receipts, and no other anchor waits for them.
 - **Durability (founder answer 5):** the whole tracker (per-milestone receipt lists, poll counts, seal count, chain
   head and entries) is persisted on the run's terminal job:
-  - at every seal, which creates the job before the terminal transition, the way the agreement anchor already does;
-  - inside `endRun`'s durable enqueue.
+  - at every seal, using the fail-closed `updateDurable` (review L3). A seal's writes are queued only after that save
+    succeeded, so no ledger write can precede its seal on disk. If the save fails, nothing is queued, and the entry is
+    queued after the next successful save. The first seal creates the job before the terminal transition, the way the
+    agreement anchor already does;
+  - inside `endRun`'s durable enqueue;
+  - at the close, which happens on the terminal call's own receipt. The saved settlement entry therefore includes that
+    receipt.
 
   A job whose tracker is not closed, or which has an own write still `anchoring`/`pending`, is "unfinished", so it is
   never pruned and is visited at boot. At boot:
@@ -132,7 +146,7 @@ What the server cannot observe:
   - **Non-terminal job** (a live run lost with the process): it is marked `interrupted`. What it reached stays sealed
     and written, and its unsealed milestones show as `interrupted`. A run dropped from memory before it ended is
     marked the same way.
-  - **Pending own writes** are re-driven without a second write.
+  - **Pending own writes**, and any legacy `failed` ones, are re-driven without a second write.
 
   Nothing reads "lost".
 
@@ -147,11 +161,15 @@ event:
   status: open | not-reached | interrupted | awaiting-anchor | anchoring | pending | anchored | failed,
   digest,          // the entry's chain digest (sha256 of payload)
   assetHash,       // what is on the ledger: own write = digest; track-b = the referenced anchor's event hash
-  anchorRef, anchorId, ledgerId, blockHeight,
+  anchorRefLive,   // the referenced anchor as it stands now (final's digest filled in once it fires); NOT hashed
+  anchorId, ledgerId, blockHeight,
   sealedAt,        // server time the entry sealed
   anchoredAt,      // ledger time, once anchored
   error, payload }
 ```
+
+Verifiers recompute `digest` from `payload`. The hashed field is `payload.anchorRef`; `anchorRefLive` is display only
+(review L4). A terminal run that never had a tracker renders all six rows as `not-reached`, never `open` (review L1).
 
 `anchors.clockchainCalls = {writes, lookups}` counts this run's Clockchain calls through the run anchor (founder
 answer 4):
@@ -160,8 +178,11 @@ answer 4):
 - confirm lookups;
 - milestone lookups and writes.
 
-The shared per-digest brief anchor is not counted, because it is not any one run's call. The count is kept on the job,
-so it survives a restart. Calls per completed deal:
+The shared per-digest brief anchor is not counted, because it is not any one run's call. Counting never writes
+`terminal-jobs.json` by itself (review M3). A live run's count is kept in memory and saved with the next tracker or
+entry save and in the `endRun` enqueue. When the run is dropped from memory, the count moves onto the job object and
+the in-memory bookkeeping is cleared (review L2). The count therefore survives a restart, though the on-disk value may
+trail the in-memory one by the calls since the last save. Calls per completed deal:
 
 | Configuration | Writes | Lookups | Total |
 |---|---|---|---|
@@ -236,3 +257,17 @@ Tests: `test/agent-contract-milestone-log.test.mjs`. It covers:
 
 - `verified` status polls count toward settlement's `pollCount`, because execution seals at `verification_submit`.
 - A referenced anchor that stays `pending` for good, and never reaches `failed`, does not trigger a fallback.
+
+## Review fixes (13f3e08)
+
+| Item | Fix |
+|---|---|
+| M1 | A failed own write rests `pending` with its error and is retried within the confirm budget. Boot re-drives pending (and legacy `failed`) own writes. This is safe because `searchAsset` runs first. |
+| M2 | `closeMilestones` also writes a referenced chain tail as its own record. |
+| M3 | Clockchain call counting no longer saves `terminal-jobs.json`; the counter rides tracker and entry saves. |
+| L1 | A terminal job without a tracker renders `not-reached`. |
+| L2 | `dropRun` clears the run's call counts and `callOwner` entries; the count moves onto the job. |
+| L3 | Seals are saved with `updateDurable` before their writes are queued. The close save includes the terminal call's receipt. |
+| L4 | The hashed `payload.anchorRef` stays; the rendered live value is `anchorRefLive`. |
+| L6 | `asset_reference_id` uses `sha256(runId)[:32]`; the runId is never sent to the gateway. `log` takes the runId as a local-only field, for counting. |
+| L5, L7 | Documentation only. The review text for these two was not in the brief Track C received, so they are not addressed here. Add them when the review is shared. |

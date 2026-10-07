@@ -49,6 +49,8 @@
  * restart is "interrupted": its sealed entries are still written.
  */
 import type { AnchorWrite, ContractAnchor } from "./anchor.js";
+import { createHash } from "node:crypto";
+
 import { canonicalDigest } from "./canonical.js";
 import type { ServerReceipt } from "./receipts.js";
 import type { AnchorRunState, ContractRun } from "./service.js";
@@ -92,8 +94,15 @@ const CLOSERS: Readonly<Record<string, Milestone>> = Object.freeze({
   verification_submit: "execution",
 });
 
+/**
+ * Review L6: the runId is the handshake session id, so it never goes on the
+ * public ledger. The reference carries the first 32 hex of sha256(runId);
+ * the runId itself is only inside the hashed payload, which is not published.
+ */
+export const milestoneRunRef = (runId: string): string =>
+  createHash("sha256").update(runId, "utf8").digest("hex").slice(0, 32);
 export const milestoneReferenceId = (runId: string, m: Milestone): string =>
-  `ac-milestone:${runId}:${MILESTONES.indexOf(m) + 1}-${m}`;
+  `ac-milestone:${milestoneRunRef(runId)}:${MILESTONES.indexOf(m) + 1}-${m}`;
 /** Plain text only — the gateway strips punctuation from additional_info. */
 export const milestoneAdditionalInfo = (m: Milestone): string => `agent contract milestone ${m}`;
 
@@ -242,7 +251,18 @@ export function closeMilestones(t: MilestoneTracker, ctx: SealContext): Mileston
   t.buckets.forEach((b, i) => {
     if (b.receiptIds.length > 0 || b.approvalDigests.length > 0) last = Math.max(last, i);
   });
-  return sealThrough(t, ctx, last);
+  const sealed = sealThrough(t, ctx, last);
+  // Review M2: the chain tail is always on Clockchain. A tail indexed to a
+  // server anchor is ALSO written as its own record (anchorRef unchanged).
+  const tail = t.entries.at(-1);
+  if (tail !== undefined && tail.source === "track-b-anchor") {
+    const own: MilestoneEntryState = { ...tail, source: "own-write", status: "anchoring" };
+    t.entries[t.entries.length - 1] = own;
+    const i = sealed.findIndex((e) => e.index === own.index);
+    if (i >= 0) sealed[i] = own;
+    else sealed.push(own);
+  }
+  return sealed;
 }
 
 /**
@@ -308,7 +328,11 @@ export interface RenderedMilestone {
   digest: string | null;
   /** The hash actually on the ledger: own write = digest; track-b = the referenced anchor's event hash. */
   assetHash: string | null;
-  anchorRef: AnchorRef | null;
+  /**
+   * Review L4: the referenced anchor as it stands NOW (final's digest filled in once it fires). NOT hashed —
+   * verifiers recompute the digest from `payload` (whose `anchorRef` is the hashed one).
+   */
+  anchorRefLive: AnchorRef | null;
   anchorId: string | null;
   ledgerId: string | null;
   blockHeight: string | null;
@@ -322,6 +346,8 @@ export function renderMilestones(
   runId: string,
   t: MilestoneTracker | undefined,
   anchors: Partial<Record<string, AnchorRunState | TerminalAnchorJob | undefined>> | undefined,
+  /** Review L1: the run already ended — without a tracker every row is not-reached, never "open". */
+  ended = false,
 ): RenderedMilestone[] {
   return MILESTONES.map((m, i) => {
     const e = t?.entries.find((x) => x.index === i + 1);
@@ -329,8 +355,8 @@ export function renderMilestones(
     if (e === undefined) {
       return {
         ...base, source: null,
-        status: t?.interrupted === true ? "interrupted" : t?.closed === true ? "not-reached" : "open",
-        digest: null, assetHash: null, anchorRef: null, anchorId: null, ledgerId: null, blockHeight: null,
+        status: t?.interrupted === true ? "interrupted" : t?.closed === true || (t === undefined && ended) ? "not-reached" : "open",
+        digest: null, assetHash: null, anchorRefLive: null, anchorId: null, ledgerId: null, blockHeight: null,
         sealedAt: null, anchoredAt: null, error: null, payload: null,
       };
     }
@@ -349,7 +375,7 @@ export function renderMilestones(
     return {
       ...base, assetReferenceId: e.referenceId, source: e.source, status: state.status,
       digest: e.digest, assetHash: state.assetHash ?? null,
-      anchorRef: e.payload.anchorRef?.kind === "final" && e.payload.anchorRef.digest === null && anchors?.final !== undefined
+      anchorRefLive: e.payload.anchorRef?.kind === "final" && e.payload.anchorRef.digest === null && anchors?.final !== undefined
         ? { kind: "final", digest: anchors.final.digest }
         : e.payload.anchorRef,
       anchorId: state.anchorId ?? null,
@@ -382,8 +408,13 @@ export function createMilestoneLog(deps: {
   anchor: ContractAnchor & Required<Pick<ContractAnchor, "log">>;
   getRun(runId: string): ContractRun | undefined;
   getJob(runId: string): TerminalJob | undefined;
-  /** Get-or-create + mutate + persist (a seal creates the job before the terminal transition). */
+  /** Get-or-create + mutate + persist; a persist failure is swallowed (entry-state updates). */
   updateJob(runId: string, mutate: (job: TerminalJob) => void): void;
+  /**
+   * Review L3: the fail-closed variant (outbox.updateDurable) — THROWS when the
+   * durable write fails, leaving the job as it was. Seals use it.
+   */
+  updateJobDurable(runId: string, mutate: (job: TerminalJob) => void): void;
   track(p: Promise<void>): void;
   sleep(ms: number): Promise<void>;
   confirmDelayMs: number;
@@ -395,13 +426,29 @@ export function createMilestoneLog(deps: {
   const anchor = deps.anchor;
   /** Per-run write queue: own writes are issued strictly in index order. */
   const queues = new Map<string, Promise<void>>();
+  /** `runId|index` of own writes queued or in flight (never queued twice at once). */
+  const queued = new Set<string>();
 
   const ctxFor = (runId: string, anchors: AnchorStates | undefined): SealContext =>
     ({ runId, now: deps.now(), anchors, finalAnchors: deps.finalAnchors });
 
-  /** Persist the run's whole tracker on its job (creating the job if needed). */
-  function persistTracker(runId: string, t: MilestoneTracker): void {
-    deps.updateJob(runId, (job) => { job.milestoneLog = structuredClone(t); });
+  /**
+   * Durably persist the run's whole tracker on its job (creating the job if
+   * needed). Review L3: false when the durable write failed — then NOTHING is
+   * queued, so no ledger write can ever precede its seal on disk.
+   */
+  function persistTracker(runId: string, t: MilestoneTracker): boolean {
+    try {
+      deps.updateJobDurable(runId, (job) => { job.milestoneLog = structuredClone(t); });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** After a durable save: queue every own write sealed but not yet queued (in index order). */
+  function queueSaved(runId: string, t: MilestoneTracker): void {
+    enqueue(runId, t.entries.filter((e) => writes(e) && e.status === "anchoring"));
   }
 
   /** Record an own-write state on the live tracker and on the job. */
@@ -419,21 +466,39 @@ export function createMilestoneLog(deps: {
     });
   }
 
+  const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+  /**
+   * Re-check a pending own write: read its record by ledger id, or — when no
+   * write ever landed — re-issue it (idempotent: searchAsset first). Bounded
+   * by the confirm budget; past it the entry rests `pending` and the next
+   * boot re-drives it. Review M1: an error never makes it permanent.
+   */
   function confirm(runId: string, prior: MilestoneEntryState, attempt: number): void {
     if (deps.confirmDelayMs <= 0 || attempt > deps.confirmMaxAttempts) return;
     const ledgerId = prior.ledger?.ledgerId;
     deps.track(deps.sleep(deps.confirmDelayMs)
       .then(() => anchor.confirmLog !== undefined && ledgerId !== undefined && ledgerId !== ""
-        ? anchor.confirmLog(ledgerId)
-        : anchor.log({ referenceId: prior.referenceId, digestHex: prior.digest, additionalInfo: milestoneAdditionalInfo(prior.milestone) })
-          .then((w) => w.anchor))
-      .then((ledger) => {
-        const confirmed = ledger.status === "anchored" && ledger.blockHeight !== null && ledger.time !== null;
-        const next: MilestoneEntryState = { ...prior, status: confirmed ? "anchored" : "pending", ledger };
+        ? anchor.confirmLog(ledgerId).then((ledger) => ({ ledger } as Partial<AnchorWrite> & { ledger: AnchorWrite["anchor"] }))
+        : anchor.log({
+            referenceId: prior.referenceId, digestHex: prior.digest,
+            additionalInfo: milestoneAdditionalInfo(prior.milestone), runId,
+          }).then((w) => ({ ledger: w.anchor, anchorId: w.anchorId, eventHash: w.eventHash })))
+      .then((r) => {
+        const confirmed = r.ledger.status === "anchored" && r.ledger.blockHeight !== null && r.ledger.time !== null;
+        const next: MilestoneEntryState = {
+          ...prior, status: confirmed ? "anchored" : "pending", ledger: r.ledger,
+          ...(r.anchorId !== undefined ? { anchorId: r.anchorId, eventHash: r.eventHash } : {}),
+        };
+        delete next.error;
         record(runId, next);
         if (!confirmed) confirm(runId, next, attempt + 1);
       })
-      .catch(() => confirm(runId, prior, attempt + 1)));
+      .catch((err) => {
+        const next: MilestoneEntryState = { ...prior, status: "pending", error: message(err) };
+        record(runId, next);
+        confirm(runId, next, attempt + 1);
+      }));
   }
 
   /** Issue one own write (idempotent in the adapter); record every state. */
@@ -443,6 +508,7 @@ export function createMilestoneLog(deps: {
         referenceId: entry.referenceId,
         digestHex: entry.digest,
         additionalInfo: milestoneAdditionalInfo(entry.milestone),
+        runId,
       }))
       .then((w) => {
         const confirmed = w.anchor.status === "anchored" && w.anchor.blockHeight !== null && w.anchor.time !== null;
@@ -455,25 +521,34 @@ export function createMilestoneLog(deps: {
         if (!confirmed) confirm(runId, next, 1);
       })
       .catch((err) => {
-        record(runId, { ...entry, status: "failed", error: err instanceof Error ? err.message : String(err) });
+        // Review M1: pending with its error, retried within the confirm budget.
+        const next: MilestoneEntryState = { ...entry, status: "pending", error: message(err) };
+        record(runId, next);
+        confirm(runId, next, 1);
       });
   }
 
   function enqueue(runId: string, entries: readonly MilestoneEntryState[]): void {
     for (const entry of entries) {
       if (!writes(entry)) continue;
+      const key = `${runId}|${entry.index}`;
+      if (queued.has(key)) continue;
+      queued.add(key);
       const prev = queues.get(runId) ?? Promise.resolve();
       const op = prev.then(() => write(runId, entry));
       queues.set(runId, op);
       deps.track(op);
-      void op.finally(() => { if (queues.get(runId) === op) queues.delete(runId); });
+      void op.finally(() => {
+        queued.delete(key);
+        if (queues.get(runId) === op) queues.delete(runId);
+      });
     }
   }
 
   function afterSeal(runId: string, t: MilestoneTracker, sealed: readonly MilestoneEntryState[], closedNow: boolean): void {
     if (sealed.length === 0 && !closedNow) return;
-    persistTracker(runId, t);
-    enqueue(runId, sealed);
+    // L3: the seal is on disk before any of its writes is queued.
+    if (persistTracker(runId, t)) queueSaved(runId, t);
     // A referenced anchor that already failed before the seal: fall back now.
     if (sealed.some((e) => e.source === "track-b-anchor")) fallback(runId);
   }
@@ -498,8 +573,7 @@ export function createMilestoneLog(deps: {
       switched.push(next);
     });
     if (switched.length === 0) return;
-    persistTracker(runId, t);
-    enqueue(runId, switched);
+    if (persistTracker(runId, t)) queueSaved(runId, t);
   }
 
   return {
@@ -550,9 +624,8 @@ export function createMilestoneLog(deps: {
         const t = structuredClone(ml);
         if (job.terminalState !== null) {
           // Crash between the terminal transition and the close: seal from the persisted buckets.
-          const sealed = closeMilestones(t, ctxFor(job.runId, job.anchors as AnchorStates | undefined));
-          persistTracker(job.runId, t);
-          enqueue(job.runId, sealed);
+          closeMilestones(t, ctxFor(job.runId, job.anchors as AnchorStates | undefined));
+          if (persistTracker(job.runId, t)) queueSaved(job.runId, t);
         } else {
           // The live run died with the process: what it reached stays sealed; nothing more can complete.
           t.closed = true;
@@ -562,7 +635,8 @@ export function createMilestoneLog(deps: {
       }
       // Re-issue: the adapter finds an existing record under the same reference + hash (no second write).
       // Entries the close just sealed were enqueued above; these are the older pending ones.
-      enqueue(job.runId, ml.entries.filter((e) => writes(e) && (e.status === "anchoring" || e.status === "pending")));
+      // Review M1: a legacy `failed` own write is re-driven too (searchAsset first, so never twice).
+      enqueue(job.runId, ml.entries.filter((e) => writes(e) && (e.status === "anchoring" || e.status === "pending" || e.status === "failed")));
       // A referenced anchor that failed while we were down.
       fallback(job.runId);
     },

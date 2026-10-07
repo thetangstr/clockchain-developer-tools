@@ -1,6 +1,6 @@
 # Release note: milestone log production window (W2)
 
-Status: prepared, NOT executed. Nothing in this note has been run against AWS, the box or SSM. The feature is
+Status: prepared, NOT executed. It includes the fixes from the review of `13f3e08` (M1–M3, L1–L4, L6). Nothing in this note has been run against AWS, the box or SSM. The feature is
 described in `MILESTONE-LOG.md`.
 
 This note has the same shape as the 2026-10-07 window sheet (`window/STAGE-2-3-COMMANDS.md`): session helpers, a "no
@@ -137,25 +137,29 @@ Gate: `PUBLIC-EQUAL`. A `/contract/mcp` 503 means a boot misconfiguration: roll 
 Track C party canaries:
 - tools/list and the guidance digests are still **unchanged** (the flag adds no tool).
 - `contract_status` after a bind shows `anchors.milestones`, which is six rows. `discover` is `track-b-anchor`
-  (terms) and the rest are `open`. It also shows `anchors.clockchainCalls`.
+  (terms) and the rest are `open`. It also shows `anchors.clockchainCalls`. Every `assetReferenceId` looks like
+  `ac-milestone:<32 hex>:<n>-<milestone>` and never contains the runId.
 
 ### B.5 Proof on the first real run
 
 After one completed deal:
 - All six rows reach `anchored`. Sources are discover and agreement as `track-b-anchor`, and proposal, negotiation,
-  execution and settlement as `own-write`. A `own-write (fallback)` source means a server anchor failed: investigate
-  the gateway, but the run is still fully logged.
+  execution and settlement as `own-write`. An `own-write (fallback)` source means a server anchor failed: investigate
+  the gateway, but the run is still fully logged. A run that ends early also writes its last sealed entry, even when
+  that entry is a reference.
 - `anchors.clockchainCalls` is about `{writes: 8, lookups: 4}`, plus one lookup per confirm read.
 - For each own write:
   - `get_log_entry(ledgerId).assetHash` equals `digest` without `0x`;
-  - `sha256(canonicalJson(payload))` equals `digest`;
+  - `sha256(canonicalJson(payload))` equals `digest`. Recompute from `payload`, whose `anchorRef` is the hashed one;
+    the row's `anchorRefLive` is display only;
   - `search_actions(assetReferenceId)` returns exactly one record.
 - Each row's `payload.prevEntryDigest` equals the previous row's `digest`.
 
 Record the rows in the run's evidence bundle.
 
-A `failed` own write points at the production gateway or its signing secret. It never blocks the deal. Per the
-anchors rule (2026-10-07 decision 10), roll back with B.R.
+An own write that stays `pending` with an `error` points at the production gateway or its signing secret. It is retried
+within the confirm budget, then again at each boot, and it never blocks the deal. If it persists past the first run, roll
+back with B.R, per the anchors rule (2026-10-07 decision 10).
 
 ### B.R Rollback (flag off)
 
@@ -169,7 +173,8 @@ canaries | tee ${WIN}/w2-canary-B-rollback.txt
 ```
 
 Entries already written stay on the ledger, and nothing else depends on them. Any terminal jobs that still hold an
-unclosed milestone tracker are kept as unfinished, are not pruned, and are ignored while the flag is off. If the flag
-is turned back on, the next boot closes them or marks them interrupted.
+unclosed milestone tracker or a `pending` own write are kept as unfinished, are not pruned, and are ignored while the
+flag is off. If the flag is turned back on, the next boot closes them, marks them interrupted, or lands the pending
+writes. No write is ever made twice.
 
 For a full rollback, run B.R and then A.R.
