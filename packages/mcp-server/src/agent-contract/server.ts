@@ -324,6 +324,7 @@ export function buildContractServer(options: {
       const served = await service.getBrief((parsed.data as { name: string }).name, {
         ...(receiptRun !== undefined ? { run: receiptRun } : {}),
         preBindScope: service.preBindBriefScope(principal.keyId, options.session?.id),
+        role: principal.role,
       });
       outcome = served.ok ? ok({ ...served.result, serverNonce }) : refusal(served.code, serverNonce);
       return asResult(recordAny(receiptRun, name, argsDigest, outcome, serverNonce, argsScheme));
@@ -458,7 +459,9 @@ export function buildContractServer(options: {
               // M5: reported only with CONTRACT_SERVER_ANCHORS=1.
               ...(serverAnchorsOn ? {
                 terms: renderServerAnchor(job.anchors.terms),
-                brief: renderServerAnchor(job.anchors.brief),
+                brief: service.roleBriefs
+                  ? { buyer: renderServerAnchor(job.anchors.briefBuyer), provider: renderServerAnchor(job.anchors.briefProvider) }
+                  : renderServerAnchor(job.anchors.brief),
                 final: renderFinalAnchor(job.anchors.final),
               } : {}),
             },
@@ -537,7 +540,10 @@ export function buildContractServer(options: {
           // Server-side anchors — recorded here, never chained receipts.
           ...(serverAnchorsOn ? {
             terms: renderServerAnchor(anchorStates.terms),
-            brief: renderServerAnchor(anchorStates.brief),
+            // CDT-GAPS gap 1: with CONTRACT_ROLE_BRIEFS, one record per role.
+            brief: service.roleBriefs
+              ? { buyer: renderServerAnchor(anchorStates.briefBuyer), provider: renderServerAnchor(anchorStates.briefProvider) }
+              : renderServerAnchor(anchorStates.brief),
             final: renderFinalAnchor(anchorStates.final),
           } : {}),
         },

@@ -80,6 +80,8 @@ export interface BoundRole {
   /** N4b-7: whether the session-key possession statement verified. */
   readonly bindStatement: "verified" | "absent";
   readonly bindAssurance: "agentId-pinned-token" | "late-certificate-party" | "session-key-possession";
+  /** CDT-GAPS gap 1 (CONTRACT_ROLE_BRIEFS): the brief digest this role's bind bound (null: none). */
+  readonly briefDigest?: string | null;
 }
 
 export type ContractStage =
@@ -266,6 +268,9 @@ export interface ContractRun {
     terms?: AnchorRunState;
     brief?: AnchorRunState;
     final?: AnchorRunState;
+    /** CDT-GAPS gap 1 (CONTRACT_ROLE_BRIEFS): each role's own brief anchor. */
+    briefBuyer?: AnchorRunState;
+    briefProvider?: AnchorRunState;
   };
   stage: ContractStage;
   /**
@@ -504,6 +509,8 @@ export interface ContractService {
    * them. Off = the b04059e anchors only.
    */
   readonly serverAnchors: boolean;
+  /** CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS is configured (per-role brief anchors). */
+  readonly roleBriefs: boolean;
   /** The business-tool semantics layer (everything except bind/status). */
   business: BusinessOps;
   /** Release the state-dir lock (simulate a restart in tests / shutdown). */
@@ -1087,6 +1094,13 @@ export function createContractService(options: {
   /** M5: CONTRACT_SERVER_ANCHORS=1 (default off) — fire terms/brief/final anchors. */
   serverAnchors?: boolean;
   /**
+   * CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS (default off) — role → brief NAME
+   * (a key of `briefs`). Each role's brief is anchored in its own slot and
+   * bound by that role's contract_bind (`briefDigest`); a configured brief's
+   * anchor is issued at start-up. Present (even with one role) = role mode.
+   */
+  roleBriefs?: Partial<Record<ContractRole, string>>;
+  /**
    * M5: CONTRACT_POLICY_REGISTRATION=1 (default off) — serve
    * contract_register_policy; off, persisted registrations authorize nothing.
    */
@@ -1129,6 +1143,18 @@ export function createContractService(options: {
     ...((options.briefs?.size ?? 0) > 0 ? { briefs: true } : {}),
   });
   const serverAnchorsOn = options.serverAnchors === true;
+  // CDT-GAPS gap 1: role → brief digest. An unknown name fails construction.
+  const roleBriefDigests: Partial<Record<ContractRole, string>> | undefined = (() => {
+    if (options.roleBriefs === undefined) return undefined;
+    const out: Partial<Record<ContractRole, string>> = {};
+    for (const [role, name] of Object.entries(options.roleBriefs) as [ContractRole, string | undefined][]) {
+      if (name === undefined) continue;
+      const brief = options.briefs?.get(name);
+      if (brief === undefined) throw new Error(`role brief ${role}:${name} is not a configured brief`);
+      out[role] = brief.digest;
+    }
+    return out;
+  })();
   const runs = new Map<string, ContractRun>();
   /** O-3: live-run routing per (keyId, mcpSessionId slot), capped per keyId. */
   const router = createRunRouter(options.maxRunsPerKey);
@@ -1790,6 +1816,16 @@ export function createContractService(options: {
       ? "late-certificate-party" as const
       : statementPresent ? "session-key-possession" as const : "agentId-pinned-token" as const;
     const boundAt = new Date(now()).toISOString();
+    // CDT-GAPS gap 1: the role's brief digest is part of the bind result, so
+    // the bind receipt's responseDigest binds it — no client call needed.
+    let roleBriefDigest: string | null | undefined;
+    if (roleBriefDigests !== undefined) {
+      try {
+        roleBriefDigest = serverAnchors.roleBriefFor(principal.role, briefScopeOf(preBindChain));
+      } catch {
+        roleBriefDigest = roleBriefDigests[principal.role] ?? null;
+      }
+    }
     const resultBody = {
       runId: verdict.sessionId,
       role: principal.role,
@@ -1800,6 +1836,7 @@ export function createContractService(options: {
       bindMode,
       bindStatement: bindStatementOutcome,
       bindAssurance,
+      ...(roleBriefDigest !== undefined ? { briefDigest: roleBriefDigest } : {}),
     };
     const runId = verdict.sessionId;
     const prevReceipt = existing === undefined ? null : (existing.receipts.at(-1) ?? null);
@@ -1896,6 +1933,7 @@ export function createContractService(options: {
       bindMode,
       bindStatement: bindStatementOutcome,
       bindAssurance,
+      ...(roleBriefDigest !== undefined ? { briefDigest: roleBriefDigest } : {}),
     };
     run.receipts.push(receipt);
     run.receiptsByPrincipal.set(principal.keyId, principalReceipts + 1);
@@ -1931,6 +1969,9 @@ export function createContractService(options: {
     try {
       if (existing === undefined) serverAnchors.fireTerms(run, termsDigestOf(verdict.result, verdict.resultDigest));
       serverAnchors.carryBrief(run, briefScopeOf(preBindChain));
+      if (roleBriefDigest !== undefined && roleBriefDigest !== null) {
+        serverAnchors.attachRoleBrief(run, principal.role, roleBriefDigest);
+      }
     } catch { /* an anchor bug must never break a committed bind */ }
     return { ok: true, runId, role: principal.role, boundAt, result: resultBody, receipt, run };
   }
@@ -1956,6 +1997,7 @@ export function createContractService(options: {
         bindMode: run.bound[role]?.bindMode,
         bindStatement: run.bound[role]?.bindStatement,
         bindAssurance: run.bound[role]?.bindAssurance,
+        ...(run.bound[role]?.briefDigest !== undefined ? { briefDigest: run.bound[role]?.briefDigest } : {}),
         idempotent: true,
       },
       // An idempotent re-bind appends no receipt: nothing changed.
@@ -1995,6 +2037,7 @@ export function createContractService(options: {
     ...(options.briefAnchorAwaitMs !== undefined ? { briefAnchorAwaitMs: options.briefAnchorAwaitMs } : {}),
     ...(options.finalAnchorAwaitMs !== undefined ? { finalAnchorAwaitMs: options.finalAnchorAwaitMs } : {}),
     ...(options.briefRetryMs !== undefined ? { briefRetryMs: options.briefRetryMs } : {}),
+    ...(roleBriefDigests !== undefined ? { roleBriefs: roleBriefDigests } : {}),
     now,
   });
 
@@ -2183,7 +2226,8 @@ export function createContractService(options: {
     };
     const poll = anchor.confirm !== undefined && aj.anchorId !== undefined
       ? anchor.confirm(aj.anchorId).then((ledger) => ({ ledger }))
-      : anchor.anchor({ kind: aj.kind, runId, digestHex: aj.digest }).then((w) => ({ write: w }));
+      // Only agreement/terminal jobs reach this path (boot recovery loop).
+      : anchor.anchor({ kind: aj.kind as "agreement" | "terminal", runId, digestHex: aj.digest }).then((w) => ({ write: w }));
     const op = Promise.resolve(poll)
       .then((r) => {
         if ("write" in r) {
@@ -2245,7 +2289,7 @@ export function createContractService(options: {
       ].filter((k): k is string => k !== undefined);
       job.prevReceipt = run.receipts.at(-1) ?? null;
       // Server-side anchors recorded on the live run so far join the job.
-      for (const k of ["terms", "brief"] as const) {
+      for (const k of ["terms", "brief", "briefBuyer", "briefProvider"] as const) {
         const st = run.anchors?.[k];
         if (st !== undefined) job.anchors = { ...job.anchors, [k]: { kind: k, ...st } };
       }
@@ -2344,7 +2388,10 @@ export function createContractService(options: {
         }
       }
       // Server-side anchors re-drive unchained (server-anchors.ts).
-      for (const aj of [job.anchors?.terms, job.anchors?.brief, job.anchors?.final]) {
+      for (const aj of [
+        job.anchors?.terms, job.anchors?.brief, job.anchors?.final,
+        job.anchors?.briefBuyer, job.anchors?.briefProvider,
+      ]) {
         if (aj !== undefined && (aj.status === "anchoring" || aj.status === "pending")) {
           serverAnchors.recover(job, aj);
         }
@@ -2368,6 +2415,7 @@ export function createContractService(options: {
     issueBindChallenge,
     features,
     serverAnchors: serverAnchorsOn,
+    roleBriefs: roleBriefDigests !== undefined,
     registerPolicy: (principal, input) => features.policyRegistration === true
       ? policyRegistry.register(principal, input)
       : { ok: false, code: "NOT_FOUND" },

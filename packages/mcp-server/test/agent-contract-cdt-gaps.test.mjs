@@ -4,7 +4,8 @@
 // Offline: loopback ports 19520-19539 only; every key is generated.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
@@ -14,6 +15,7 @@ import { loadContractConfig } from "../dist/agent-contract/config.js";
 import { createCloseEmitter } from "../dist/agent-contract/close-emitter.js";
 import { canonicalDigest } from "../dist/agent-contract/canonical.js";
 import { verifyChain } from "../dist/agent-contract/receipts.js";
+import { parseContractBriefs } from "../dist/agent-contract/server-anchors.js";
 import {
   ACCEPT, HOST_ROOTS, POLICY, SIGNER, bindPair, boot, fakeAnchor, mintCertificate, rootKey, keys,
   serverPubKey, sinkCheckReceipt, uuid, waitFor,
@@ -377,5 +379,249 @@ test("gap 2: with expireAtTtl a half-bound run reaching its TTL first ends expir
     assert.equal(delivered[0].terminalState, "expired_unbound");
   } finally {
     env.close();
+  }
+});
+
+// =============================================================================
+// Gap 1 — with different buyer and provider briefs only one brief anchor was
+// recorded per run (carryBrief: the creating binder's), so the other role
+// failed R10(b). CONTRACT_ROLE_BRIEFS records and anchors each role's brief
+// (anchored at start-up), binds it in that role's contract_bind result, and
+// contract_status reports anchors.brief = {buyer, provider}. The stock
+// harness never calls contract_get_brief, and these tests never do either.
+// =============================================================================
+
+const BUYER_BRIEF = "# Buyer brief\n\nBook the family trip within the signed mandate only.\n";
+const PROVIDER_BRIEF = "# Provider brief\n\nQuote and book only inventory you hold.\n";
+const sha = (text) => `0x${createHash("sha256").update(text).digest("hex")}`;
+
+function roleBriefsFixture() {
+  const dir = mkdtempSync(path.join(tmpdir(), "cdt-gaps-briefs-"));
+  writeFileSync(path.join(dir, "buyer-brief.md"), BUYER_BRIEF);
+  writeFileSync(path.join(dir, "provider-brief.md"), PROVIDER_BRIEF);
+  return {
+    dir,
+    raw: `buyer-brief:${sha(BUYER_BRIEF)},provider-brief:${sha(PROVIDER_BRIEF)}`,
+    briefs: parseContractBriefs(`buyer-brief:${sha(BUYER_BRIEF)},provider-brief:${sha(PROVIDER_BRIEF)}`, dir),
+  };
+}
+
+/** A fake anchor whose ledger time is the real time of the anchor call. */
+function clockAnchor() {
+  const base = fakeAnchor();
+  return {
+    calls: base.calls,
+    async anchor(input) {
+      const w = await base.anchor(input);
+      base.calls.at(-1).atMs = Date.now();
+      return { ...w, anchor: { ...w.anchor, time: new Date().toISOString() } };
+    },
+  };
+}
+
+function bindArgsFor(cert, role) {
+  const signer = role === "buyer" ? keys.buyerSigner : keys.providerSigner;
+  const approval = role === "buyer" ? keys.buyerApproval : keys.providerApproval;
+  return {
+    certificate: cert,
+    signerKey: { keyId: signer.keyId, publicKeyHex: signer.publicKeyHex },
+    approvalKey: { keyId: approval.keyId, publicKeyHex: approval.publicKeyHex },
+  };
+}
+
+test("gap 1: distinct buyer/provider briefs are each anchored before that role's first event and bound by its bind", async () => {
+  const { briefs } = roleBriefsFixture();
+  const anchor = clockAnchor();
+  const env = await boot({
+    anchor, briefs, serverAnchors: true, roleBriefs: { buyer: "buyer-brief", provider: "provider-brief" },
+  });
+  try {
+    // Both role briefs are anchored at start-up — no client call involved.
+    const settled = await waitFor(() => anchor.calls.filter((c) => c.kind === "brief").length === 2);
+    assert.ok(settled, JSON.stringify(anchor.calls));
+    await new Promise((r) => setTimeout(r, 20)); // let the anchor results land
+
+    const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(4101) });
+    const b = await env.callTool("tb1", "contract_bind", bindArgsFor(cert, "buyer"));
+    assert.equal(b.bound, true, JSON.stringify(b));
+    const p = await env.callTool("tp1", "contract_bind", bindArgsFor(cert, "provider"));
+    assert.equal(p.bound, true, JSON.stringify(p));
+
+    // Each role's bind result binds its own brief digest ...
+    assert.equal(b.briefDigest, sha(BUYER_BRIEF));
+    assert.equal(p.briefDigest, sha(PROVIDER_BRIEF));
+    // ... and the bind receipt's responseDigest covers that result.
+    const feed = env.service.receiptFeed(b.runId);
+    const binds = feed.receipts.filter((r) => r.tool === "contract_bind");
+    assert.equal(binds.length, 2);
+    const bindOf = (role) => binds.find((r) => r.principal.role === role);
+    assert.equal(bindOf("buyer").responseDigest, canonicalDigest(b));
+    assert.equal(bindOf("provider").responseDigest, canonicalDigest(p));
+
+    // contract_status: one anchored record per role, the PROPOSED verifier shape.
+    const st = await env.callTool("tb1", "contract_status", {});
+    assert.equal(st.rpcError, undefined, JSON.stringify(st));
+    const rec = st.anchors.brief;
+    assert.equal(typeof rec.status, "undefined", "per-role map, not a single record");
+    for (const [role, text] of [["buyer", BUYER_BRIEF], ["provider", PROVIDER_BRIEF]]) {
+      const r = rec[role];
+      assert.equal(r.status, "anchored", `${role}: ${JSON.stringify(r)}`);
+      assert.equal(r.digest, sha(text));
+      assert.ok(r.anchorId && r.ledger?.time, `${role}: ledger complete`);
+      // R10(b): the role's brief anchor precedes the role's first acting call (its bind).
+      assert.ok(Date.parse(r.ledger.time) <= bindOf(role).ts, `${role}: anchor ${r.ledger.time} after bind ${bindOf(role).ts}`);
+    }
+    // The two roles' anchors are different ledger objects (one per digest, CDT-SEC M4).
+    assert.notEqual(rec.buyer.anchorId, rec.provider.anchorId);
+    const briefCalls = anchor.calls.filter((c) => c.kind === "brief");
+    assert.deepEqual(new Set(briefCalls.map((c) => c.digestHex)), new Set([sha(BUYER_BRIEF), sha(PROVIDER_BRIEF)]));
+    assert.equal(briefCalls.length, 2, "still one anchor per digest");
+
+    // Terminal: the per-role records join the job, and the final anchor still fires.
+    await env.callTool("tb1", "contract_withdraw", {});
+    const fin = await waitFor(() => env.service.runFor(b.runId)?.anchors?.final?.status === "anchored");
+    assert.ok(fin, "final anchored with per-role brief anchors");
+    const job = env.service.terminalJobFor(b.runId);
+    assert.equal(job.anchors.briefBuyer.digest, sha(BUYER_BRIEF));
+    assert.equal(job.anchors.briefProvider.digest, sha(PROVIDER_BRIEF));
+    const st2 = await env.callTool("tp1", "contract_status", {});
+    assert.equal(st2.anchors.brief.buyer.digest, sha(BUYER_BRIEF));
+    assert.equal(st2.anchors.brief.provider.digest, sha(PROVIDER_BRIEF));
+  } finally {
+    env.close();
+  }
+});
+
+test("gap 1: contract_get_brief stays a read; a partial mapping takes the role's pre-bind brief, else null", async () => {
+  const { briefs } = roleBriefsFixture();
+  const anchor = fakeAnchor();
+  const env = await boot({ anchor, briefs, serverAnchors: true, roleBriefs: { buyer: "buyer-brief" } });
+  try {
+    // Unbound read: text, digest and its anchor, as before.
+    const g = await env.callTool("tp1", "contract_get_brief", { name: "provider-brief" });
+    assert.equal(g.text, PROVIDER_BRIEF);
+    assert.equal(g.digest, sha(PROVIDER_BRIEF));
+    assert.equal(g.anchor.status, "anchored");
+
+    const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(4102) });
+    const b = await env.callTool("tb1", "contract_bind", bindArgsFor(cert, "buyer"));
+    const p = await env.callTool("tp1", "contract_bind", bindArgsFor(cert, "provider"));
+    assert.equal(b.briefDigest, sha(BUYER_BRIEF));
+    assert.equal(p.briefDigest, sha(PROVIDER_BRIEF), "the provider's pre-bind brief");
+
+    // A bound read of the OTHER role's brief does not move the caller's slot.
+    const g2 = await env.callTool("tb1", "contract_get_brief", { name: "provider-brief" });
+    assert.equal(g2.digest, sha(PROVIDER_BRIEF));
+    const st = await env.callTool("tb1", "contract_status", {});
+    assert.equal(st.anchors.brief.buyer.digest, sha(BUYER_BRIEF));
+    assert.equal(st.anchors.brief.provider.digest, sha(PROVIDER_BRIEF));
+  } finally {
+    env.close();
+  }
+
+  // No configured brief and none read before bind: the bind binds null.
+  const env2 = await boot({ anchor: fakeAnchor(), briefs, serverAnchors: true, roleBriefs: { buyer: "buyer-brief" } });
+  try {
+    const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(4103) });
+    await env2.callTool("tb1", "contract_bind", bindArgsFor(cert, "buyer"));
+    const p = await env2.callTool("tp1", "contract_bind", bindArgsFor(cert, "provider"));
+    assert.equal(p.bound, true, JSON.stringify(p));
+    assert.equal(p.briefDigest, null);
+    const st = await env2.callTool("tp1", "contract_status", {});
+    assert.equal(st.anchors.brief.provider, null);
+    assert.equal(st.anchors.brief.buyer.digest, sha(BUYER_BRIEF));
+  } finally {
+    env2.close();
+  }
+});
+
+test("gap 1: default off — no roleBriefs keeps the single brief record and the b04059e bind result", async () => {
+  const { briefs } = roleBriefsFixture();
+  const anchor = fakeAnchor();
+  const env = await boot({ anchor, briefs, serverAnchors: true });
+  try {
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(anchor.calls.filter((c) => c.kind === "brief").length, 0, "nothing anchored at start-up");
+    const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(4104) });
+    const b = await env.callTool("tb1", "contract_bind", bindArgsFor(cert, "buyer"));
+    assert.equal(b.bound, true);
+    assert.equal("briefDigest" in b, false);
+    assert.equal(env.service.roleBriefs, false);
+  } finally {
+    env.close();
+  }
+});
+
+test("gap 1: config — CONTRACT_ROLE_BRIEFS needs server anchors and known brief names", async (t) => {
+  const fx = roleBriefsFixture();
+  const base = {
+    CONTRACT_MCP_ENABLED: "1",
+    CONTRACT_AUTH_TOKENS: TOKENS_RAW,
+    CONTRACT_HOST_ROOTS: HOST_ROOTS.map((r) => `${r.kid}:${r.fingerprint}`).join(","),
+    CONTRACT_SERVER_ED25519_SEED: SERVER_SEED.toString("base64"),
+    CONTRACT_SERVER_KEY_ID: "contract-server-gaps",
+    CONTRACT_SERVER_KEY_VALID_FROM: "2020-01-01T00:00:00Z",
+    CONTRACT_POLICY_DIGESTS: `buyer:${POLICY.buyer},provider:${POLICY.provider}`,
+    CONTRACT_BRIEFS: fx.raw,
+    CONTRACT_BRIEFS_DIR: fx.dir,
+  };
+  const load = (extra) => loadContractConfig({ ...base, CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "cdt-gaps-")), ...extra });
+  const cases = [
+    [{ CONTRACT_ROLE_BRIEFS: "buyer:buyer-brief" }, /requires CONTRACT_SERVER_ANCHORS=1/],
+    [{ CONTRACT_SERVER_ANCHORS: "1", CONTRACT_ROLE_BRIEFS: "buyer:nope" }, /nope is not a CONTRACT_BRIEFS name/],
+    [{ CONTRACT_SERVER_ANCHORS: "1", CONTRACT_ROLE_BRIEFS: "buyer:buyer-brief,buyer:provider-brief" }, /names buyer twice/],
+    [{ CONTRACT_SERVER_ANCHORS: "1", CONTRACT_ROLE_BRIEFS: "agent:buyer-brief" }, /wants buyer:<brief>,provider:<brief>/],
+  ];
+  for (const [extra, re] of cases) {
+    const cfg = load(extra);
+    assert.equal(cfg.kind, "misconfigured", JSON.stringify(extra));
+    assert.match(cfg.reason, re);
+  }
+  const noBriefs = loadContractConfig({
+    ...base, CONTRACT_BRIEFS: "", CONTRACT_SERVER_ANCHORS: "1", CONTRACT_ROLE_BRIEFS: "buyer:buyer-brief",
+    CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "cdt-gaps-")),
+  });
+  assert.match(noBriefs.reason, /requires CONTRACT_BRIEFS/);
+  const ok = load({ CONTRACT_SERVER_ANCHORS: "1", CONTRACT_ROLE_BRIEFS: "buyer:buyer-brief,provider:provider-brief" });
+  assert.equal(ok.kind, "ready", JSON.stringify(ok));
+  t.after(() => ok.service.close());
+  assert.equal(ok.service.roleBriefs, true);
+  assert.deepEqual(ok.service.features, { briefs: true }, "the CONTRACT_BRIEFS surface only, nothing new");
+});
+
+test("gap 1: a per-role brief anchor still pending at terminal is re-driven after a restart", async () => {
+  const { briefs } = roleBriefsFixture();
+  const roleBriefs = { buyer: "buyer-brief", provider: "provider-brief" };
+  // Pending writes, confirmation polling off: the role anchors stay pending.
+  const env = await boot({
+    anchor: fakeAnchor({ pending: true }), anchorConfirmDelayMs: 0, briefs, serverAnchors: true, roleBriefs,
+  });
+  let runId;
+  try {
+    await new Promise((r) => setTimeout(r, 20));
+    const cert = mintCertificate({ root: rootKey, session: generateKeyPairSync("ed25519"), sessionId: uuid(4105) });
+    runId = (await env.callTool("tb1", "contract_bind", bindArgsFor(cert, "buyer"))).runId;
+    await env.callTool("tp1", "contract_bind", bindArgsFor(cert, "provider"));
+    await env.callTool("tb1", "contract_withdraw", {});
+    const job = env.service.terminalJobFor(runId);
+    assert.equal(job.anchors.briefBuyer.status, "pending");
+    assert.equal(job.anchors.briefProvider.status, "pending");
+    assert.ok(env.service.pendingTerminalJobs().some((j) => j.runId === runId), "the job is unfinished");
+  } finally {
+    env.close();
+  }
+  // Restart on the same state dir with a confirming anchor.
+  const anchor2 = fakeAnchor();
+  const env2 = await boot({ anchor: anchor2, stateDir: env.stateDir, briefs, serverAnchors: true, roleBriefs });
+  try {
+    const done = await waitFor(() => {
+      const a = env2.service.terminalJobFor(runId)?.anchors;
+      return a?.briefBuyer?.status === "anchored" && a?.briefProvider?.status === "anchored";
+    });
+    assert.ok(done, JSON.stringify(env2.service.terminalJobFor(runId)?.anchors));
+    const fin = await waitFor(() => env2.service.terminalJobFor(runId)?.anchors?.final?.status === "anchored");
+    assert.ok(fin, "the final anchor fires once the role anchors resolved");
+  } finally {
+    env2.close();
   }
 });

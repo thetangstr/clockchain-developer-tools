@@ -21,6 +21,13 @@
  *   MOMENT — covering the close and anchor evidence receipts that chain on
  *   after the terminal anchor.
  *
+ * - per-role brief (CDT-GAPS gap 1, CONTRACT_ROLE_BRIEFS — default off): each
+ *   role's brief is recorded in its own slot (`briefBuyer` / `briefProvider`)
+ *   and bound by that role's contract_bind (result `briefDigest`, covered by
+ *   the bind receipt's responseDigest). A configured role brief's shared
+ *   anchor is issued at service start, so it precedes every role's first
+ *   event without any client calling contract_get_brief.
+ *
  * None of these outcomes is chained as a receipt: they are recorded on the
  * run and the durable terminal job (contract_status reports them). A
  * chained final outcome would always leave one more uncovered receipt.
@@ -36,6 +43,11 @@ import type { TerminalAnchorJob, TerminalJob } from "./terminal-jobs.js";
 import type { AnchorRunState, ContractRun } from "./service.js";
 
 export type ServerAnchorKind = "terms" | "brief" | "final";
+/** CDT-GAPS gap 1: the per-role brief slots on run.anchors / job.anchors. */
+export type RoleBriefSlot = "briefBuyer" | "briefProvider";
+export type ServerAnchorSlot = ServerAnchorKind | RoleBriefSlot;
+export const roleBriefSlot = (role: "buyer" | "provider"): RoleBriefSlot =>
+  role === "buyer" ? "briefBuyer" : "briefProvider";
 
 /** A frozen brief template: its text and the pinned sha256 digest (0x hex). */
 export interface ContractBrief {
@@ -125,13 +137,23 @@ export interface ServerAnchors {
   /** Serve a brief; its digest's one shared anchor is issued on first need, awaited (bounded). */
   getBrief(
     name: string,
-    scope: { run?: ContractRun; preBindScope: string },
+    scope: { run?: ContractRun; preBindScope: string; role?: "buyer" | "provider" },
   ): Promise<
     | { ok: true; result: { name: string; digest: string; text: string; anchor: ReturnType<typeof renderServerAnchor> } }
     | { ok: false; code: "NOT_FOUND" }
   >;
   /** At bind: a brief anchored on the seat's pre-bind scope becomes the run's brief anchor. */
   carryBrief(run: ContractRun, preBindScope: string): void;
+  /** CDT-GAPS gap 1: role-brief mode is on (CONTRACT_ROLE_BRIEFS). */
+  readonly roleBriefs: boolean;
+  /**
+   * CDT-GAPS gap 1, at bind BEFORE the result is built: the binding role's
+   * brief digest — the configured role brief, else the first non-failed
+   * brief served in this seat's pre-bind scope, else null.
+   */
+  roleBriefFor(role: "buyer" | "provider", preBindScope: string): string | null;
+  /** CDT-GAPS gap 1, after the bind committed: record `digest`'s shared anchor in the role's slot. */
+  attachRoleBrief(run: ContractRun, role: "buyer" | "provider", digest: string): void;
   /** CDT-SEC M4: forget an ended scope (`run:<id>` or a pre-bind scope). */
   dropScope(scope: string): void;
   /** Re-check whether the run's final anchor can fire (deferred one macrotask). */
@@ -158,6 +180,12 @@ export function createServerAnchors(deps: {
   finalAnchorAwaitMs?: number;
   /** M4: minimum wait before a failed brief anchor is retried (default 60 s). */
   briefRetryMs?: number;
+  /**
+   * CDT-GAPS gap 1 (CONTRACT_ROLE_BRIEFS): role → configured brief digest.
+   * Present (even empty) = role-brief mode; each digest's shared anchor is
+   * issued at construction.
+   */
+  roleBriefs?: Partial<Record<"buyer" | "provider", string>>;
   now?: () => number;
 }): ServerAnchors {
   const briefAwaitMs = deps.briefAnchorAwaitMs ?? 10_000;
@@ -172,8 +200,17 @@ export function createServerAnchors(deps: {
     state: AnchorRunState | undefined;
     op: Promise<void> | undefined;
     retryAtMs: number;
+    /** Targets: `runId` (the run's single brief slot) or `runId|buyer` / `runId|provider` (role slots). */
     runs: Set<string>;
   }
+  const roleMode = deps.roleBriefs !== undefined;
+  /** A shared-brief target → the run and the slot its state is copied into. */
+  const targetOf = (target: string): { runId: string; slot: "brief" | RoleBriefSlot } => {
+    const i = target.lastIndexOf("|");
+    if (i < 0) return { runId: target, slot: "brief" };
+    const role = target.slice(i + 1);
+    return { runId: target.slice(0, i), slot: role === "buyer" ? "briefBuyer" : "briefProvider" };
+  };
   const sharedBriefs = new Map<string, SharedBrief>();
   /** M4: the brief digests served per scope, in serve order (for carryBrief). */
   const scopeBriefs = new Map<string, string[]>();
@@ -242,7 +279,7 @@ export function createServerAnchors(deps: {
    * job when one exists. A live run has no job before its terminal
    * transition (endRun copies terms/brief in); this never creates one.
    */
-  const recordOn = (runId: string, kind: ServerAnchorKind) => (s: AnchorRunState): void => {
+  const recordOn = (runId: string, kind: ServerAnchorSlot) => (s: AnchorRunState): void => {
     const live = deps.getRun(runId);
     if (live !== undefined) (live.anchors ??= {})[kind] = s;
     if (deps.getJob(runId) === undefined) return;
@@ -278,13 +315,14 @@ export function createServerAnchors(deps: {
       const op = run("brief", BRIEF_ANCHOR_SUBJECT, digest, (s) => {
         sb.state = s;
         if (s.status === "failed") sb.retryAtMs = now() + briefRetryMs;
-        for (const runId of [...sb.runs]) {
+        for (const target of [...sb.runs]) {
           // A run whose live state and job are both gone needs no copy.
+          const { runId } = targetOf(target);
           if (deps.getRun(runId) === undefined && deps.getJob(runId) === undefined) {
-            sb.runs.delete(runId);
+            sb.runs.delete(target);
             continue;
           }
-          copyToRun(runId, s);
+          copyToRun(target, s);
         }
       });
       sb.op = op;
@@ -293,14 +331,18 @@ export function createServerAnchors(deps: {
     return sb;
   }
 
-  /** M4: make the shared anchor this run's brief anchor (state copied now and on every change). */
-  function attachRun(sb: SharedBrief, runId: string): void {
-    sb.runs.add(runId);
-    if (sb.state !== undefined) copyToRun(runId, sb.state);
+  /**
+   * M4: make the shared anchor this run's brief anchor (state copied now and
+   * on every change). `target` is a runId, or `runId|role` for a role slot.
+   */
+  function attachRun(sb: SharedBrief, target: string): void {
+    sb.runs.add(target);
+    if (sb.state !== undefined) copyToRun(target, sb.state);
   }
 
-  function copyToRun(runId: string, s: AnchorRunState): void {
-    recordOn(runId, "brief")(s);
+  function copyToRun(target: string, s: AnchorRunState): void {
+    const { runId, slot } = targetOf(target);
+    recordOn(runId, slot)(s);
     if (s.status !== "anchoring") scheduleFinal(runId);
   }
 
@@ -313,7 +355,7 @@ export function createServerAnchors(deps: {
     if (job.terminalState === null || job.anchors?.final !== undefined) return false;
     if (job.close !== undefined && job.close.status === "delivering") return false;
     const a = job.anchors;
-    return a === undefined || ![a.agreement, a.terminal, a.terms, a.brief].some(isOpen);
+    return a === undefined || ![a.agreement, a.terminal, a.terms, a.brief, a.briefBuyer, a.briefProvider].some(isOpen);
   }
 
   function maybeFireFinal(runId: string): void {
@@ -337,6 +379,14 @@ export function createServerAnchors(deps: {
     void op.finally(() => finalOps.delete(runId));
   }
 
+  // CDT-GAPS gap 1: configured role briefs are anchored at start-up, so the
+  // anchor's ledger time precedes every role's first event.
+  if (deps.anchor !== undefined) {
+    for (const digest of new Set(Object.values(deps.roleBriefs ?? {}))) {
+      if (digest !== undefined) ensureBriefAnchor(digest);
+    }
+  }
+
   return {
     fireTerms(r, digest) {
       if (deps.anchor === undefined || r.anchors?.terms !== undefined) return;
@@ -354,8 +404,18 @@ export function createServerAnchors(deps: {
       const shared = ensureBriefAnchor(brief.digest);
       // The run's brief anchor is the first brief served in it.
       if (scope.run !== undefined) {
-        const cur = scope.run.anchors?.brief;
-        if (cur === undefined || cur.digest === brief.digest) attachRun(shared, scope.run.runId);
+        if (roleMode) {
+          // CDT-GAPS gap 1: the bound caller's own role slot, when it has none yet.
+          if (scope.role !== undefined) {
+            const cur = scope.run.anchors?.[roleBriefSlot(scope.role)];
+            if (cur === undefined || cur.digest === brief.digest) {
+              attachRun(shared, `${scope.run.runId}|${scope.role}`);
+            }
+          }
+        } else {
+          const cur = scope.run.anchors?.brief;
+          if (cur === undefined || cur.digest === brief.digest) attachRun(shared, scope.run.runId);
+        }
       }
       // Bounded wait for an in-flight issue only — never during the backoff.
       if (shared.op !== undefined) await Promise.race([shared.op, wait(briefAwaitMs)]);
@@ -365,8 +425,31 @@ export function createServerAnchors(deps: {
       };
     },
 
+    roleBriefs: roleMode,
+
+    roleBriefFor(role, preBindScope) {
+      const configured = deps.roleBriefs?.[role];
+      if (configured !== undefined) {
+        // Re-issue only if the start-up issue failed and its backoff passed.
+        if (deps.anchor !== undefined) ensureBriefAnchor(configured);
+        return configured;
+      }
+      for (const digest of scopeBriefs.get(preBindScope) ?? []) {
+        const shared = sharedBriefs.get(digest);
+        if (shared?.state !== undefined && shared.state.status !== "failed") return digest;
+      }
+      return null;
+    },
+
+    attachRoleBrief(r, role, digest) {
+      if (deps.anchor === undefined) return;
+      const cur = r.anchors?.[roleBriefSlot(role)];
+      if (cur !== undefined && cur.digest !== digest) return;
+      attachRun(ensureBriefAnchor(digest), `${r.runId}|${role}`);
+    },
+
     carryBrief(r, preBindScope) {
-      if (r.anchors?.brief !== undefined || deps.anchor === undefined) return;
+      if (roleMode || r.anchors?.brief !== undefined || deps.anchor === undefined) return;
       for (const digest of scopeBriefs.get(preBindScope) ?? []) {
         const shared = sharedBriefs.get(digest);
         if (shared?.state !== undefined && shared.state.status !== "failed") {
@@ -410,6 +493,10 @@ export function createServerAnchors(deps: {
       if (aj.kind === "brief") {
         // M4: the shared per-digest anchor (deterministic commitment).
         attachRun(ensureBriefAnchor(aj.digest), job.runId);
+        return;
+      }
+      if (aj.kind === "briefBuyer" || aj.kind === "briefProvider") {
+        attachRun(ensureBriefAnchor(aj.digest), `${job.runId}|${aj.kind === "briefBuyer" ? "buyer" : "provider"}`);
         return;
       }
       if (aj.kind !== "terms" && aj.kind !== "final") return;

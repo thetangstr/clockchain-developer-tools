@@ -37,7 +37,7 @@ export const DEFAULT_TERMINAL_JOBS_MAX_FINISHED = 256;
 
 /** A persisted anchor job — mirrors AnchorRunState plus the subject digest. */
 export interface TerminalAnchorJob {
-  kind: "agreement" | "terminal" | "terms" | "brief" | "final";
+  kind: "agreement" | "terminal" | "terms" | "brief" | "final" | "briefBuyer" | "briefProvider";
   digest: string;
   status: "anchoring" | "pending" | "anchored" | "failed";
   /** final only: the run-chain length the final head covers (null after a restart). */
@@ -85,6 +85,9 @@ export interface TerminalJob {
     terms?: TerminalAnchorJob;
     brief?: TerminalAnchorJob;
     final?: TerminalAnchorJob;
+    /** CDT-GAPS gap 1 (CONTRACT_ROLE_BRIEFS): each role's brief anchor. */
+    briefBuyer?: TerminalAnchorJob;
+    briefProvider?: TerminalAnchorJob;
   };
   /** Post-transition evidence receipts (mirror of the live run chain). */
   evidence: ServerReceipt[];
@@ -124,7 +127,7 @@ function loadTerminalJobs(stateDir: string): Map<string, TerminalJob> {
  */
 function anchorJobOpen(j: TerminalJob): boolean {
   const a = j.anchors;
-  return a !== undefined && [a.agreement, a.terminal, a.terms, a.brief, a.final].some(
+  return a !== undefined && [a.agreement, a.terminal, a.terms, a.brief, a.final, a.briefBuyer, a.briefProvider].some(
     (x) => x !== undefined && (x.status === "anchoring" || x.status === "pending"),
   );
 }

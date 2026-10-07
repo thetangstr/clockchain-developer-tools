@@ -354,6 +354,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         "late-certificate-party",
         "session-key-possession",
       ]).optional(),
+      /** CDT-GAPS gap 1 (CONTRACT_ROLE_BRIEFS): the brief this role's bind binds (null: none). */
+      briefDigest: digestHex.nullable().optional(),
       idempotent: z.literal(true).optional(),
     }).strict(),
     readOnly: false,
@@ -764,7 +766,11 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         // digest at bind, the brief digest, and the final chain head once
         // the terminal job finished. Recorded on the job, never chained.
         terms: serverAnchorState.nullable().optional(),
-        brief: serverAnchorState.nullable().optional(),
+        // CDT-GAPS gap 1 (CONTRACT_ROLE_BRIEFS): one record per role.
+        brief: z.union([
+          serverAnchorState.nullable(),
+          z.object({ buyer: serverAnchorState.nullable(), provider: serverAnchorState.nullable() }).strict(),
+        ]).optional(),
         final: serverAnchorState.extend({
           /** Receipts on the run chain the final head covers. */
           receiptCount: z.number().int().nonnegative().nullable(),

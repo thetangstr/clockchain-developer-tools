@@ -469,6 +469,25 @@ export function loadContractConfig(
   // "expired_unbound") with the full terminal path instead of being dropped.
   const expireAtTtl = flag("CONTRACT_EXPIRE_AT_TTL");
   if (typeof expireAtTtl === "string") return misconfigured(expireAtTtl);
+  // CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS=buyer:<name>,provider:<name> — each
+  // role's brief (a CONTRACT_BRIEFS name) is anchored at start-up, recorded
+  // in its own slot and bound by that role's contract_bind. Needs the
+  // server-side anchors on. Unset = the single per-run brief record.
+  let roleBriefs: Partial<Record<"buyer" | "provider", string>> | undefined;
+  const roleBriefsRaw = (env.CONTRACT_ROLE_BRIEFS ?? "").trim();
+  if (roleBriefsRaw !== "") {
+    if (serverAnchors !== true) return misconfigured("CONTRACT_ROLE_BRIEFS requires CONTRACT_SERVER_ANCHORS=1");
+    if (briefs === undefined) return misconfigured("CONTRACT_ROLE_BRIEFS requires CONTRACT_BRIEFS");
+    roleBriefs = {};
+    for (const part of roleBriefsRaw.split(",").map((x) => x.trim()).filter((x) => x !== "")) {
+      const m = /^(buyer|provider):([A-Za-z0-9_.-]{1,64})$/.exec(part);
+      if (m === null) return misconfigured("CONTRACT_ROLE_BRIEFS wants buyer:<brief>,provider:<brief>");
+      const role = m[1] as "buyer" | "provider";
+      if (roleBriefs[role] !== undefined) return misconfigured(`CONTRACT_ROLE_BRIEFS names ${role} twice`);
+      if (!briefs.has(m[2]!)) return misconfigured(`CONTRACT_ROLE_BRIEFS: ${m[2]} is not a CONTRACT_BRIEFS name`);
+      roleBriefs[role] = m[2]!;
+    }
+  }
   const maxReceiptsPerRun = Number(env.CONTRACT_MAX_RECEIPTS_PER_RUN || "4096");
   const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL || "512");
   const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS || String(24 * 3600_000));
@@ -594,6 +613,7 @@ export function loadContractConfig(
       ...(policyRegistration ? { policyRegistration: true } : {}),
       ...(serverAnchors ? { serverAnchors: true } : {}),
       ...(expireAtTtl ? { expireAtTtl: true } : {}),
+      ...(roleBriefs !== undefined ? { roleBriefs } : {}),
       maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
       maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
       runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
