@@ -1,7 +1,7 @@
 // CDT-SEC (state/ledger/notes/cdt-integration-security-review.md): sink-side
 // fixes for L4 (lane store pruning), L5 (audience, lane release) and L7
 // (no plaintext anchor token in production), L8 (forwarder control secret).
-// Loopback ports 19460-19469 only; every key is generated.
+// Loopback only, OS-assigned ports; every key is generated.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -171,15 +171,12 @@ test("L5 sink: a released lane stops counting toward LANE_LIMIT and can never be
 });
 
 async function listenClose(server) {
-  for (let p = 19460; p <= 19469; p += 1) {
-    const ok = await new Promise((resolve) => {
-      const onError = () => resolve(false);
-      server.once("error", onError);
-      server.listen(p, "127.0.0.1", () => { server.off("error", onError); resolve(true); });
-    });
-    if (ok) return `http://127.0.0.1:${p}`;
-  }
-  throw new Error("no free loopback port in 19460-19469");
+  // An OS-assigned loopback port: a fixed range collides with other local stacks.
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
+  });
+  return `http://127.0.0.1:${server.address().port}`;
 }
 
 test("L5 sink: the close listener serves POST /v1/lanes/release", async (t) => {
