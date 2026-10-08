@@ -194,6 +194,10 @@ const bookInputSchema = z
     feeMinor: z.number().int().nonnegative().max(10_000_000),
     totalMinor: z.number().int().nonnegative(),
     travelerCount: z.number().int().min(1).max(9).optional(),
+    // CONTRACT_PRIVATE_FLOOR (all-in pricing): the agreement's stated fare
+    // component (0) — the agreed total is the price, the catalog fare is the
+    // agency's private cost. Absent = the catalog fare, as before.
+    fareMinor: z.number().int().nonnegative().optional(),
   })
   .strict();
 
@@ -457,7 +461,8 @@ function createSimRun(
 
       const itinerary = priced(req.itineraryId);
       if (itinerary === undefined) return { ok: false, code: "ITINERARY_UNKNOWN" };
-      if (req.totalMinor !== itinerary.fareMinor + req.feeMinor) {
+      const statedFareMinor = req.fareMinor ?? itinerary.fareMinor;
+      if (req.totalMinor !== statedFareMinor + req.feeMinor) {
         return { ok: false, code: "FARE_MISMATCH" };
       }
 
@@ -466,7 +471,7 @@ function createSimRun(
         pnr: pick(6),
         agreementId: req.agreementId,
         itineraryId: req.itineraryId,
-        fareMinor: itinerary.fareMinor,
+        fareMinor: statedFareMinor,
         feeMinor: req.feeMinor,
         totalMinor: req.totalMinor,
         currency: itinerary.currency,

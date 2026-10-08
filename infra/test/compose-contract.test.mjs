@@ -95,6 +95,7 @@ const CONTRACT_ENV_NAMES = [
   "CONTRACT_ROLE_BRIEFS",
   "CONTRACT_MILESTONE_LOG",
   "CONTRACT_FLEX_POLICY",
+  "CONTRACT_PRIVATE_FLOOR", "CONTRACT_PRIVATE_FLOOR_BPS",
 ];
 
 // CDT wiring: the settings b04059e does not read. Each must be an optional SSM
@@ -137,7 +138,7 @@ test("the mcp service carries the handshake v2 receipts env and compose-up reads
 });
 
 test("CDT wiring: compose-up reads every new contract setting optionally and compose passes it through", async () => {
-  assert.equal(CDT_FEATURE_ENV_NAMES.length, 12);
+  assert.equal(CDT_FEATURE_ENV_NAMES.length, 14);
   const source = await readFile(composeFile, "utf8");
   const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
   const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");

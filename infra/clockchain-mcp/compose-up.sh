@@ -420,6 +420,10 @@ read_optional_env CONTRACT_ROLE_BRIEFS /clockchain/mcp/CONTRACT_ROLE_BRIEFS
 read_optional_env CONTRACT_MILESTONE_LOG /clockchain/mcp/CONTRACT_MILESTONE_LOG
 # Flexible family policy (0|1, default off): mandate v3 + the per-run trip statement; off = the b04059e surface.
 read_optional_env CONTRACT_FLEX_POLICY /clockchain/mcp/CONTRACT_FLEX_POLICY
+# All-in pricing + the agency's private floor (0|1, default off; BPS default 9000): buyers counter at any total under
+# their cap; the provider's own offers/accepts stay at or above BPS/10000 of the catalog fare. Off = today's pricing.
+read_optional_env CONTRACT_PRIVATE_FLOOR /clockchain/mcp/CONTRACT_PRIVATE_FLOOR
+read_optional_env CONTRACT_PRIVATE_FLOOR_BPS /clockchain/mcp/CONTRACT_PRIVATE_FLOOR_BPS
 # Agent Handshake v2 per-call receipts (opt-in, off unless HANDSHAKE_V2_RECEIPTS=1). Dedicated key — never
 # the contract server key. All optional reads, like the contract block above.
 read_optional_env HANDSHAKE_V2_RECEIPTS /clockchain/mcp/HANDSHAKE_V2_RECEIPTS

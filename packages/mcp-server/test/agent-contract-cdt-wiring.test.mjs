@@ -34,6 +34,7 @@ const CDT_NAMES = [
   "CONTRACT_BRIEFS", "CONTRACT_BRIEFS_DIR", "CONTRACT_ROLE_BRIEFS",
   "CONTRACT_MILESTONE_LOG",
   "CONTRACT_FLEX_POLICY",
+  "CONTRACT_PRIVATE_FLOOR", "CONTRACT_PRIVATE_FLOOR_BPS",
 ];
 /** What compose injects for every one of them when its SSM parameter is absent. */
 const COMPOSE_ABSENT = Object.fromEntries(CDT_NAMES.map((n) => [n, ""]));

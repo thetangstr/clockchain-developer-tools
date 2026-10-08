@@ -475,6 +475,16 @@ export function loadContractConfig(
   // Flexible family policy: mandate v3 + the per-run trip statement.
   const flexPolicy = flag("CONTRACT_FLEX_POLICY");
   if (typeof flexPolicy === "string") return misconfigured(flexPolicy);
+  // All-in pricing with the agency's private floor (default off): buyers
+  // counter at any total under their cap; the provider's own offers/accepts
+  // stay at or above CONTRACT_PRIVATE_FLOOR_BPS (default 9000) of the catalog fare.
+  const privateFloorOn = flag("CONTRACT_PRIVATE_FLOOR");
+  if (typeof privateFloorOn === "string") return misconfigured(privateFloorOn);
+  const floorBpsRaw = (env.CONTRACT_PRIVATE_FLOOR_BPS ?? "").trim();
+  const floorBps = floorBpsRaw === "" ? 9000 : Number(floorBpsRaw);
+  if (!Number.isSafeInteger(floorBps) || floorBps < 0 || floorBps > 10_000) {
+    return misconfigured("CONTRACT_PRIVATE_FLOOR_BPS wants an integer 0..10000");
+  }
   const milestoneLog = flag("CONTRACT_MILESTONE_LOG");
   if (typeof milestoneLog === "string") return misconfigured(milestoneLog);
   // CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS=buyer:<name>,provider:<name> — each
@@ -620,6 +630,7 @@ export function loadContractConfig(
       ...(briefs !== undefined ? { briefs } : {}),
       ...(policyRegistration ? { policyRegistration: true } : {}),
       ...(flexPolicy ? { flexPolicy: true } : {}),
+      ...(privateFloorOn ? { privateFloor: { floorBps } } : {}),
       ...(serverAnchors ? { serverAnchors: true } : {}),
       ...(expireAtTtl ? { expireAtTtl: true } : {}),
       ...(milestoneLog ? { milestoneLog: true } : {}),

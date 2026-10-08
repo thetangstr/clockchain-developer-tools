@@ -131,6 +131,7 @@ export const ENV_PARAMETERS = [
   // Milestone log (default-off; absent == today's behaviour).
   "CONTRACT_MILESTONE_LOG",
   "CONTRACT_FLEX_POLICY",
+  "CONTRACT_PRIVATE_FLOOR", "CONTRACT_PRIVATE_FLOOR_BPS",
 ];
 
 /**

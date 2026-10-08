@@ -1144,6 +1144,8 @@ export function createContractService(options: {
    * and the surface is byte-identical to before.
    */
   flexPolicy?: boolean;
+  /** CONTRACT_PRIVATE_FLOOR=1 (default off): all-in pricing + the provider-side private floor (business.ts). */
+  privateFloor?: { floorBps: number };
   briefAnchorAwaitMs?: number;
   /** CDT-SEC M4: minimum wait before a failed brief anchor is retried (default 60 s). */
   briefRetryMs?: number;
@@ -2482,6 +2484,7 @@ export function createContractService(options: {
     sim,
     signingOpen,
     flexPolicy: features.flexPolicy === true,
+    ...(options.privateFloor !== undefined ? { privateFloor: { floorBps: options.privateFloor.floorBps } } : {}),
     policyDigests: livePolicyDigests,
     ...(buyerPolicyDigestsFor !== undefined ? { buyerPolicyDigestsFor } : {}),
     ...(options.principals !== undefined ? { principals: options.principals } : {}),
