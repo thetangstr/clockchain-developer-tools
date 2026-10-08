@@ -699,22 +699,30 @@ export function createBusinessOps(options: {
   }
 
   /** CONTRACT_PRIVATE_FLOOR: an offer's stated fare — 0 under all-in pricing, else the catalog fare. */
-  function statedFare(catalogFareMinor: number): number {
-    return options.privateFloor === undefined ? catalogFareMinor : 0;
+  function statedFare(run: ContractRun, catalogFareMinor: number): number {
+    return allInPricing(run) ? 0 : catalogFareMinor;
+  }
+
+  /**
+   * CONTRACT_PRIVATE_FLOOR applies to v3 (flexible-policy) runs only: a v2
+   * (Rome) run keeps fare + fee pricing byte for byte with the flag on.
+   */
+  function allInPricing(run: ContractRun): boolean {
+    return options.privateFloor !== undefined && run.mandate?.mandateVersion === 3;
   }
 
   /** CONTRACT_PRIVATE_FLOOR provider backstop: a total under floorBps of the catalog fare (never a buyer check). */
-  function belowProviderFloor(totalMinor: number, catalogFareMinor: number): boolean {
+  function belowProviderFloor(run: ContractRun, totalMinor: number, catalogFareMinor: number): boolean {
     const pf = options.privateFloor;
-    if (pf === undefined) return false;
+    if (pf === undefined || !allInPricing(run)) return false;
     return totalMinor * 10_000 < catalogFareMinor * pf.floorBps;
   }
 
   function providerAcceptBelowFloor(run: ContractRun, offer: OfferRecord): boolean {
-    if (options.privateFloor === undefined) return false;
+    if (!allInPricing(run)) return false;
     const itinerary = run.simRun!.itinerary(offer.payload.itineraryId as string);
     if (itinerary === undefined) return true;
-    return belowProviderFloor(offer.payload.totalMinor as number, itinerary.fareMinor);
+    return belowProviderFloor(run, offer.payload.totalMinor as number, itinerary.fareMinor);
   }
 
   /** The offer terms the v2 accept/booking/settlement payloads flatten. */
@@ -1360,13 +1368,18 @@ export function createBusinessOps(options: {
         const itinerary = liveRun.simRun!.itinerary(itineraryId);
         if (itinerary === undefined) return refuse("NOT_FOUND");
         const feeMinor = args.feeMinor as number;
-        const fareMinor = statedFare(itinerary.fareMinor);
+        // CONTRACT_PRIVATE_FLOOR: before the buyer's mandate the run's pricing
+        // model is unknown — no provider offer is priced until it lands.
+        if (options.privateFloor !== undefined && principal.role === "provider" && liveRun.mandate === undefined) {
+          return refuse("STATE_REFUSED");
+        }
+        const fareMinor = statedFare(liveRun, itinerary.fareMinor);
         const totalMinor = fareMinor + feeMinor;
         if (principal.role === "buyer") {
           const cap = capCheck(liveRun, totalMinor, itinerary.currency, itineraryId);
           if (cap !== null) return cap;
         }
-        if (principal.role === "provider" && belowProviderFloor(totalMinor, itinerary.fareMinor)) {
+        if (principal.role === "provider" && belowProviderFloor(liveRun, totalMinor, itinerary.fareMinor)) {
           return refuse("MANDATE_REFUSED");
         }
         const counterparty = latestCounterpartyOffer(liveRun, principal.role);
@@ -1402,9 +1415,9 @@ export function createBusinessOps(options: {
         if (
           itinerary === undefined ||
           payload.offerId !== expectedOfferId ||
-          payload.fareMinor !== statedFare(itinerary.fareMinor) ||
+          payload.fareMinor !== statedFare(liveRun, itinerary.fareMinor) ||
           payload.currency !== itinerary.currency ||
-          payload.totalMinor !== statedFare(itinerary.fareMinor) + (payload.feeMinor as number) ||
+          payload.totalMinor !== statedFare(liveRun, itinerary.fareMinor) + (payload.feeMinor as number) ||
           (payload.kind === "counter" &&
             latestCounterpartyOffer(liveRun, principal.role)?.offerId !== payload.inReplyTo) ||
           (payload.kind !== "offer" && payload.kind !== "counter")
@@ -1415,7 +1428,7 @@ export function createBusinessOps(options: {
           const cap = capCheck(liveRun, payload.totalMinor as number, itinerary.currency, itinerary.itineraryId);
           if (cap !== null) return cap;
         }
-        if (principal.role === "provider" && belowProviderFloor(payload.totalMinor as number, itinerary.fareMinor)) {
+        if (principal.role === "provider" && belowProviderFloor(liveRun, payload.totalMinor as number, itinerary.fareMinor)) {
           return refuse("MANDATE_REFUSED");
         }
         const offer: OfferRecord = {
@@ -1658,7 +1671,7 @@ export function createBusinessOps(options: {
           feeMinor: agreement.feeMinor,
           totalMinor: agreement.totalMinor,
           // CONTRACT_PRIVATE_FLOOR: the agreement's stated fare (0); absent = the catalog fare, as before.
-          ...(options.privateFloor !== undefined ? { fareMinor: agreement.fareMinor } : {}),
+          ...(allInPricing(liveRun) ? { fareMinor: agreement.fareMinor } : {}),
           // N4b-9 (F16 → D12): the traveller count is the principal-signed
           // mandate's partySize — never a model argument.
           travelerCount: liveRun.mandate?.partySize,

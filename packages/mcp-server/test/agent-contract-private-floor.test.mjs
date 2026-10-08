@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createSimWorld } from "../dist/agent-contract/sim/index.js";
 import {
-  boot, bindPair, signedSubmit, signMandateFields, makeApproval,
+  boot, bindPair, bookPair, signedSubmit, signMandateFields, makeApproval,
   statusSchema, keys, uuid,
 } from "./n4b9-harness.mjs";
 
@@ -136,6 +136,32 @@ test("on: the buyer's signed cap still binds — a counter over the cap is refus
     assert.equal(over.prep.error, "MANDATE_REFUSED");
     const tiny = await offer(env, "tb1", "buyer", { itineraryId: it.itineraryId, feeMinor: 100 });
     assert.equal(tiny.sub.state, "offered", "a buyer lowball is the agency's to answer, not a server refusal");
+  } finally { env.close(); }
+});
+
+test("on: a v2 (Rome) run keeps fare + fee pricing byte for byte — the flag applies to v3 runs only", async () => {
+  const pf = await boot({ flexPolicy: true, privateFloor: { floorBps: 9000 } });
+  const off = await boot({ flexPolicy: true });
+  try {
+    const sid = uuid(1000 + Math.floor(Math.random() * 9000));
+    const a = await bookPair(pf, sid, "tb1", "tp1");
+    const b = await bookPair(off, sid, "tb1", "tp1");
+    assert.ok(a.booked.orderRef && b.booked.orderRef, JSON.stringify([a.booked, b.booked]));
+    const ga = await pf.callTool("tb1", "agreement_get", {});
+    const gb = await off.callTool("tb1", "agreement_get", {});
+    assert.ok(ga.agreement.fareMinor > 0);
+    assert.equal(ga.agreement.fareMinor, gb.agreement.fareMinor);
+    assert.equal(ga.agreement.totalMinor, gb.agreement.totalMinor);
+  } finally { pf.close(); off.close(); }
+});
+
+test("on: a provider offer before the buyer's mandate is refused STATE_REFUSED (pricing model not yet known)", async () => {
+  const env = await boot({ flexPolicy: true, privateFloor: { floorBps: 9000 } });
+  try {
+    await bindPair(env, uuid(1000 + Math.floor(Math.random() * 9000)), "tb1", "tp1");
+    const q = await env.callTool("tp1", "catalog_quote", { origin: "SFO", destination: "NAS" });
+    const r = await env.callTool("tp1", "offer_prepare", { itineraryId: q.itineraries[0].itineraryId, feeMinor: 500_000 });
+    assert.equal(r.error, "STATE_REFUSED", JSON.stringify(r));
   } finally { env.close(); }
 });
 
