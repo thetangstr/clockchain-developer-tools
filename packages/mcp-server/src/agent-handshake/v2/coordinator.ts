@@ -37,8 +37,12 @@ type InvitationService = Readonly<{
   accept(input: { invitation: string; acceptanceIdempotencyKey?: string }): Promise<{ claimedAtMs: string | null; responderAccess: string; metadata: V2InvitationMetadata | null; claim: V2InvitationClaim | null }>;
   advanceClaim(input: { claim: V2InvitationClaim; phase: ClaimPhase; completedAtMs?: string }): Promise<{ claim: V2InvitationClaim | null }>;
 }>;
+export type RelaySessionListing = Readonly<{ sessionId: string; startedAtMs: number; stage: string | null }>;
 export type Relay = Readonly<{
   fetchDiscovery(sessionId?: string): Promise<unknown>;
+  // Optional (multi-session hosting): every session the relay holds, newest first
+  // (relay GET /v1/runs). Absent => invite() uses only the relay's "current" session.
+  listSessions?(): Promise<readonly RelaySessionListing[]>;
   getMessages(input: { sessionId: string; after?: string; waitMs?: number }): Promise<{ highestSeq?: string; messages: readonly JsonObject[] }>;
   postMessage(input: { body: unknown; kind: string; privateKeyPem: string; role: V2Role; senderKey: string; sessionId: string }): Promise<unknown>;
   getResult(input: { sessionId: string }): Promise<unknown>;
@@ -90,6 +94,15 @@ const INVITATION_CLAIM_RUNWAY_MS = 180_000;
 // coordinator but orphans the session (claims post, nobody funds, the session
 // stalls at awaiting_funding until deadline).
 const INVITATION_CLAIM_LANDING_MARGIN_MS = 5_000;
+// Multi-session hosting: N host containers each open their own ~120 s session on
+// the shared relay, staggered. invite() considers the newest few sessions the
+// relay lists (not only "current") and mints into a FREE one: valid discovery,
+// same host build as "current", >= INVITATION_MIN_RUNWAY_MS of invitation window
+// left, no initiator invitation on its relay log, and not reserved by a
+// concurrent invite in this process. One invitation per session is unchanged.
+const MULTI_SESSION_MAX_CANDIDATES = 8;
+// A listed session older than this cannot still be in its invitation window.
+const MULTI_SESSION_MAX_AGE_MS = 10 * 60_000;
 const NEXT_ACTION = "call_agent_handshake_next_with_unchanged_role_access";
 // agent_handshake_next bridges ordinary dependency waits server-side: one tool
 // call may hold up to a bounded waitMs so a public client gets the next
@@ -971,90 +984,200 @@ export function createV2Coordinator(options: {
     return Object.freeze({ stage: "sign_evidence", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
   }
 
+  // ---- Multi-session invite selection ------------------------------------
+  const inviteReservations = new Map<string, number>();
+
+  function inviteRetryHints(found: JsonObject, inviteNow: number): { rotationRetryMs: number; windowRetryMs: number } {
+    // Retry hints name the moment the NEXT usable session is live — window end
+    // (or claim-window end) plus a rotation margin — never a cycle-length value:
+    // a ~120s hint against a ~121s rotation phase-locks an obedient caller into
+    // the same dead phase on every retry.
+    const rotationRetryMs = Math.min(Math.max(Number(found.sessionDeadlineMs) - inviteNow + 2_000, 5_000), 120_000);
+    const windowRetryMs = Number.isSafeInteger(Number(found.invitationExpiresAtMs))
+      ? Math.min(Math.max(Number(found.invitationExpiresAtMs) - inviteNow + 2_500, 5_000), 120_000)
+      : rotationRetryMs;
+    return { rotationRetryMs, windowRetryMs };
+  }
+
+  // null => free (as far as the relay log shows); a number => busy, retry hint in ms.
+  async function sessionBusyRetryMs(found: JsonObject, inviteNow: number): Promise<number | null> {
+    const { rotationRetryMs, windowRetryMs } = inviteRetryHints(found, inviteNow);
+    // Reject before minting any state unless the window retains enough runway for the Responder's claim
+    // to land; an already-expired or near-expiry session rolls over underneath the invite, so the
+    // caller must retry into a fresh session rather than hold an invitation nobody will observe.
+    if (inviteNow + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) return windowRetryMs;
+    // One invitation per session: the first invite anchors an
+    // agent_v2_invitation_created message on the session's relay log, and a
+    // second invite would fail closed inside post() on the sender-key check.
+    // The condition self-heals at session rotation, so surface it as
+    // transient instead of a terminal coordination failure.
+    const takenInvitation = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
+      .find((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
+    if (takenInvitation) {
+      // An unclaimed mint lapses at its claimExpiresAtMs and the host rotates
+      // ~1-2s later; a claimed one holds the session to its deadline. Hint the
+      // earlier horizon, floored so a legitimately-busy session is not hot-polled.
+      const claimExpMs = Number((takenInvitation.body as JsonObject | undefined)?.claimExpiresAtMs);
+      return Number.isSafeInteger(claimExpMs)
+        ? Math.min(Math.max(claimExpMs - inviteNow + 2_500, 15_000), 120_000)
+        : rotationRetryMs;
+    }
+    return null;
+  }
+
+  function reserveInviteSession(found: JsonObject, inviteNow: number): boolean {
+    for (const [id, until] of inviteReservations) if (until <= inviteNow) inviteReservations.delete(id);
+    const id = found.sessionId as string;
+    if (inviteReservations.has(id)) return false;
+    inviteReservations.set(id, Number(found.invitationExpiresAtMs));
+    return true;
+  }
+
+  // A listed session is only a candidate when it is the same host build as the
+  // relay's "current" session (the one the single-session path trusts) and its
+  // windows are no wider than current's: the relay is an open mailbox, so a
+  // foreign session must not attract invites by advertising a longer window.
+  function compatibleWithCurrent(current: JsonObject, candidate: JsonObject): boolean {
+    if (candidate.sessionId === current.sessionId) return true;
+    if (
+      candidate.repositorySha !== current.repositorySha ||
+      candidate.kitRepoUrl !== current.kitRepoUrl ||
+      candidate.relayUrl !== current.relayUrl ||
+      candidate.hostSessionKeyCertificate?.certificate?.rootKid !== current.hostSessionKeyCertificate?.certificate?.rootKid ||
+      candidate.hostSessionKeyCertificate?.certificate?.sessionId !== candidate.sessionId ||
+      candidate.hostSessionKeyCertificate?.certificate?.repositorySha !== candidate.repositorySha
+    ) return false;
+    const width = (item: JsonObject, field: string) => BigInt(item[field]) - BigInt(item.createdAtMs);
+    if (width(candidate, "invitationExpiresAtMs") > width(current, "invitationExpiresAtMs")) return false;
+    if (width(candidate, "sessionDeadlineMs") > width(current, "sessionDeadlineMs")) return false;
+    const currentTerms = current.terms as JsonObject | undefined;
+    const candidateTerms = candidate.terms as JsonObject | undefined;
+    if ((currentTerms === undefined) !== (candidateTerms === undefined)) return false;
+    if (currentTerms !== undefined && v2CanonicalRecord(currentTerms).digest !== v2CanonicalRecord(candidateTerms as JsonObject).digest) return false;
+    return true;
+  }
+
+  async function listedCandidates(current: JsonObject, inviteNow: number): Promise<JsonObject[] | null> {
+    if (typeof options.relay.listSessions !== "function") return null;
+    let listing: readonly RelaySessionListing[];
+    try {
+      listing = await options.relay.listSessions();
+      if (!Array.isArray(listing)) return null;
+    } catch {
+      console.warn(JSON.stringify({ event: "agent_handshake_v2_session_list_unavailable" }));
+      return null;
+    }
+    const ids: string[] = [];
+    for (const entry of listing) {
+      if (ids.length >= MULTI_SESSION_MAX_CANDIDATES) break;
+      if (entry === null || typeof entry !== "object" || typeof entry.sessionId !== "string" || !UUID.test(entry.sessionId)) continue;
+      if (entry.stage !== null && entry.stage !== undefined) continue;
+      if (!Number.isFinite(entry.startedAtMs) || inviteNow - entry.startedAtMs > MULTI_SESSION_MAX_AGE_MS) continue;
+      if (!ids.includes(entry.sessionId)) ids.push(entry.sessionId);
+    }
+    const others = ids.filter((id) => id !== current.sessionId);
+    const fetched = await Promise.all(others.map(async (id) => {
+      try {
+        const candidate = discovery(await options.relay.fetchDiscovery(id));
+        return candidate.sessionId === id && compatibleWithCurrent(current, candidate) ? candidate : null;
+      } catch {
+        return null;
+      }
+    }));
+    const candidates = [current, ...fetched.filter((item): item is JsonObject => item !== null)];
+    // Oldest free window first: keeps the freshest sessions for the next caller.
+    candidates.sort((a, b) => {
+      const left = BigInt(a.invitationExpiresAtMs);
+      const right = BigInt(b.invitationExpiresAtMs);
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
+    return candidates;
+  }
+
+  async function selectInviteSession(current: JsonObject, inviteNow: number): Promise<JsonObject> {
+    const candidates = (await listedCandidates(current, inviteNow)) ?? [current];
+    let bestRetryMs: number | null = null;
+    for (const candidate of candidates) {
+      const busyRetryMs = await sessionBusyRetryMs(candidate, inviteNow);
+      if (busyRetryMs === null) {
+        if (reserveInviteSession(candidate, inviteNow)) return candidate;
+        // Another invite in this process is minting into it right now.
+        const reservedRetryMs = Math.max(inviteRetryHints(candidate, inviteNow).windowRetryMs, 15_000);
+        bestRetryMs = bestRetryMs === null ? reservedRetryMs : Math.min(bestRetryMs, reservedRetryMs);
+        continue;
+      }
+      bestRetryMs = bestRetryMs === null ? busyRetryMs : Math.min(bestRetryMs, busyRetryMs);
+    }
+    transient(bestRetryMs ?? inviteRetryHints(current, inviteNow).rotationRetryMs);
+  }
+
+  async function mintInvitation(found: JsonObject, terms: JsonObject, inviteNow: number): Promise<JsonObject> {
+    const activeTerms = (found.terms as JsonObject | undefined) ?? terms;
+    const { windowRetryMs } = inviteRetryHints(found, inviteNow);
+    // The minted claim window is mint-relative at INVITATION_CLAIM_RUNWAY_MS,
+    // capped only by the session deadline minus the landing margin. The host
+    // observes agent_v2_invitation_created (posted below with the minted
+    // expiry as claimExpiresAtMs) and extends its claim-observation bound to
+    // match, so the window never outlives observation — the #141 orphan guard
+    // — while a late-window mint still gets the full runway. A Responder too
+    // slow to claim gets invitation_expired and the Initiator re-invites into
+    // the next session rather than both sides stalling in an orphaned one.
+    const invitationExpMs = String(Math.min(
+      inviteNow + INVITATION_CLAIM_RUNWAY_MS,
+      Number(found.sessionDeadlineMs) - INVITATION_CLAIM_LANDING_MARGIN_MS,
+    ));
+    const metadata = metadataFrom(found, activeTerms);
+    let created;
+    try {
+      created = await options.invitationService.create({
+        sessionId: found.sessionId,
+        statementDigest: v2CanonicalRecord(activeTerms).digest,
+        nbfMs: found.createdAtMs,
+        expMs: found.sessionDeadlineMs,
+        invitationExpMs,
+        metadata,
+        // Evaluated inside the store's serialized write: if the remaining window drops below the minimum
+        // runway during create, the commit is refused atomically so no unclaimed invitation record is
+        // left behind. Same invariant as the precheck above — a late commit must not shrink the runway.
+        commitGuard: () => now() + INVITATION_MIN_RUNWAY_MS < Number(found.invitationExpiresAtMs),
+      });
+    } catch (error) {
+      if (error instanceof V2InvitationWindowUnavailableError) transient(windowRetryMs);
+      throw error;
+    }
+    const createdAtMs = now();
+    const keyValue = await storeInitial(created.initiatorAccess, metadata, "initiator");
+    await post(keyValue, "agent_v2_invitation_created", {
+      claimExpiresAtMs: invitationExpMs,
+      createdAtMs: String(createdAtMs),
+      externalBusinessActionPerformed: false,
+      statementDigest: v2CanonicalRecord(activeTerms).digest,
+      terms: activeTerms,
+    });
+    const policy = localPolicy(activeTerms, "initiator") as JsonObject;
+    return Object.freeze({ ...created, endpoint: V2_PUBLIC_ENDPOINT, sessionId: found.sessionId, invitationExpiresAtMs: invitationExpMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator", registerLocalActionCommand) });
+  }
+
   return Object.freeze({
     async invite(value: unknown): Promise<JsonObject> {
       const terms = normalizeV2Terms(value) as JsonObject;
-      const found = discovery(await options.relay.fetchDiscovery());
-      const hostTerms = found.terms as JsonObject | undefined;
+      const current = discovery(await options.relay.fetchDiscovery());
+      const hostTerms = current.terms as JsonObject | undefined;
       if (hostTerms === undefined) {
-        console.warn(JSON.stringify({ event: "agent_handshake_v2_invite_without_host_terms", sessionId: found.sessionId }));
+        console.warn(JSON.stringify({ event: "agent_handshake_v2_invite_without_host_terms", sessionId: current.sessionId }));
       } else if (v2CanonicalRecord(terms).digest !== v2CanonicalRecord(hostTerms).digest) {
         throw new V2TermsMismatchError(hostTerms);
       }
-      const activeTerms = hostTerms ?? terms;
-      // Reject before minting any state unless the window retains enough runway for the Responder's claim
-      // to land; an already-expired or near-expiry "current" session rolls over underneath the invite, so the
-      // caller must retry into the fresh session rather than hold an invitation nobody will observe.
-      // The retry hints below name the moment the NEXT usable session is live —
-      // window end (or claim-window end) plus a rotation margin — never a
-      // cycle-length value: a ~120s hint against a ~121s rotation phase-locks an
-      // obedient caller into this same dead phase on every retry.
       const inviteNow = now();
-      const rotationRetryMs = Math.min(Math.max(Number(found.sessionDeadlineMs) - inviteNow + 2_000, 5_000), 120_000);
-      const windowRetryMs = Number.isSafeInteger(Number(found.invitationExpiresAtMs))
-        ? Math.min(Math.max(Number(found.invitationExpiresAtMs) - inviteNow + 2_500, 5_000), 120_000)
-        : rotationRetryMs;
-      if (inviteNow + INVITATION_MIN_RUNWAY_MS >= Number(found.invitationExpiresAtMs)) transient(windowRetryMs);
-      // One invitation per session: the first invite anchors an
-      // agent_v2_invitation_created message on the session's relay log, and a
-      // second invite would fail closed inside post() on the sender-key check.
-      // The condition self-heals at session rotation, so surface it as
-      // transient — same "retry into the next session" semantics as the runway
-      // check above — instead of a terminal coordination failure.
-      const takenInvitation = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
-        .find((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
-      if (takenInvitation) {
-        // An unclaimed mint lapses at its claimExpiresAtMs and the host rotates
-        // ~1-2s later; a claimed one holds the session to its deadline. Hint the
-        // earlier horizon, floored so a legitimately-busy session is not
-        // hot-polled.
-        const claimExpMs = Number((takenInvitation.body as JsonObject | undefined)?.claimExpiresAtMs);
-        transient(Number.isSafeInteger(claimExpMs)
-          ? Math.min(Math.max(claimExpMs - inviteNow + 2_500, 15_000), 120_000)
-          : rotationRetryMs);
-      }
-      // The minted claim window is mint-relative at INVITATION_CLAIM_RUNWAY_MS,
-      // capped only by the session deadline minus the landing margin. The host
-      // observes agent_v2_invitation_created (posted below with the minted
-      // expiry as claimExpiresAtMs) and extends its claim-observation bound to
-      // match, so the window never outlives observation — the #141 orphan guard
-      // — while a late-window mint still gets the full runway. A Responder too
-      // slow to claim gets invitation_expired and the Initiator re-invites into
-      // the next session rather than both sides stalling in an orphaned one.
-      const invitationExpMs = String(Math.min(
-        inviteNow + INVITATION_CLAIM_RUNWAY_MS,
-        Number(found.sessionDeadlineMs) - INVITATION_CLAIM_LANDING_MARGIN_MS,
-      ));
-      const metadata = metadataFrom(found, activeTerms);
-      let created;
+      // Picks a free session and reserves it (synchronously, after its last
+      // await) so a concurrent invite in this process moves on to another one.
+      const found = await selectInviteSession(current, inviteNow);
       try {
-        created = await options.invitationService.create({
-          sessionId: found.sessionId,
-          statementDigest: v2CanonicalRecord(activeTerms).digest,
-          nbfMs: found.createdAtMs,
-          expMs: found.sessionDeadlineMs,
-          invitationExpMs,
-          metadata,
-          // Evaluated inside the store's serialized write: if the remaining window drops below the minimum
-          // runway during create, the commit is refused atomically so no unclaimed invitation record is
-          // left behind. Same invariant as the precheck above — a late commit must not shrink the runway.
-          commitGuard: () => now() + INVITATION_MIN_RUNWAY_MS < Number(found.invitationExpiresAtMs),
-        });
+        return await mintInvitation(found, terms, inviteNow);
       } catch (error) {
-        if (error instanceof V2InvitationWindowUnavailableError) transient(windowRetryMs);
+        inviteReservations.delete(found.sessionId as string);
         throw error;
       }
-      const createdAtMs = now();
-      const keyValue = await storeInitial(created.initiatorAccess, metadata, "initiator");
-      await post(keyValue, "agent_v2_invitation_created", {
-        claimExpiresAtMs: invitationExpMs,
-        createdAtMs: String(createdAtMs),
-        externalBusinessActionPerformed: false,
-        statementDigest: v2CanonicalRecord(activeTerms).digest,
-        terms: activeTerms,
-      });
-      const policy = localPolicy(activeTerms, "initiator") as JsonObject;
-      return Object.freeze({ ...created, endpoint: V2_PUBLIC_ENDPOINT, sessionId: found.sessionId, invitationExpiresAtMs: invitationExpMs, sessionDeadlineMs: found.sessionDeadlineMs, terms: activeTerms, localPolicy: policy, localAction: setupLocalAction(options.verifiedHelperPrefix, policy, found.sessionId, "initiator", registerLocalActionCommand) });
     },
 
     async acceptInvitation(invitation: string, acceptanceIdempotencyKey?: string): Promise<JsonObject> {
@@ -1326,11 +1449,30 @@ async function fetchV2Discovery(relayUrl: string, sessionId?: string): Promise<u
   return response.json();
 }
 
+// GET /v1/runs: every session the relay holds, newest first (relay caps it at 50).
+// Only the listing fields invite() needs are kept; anything malformed is dropped.
+async function listV2Sessions(relayUrl: string): Promise<readonly RelaySessionListing[]> {
+  const response = await fetch(`${relayUrl}/v1/runs`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(5_000) });
+  if (!response.ok) fail();
+  const body = await response.json() as unknown;
+  const runs = (body !== null && typeof body === "object" && Array.isArray((body as JsonObject).runs)) ? (body as JsonObject).runs as unknown[] : null;
+  if (runs === null) fail();
+  const out: RelaySessionListing[] = [];
+  for (const run of runs) {
+    if (run === null || typeof run !== "object") continue;
+    const item = run as JsonObject;
+    if (typeof item.sessionId !== "string" || typeof item.startedAtMs !== "number") continue;
+    out.push(Object.freeze({ sessionId: item.sessionId, startedAtMs: item.startedAtMs, stage: typeof item.stage === "string" ? item.stage : null }));
+  }
+  return Object.freeze(out);
+}
+
 export function runtimeRelay(relayUrl: string): Relay {
   const base = createHandshakeRelayClient({ relayUrl }) as unknown as Relay;
   return Object.freeze({
     ...base,
     fetchDiscovery: (sessionId?: string) => fetchV2Discovery(relayUrl, sessionId),
+    listSessions: () => listV2Sessions(relayUrl),
   });
 }
 
