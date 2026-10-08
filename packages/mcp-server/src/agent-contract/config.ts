@@ -472,6 +472,9 @@ export function loadContractConfig(
   // Milestone log (MILESTONE-TIMELINE.md §4 Option A): the six per-milestone
   // Clockchain entries, written through the run anchor. A no-op unless
   // CONTRACT_ANCHOR_ENABLED=1 (check-config warns).
+  // Flexible family policy: mandate v3 + the per-run trip statement.
+  const flexPolicy = flag("CONTRACT_FLEX_POLICY");
+  if (typeof flexPolicy === "string") return misconfigured(flexPolicy);
   const milestoneLog = flag("CONTRACT_MILESTONE_LOG");
   if (typeof milestoneLog === "string") return misconfigured(milestoneLog);
   // CDT-GAPS gap 1: CONTRACT_ROLE_BRIEFS=buyer:<name>,provider:<name> — each
@@ -616,6 +619,7 @@ export function loadContractConfig(
       maxRunsPerKey,
       ...(briefs !== undefined ? { briefs } : {}),
       ...(policyRegistration ? { policyRegistration: true } : {}),
+      ...(flexPolicy ? { flexPolicy: true } : {}),
       ...(serverAnchors ? { serverAnchors: true } : {}),
       ...(expireAtTtl ? { expireAtTtl: true } : {}),
       ...(milestoneLog ? { milestoneLog: true } : {}),

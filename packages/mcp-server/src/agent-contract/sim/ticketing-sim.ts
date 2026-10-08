@@ -45,6 +45,12 @@ export interface SimItinerary {
   returnDate?: string;
   summary: string;
   fareMinor: number;
+  /**
+   * Flexible-policy (mandate v3): present only once the run's party is known
+   * (`SimRun.setParty`). `fareMinor` is then `farePerPersonMinor * party`.
+   * Absent on every v2 / pre-party quote, which stay byte-identical.
+   */
+  farePerPersonMinor?: number;
   currency: string;
 }
 
@@ -140,8 +146,20 @@ export interface SimRun {
   issueTickets(input: unknown): SimIssueResult | SimRefusal;
   lookupOrder(input: unknown): SimOrderObservation;
   cancelOrder(input: unknown): SimCancelResult | SimRefusal;
-  /** The deterministic offer board — canonical rows plus quoted generated ones. */
+  /**
+   * The deterministic offer board — canonical rows plus quoted generated ones.
+   * Priced for the run's party once `setParty` has been called.
+   */
   itinerary(itineraryId: string): SimItinerary | undefined;
+  /**
+   * Flexible-policy (mandate v3): fix the run's party. Write-once; returns
+   * false (and changes nothing) when a different party is already set or the
+   * count is invalid. Before this call (and for every v2 run) fares are the
+   * legacy fixed board totals.
+   */
+  setParty(partySize: number): boolean;
+  /** The run's party once set, else undefined. */
+  readonly party: number | undefined;
   /** Config-seeded fault active on this run (undefined when none). */
   readonly faults: SimFaults | undefined;
   readonly payments: SimPaymentRail;
@@ -273,6 +291,45 @@ function generatedBoard(origin: string, destination: string): SimItinerary[] {
   }));
 }
 
+/**
+ * The canonical rows' fares are family totals for a party of 4 (the Rome
+ * scenario). Per person = total / 4 (every canonical fare divides evenly), so
+ * a run whose party is 4 reprices to the identical total.
+ */
+const CANONICAL_BASE_PARTY = 4;
+
+/**
+ * Per-person board for a generated route (mandate v3). Same ids as
+ * `generatedBoard` (ids never change); economy / premium economy / one-stop
+ * labels; deterministic per-person fares from the same digest.
+ */
+function flexGeneratedBoard(origin: string, destination: string): SimItinerary[] {
+  const digest = canonicalDigest({ origin, destination, kind: "SIM_BOARD" }).slice(2);
+  const byte = (i: number) => parseInt(digest.slice(i * 2, i * 2 + 2), 16);
+  const economy = 55_000 + ((byte(12) * 256 + byte(13)) % 400) * 100; // $550..$949 per person
+  const round100 = (n: number) => Math.round(n / 100) * 100;
+  const tiers: Array<{ label: string; perPerson: number }> = [
+    { label: "economy, nonstop", perPerson: economy },
+    { label: "premium economy, nonstop", perPerson: round100(economy * 1.55) },
+    { label: "economy, 1 stop (longer journey)", perPerson: round100(economy * 0.82) },
+  ];
+  return tiers.map((t, i) => ({
+    itineraryId: `IT-${digest.slice(i * 6, i * 6 + 6).toUpperCase()}`,
+    origin,
+    destination,
+    summary: `${origin}→${destination} ${t.label} (fare is per person)`,
+    fareMinor: t.perPerson,
+    farePerPersonMinor: t.perPerson,
+    currency: "USD",
+  }));
+}
+
+/** Reprice a legacy row for a party: canonical rows by their per-person share, generated rows by flex. */
+function pricedForParty(row: SimItinerary, party: number): SimItinerary {
+  const perPerson = row.farePerPersonMinor ?? row.fareMinor / CANONICAL_BASE_PARTY;
+  return { ...row, farePerPersonMinor: perPerson, fareMinor: perPerson * party };
+}
+
 const ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 interface OrderRecord {
@@ -312,6 +369,20 @@ function createSimRun(
   const knownItineraries = new Map<string, SimItinerary>(
     CANONICAL_BOARD.map((i) => [i.itineraryId, i]),
   );
+  /** Generated rows' per-person (v3) pricing and labels, keyed by the (unchanged) itinerary id. */
+  const flexKnown = new Map<string, SimItinerary>();
+  /** Flexible-policy party (mandate v3); undefined = legacy fixed board totals. */
+  let party: number | undefined;
+  /** An itinerary as this run prices it: legacy totals, or per-person x party once the party is set. */
+  function priced(id: string): SimItinerary | undefined {
+    const legacy = knownItineraries.get(id);
+    if (legacy === undefined || party === undefined) return legacy;
+    const flex = flexKnown.get(id);
+    return pricedForParty(
+      flex === undefined ? legacy : { ...legacy, summary: flex.summary, farePerPersonMinor: flex.farePerPersonMinor },
+      party,
+    );
+  }
   const quoteMemo = new Map<string, SimQuoteResult>();
   const orders = new Map<string, OrderRecord>();
   /** agreementId → digest of the first accepted booking input (idempotency). */
@@ -342,7 +413,7 @@ function createSimRun(
       const { departDate, returnDate } = parsed.data;
       const origin = parsed.data.origin.toUpperCase();
       const destination = parsed.data.destination.toUpperCase();
-      const key = canonicalDigest({ ...parsed.data, origin, destination });
+      const key = canonicalDigest({ ...parsed.data, origin, destination, ...(party !== undefined ? { party } : {}) });
       const memoized = quoteMemo.get(key);
       if (memoized !== undefined) return structuredClone(memoized);
 
@@ -355,11 +426,13 @@ function createSimRun(
         ...(returnDate !== undefined ? { returnDate } : {}),
       }));
       for (const itin of itineraries) knownItineraries.set(itin.itineraryId, itin);
+      // The generated rows' per-person view (same ids as the legacy generated rows).
+      for (const f of flexGeneratedBoard(origin, destination)) flexKnown.set(f.itineraryId, f);
 
       const result: SimQuoteResult = {
         origin,
         destination,
-        itineraries,
+        itineraries: party === undefined ? itineraries : itineraries.map((i) => priced(i.itineraryId)!),
         quotedAt: isoNow(),
         simulated: true,
       };
@@ -382,7 +455,7 @@ function createSimRun(
         return { ok: false, code: "AGREEMENT_CONFLICT" };
       }
 
-      const itinerary = knownItineraries.get(req.itineraryId);
+      const itinerary = priced(req.itineraryId);
       if (itinerary === undefined) return { ok: false, code: "ITINERARY_UNKNOWN" };
       if (req.totalMinor !== itinerary.fareMinor + req.feeMinor) {
         return { ok: false, code: "FARE_MISMATCH" };
@@ -495,7 +568,16 @@ function createSimRun(
     },
 
     itinerary(itineraryId) {
-      return knownItineraries.get(itineraryId);
+      return priced(itineraryId);
+    },
+    setParty(partySize) {
+      if (!Number.isInteger(partySize) || partySize < 1 || partySize > 9) return false;
+      if (party !== undefined) return party === partySize;
+      party = partySize;
+      return true;
+    },
+    get party() {
+      return party;
     },
     faults: deps.faults,
     payments: createSimPaymentRail({ runId, now }),

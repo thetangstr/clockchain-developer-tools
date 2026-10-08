@@ -159,12 +159,14 @@ export interface ContractToolDef {
  *   inbox long-poll, rendezvous_ack).
  * - `policyRegistration`: CONTRACT_POLICY_REGISTRATION=1.
  * - `briefs`: CONTRACT_BRIEFS.
+ * - `flexPolicy`: CONTRACT_FLEX_POLICY=1 (mandate v3 + the `trip` argument of
+ *   mandate_submit).
  */
-export type ContractFeature = "directory" | "policyRegistration" | "briefs";
+export type ContractFeature = "directory" | "policyRegistration" | "briefs" | "flexPolicy";
 export type ContractFeatures = Readonly<Partial<Record<ContractFeature, boolean>>>;
 export const NO_CONTRACT_FEATURES: ContractFeatures = Object.freeze({});
 export const ALL_CONTRACT_FEATURES: ContractFeatures = Object.freeze({
-  directory: true, policyRegistration: true, briefs: true,
+  directory: true, policyRegistration: true, briefs: true, flexPolicy: true,
 });
 
 const envelopeOut = { envelope: prepareEnvelopeSchema, serverNonce } as const;
@@ -425,7 +427,12 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
     schema: {
       envelope: prepareEnvelopeSchema,
       signatureHex,
+      // Flexible family policy: the traveler's per-run trip statement
+      // {origin, destination, partySize, budgetMinor}. Required by a v3
+      // mandate, optional for v2. NOT signed; validated against the mandate.
+      trip: opaqueRecord.optional(),
     },
+    featureFields: { flexPolicy: ["trip"] },
     outputSchema: z.object({
       bound: z.literal(true),
       mandateDigest: digestHex,
@@ -869,6 +876,23 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         orderRef,
         cancelledAt: isoDateTime,
       }).strict().nullable().optional(),
+      // Flexible family policy: the policy summary (v3 mandates, or a v2 run
+      // that stated a trip). Absent otherwise. The provider sees the trip's
+      // route and party only; the buyer also sees the cap, range and budget.
+      policy: z.object({
+        mandateVersion: z.union([z.literal(2), z.literal(3)]),
+        maxCapMinor: z.number().int().nonnegative().optional(),
+        currency: z.string().length(3).optional(),
+        partyMin: z.number().int().min(1).optional(),
+        partyMax: z.number().int().min(1).optional(),
+        destinations: z.union([z.literal("any"), z.array(z.string().min(1).max(64))]).optional(),
+        trip: z.object({
+          origin: z.string(),
+          destination: z.string(),
+          partySize: z.number().int().min(1),
+          budgetMinor: z.number().int().min(1).optional(),
+        }).strict().optional(),
+      }).strict().optional(),
       serverNonce,
     }).strict(),
     readOnly: true,

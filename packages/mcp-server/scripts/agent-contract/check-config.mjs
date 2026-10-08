@@ -47,6 +47,9 @@ export function featureVerdicts(env, cfg) {
     roleBriefs: cfg.service.roleBriefs ? "on" : "off",
     // CONTRACT_MILESTONE_LOG (MILESTONE-LOG.md): the per-milestone Clockchain log.
     milestoneLog: isOn(env, "CONTRACT_MILESTONE_LOG") ? "on" : "off",
+    // Flexible family policy: mandate v3 + the trip statement on mandate_submit.
+    // (reported only when on: an off switch leaves the verdict exactly as before)
+    ...(cfg.service.features.flexPolicy === true ? { flexPolicy: "on" } : {}),
     briefs: listCount(env, "CONTRACT_BRIEFS"),
     directory: listCount(env, "CONTRACT_DIRECTORY"),
   };

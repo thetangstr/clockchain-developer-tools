@@ -98,7 +98,7 @@ interface ContractToolDescriptor {
   readonly featureDescription?: Readonly<Partial<Record<ContractFeature, string>>>;
 }
 
-const FEATURE_ORDER: readonly ContractFeature[] = ["directory", "policyRegistration", "briefs"];
+const FEATURE_ORDER: readonly ContractFeature[] = ["directory", "policyRegistration", "briefs", "flexPolicy"];
 
 function describe(descriptor: ContractToolDescriptor, features: ContractFeatures): string {
   const extra = FEATURE_ORDER
@@ -120,7 +120,7 @@ const CONTRACT_TOOL_DESCRIPTORS: readonly ContractToolDescriptor[] = Object.free
   { name: "contract_bind_challenge", title: "Get a bind challenge", description: "Issue a single-use, short-lived challenge nonce to sign into a bind statement. The statement proves the caller possesses the handshake session key of the certificate side it claims (DRAFT schema)." },
   { name: "contract_bind", title: "Bind to a handshake session", description: "Bind this caller's business signing and approval keys to a closed, verified Clockchain handshake and join the contract session it names. Identify the handshake by its session id; the server resolves and verifies that session's closing certificate itself, so never copy or rebuild the certificate. A certificate may still be supplied, but it must match the resolved one exactly. Refused CERTIFICATE_NOT_READY (retryable) until the handshake has closed. Optionally carries a DRAFT bind statement — signed over a server-issued challenge — proving possession of the claimed side's handshake session key; its runId is the same session id." },
   { name: "mandate_prepare", title: "Prepare the mandate", description: "Prepare the family principal's signed mandate — caps, dates, travellers — for validation. Returns a server-signed envelope carrying the canonical mandate bytes." },
-  { name: "mandate_submit", title: "Submit the mandate", description: "Submit a local signature over a prepared mandate envelope to bind the mandate's caps to this contract session. The principal signature inside the mandate is validated; caps are parsed and enforced from then on, but never disclosed." },
+  { name: "mandate_submit", title: "Submit the mandate", description: "Submit a local signature over a prepared mandate envelope to bind the mandate's caps to this contract session. The principal signature inside the mandate is validated; caps are parsed and enforced from then on, but never disclosed.", featureDescription: { flexPolicy: "A range mandate also takes the traveler's per-run trip statement: origin, destination, party size and budget." } },
   { name: "catalog_quote", title: "Read the offer board", description: "Read the simulated offer board for a route: itineraries, fares and the fixed service fee. SIMULATED data." },
   { name: "offer_prepare", title: "Prepare an offer or counter", description: "Prepare an offer or counter-offer on a board itinerary with a service fee and an optional note. Returns a server-signed envelope quoting the board fare and the resulting total." },
   { name: "offer_submit", title: "Submit an offer", description: "Submit a local signature over a prepared offer envelope to make the offer live for the counterparty." },

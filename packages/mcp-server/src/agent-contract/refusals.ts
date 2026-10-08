@@ -28,6 +28,12 @@ export const CONTRACT_REFUSAL_CODES = Object.freeze([
   // N4b-8 (gap 5): a VALID signed approval carrying decision:"deny" — the
   // policy refused; the run ends blocked_by_policy (terminal).
   "POLICY_DENIED",
+  // Flexible family policy (mandate v3): the traveler's per-run trip statement
+  // on mandate_submit. Distinct codes, no state change, no value in the body.
+  "TRIP_REQUIRED",
+  "TRIP_INVALID",
+  "PARTY_OUT_OF_RANGE",
+  "BUDGET_OVER_CAP",
   "LISTING_UNAVAILABLE",
   "SEAT_TAKEN",
   "ALREADY_TERMINAL",

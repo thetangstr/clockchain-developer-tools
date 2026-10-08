@@ -91,6 +91,7 @@ const expectedContractEnv = {
   CONTRACT_BRIEFS_DIR: "/app/packages/mcp-server/assets/briefs\n",
   CONTRACT_ROLE_BRIEFS: "buyer:family-travel,provider:family-travel\n",
   CONTRACT_MILESTONE_LOG: "milestone-log-on\n",
+  CONTRACT_FLEX_POLICY: "flex-policy-on\n",
   HANDSHAKE_V2_RECEIPTS: "1\n",
   HANDSHAKE_V2_RECEIPT_ED25519_SEED: "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\n",
   HANDSHAKE_V2_RECEIPT_KEY_ID: "handshake-v2-receipts-2026-10\n",
@@ -360,6 +361,7 @@ case "$name" in
   /clockchain/mcp/CONTRACT_BRIEFS_DIR) value=$'/app/packages/mcp-server/assets/briefs\\n' ;;
   /clockchain/mcp/CONTRACT_ROLE_BRIEFS) value=$'buyer:family-travel,provider:family-travel\\n' ;;
   /clockchain/mcp/CONTRACT_MILESTONE_LOG) value=$'milestone-log-on\\n' ;;
+  /clockchain/mcp/CONTRACT_FLEX_POLICY) value=$'flex-policy-on\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPTS) value=$'1\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_ED25519_SEED) value=$'ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_ID) value=$'handshake-v2-receipts-2026-10\\n' ;;
@@ -1092,6 +1094,7 @@ const cdtFeatureNames = [
   "CONTRACT_POLICY_REGISTRATION", "CONTRACT_SERVER_ANCHORS", "CONTRACT_EXPIRE_AT_TTL",
   "CONTRACT_BRIEFS", "CONTRACT_BRIEFS_DIR", "CONTRACT_ROLE_BRIEFS",
   "CONTRACT_MILESTONE_LOG",
+  "CONTRACT_FLEX_POLICY",
 ];
 
 test("CDT wiring: each new contract setting is read from SSM and exported byte-for-byte", async () => {

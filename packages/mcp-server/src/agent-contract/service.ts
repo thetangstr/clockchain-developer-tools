@@ -170,6 +170,18 @@ export interface ContractRun {
     currency: string;
     allowedItineraryIds: string[];
     /**
+     * Flexible family policy: 2 (the default, absent) or 3. For a v3
+     * mandate `capMinor` carries `maxCapMinor`, `partySize` carries the
+     * traveler's per-run party, and an empty `allowedItineraryIds` means any
+     * catalog itinerary.
+     */
+    mandateVersion?: 2 | 3;
+    maxCapMinor?: number;
+    partyMin?: number;
+    partyMax?: number;
+    /** The traveler's per-run, unsigned trip statement (recorded, enforced). */
+    trip?: { origin: string; destination: string; partySize: number; budgetMinor: number };
+    /**
      * N4b-9 (F16 → D12): the principal-signed traveller count (v2.2).
      * The booking issues exactly this many tickets and verification
      * recomputes match against it — never model-supplied.
@@ -234,7 +246,7 @@ export interface ContractRun {
    * flat-mandate payload (CONTRACT-PAYLOADS-v2 §Mandate) — the signature
    * itself never rides inside the signed payload.
    */
-  mandatePrepared?: { nonce: string; mandateSignature: string };
+  mandatePrepared?: { nonce: string; mandateSignature: string; mandate?: Record<string, unknown> };
   /**
    * N6g-2 (observer R12): cryptographically verified approval records
    * collected at consequential submits — wire fields verbatim plus
@@ -1126,6 +1138,12 @@ export function createContractService(options: {
    * contract_register_policy; off, persisted registrations authorize nothing.
    */
   policyRegistration?: boolean;
+  /**
+   * Flexible family policy: CONTRACT_FLEX_POLICY=1 (default off) — accept the
+   * v3 mandate and the per-run `trip` on mandate_submit; off, both are refused
+   * and the surface is byte-identical to before.
+   */
+  flexPolicy?: boolean;
   briefAnchorAwaitMs?: number;
   /** CDT-SEC M4: minimum wait before a failed brief anchor is retried (default 60 s). */
   briefRetryMs?: number;
@@ -1161,6 +1179,7 @@ export function createContractService(options: {
   const features: ContractFeatures = Object.freeze({
     ...((options.directory?.size ?? 0) > 0 ? { directory: true } : {}),
     ...(options.policyRegistration === true ? { policyRegistration: true } : {}),
+    ...(options.flexPolicy === true ? { flexPolicy: true } : {}),
     ...((options.briefs?.size ?? 0) > 0 ? { briefs: true } : {}),
   });
   const serverAnchorsOn = options.serverAnchors === true;
@@ -2462,6 +2481,7 @@ export function createContractService(options: {
     now,
     sim,
     signingOpen,
+    flexPolicy: features.flexPolicy === true,
     policyDigests: livePolicyDigests,
     ...(buyerPolicyDigestsFor !== undefined ? { buyerPolicyDigestsFor } : {}),
     ...(options.principals !== undefined ? { principals: options.principals } : {}),

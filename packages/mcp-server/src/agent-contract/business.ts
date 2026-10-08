@@ -169,7 +169,63 @@ const mandateSchema = z.object({
   partySize: z.number().int().min(1).max(9),
   expiresAt: z.string().datetime({ offset: false }),
 }).strict();
-type Mandate = z.infer<typeof mandateSchema>;
+type MandateV2 = z.infer<typeof mandateSchema>;
+
+/**
+ * Flexible family policy (mandate v3): the principal signs a RANGE — a cap
+ * ceiling, a party range and an optional itinerary allowlist (empty = any
+ * catalog itinerary). Same signing domain as v2. The v3 shape carries no
+ * `capMinor` / `partySize`; the strict v2 schema rejects it and this one
+ * rejects every v2 mandate (`mandateVersion` is a literal 3), so the two
+ * can never be confused.
+ */
+const mandateSchemaV3 = z.object({
+  kind: z.literal("mandate"),
+  mandateVersion: z.literal(3),
+  mandateId: z.string().min(4).max(64),
+  maxCapMinor: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  partyMin: z.number().int().min(1).max(8),
+  partyMax: z.number().int().min(1).max(8),
+  allowedItineraryIds: z.array(z.string().min(1).max(64)).max(64),
+  expiresAt: z.string().datetime({ offset: false }),
+}).strict().refine((m) => m.partyMin <= m.partyMax);
+type MandateV3 = z.infer<typeof mandateSchemaV3>;
+type Mandate = MandateV2 | MandateV3;
+
+/** The traveler's per-run trip statement (NOT signed). */
+const tripSchema = z.object({
+  origin: z.string().regex(/^[A-Z]{3}$/),
+  destination: z.string().regex(/^[A-Z]{3}$/),
+  partySize: z.number().int().min(1).max(9),
+  budgetMinor: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+}).strict().refine((t) => t.origin !== t.destination);
+type Trip = z.infer<typeof tripSchema>;
+
+/**
+ * Validate a trip statement against a verified mandate. v3: required; party
+ * in [partyMin, partyMax]; budget <= maxCap. v2: optional; when given, the
+ * party must equal the signed partySize and the budget must fit capMinor.
+ * Distinct refusal codes, no value in the refusal.
+ */
+function resolveTrip(mandate: Mandate, raw: unknown): { trip: Trip | undefined } | ContractRefusalCode {
+  const v3 = "mandateVersion" in mandate;
+  if (raw === undefined) return v3 ? "TRIP_REQUIRED" : { trip: undefined };
+  const parsed = tripSchema.safeParse(raw);
+  if (!parsed.success) return "TRIP_INVALID";
+  const trip = parsed.data;
+  const min = v3 ? mandate.partyMin : (mandate as MandateV2).partySize;
+  const max = v3 ? mandate.partyMax : (mandate as MandateV2).partySize;
+  if (trip.partySize < min || trip.partySize > max) return "PARTY_OUT_OF_RANGE";
+  const cap = v3 ? mandate.maxCapMinor : (mandate as MandateV2).capMinor;
+  if (trip.budgetMinor > cap) return "BUDGET_OVER_CAP";
+  return { trip };
+}
+
+/** A mandate that claims version 3 is validated ONLY by the v3 schema (a v2 shape never gets here). */
+function isRecord3(v: unknown): boolean {
+  return v !== null && typeof v === "object" && !Array.isArray(v) && "mandateVersion" in v;
+}
 
 const LISTING_TTL_MS = 60 * 60_000;
 /** Global safety cap — the real quota is per-provider. */
@@ -224,6 +280,7 @@ export const STATUS_MAX_OFFERS = 8;
  * signatures, payload objects or ticket details.
  */
 export function contractStatusReadView(run: ContractRun, role: ContractRole): Record<string, unknown> {
+  const policy = policySummary(run, role);
   const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
   const offers = [...run.offers.values()]
     .sort((a, b) => b.seq - a.seq)
@@ -269,6 +326,36 @@ export function contractStatusReadView(run: ContractRun, role: ContractRole): Re
       orderRef: run.cancellation.orderRef,
       cancelledAt: run.cancellation.cancelledAt,
     },
+    // Absent for a v2 run that stated no trip: that status stays byte-identical.
+    ...(policy !== undefined ? { policy } : {}),
+  };
+}
+
+/**
+ * Flexible-policy summary for `contract_status`. v3 mandates (or a v2 run that
+ * stated a trip) only. The buyer sees its own policy (ceiling, range,
+ * destinations, trip incl. budget); the provider sees the trip's route and
+ * party only — never the cap or the budget.
+ */
+function policySummary(run: ContractRun, role: ContractRole): Record<string, unknown> | undefined {
+  const m = run.mandate;
+  if (m === undefined || (m.mandateVersion !== 3 && m.trip === undefined)) return undefined;
+  const v3 = m.mandateVersion === 3;
+  const trip = m.trip;
+  if (role === "provider") {
+    return {
+      mandateVersion: v3 ? 3 : 2,
+      ...(trip !== undefined ? { trip: { origin: trip.origin, destination: trip.destination, partySize: trip.partySize } } : {}),
+    };
+  }
+  return {
+    mandateVersion: v3 ? 3 : 2,
+    maxCapMinor: v3 ? m.maxCapMinor : m.capMinor,
+    currency: m.currency,
+    partyMin: v3 ? m.partyMin : m.partySize,
+    partyMax: v3 ? m.partyMax : m.partySize,
+    destinations: m.allowedItineraryIds.length === 0 ? "any" : [...m.allowedItineraryIds],
+    ...(trip !== undefined ? { trip: { ...trip } } : {}),
   };
 }
 
@@ -282,6 +369,8 @@ export function createBusinessOps(options: {
    * refuses outright (the receipted caller can never reach it anyway).
    */
   signingOpen?: () => boolean;
+  /** CONTRACT_FLEX_POLICY: accept mandate v3 and the trip statement (default off = the previous surface). */
+  flexPolicy?: boolean;
   /** Required per-role §13 policy pins (`CONTRACT_POLICY_DIGESTS`). */
   policyDigests: Readonly<Record<ContractRole, ReadonlySet<string>>>;
   /**
@@ -552,7 +641,10 @@ export function createBusinessOps(options: {
    * is the same generic MANDATE_INVALID.
    */
   function verifyMandate(principal: ContractPrincipal, mandate: unknown, mandateSignature: unknown): Mandate | ContractRefusalCode {
-    const parsed = mandateSchema.safeParse(mandate);
+    const parsed: { success: true; data: Mandate } | { success: false } =
+      isRecord3(mandate)
+        ? (options.flexPolicy === true ? mandateSchemaV3.safeParse(mandate) : { success: false as const })
+        : mandateSchema.safeParse(mandate);
     if (!parsed.success) return "MANDATE_INVALID";
     if (Date.parse(parsed.data.expiresAt) <= now()) return "MANDATE_INVALID";
     const pinned = principals.get(principal.keyId);
@@ -574,6 +666,17 @@ export function createBusinessOps(options: {
     if (Date.parse(m.expiresAt) <= now()) return refuse("MANDATE_REFUSED");
     if (totalMinor > m.capMinor) return refuse("MANDATE_REFUSED");
     if (currency !== m.currency) return refuse("MANDATE_REFUSED");
+    if (m.mandateVersion === 3) {
+      // v3: an empty allowlist means any CATALOG itinerary; with a trip stated
+      // the itinerary must also be that trip's route.
+      if (m.allowedItineraryIds.length > 0 && !m.allowedItineraryIds.includes(itineraryId)) return refuse("MANDATE_REFUSED");
+      const itin = run.simRun?.itinerary(itineraryId);
+      if (itin === undefined) return refuse("MANDATE_REFUSED");
+      if (m.trip !== undefined && (itin.origin !== m.trip.origin || itin.destination !== m.trip.destination)) {
+        return refuse("MANDATE_REFUSED");
+      }
+      return null;
+    }
     if (!m.allowedItineraryIds.includes(itineraryId)) return refuse("MANDATE_REFUSED");
     return null;
   }
@@ -814,6 +917,8 @@ export function createBusinessOps(options: {
       if (want === undefined) return true;
       const have = terms[key];
       if (have === undefined) return true; // undeclared term can't contradict
+      // Flexible policy: a listing that is not route-locked says "any".
+      if (options.flexPolicy === true && have === "any" && (key === "origin" || key === "destination")) return true;
       if (Array.isArray(have)) return have.includes(want);
       return have === want;
     };
@@ -1127,11 +1232,24 @@ export function createBusinessOps(options: {
         liveRun.mandatePrepared = {
           nonce: envelope.nonce,
           mandateSignature: args.mandateSignature as string,
+          mandate: { ...mandate },
         };
         return ok({ envelope, mandateDigest, serverNonce });
       }
 
       case "mandate_submit": {
+        // Flexible policy: a bad trip statement is refused BEFORE the envelope
+        // nonce is consumed, so the traveler can correct it and resubmit the
+        // same signed envelope. (The authoritative check runs again below on
+        // the verified mandate.)
+        {
+          const early = liveRun.mandatePrepared;
+          const env = args.envelope as { nonce?: unknown } | undefined;
+          if (early?.mandate !== undefined && env?.nonce === early.nonce && liveRun.mandate === undefined) {
+            const t = resolveTrip(early.mandate as Mandate, args.trip);
+            if (typeof t === "string") return refuse(t);
+          }
+        }
         // Envelope verification first so a REPLAYED nonce reports NONCE_REUSED
         // precisely; a fresh-envelope resubmission then hits the write-once
         // guard as STATE_REFUSED.
@@ -1149,6 +1267,9 @@ export function createBusinessOps(options: {
         if (payload.kind !== "mandate" || typeof mandate === "string") {
           return refuse("MANDATE_INVALID");
         }
+        const tripResolved = resolveTrip(mandate, args.trip);
+        if (typeof tripResolved === "string") return refuse(tripResolved);
+        const trip = tripResolved.trip;
         delete liveRun.mandatePrepared;
         const mandateDigest = canonicalDigest({ domain: MANDATE_DOMAIN, ...mandate });
         // Single-use per family principal (N4B2B-CHANGES-2 §3): the ledger
@@ -1160,17 +1281,43 @@ export function createBusinessOps(options: {
         );
         if (claim === "used") return refuse("MANDATE_INVALID");
         if (claim === "unavailable") return refuse("CONTRACT_UNAVAILABLE");
-        liveRun.mandate = {
-          digest: mandateDigest,
-          mandateId: mandate.mandateId,
-          capMinor: mandate.capMinor,
-          currency: mandate.currency,
-          allowedItineraryIds: [...mandate.allowedItineraryIds],
-          partySize: mandate.partySize,
-          expiresAt: mandate.expiresAt,
-          principalAddress: principals.get(principal.keyId)!,
-          submittedAt: iso(now()),
-        };
+        const principalAddress = principals.get(principal.keyId)!;
+        if ("mandateVersion" in mandate) {
+          // v3: the run's cap is the ceiling, its party the traveler's stated
+          // party (validated into [partyMin, partyMax]); the sim prices fares
+          // per person x that party from here on.
+          const stated = trip!;
+          liveRun.simRun!.setParty(stated.partySize);
+          liveRun.mandate = {
+            digest: mandateDigest,
+            mandateId: mandate.mandateId,
+            mandateVersion: 3,
+            capMinor: mandate.maxCapMinor,
+            maxCapMinor: mandate.maxCapMinor,
+            partyMin: mandate.partyMin,
+            partyMax: mandate.partyMax,
+            currency: mandate.currency,
+            allowedItineraryIds: [...mandate.allowedItineraryIds],
+            partySize: stated.partySize,
+            trip: { ...stated },
+            expiresAt: mandate.expiresAt,
+            principalAddress,
+            submittedAt: iso(now()),
+          };
+        } else {
+          liveRun.mandate = {
+            digest: mandateDigest,
+            mandateId: mandate.mandateId,
+            capMinor: mandate.capMinor,
+            currency: mandate.currency,
+            allowedItineraryIds: [...mandate.allowedItineraryIds],
+            partySize: mandate.partySize,
+            ...(trip !== undefined ? { trip: { ...trip } } : {}),
+            expiresAt: mandate.expiresAt,
+            principalAddress,
+            submittedAt: iso(now()),
+          };
+        }
         if (liveRun.stage === "bound" || liveRun.stage === "handshake") liveRun.stage = "mandated";
         return ok({ bound: true, mandateDigest, serverNonce });
       }

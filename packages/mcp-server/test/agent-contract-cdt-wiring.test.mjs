@@ -33,6 +33,7 @@ const CDT_NAMES = [
   "CONTRACT_POLICY_REGISTRATION", "CONTRACT_SERVER_ANCHORS", "CONTRACT_EXPIRE_AT_TTL",
   "CONTRACT_BRIEFS", "CONTRACT_BRIEFS_DIR", "CONTRACT_ROLE_BRIEFS",
   "CONTRACT_MILESTONE_LOG",
+  "CONTRACT_FLEX_POLICY",
 ];
 /** What compose injects for every one of them when its SSM parameter is absent. */
 const COMPOSE_ABSENT = Object.fromEntries(CDT_NAMES.map((n) => [n, ""]));
@@ -80,6 +81,7 @@ function allOnEnv() {
       CONTRACT_BRIEFS_DIR: briefs.dir,
       CONTRACT_ROLE_BRIEFS: "buyer:family-travel,provider:family-travel",
       CONTRACT_MILESTONE_LOG: "1",
+      CONTRACT_FLEX_POLICY: "1",
     }),
     briefs,
   };
@@ -201,7 +203,7 @@ test("check-config: all CDT features on → on/configured verdicts and counts, n
   assert.equal(out.exitCode, 0, JSON.stringify(out.report));
   assert.deepEqual(out.report.features, {
     telemetryLanes: "on", telemetrySinkKeyId: "configured", policyRegistration: "on", serverAnchors: "on",
-    expireAtTtl: "on", roleBriefs: "on", milestoneLog: "on", briefs: 1, directory: 1,
+    expireAtTtl: "on", roleBriefs: "on", milestoneLog: "on", flexPolicy: "on", briefs: 1, directory: 1,
   });
   assert.equal(out.report.limits.maxRunsPerKey, 4);
   assert.deepEqual(out.report.warnings, []);
