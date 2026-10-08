@@ -33,9 +33,39 @@ type JsonObject = { [key: string]: JsonValue };
 type PersistedHandshakeRecord = Omit<HandshakeRecord, "principal" | "session" | "role">;
 type FileShape = { records: Record<string, PersistedHandshakeRecord> };
 
+export interface HandshakeStateStoreOptions {
+  /**
+   * Drop records whose last update (updatedAt, else createdAt) is older than
+   * this many milliseconds, on load and on every persisted write. Unset or
+   * non-positive = keep forever (the historical behaviour).
+   */
+  retentionMs?: number;
+  /** Clock for retention (tests). */
+  now?: () => number;
+}
+
 class InMemoryHandshakeStateStore implements HandshakeStateStore {
   protected records = new Map<string, HandshakeRecord>();
   private mutationQueue: Promise<unknown> = Promise.resolve();
+
+  constructor(protected readonly storeOptions: HandshakeStateStoreOptions = {}) {}
+
+  /** Number of records held in memory (observability/tests). */
+  size(): number {
+    return this.records.size;
+  }
+
+  /** Remove records past the retention window from `records` (never `keep`). */
+  protected pruneExpired(records: Map<string, HandshakeRecord>, keep?: string): void {
+    const retentionMs = this.storeOptions.retentionMs;
+    if (retentionMs === undefined || !Number.isFinite(retentionMs) || retentionMs <= 0) return;
+    const cutoff = (this.storeOptions.now ?? Date.now)() - retentionMs;
+    for (const [keyHash, record] of records) {
+      if (keyHash === keep) continue;
+      const last = record.updatedAt ?? record.createdAt;
+      if (typeof last === "number" && last < cutoff) records.delete(keyHash);
+    }
+  }
 
   async get(key: HandshakeKey): Promise<HandshakeRecord | null> {
     const record = this.records.get(handshakeKeyHash(key));
@@ -58,15 +88,31 @@ class InMemoryHandshakeStateStore implements HandshakeStateStore {
       const keyHash = handshakeKeyHash(key);
       const current = this.records.get(keyHash);
       const next = mutate(current ? clone(current) : null);
-      const draft = cloneRecords(this.records);
+      // Stored records are private, immutable clones (every read returns a
+      // fresh clone and every write stores a fresh one), so the draft only
+      // needs a SHALLOW copy of the map. Deep-cloning every record on every
+      // mutation made each write O(total state): with the production v2 file
+      // (1,607 records, 19 MB) every agent_handshake_next poll cloned the whole
+      // store and rewrote 19 MB, which ballooned the V8 heap until the kernel
+      // OOM-killed the container (2026-10-08 14:42Z).
       if (next === null) {
+        if (current === undefined) return null;
+        const draft = new Map(this.records);
         draft.delete(keyHash);
         await this.flush(draft);
         this.records = draft;
         return null;
       }
       const stored = prepareRecord(key, keyHash, next, current);
+      if (current !== undefined && samePersistedRecord(current, stored)) {
+        // No-op write (e.g. a refresh() poll that observed nothing new): the
+        // persisted bytes would be identical, so skip the full-file rewrite.
+        this.records.set(keyHash, stored);
+        return clone(stored);
+      }
+      const draft = new Map(this.records);
       draft.set(keyHash, stored);
+      this.pruneExpired(draft, keyHash);
       await this.flush(draft);
       this.records = draft;
       return clone(stored);
@@ -85,9 +131,11 @@ class InMemoryHandshakeStateStore implements HandshakeStateStore {
 }
 
 class FileHandshakeStateStore extends InMemoryHandshakeStateStore {
-  constructor(private readonly path: string) {
-    super();
+  constructor(private readonly path: string, options: HandshakeStateStoreOptions = {}) {
+    super(options);
     this.load();
+    // Expired records drop out of memory at boot; the file catches up on the next write.
+    this.pruneExpired(this.records);
   }
 
   private load(): void {
@@ -122,7 +170,8 @@ class FileHandshakeStateStore extends InMemoryHandshakeStateStore {
     let renamed = false;
     try {
       fd = openSync(tmp, "wx", 0o600);
-      writeFileSync(fd, JSON.stringify(data, null, 2), { encoding: "utf8" });
+      // Compact JSON: the pretty-printed form was ~40% larger (19 MB vs 14 MB in production) for no reader's benefit.
+      writeFileSync(fd, JSON.stringify(data), { encoding: "utf8" });
       fsyncSync(fd);
       closeSync(fd);
       fd = null;
@@ -166,8 +215,21 @@ export function createHandshakeStateStore(env: NodeJS.ProcessEnv | Record<string
   return shared;
 }
 
-export function createIsolatedHandshakeStateStore(path?: string): HandshakeStateStore {
-  return path ? new FileHandshakeStateStore(path) : new InMemoryHandshakeStateStore();
+export function createIsolatedHandshakeStateStore(
+  path?: string,
+  options: HandshakeStateStoreOptions = stateStoreOptionsFromEnv(process.env),
+): HandshakeStateStore {
+  return path ? new FileHandshakeStateStore(path, options) : new InMemoryHandshakeStateStore(options);
+}
+
+/**
+ * AGENT_HANDSHAKE_V2_STATE_RETENTION_DAYS (opt-in, positive number): records not
+ * updated for that many days are dropped from the isolated (v2) state store.
+ * Unset/invalid = keep forever.
+ */
+export function stateStoreOptionsFromEnv(env: NodeJS.ProcessEnv | Record<string, string | undefined>): HandshakeStateStoreOptions {
+  const days = Number(env.AGENT_HANDSHAKE_V2_STATE_RETENTION_DAYS ?? "");
+  return Number.isFinite(days) && days > 0 ? { retentionMs: days * 24 * 60 * 60 * 1000 } : {};
 }
 
 export function __resetHandshakeStateStore(): void {
@@ -246,8 +308,10 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function cloneRecords(records: Map<string, HandshakeRecord>): Map<string, HandshakeRecord> {
-  return new Map(Array.from(records.entries(), ([key, record]) => [key, clone(record)]));
+/** Whether two records serialize to the same persisted form (key fields are not persisted). */
+function samePersistedRecord(a: HandshakeRecord, b: HandshakeRecord): boolean {
+  const strip = ({ principal: _p, session: _s, role: _r, ...rest }: HandshakeRecord) => rest;
+  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
 }
 
 function fsyncDirectory(path: string): void {
