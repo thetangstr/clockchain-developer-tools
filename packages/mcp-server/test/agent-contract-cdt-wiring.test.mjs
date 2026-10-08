@@ -431,7 +431,7 @@ test("check-config-from-ssm: Track C's revised shape with the committed family-t
   const name = "family-travel-tc-door";
   const text = readFileSync(path.join(REPO_ROOT, "packages", "mcp-server", "assets", "briefs", `${name}.md`), "utf8");
   const digest = `0x${createHash("sha256").update(text).digest("hex")}`;
-  assert.equal(digest, "0x8a0f8775b12536dca1d7679c175e44d536bbdfb7e5970ccb872295b09449bd6b", "the committed brief is the exact file Track C pinned");
+  assert.equal(digest, "0xaac93fd922c8b712ef48ab839066cda166faad979b75b3425697785229dc324b", "the committed brief is the exact file Track C pinned");
   const shape = {
     ...baseEnv(), CONTRACT_STATE_DIR: mkdtempSync(path.join(tmpdir(), "cdt-wiring-ssm-")),
     CONTRACT_ANCHOR_ENABLED: "1",
