@@ -46,4 +46,7 @@ COPY --from=build /app/packages/mcp-server/package.json ./packages/mcp-server/pa
 COPY --from=build /app/packages/mcp-server/dist ./packages/mcp-server/dist
 COPY --from=build /app/packages/mcp-server/assets ./packages/mcp-server/assets
 EXPOSE 8080
-CMD ["node", "packages/mcp-server/dist/index.js"]
+# Cap the V8 old space well below the t3.small box (1.9 GB shared by 8 containers): without it
+# V8 defaults to ~978 MB here and lets garbage pile up until the KERNEL OOM-kills (2026-10-08).
+# With the cap, a runaway fails inside this container (restart: unless-stopped) instead.
+CMD ["node", "--max-old-space-size=384", "packages/mcp-server/dist/index.js"]
