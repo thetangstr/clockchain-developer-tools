@@ -389,6 +389,8 @@ read_optional_env TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS /clockchain/mcp/TELEMETRY_C
 read_optional_env TELEMETRY_CLOSE_DEADLINE_MS /clockchain/mcp/TELEMETRY_CLOSE_DEADLINE_MS
 read_optional_env CONTRACT_CALLS_PER_MINUTE /clockchain/mcp/CONTRACT_CALLS_PER_MINUTE
 read_optional_env CONTRACT_OBSERVER_PER_MINUTE /clockchain/mcp/CONTRACT_OBSERVER_PER_MINUTE
+# optional per-keyId/runId observer/verifier feed bucket (unset = the single global bucket)
+read_optional_env CONTRACT_OBSERVER_PER_KEY_PER_MINUTE /clockchain/mcp/CONTRACT_OBSERVER_PER_KEY_PER_MINUTE
 read_optional_env CONTRACT_MAX_RUNS /clockchain/mcp/CONTRACT_MAX_RUNS
 read_optional_env CONTRACT_MAX_RECEIPTS_PER_RUN /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_RUN
 read_optional_env CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL

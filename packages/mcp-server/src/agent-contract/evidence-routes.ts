@@ -50,15 +50,58 @@ export interface ContractEvidenceRoutesOptions {
   /** Prebuilt `GET /contract/keys` document; absent → the route 404s. */
   keysDoc?: ReturnType<typeof buildServerKeysDoc>;
   /**
-   * Feed limiter — `(scope) => allowed`. http.ts injects its shared
-   * CONTRACT_OBSERVER_PER_MINUTE limiter; the default is the same 30/min.
+   * Feed limiter — `(scope, subject) => allowed`. http.ts injects
+   * `createObserverFeedLimiter` (CONTRACT_OBSERVER_PER_MINUTE global, optional
+   * CONTRACT_OBSERVER_PER_KEY_PER_MINUTE per subject); the default is the same
+   * 30/min global bucket. `subject` is `k:<keyId>` or `r:<runId>` from the query.
    */
-  allowFeed?: (scope: "observer" | "verifier") => boolean;
+  allowFeed?: (scope: "observer" | "verifier", subject?: string) => boolean;
   /** Metrics hook invoked on a rate-limited feed request. */
   onRateLimited?: () => void;
 }
 
 export type ContractEvidenceRoutes = (req: IncomingMessage, res: ServerResponse) => boolean;
+
+/** Strict positive integer from an env string; "" / unset / invalid -> undefined. */
+export function parsePerMinute(raw: string | undefined): number | undefined {
+  const v = (raw ?? "").trim();
+  if (!/^[1-9][0-9]{0,6}$/.test(v)) return undefined;
+  return Number(v);
+}
+
+/**
+ * The observer/verifier feed limiter (COUNTER window follow-up, 2026-10-08).
+ * - `globalPerMinute`: one bucket per scope, exactly today's behaviour.
+ * - `perSubjectPerMinute` (optional): an extra bucket per scope + queried
+ *   keyId/runId, checked FIRST; a request refused there does not consume the
+ *   global bucket. Unset = the old single global bucket, byte for byte.
+ */
+export function createObserverFeedLimiter(o: {
+  globalPerMinute: number;
+  perSubjectPerMinute?: number;
+  now?: () => number;
+}): (scope: "observer" | "verifier", subject?: string) => boolean {
+  const now = o.now ?? Date.now;
+  const global = keyedWindowLimiter(o.globalPerMinute, 60_000, now);
+  const perSubject = o.perSubjectPerMinute !== undefined
+    ? keyedWindowLimiter(o.perSubjectPerMinute, 60_000, now)
+    : undefined;
+  return (scope, subject) => {
+    if (perSubject !== undefined && subject !== undefined && subject !== "") {
+      if (!perSubject(`${scope}|${subject}`)) return false;
+    }
+    return global(scope);
+  };
+}
+
+const subjectOf = (url: string | undefined): string | undefined => {
+  const q = new URL(url ?? "/", "http://localhost").searchParams;
+  const keyId = q.get("keyId");
+  if (keyId !== null && keyId !== "") return `k:${keyId}`;
+  const runId = q.get("runId");
+  if (runId !== null && runId !== "") return `r:${runId}`;
+  return undefined;
+};
 
 export function createContractEvidenceRoutes(
   options: ContractEvidenceRoutesOptions,
@@ -96,7 +139,7 @@ export function createContractEvidenceRoutes(
         refuse(res, 401, "unauthorized");
         return true;
       }
-      if (!allowFeed("observer")) {
+      if (!allowFeed("observer", subjectOf(req.url))) {
         onRateLimited();
         refuse(res, 429, "rate_limited");
         return true;
@@ -137,7 +180,7 @@ export function createContractEvidenceRoutes(
         refuse(res, 401, "unauthorized");
         return true;
       }
-      if (!allowFeed("verifier")) {
+      if (!allowFeed("verifier", subjectOf(req.url))) {
         onRateLimited();
         refuse(res, 429, "rate_limited");
         return true;

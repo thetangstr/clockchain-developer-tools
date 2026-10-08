@@ -66,6 +66,7 @@ const expectedContractEnv = {
   TELEMETRY_CLOSE_DEADLINE_MS: "90000\n",
   CONTRACT_CALLS_PER_MINUTE: "60\n",
   CONTRACT_OBSERVER_PER_MINUTE: "45\n",
+  CONTRACT_OBSERVER_PER_KEY_PER_MINUTE: "15\n",
   CONTRACT_MAX_RUNS: "256\n",
   CONTRACT_MAX_RECEIPTS_PER_RUN: "1024\n",
   CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL: "128\n",
@@ -340,6 +341,7 @@ case "$name" in
   /clockchain/mcp/TELEMETRY_CLOSE_DEADLINE_MS) value=$'90000\\n' ;;
   /clockchain/mcp/CONTRACT_CALLS_PER_MINUTE) value=$'60\\n' ;;
   /clockchain/mcp/CONTRACT_OBSERVER_PER_MINUTE) value=$'45\\n' ;;
+  /clockchain/mcp/CONTRACT_OBSERVER_PER_KEY_PER_MINUTE) value=$'15\\n' ;;
   /clockchain/mcp/CONTRACT_MAX_RUNS) value=$'256\\n' ;;
   /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_RUN) value=$'1024\\n' ;;
   /clockchain/mcp/CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL) value=$'128\\n' ;;

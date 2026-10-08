@@ -52,6 +52,7 @@ marked required falls back to the shown default or stays off.
 | `CONTRACT_STATE_DIR` | String | no | run/receipt/binding state dir. Container default is `cwd/state/contract` = `/app/state/contract` (the `mcp_state` volume); pin it anyway for clarity |
 | `CONTRACT_CALLS_PER_MINUTE` | String | no | integer, default `120` |
 | `CONTRACT_OBSERVER_PER_MINUTE` | String | no | observer feed limiter, integer, default `30` (read in `http.ts`, not `config.ts`) |
+| `CONTRACT_OBSERVER_PER_KEY_PER_MINUTE` | String | no | optional extra observer/verifier feed bucket per queried `keyId`/`runId` (strict integer 1..9999999), checked before the global bucket; unset/invalid = the single global bucket (read in `http.ts`) |
 | `CONTRACT_MAX_RUNS` | String | no | integer, default `1024` |
 | `CONTRACT_MAX_RECEIPTS_PER_RUN` | String | no | integer, default `4096` |
 | `CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL` | String | no | integer, default `512` |

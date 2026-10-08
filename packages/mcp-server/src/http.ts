@@ -77,7 +77,7 @@ import {
   buildServerKeysDoc,
   SERVER_CARD_PATH,
 } from "./agent-contract/server-card.js";
-import { createContractEvidenceRoutes } from "./agent-contract/evidence-routes.js";
+import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -583,7 +583,13 @@ export async function runHttp(): Promise<Server> {
   // The observer receipt feed is a low-rate surface (default 30/min).
   // `||` not `??`: compose injects "" when the host var is unset (N7c) —
   // empty must mean the default, not 0.
-  const allowObserverFeed = keyedWindowLimiter(Number(process.env.CONTRACT_OBSERVER_PER_MINUTE || "30"), 60_000, Date.now);
+  // CONTRACT_OBSERVER_PER_KEY_PER_MINUTE (optional, strict integer): an extra
+  // per-keyId/runId bucket so concurrent lanes stop sharing one global bucket.
+  // Unset = today's single global bucket.
+  const allowObserverFeed = createObserverFeedLimiter({
+    globalPerMinute: Number(process.env.CONTRACT_OBSERVER_PER_MINUTE || "30"),
+    perSubjectPerMinute: parsePerMinute(process.env.CONTRACT_OBSERVER_PER_KEY_PER_MINUTE),
+  });
 
   // N4b-6: the evidence routes are ONE exported code path — shared with the
   // l-stack so nothing can drift (receipts feed, keys doc, run-salt). The
@@ -597,7 +603,7 @@ export async function runHttp(): Promise<Server> {
           simFaultsEnabled: contractConfig.simFaultsEnabled,
         })
       : undefined,
-    allowFeed: (scope) => allowObserverFeed(scope),
+    allowFeed: (scope, subject) => allowObserverFeed(scope, subject),
     onRateLimited: () => rlEvents.inc({ surface: bounded("contract_call", RL_SURFACES) }),
   });
 
