@@ -2237,7 +2237,16 @@ export function createContractService(options: {
         job.anchors = { ...job.anchors, [kind]: { kind, ...state } };
       });
     };
-    const op = Promise.resolve()
+    // QA F-6: with the milestone log on, the agreement anchor waits on the
+    // run's milestone write queue behind the negotiation entry (sealed now),
+    // so Negotiation lands on the ledger before Agreement. `gate` opens when
+    // the queue reaches it — or at once if the milestone log is off or
+    // faults (an ordering bug must never hold the anchor).
+    let openGate: () => void = () => {};
+    const gate = kind === "agreement" && milestoneLog !== undefined
+      ? new Promise<void>((resolve) => { openGate = resolve; })
+      : Promise.resolve();
+    const op = gate
       .then(() => anchor.anchor({ kind, runId: run.runId, digestHex: digest }))
       .then((write) => {
         // F13: a RESOLVED write is anchored only when the backing confirms
@@ -2264,6 +2273,13 @@ export function createContractService(options: {
         receiptOutcome("anchor_failed", { error });
         try { milestoneLog?.anchorFailed(run.runId); } catch { /* never fault the anchor path */ }
       });
+    if (kind === "agreement" && milestoneLog !== undefined) {
+      try {
+        milestoneLog.beforeAgreementAnchor(run, () => { openGate(); return op; });
+      } catch {
+        openGate();
+      }
+    }
     trackAnchorOp(op, run.runId);
   };
 
