@@ -60,6 +60,8 @@ export interface TerminalJob {
   runId: string;
   /** Null until the first terminal transition lands it (write-once). */
   terminalState: string | null;
+  /** QA F-5: why the run ended, when the state alone does not say (e.g. counterparty_never_bound). */
+  terminalReason?: string;
   /** The immutable close receipt — absent only when no emitter is armed. */
   receipt?: TerminalReceipt;
   /** sha256 of the canonical receipt. */

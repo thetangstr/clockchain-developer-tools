@@ -397,7 +397,7 @@ export function createBusinessOps(options: {
    * Absent this hook an in-memory ledger still enforces single-use.
    */
   claimMandate?(principalAddress: string, mandateId: string, runId: string, expiresAtMs: number): "ok" | "used" | "unavailable";
-  endRun: (run: ContractRun, terminalState: string, principal?: ContractPrincipal) => void;
+  endRun: (run: ContractRun, terminalState: string, principal?: ContractPrincipal, reason?: "counterparty_never_bound") => void;
   /**
    * N4b-8 (gap 4): anchor a run subject — called with "agreement" right
    * after the agreement record commits. The service owns the async anchor
@@ -1224,12 +1224,17 @@ export function createBusinessOps(options: {
     // seated until the bind deadline. `run` is the caller's own run
     // (principalRuns), and the seat must be this principal's: no one can
     // release another principal's seat.
+    // QA F-5: the terminal records reason `counterparty_never_bound`. A
+    // half-bound run that ALREADY ended (withdrawn, or expired_unbound by the
+    // half-bound timeout / bind deadline) answers ALREADY_TERMINAL to its
+    // bound party — not STATE_REFUSED, which read as "cannot be closed".
     if (
-      tool === "contract_withdraw" && run !== undefined && run.terminalState === null &&
+      tool === "contract_withdraw" && run !== undefined &&
       (run.bound.buyer === undefined || run.bound.provider === undefined) &&
       run.bound[principal.role]?.principalKeyId === principal.keyId
     ) {
-      options.endRun(run, "no_agreement", principal);
+      if (run.terminalState !== null) return refuse("ALREADY_TERMINAL");
+      options.endRun(run, "no_agreement", principal, "counterparty_never_bound");
       return ok({ state: "withdrawn", serverNonce });
     }
 

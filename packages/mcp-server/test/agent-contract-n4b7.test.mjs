@@ -470,7 +470,9 @@ test("half-bound run: the bound buyer's token is released once the bind deadline
   const stateDir = mkdtempSync(path.join(tmpdir(), "contract-n4b7-hb-"));
   let now = Date.now();
   const t0 = now;
-  const env = await boot({ stateDir, serviceOptions: { now: () => now } });
+  // halfBoundTimeoutMs: 0 — this test pins the certificate-window bound
+  // (QA F-5's shorter half-bound timeout is covered by its own tests).
+  const env = await boot({ stateDir, serviceOptions: { now: () => now, halfBoundTimeoutMs: 0 } });
   try {
     const certA = cert(260, { t: t0 });
     const runA = await bindLate(env.rpc, "tlb1", {
@@ -1182,5 +1184,153 @@ test("F4/F5: a pre-bind status read after a SETTLED run discloses priorRun + can
     assert.equal(live.terminalState, null);
     assert.equal(live.priorRun, undefined);
     assert.equal(live.canBind, undefined);
+  } finally { await env.close(); }
+});
+
+// QA F-5 (live bb9326ac, 2026-10-08): the provider bound, the buyer never
+// bound, and the run held the provider's key (cap 1) until a server restart.
+// The bound party's withdraw ends it `no_agreement` with reason
+// `counterparty_never_bound`; with no withdraw at all, the half-bound
+// timeout (default 10 min after the first bind) ends it `expired_unbound`.
+// Either way the provider key is free for a new run at once.
+const HALF_BOUND_TIMEOUT_MS = 10 * 60_000;
+
+test("QA F-5: provider-bound-only run — the provider withdraws, the reason is recorded, and its key binds a new run", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "contract-f5-wd-"));
+  const env = await boot({ stateDir });
+  try {
+    const certA = cert(300);
+    const p = await bindLate(env.rpc, "tlp1", {
+      keyId: "klp1", role: "provider", side: "responder", certificate: certA, runId: uuid(300),
+    });
+    assert.equal(p.bound, true, JSON.stringify(p));
+    const runA = env.service.runFor(uuid(300));
+    assert.equal(runA.bound.buyer, undefined);
+
+    // The never-bound buyer has no run to withdraw (no seat to prove).
+    const buyer = await env.rpc("tlb1", "contract_withdraw", {});
+    assert.equal(buyer.error, "STATE_REFUSED");
+    assert.equal(runA.terminalState, null);
+
+    const withdrawn = await env.rpc("tlp1", "contract_withdraw", { reason: "buyer never bound" });
+    assert.equal(withdrawn.state, "withdrawn", JSON.stringify(withdrawn));
+    assert.equal(runA.terminalState, "no_agreement");
+    assert.equal(runA.terminalReason, "counterparty_never_bound");
+    const job = env.service.terminalJobFor(uuid(300));
+    assert.equal(job.terminalState, "no_agreement");
+    assert.equal(job.terminalReason, "counterparty_never_bound");
+    assert.ok(env.service.receiptFeed(uuid(300)).receipts.some((r) => r.tool === "contract_withdraw" && r.outcome === "ok"));
+
+    // A repeat withdraw says the run already ended — never STATE_REFUSED.
+    const again = await env.rpc("tlp1", "contract_withdraw", {});
+    assert.equal(again.error, "ALREADY_TERMINAL", JSON.stringify(again));
+
+    // The provider key is free: it binds a NEW run right away.
+    const runB = await bindLate(env.rpc, "tlp1", {
+      keyId: "klp1", role: "provider", side: "responder",
+      certificate: cert(301, { responder: { agentId: "9702" } }), runId: uuid(301),
+    });
+    assert.equal(runB.bound, true, JSON.stringify(runB));
+    assert.equal(env.service.runIdForPrincipal("klp1"), uuid(301));
+    // ...and the late buyer can never join the withdrawn run.
+    const lateBuyer = await bindLate(env.rpc, "tlb1", {
+      keyId: "klb1", role: "buyer", side: "initiator", certificate: certA, runId: uuid(300),
+    });
+    assert.equal(lateBuyer.error, "STATE_REFUSED");
+  } finally { await env.close(); }
+});
+
+test("QA F-5: the half-bound timeout sweeper ends a provider-bound-only run and frees the provider key", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "contract-f5-sweep-"));
+  let now = Date.now();
+  const t0 = now;
+  const env = await boot({ stateDir, serviceOptions: { now: () => now } });
+  try {
+    const certA = cert(310, { t: t0 });
+    const p = await bindLate(env.rpc, "tlp2", {
+      keyId: "klp2", role: "provider", side: "responder", certificate: certA, runId: uuid(310),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(p.bound, true, JSON.stringify(p));
+    const runA = env.service.runFor(uuid(310));
+    // Default timeout (10 min) is tighter than the certificate window (20 min).
+    assert.equal(runA.bindDeadlineMs, t0 + HALF_BOUND_TIMEOUT_MS);
+
+    // Just inside the timeout the seat still holds (the buyer may yet bind).
+    now = t0 + HALF_BOUND_TIMEOUT_MS - 1_000;
+    const held = await env.rpc("tlp2", "contract_status", {});
+    assert.equal(held.terminalState, null, JSON.stringify(held));
+    const early = await bindLate(env.rpc, "tlp2", {
+      keyId: "klp2", role: "provider", side: "responder",
+      certificate: cert(311, { t: now }), runId: uuid(311), issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(early.error, "STATE_REFUSED");
+
+    // Past it, with no client call on the run, the observer feed's sweep
+    // alone ends it — an open-runs check sees the terminal.
+    now = t0 + HALF_BOUND_TIMEOUT_MS + 1_000;
+    env.service.receiptFeed(uuid(310));
+    assert.equal(runA.terminalState, "expired_unbound");
+    assert.equal(runA.terminalReason, "counterparty_never_bound");
+    assert.equal(env.service.terminalJobFor(uuid(310)).terminalReason, "counterparty_never_bound");
+
+    // The provider's withdraw now reports ALREADY_TERMINAL (not STATE_REFUSED).
+    const wd = await env.rpc("tlp2", "contract_withdraw", {});
+    assert.equal(wd.error, "ALREADY_TERMINAL", JSON.stringify(wd));
+
+    // The provider key binds a new run immediately.
+    const runB = await bindLate(env.rpc, "tlp2", {
+      keyId: "klp2", role: "provider", side: "responder",
+      certificate: cert(312, { t: now, responder: { agentId: "9712" } }), runId: uuid(312),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(runB.bound, true, JSON.stringify(runB));
+    // The buyer can no longer join the expired run although its certificate
+    // is still inside its window.
+    const lateBuyer = await bindLate(env.rpc, "tlb2", {
+      keyId: "klb2", role: "buyer", side: "initiator", certificate: certA, runId: uuid(310),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(lateBuyer.error, "STATE_REFUSED");
+  } finally { await env.close(); }
+});
+
+test("QA F-5: a counterparty binding inside the half-bound timeout completes the run normally", async () => {
+  let now = Date.now();
+  const t0 = now;
+  const env = await boot({ serviceOptions: { now: () => now } });
+  try {
+    const c = cert(320, { t: t0 });
+    const p = await bindLate(env.rpc, "tlp1", {
+      keyId: "klp1", role: "provider", side: "responder", certificate: c, runId: uuid(320),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(p.bound, true, JSON.stringify(p));
+    now = t0 + HALF_BOUND_TIMEOUT_MS - 5_000;
+    const b = await bindLate(env.rpc, "tlb3", {
+      keyId: "klb3", role: "buyer", side: "initiator", certificate: c, runId: uuid(320),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(b.bound, true, JSON.stringify(b));
+    now = t0 + HALF_BOUND_TIMEOUT_MS + 60_000;
+    const status = await env.rpc("tlb3", "contract_status", {});
+    assert.equal(status.stage, "bound", JSON.stringify(status));
+    assert.equal(status.terminalState, null);
+  } finally { await env.close(); }
+});
+
+test("QA F-5: a custom halfBoundTimeoutMs is honoured and never extends past the certificate window", async () => {
+  let now = Date.now();
+  const t0 = now;
+  const env = await boot({ serviceOptions: { now: () => now, halfBoundTimeoutMs: 60 * 60_000 } });
+  try {
+    const c = cert(330, { t: t0 });
+    const p = await bindLate(env.rpc, "tlp1", {
+      keyId: "klp1", role: "provider", side: "responder", certificate: c, runId: uuid(330),
+      issuedAt: new Date(now).toISOString(),
+    });
+    assert.equal(p.bound, true, JSON.stringify(p));
+    // 60 min > the certificate's validUntil + grace: the certificate bound wins.
+    assert.equal(env.service.runFor(uuid(330)).bindDeadlineMs, t0 + CERT_WINDOW_MS + GRACE_MS);
   } finally { await env.close(); }
 });
