@@ -34,7 +34,10 @@
  * Transitions (server-observable):
  *   discover    both contract binds succeeded
  *   proposal    the first offer_submit succeeded (the mandate is proposal)
- *   negotiation an agreement formed (empty when the first offer was accepted)
+ *   negotiation an agreement formed (empty when the first offer was accepted);
+ *               sealed and queued BEFORE the agreement anchor is sent, which
+ *               then runs on the same per-run write queue (QA F-6: ledger
+ *               order = protocol order)
  *   agreement   offer_accept_submit succeeded
  *   execution   verification_submit succeeded
  *   settlement  the terminal transition
@@ -402,6 +405,15 @@ export interface MilestoneLog {
   recover(job: TerminalJob): void;
   /** A run anchor reached `failed`: referenced entries indexed to a failed anchor fall back to own writes. */
   anchorFailed(runId: string): void;
+  /**
+   * QA F-6: the agreement anchor is about to be sent (offer_accept_submit).
+   * Seal everything before `agreement` NOW (the agreement has formed, so
+   * negotiation is complete), queue its own write, and run `send` on this
+   * run's write queue after it — so Negotiation reaches the ledger before
+   * Agreement, and later milestone writes wait for the agreement anchor.
+   * `send` must not reject (its failure is the anchor path's to record).
+   */
+  beforeAgreementAnchor(run: ContractRun, send: () => Promise<void>): void;
 }
 
 export function createMilestoneLog(deps: {
@@ -606,6 +618,22 @@ export function createMilestoneLog(deps: {
     },
     anchorFailed(runId) {
       fallback(runId);
+    },
+    beforeAgreementAnchor(run, send) {
+      const t = (run.milestoneLog ??= createMilestoneTracker());
+      if (!t.closed) {
+        try {
+          const sealed = sealThrough(t, ctxFor(run.runId, run.anchors), MILESTONES.indexOf("agreement") - 1);
+          afterSeal(run.runId, t, sealed, false);
+        } catch { /* a milestone bug must never hold the agreement anchor */ }
+      }
+      const prev = queues.get(run.runId) ?? Promise.resolve();
+      const op = prev.then(send).catch(() => { /* recorded by the anchor path */ });
+      queues.set(run.runId, op);
+      deps.track(op);
+      void op.finally(() => {
+        if (queues.get(run.runId) === op) queues.delete(run.runId);
+      });
     },
     snapshot(run) {
       return run.milestoneLog === undefined ? undefined : structuredClone(run.milestoneLog);

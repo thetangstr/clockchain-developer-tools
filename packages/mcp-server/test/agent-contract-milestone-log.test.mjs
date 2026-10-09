@@ -769,3 +769,45 @@ test("config: CONTRACT_MILESTONE_LOG is a strict 0|1 switch, live only with the 
   const off = await checkConfig(baseEnv());
   assert.equal(off.report.features.milestoneLog, "off");
 });
+
+// QA F-6 (2026-10-08, 4 of 4 live deals): the agreement anchor was fired
+// inside offer_accept_submit BEFORE the negotiation milestone was sealed, so
+// Agreement landed one block before Negotiation on the ledger. Milestones
+// must reach the ledger in protocol order.
+test("integration (QA F-6): milestones land in protocol order — Negotiation before Agreement, every block ascending", async () => {
+  const gw = fakeGateway();
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  try {
+    const runId = await negotiatedSettledRun(env, 721);
+    await waitFor(() => gw.milestoneWrites().length === 5 && ownEntries(env.service.runFor(runId)?.milestoneLog).every((e) => e.status === "anchored"));
+    const st = await env.callTool("tb1", "contract_status", {});
+    const rows = st.anchors.milestones;
+    const block = (row) => Number(row.blockHeight);
+    const negotiation = rows.find((r) => r.milestone === "negotiation");
+    const agreement = rows.find((r) => r.milestone === "agreement");
+    assert.equal(agreement.source, "track-b-anchor");
+    assert.ok(block(negotiation) < block(agreement),
+      `negotiation block ${negotiation.blockHeight} must precede agreement block ${agreement.blockHeight}`);
+    for (let i = 1; i < rows.length; i++) {
+      assert.ok(block(rows[i - 1]) < block(rows[i]),
+        `${rows[i - 1].milestone} (${rows[i - 1].blockHeight}) before ${rows[i].milestone} (${rows[i].blockHeight})`);
+    }
+    // Issue order on the gateway matches: the negotiation write is sent
+    // before the agreement anchor's tsa write.
+    const order = gw.logCalls.map((c) => c.assetReferenceId);
+    const negRef = milestoneReferenceId(runId, "negotiation");
+    const agreementTsa = gw.records.find((r) => r.ledgerId === st.anchors.agreement.ledger.ledgerId).assetReferenceId;
+    assert.ok(order.indexOf(negRef) < order.indexOf(agreementTsa), JSON.stringify(order));
+  } finally { env.close(); }
+});
+
+test("integration (QA F-6): a failing negotiation write never blocks the agreement anchor", async () => {
+  const gw = fakeGateway({ failMilestoneLog: true });
+  const env = await boot({ anchor: createTsaContractAnchor(gw), milestoneLog: true, anchorConfirmDelayMs: 0 });
+  try {
+    const runId = await negotiatedSettledRun(env, 722);
+    await waitFor(() => env.service.runFor(runId)?.anchors?.agreement?.status === "anchored");
+    const st = await env.callTool("tb1", "contract_status", {});
+    assert.equal(st.anchors.agreement.status, "anchored");
+  } finally { env.close(); }
+});
