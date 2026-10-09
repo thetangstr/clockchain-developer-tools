@@ -510,6 +510,13 @@ export function loadContractConfig(
   const maxReceiptsPerPrincipal = Number(env.CONTRACT_MAX_RECEIPTS_PER_PRINCIPAL || "512");
   const runTtlMs = Number(env.CONTRACT_RUN_TTL_MS || String(24 * 3600_000));
   const certGraceMs = Number(env.CONTRACT_CERT_GRACE_MS || "600000");
+  // QA F-5: half-bound timeout (ms after the first bind). Unset = the
+  // service default (10 min); "0" = certificate window only (pre-F-5).
+  const halfBoundRaw = (env.CONTRACT_HALF_BOUND_TIMEOUT_MS ?? "").trim();
+  if (halfBoundRaw !== "" && !/^(0|[1-9][0-9]{0,9})$/.test(halfBoundRaw)) {
+    return misconfigured("CONTRACT_HALF_BOUND_TIMEOUT_MS wants a non-negative integer (ms)");
+  }
+  const halfBoundTimeoutMs = halfBoundRaw === "" ? undefined : Number(halfBoundRaw);
   const sessionTtlMs = Number(env.CONTRACT_SESSION_TTL_MS || String(30 * 60_000));
   const stateDir = env.CONTRACT_STATE_DIR || path.join(process.cwd(), "state", "contract");
 
@@ -638,6 +645,7 @@ export function loadContractConfig(
       maxReceiptsPerRun: Number.isFinite(maxReceiptsPerRun) ? maxReceiptsPerRun : 4096,
       maxReceiptsPerPrincipal: Number.isFinite(maxReceiptsPerPrincipal) ? maxReceiptsPerPrincipal : 512,
       runTtlMs: Number.isFinite(runTtlMs) ? runTtlMs : 24 * 3600_000,
+      ...(halfBoundTimeoutMs !== undefined ? { halfBoundTimeoutMs } : {}),
       graceMs: Number.isFinite(certGraceMs) ? certGraceMs : 600_000,
       expectedErc8004,
       policyDigests: policyDigests as { buyer: Set<string>; provider: Set<string> },

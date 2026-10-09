@@ -313,3 +313,15 @@ test("empty CONTRACT_ERC8004_* values create no pin; a set pin still verifies", 
   assert.equal(mismatchRes.code, "CERTIFICATE_INVALID");
   mismatchedPin.service.close();
 });
+
+test("QA F-5: CONTRACT_HALF_BOUND_TIMEOUT_MS accepts a non-negative integer and refuses anything else", () => {
+  for (const ok of ["", "0", "600000", "120000"]) {
+    const cfg = loadContractConfig({ ...readyBase(), CONTRACT_HALF_BOUND_TIMEOUT_MS: ok });
+    assert.equal(cfg.kind, "ready", `value ${JSON.stringify(ok)}`);
+    cfg.service?.close?.();
+  }
+  for (const bad of ["-1", "10m", "1.5", "0x10", "01"]) {
+    const cfg = loadContractConfig({ ...readyBase(), CONTRACT_HALF_BOUND_TIMEOUT_MS: bad });
+    assert.notEqual(cfg.kind, "ready", `value ${JSON.stringify(bad)}`);
+  }
+});

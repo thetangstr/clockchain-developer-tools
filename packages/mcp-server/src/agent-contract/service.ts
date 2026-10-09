@@ -151,8 +151,17 @@ export interface ContractRun {
    * grace). Past it no bind can verify this session, so a run still missing a
    * party can never complete — it ends `expired_unbound`, freeing its seats.
    * Absent on runs built outside bind (never expires this way).
+   * QA F-5: capped at first bind + halfBoundTimeoutMs (default 10 min), so a
+   * run whose counterparty never binds frees the bound party's key quickly
+   * instead of holding it until the certificate window closes.
    */
   readonly bindDeadlineMs?: number;
+  /**
+   * QA F-5: why the run ended, when the terminal state alone does not say
+   * (e.g. `counterparty_never_bound` for a half-bound withdraw or expiry).
+   * Server-side evidence only — set once, with the terminal transition.
+   */
+  terminalReason?: string;
   readonly bound: Partial<Record<ContractRole, BoundRole>>;
   readonly receipts: ServerReceipt[];
   /** N3: each principal has its OWN receipt budget within a run. */
@@ -419,7 +428,7 @@ export interface ContractService {
    * principal rides along so the close emitter can receipt the delivery
    * outcome against the caller that ended the run.
    */
-  endRun(run: ContractRun, terminalState: string, principal?: ContractPrincipal): void;
+  endRun(run: ContractRun, terminalState: string, principal?: ContractPrincipal, reason?: ContractTerminalReason): void;
   /**
    * M1/N4b-3: append to the principal's active PRE-BIND segment — segments
    * seal at each bind and roll by count, so polling can never lock a
@@ -591,6 +600,10 @@ const SIM_LABELLED_TOOLS: ReadonlySet<string> = new Set([
   "settlement_prepare",
 ]);
 const RUN_TTL_MS = 24 * 3600_000; // LLD §3: run-scoped state TTL is 24h
+/** QA F-5: default bound on how long a run may stay half-bound after its first bind. */
+export const DEFAULT_HALF_BOUND_TIMEOUT_MS = 10 * 60_000;
+/** QA F-5: server-recorded reasons for a terminal transition. */
+export type ContractTerminalReason = "counterparty_never_bound";
 const USED_SESSIONS_FILE = "used-sessions.json";
 const USED_MANDATES_FILE = "used-mandates.json";
 const AGENT_BINDINGS_FILE = "agent-bindings.json";
@@ -1007,6 +1020,14 @@ export function createContractService(options: {
   maxReceiptsPerPrincipal?: number;
   runTtlMs?: number;
   /**
+   * QA F-5: how long (ms) a run may stay HALF-BOUND after its first bind
+   * before it ends `expired_unbound` (reason `counterparty_never_bound`) and
+   * releases the bound party's key. Default 10 min; 0 = only the
+   * certificate window (validUntil + grace) bounds it, as before.
+   * Env: CONTRACT_HALF_BOUND_TIMEOUT_MS.
+   */
+  halfBoundTimeoutMs?: number;
+  /**
    * CDT-GAPS gap 2: CONTRACT_EXPIRE_AT_TTL=1 (default off). A run still
    * non-terminal at its TTL is ENDED, not silently dropped: terminal state
    * `expired` (both roles bound) or `expired_unbound` (a role missing), with
@@ -1170,6 +1191,7 @@ export function createContractService(options: {
   const maxReceiptsPerRun = options.maxReceiptsPerRun ?? DEFAULT_MAX_RECEIPTS_PER_RUN;
   const maxReceiptsPerPrincipal = options.maxReceiptsPerPrincipal ?? DEFAULT_MAX_RECEIPTS_PER_PRINCIPAL;
   const runTtlMs = options.runTtlMs ?? RUN_TTL_MS;
+  const halfBoundTimeoutMs = options.halfBoundTimeoutMs ?? DEFAULT_HALF_BOUND_TIMEOUT_MS;
   const expireAtTtl = options.expireAtTtl === true;
   const expiredHoldMs = options.expiredHoldMs ?? 15 * 60_000;
   /** CDT-GAPS gap 2: runId → when its TTL expiry was made terminal. */
@@ -1497,7 +1519,7 @@ export function createContractService(options: {
     for (const run of runs.values()) {
       if (!unboundPastDeadline(run)) continue;
       try {
-        endRun(run, "expired_unbound");
+        endRun(run, "expired_unbound", undefined, "counterparty_never_bound");
       } catch { /* fail-closed enqueue: retried on the next sweep */ }
     }
   }
@@ -1636,7 +1658,7 @@ export function createContractService(options: {
       // outcomes) re-enter evictEnded synchronously and must not drop it.
       ttlExpiredAt.set(run.runId, now());
       try {
-        endRun(run, bothBound ? "expired" : "expired_unbound");
+        endRun(run, bothBound ? "expired" : "expired_unbound", undefined, bothBound ? undefined : "counterparty_never_bound");
       } catch {
         ttlExpiredAt.delete(run.runId); // fail-closed enqueue: retried on the next sweep
       }
@@ -1968,7 +1990,9 @@ export function createContractService(options: {
       resultDigest: verdict.resultDigest,
       sessionPublicKey: verdict.sessionPublicKey,
       createdAtMs: now(),
-      bindDeadlineMs: verdict.acceptUntilMs,
+      bindDeadlineMs: halfBoundTimeoutMs > 0
+        ? Math.min(verdict.acceptUntilMs, now() + halfBoundTimeoutMs)
+        : verdict.acceptUntilMs,
       bound: {},
       receipts: [],
       receiptsByPrincipal: new Map(),
@@ -2408,7 +2432,7 @@ export function createContractService(options: {
     trackAnchorOp(op, runId);
   };
 
-  const endRun = (run: ContractRun, terminalState: string, principal?: ContractPrincipal): void => {
+  const endRun = (run: ContractRun, terminalState: string, principal?: ContractPrincipal, reason?: ContractTerminalReason): void => {
     // N4b-9 (F11): the terminal transition is WRITE-ONCE. A cleanup
     // cancellation after verification_failed (or any second endRun) is
     // receipted by the call itself but never changes the terminal state,
@@ -2432,6 +2456,7 @@ export function createContractService(options: {
     // the durable record. A retry re-mints and rebuilds the same job.
     outbox.updateDurable(run.runId, now(), (job) => {
       job.terminalState = terminalState;
+      if (reason !== undefined) job.terminalReason = reason;
       job.principal = principal !== undefined
         ? { role: principal.role, keyId: principal.keyId }
         : null;
@@ -2460,6 +2485,7 @@ export function createContractService(options: {
     // reads stage:"terminal" with terminalState carrying the why.
     run.stage = terminalState === "settled" ? "settled" : "terminal";
     run.terminalState = terminalState;
+    if (reason !== undefined) run.terminalReason = reason;
     sim.markTerminal(run.runId);
     // N4b-8 (gap 4): anchor the receipt-chain head at the terminal
     // transition BEFORE the close emitter runs — the anchored head is the
