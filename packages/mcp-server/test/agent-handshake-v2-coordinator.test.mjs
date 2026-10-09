@@ -1862,3 +1862,84 @@ test("agent_handshake_next ignores an unsigned or forged host failure notice", a
   const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 0 });
   assert.equal(outcome.stage, "awaiting_funding");
 });
+
+// QA F-10: a transient Sepolia RPC failure inside resolveRegistration used to
+// surface as HANDSHAKE_UNAVAILABLE retryable:false and kill the handshake.
+test("a transient RPC failure on resolveRegistration is a retryable funding-visibility wait and the session continues", async (t) => {
+  const { EvmRpcError } = await import("../dist/handshake/evm.js");
+  const warnings = [];
+  t.mock.method(console, "warn", (line) => { warnings.push(String(line)); });
+  let failures = 1;
+  let calls = 0;
+  const harness = await createBoundedWaitHarness({
+    resolveRegistration: ({ address }) => {
+      calls += 1;
+      if (failures > 0) {
+        failures -= 1;
+        throw new EvmRpcError("RPC eth_getLogs failed to load logs: HTTP 503 upstream secret-ish provider text", "http_503");
+      }
+      return harness.registrations[address] ?? null;
+    },
+  });
+  await harness.join("initiator");
+  harness.fund("initiator");
+
+  const waiting = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 0 });
+  assert.equal(waiting.stage, "awaiting_funding_visibility");
+  assert.equal(waiting.needed, "funding_visibility");
+  assert.equal(waiting.retryAfterMs, 3000);
+  assert.equal(waiting.waitingOn, "clockchain_host");
+  assert.equal(waiting.nextAction, "wait_for_clockchain_host_funding_visibility_then_call_agent_handshake_next_with_unchanged_role_access");
+
+  const logged = warnings.map((line) => { try { return JSON.parse(line); } catch { return null; } })
+    .filter((entry) => entry?.event === "agent_handshake_v2_rpc_transient");
+  assert.equal(logged.length, 1);
+  assert.deepEqual(Object.keys(logged[0]).sort(), ["event", "op", "sessionId", "tag"]);
+  assert.equal(logged[0].op, "resolve_registration");
+  assert.equal(logged[0].tag, "http_503");
+  assert.ok(!warnings.join("\n").includes("secret-ish"), "the provider message is never logged");
+
+  // Same role access, next call: the RPC has recovered and the session proceeds.
+  const ready = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 0 });
+  assert.equal(ready.stage, "party_ready");
+  assert.equal(ready.identity.erc8004.agentId, "9452");
+  assert.equal(calls, 2);
+});
+
+test("agent_handshake_next long-polls through a transient RPC failure on resolveRegistration in one call", async (t) => {
+  const { EvmRpcError } = await import("../dist/handshake/evm.js");
+  t.mock.method(console, "warn", () => {});
+  let failures = 2;
+  const harness = await createBoundedWaitHarness({
+    advanceClockOnWaitPoll: true,
+    resolveRegistration: ({ address }) => {
+      if (failures > 0) {
+        failures -= 1;
+        throw new EvmRpcError("RPC eth_blockNumber failed to read: fetch failed", "network");
+      }
+      return harness.registrations[address] ?? null;
+    },
+  });
+  await harness.join("initiator");
+  harness.fund("initiator");
+  const outcome = await harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 10_000 });
+  assert.equal(outcome.stage, "party_ready");
+  assert.equal(harness.waitPolls().length, 2);
+});
+
+test("a deterministic (non-RPC) resolveRegistration failure stays terminal", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const harness = await createBoundedWaitHarness({
+    resolveRegistration: () => { throw new Error("ownerOf candidate probe cap exceeded (32); pass a narrower fromBlock"); },
+  });
+  await harness.join("initiator");
+  harness.fund("initiator");
+  await assert.rejects(() => harness.coordinator.next({ access: harness.accesses.initiator, waitMs: 0 }), /probe cap exceeded/);
+});
+
+test("an EvmRpcError escaping any v2 tool maps to HANDSHAKE_TEMPORARILY_UNAVAILABLE (retryable)", async () => {
+  const { EvmRpcError } = await import("../dist/handshake/evm.js");
+  const { isV2RetryableToolError } = await import("../dist/agent-handshake/v2/public-tools.js");
+  assert.equal(isV2RetryableToolError(new EvmRpcError("RPC eth_call failed to recover: HTTP 502", "http_502")), true);
+  assert.equal(isV2RetryableToolError(new Error("RPC eth_call failed to recover: HTTP 502")), false);
+});

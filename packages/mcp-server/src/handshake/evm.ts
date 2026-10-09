@@ -39,6 +39,26 @@ interface TransferLog {
   topics?: string[];
 }
 
+/**
+ * A transport-level or JSON-RPC-level failure talking to the EVM node (network
+ * error, non-2xx HTTP, malformed body/envelope, JSON-RPC error object). These
+ * are environmental and usually transient (e.g. a Sepolia provider 429/5xx), so
+ * callers may treat them as retryable. `tag` is a short, secret-free category
+ * that is safe to log; the message may carry provider text and is not.
+ */
+export class EvmRpcError extends Error {
+  readonly tag: string;
+  constructor(message: string, tag: string) {
+    super(message);
+    this.name = "EvmRpcError";
+    this.tag = tag;
+  }
+}
+
+function httpTag(status: number): string {
+  return Number.isSafeInteger(status) && status >= 100 && status <= 599 ? `http_${status}` : "http_error";
+}
+
 const ECRECOVER_PRECOMPILE = "0x0000000000000000000000000000000000000001";
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const OWNER_OF_SELECTOR = "0x6352211e";
@@ -225,7 +245,7 @@ async function rpcString(
 ): Promise<string> {
   const result = await rpc(rpcUrl, fetchImpl, method, params, action);
   if (typeof result !== "string") {
-    throw new Error(`RPC ${method} failed to ${action}: expected string result`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: expected string result`, "unexpected_result");
   }
   return result;
 }
@@ -239,7 +259,7 @@ async function rpcArray(
 ): Promise<unknown[]> {
   const result = await rpc(rpcUrl, fetchImpl, method, params, action);
   if (!Array.isArray(result)) {
-    throw new Error(`RPC ${method} failed to ${action}: expected array result`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: expected array result`, "unexpected_result");
   }
   return result;
 }
@@ -259,24 +279,29 @@ async function rpc(
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
     });
   } catch (err) {
-    throw new Error(`RPC ${method} failed to ${action}: ${(err as Error).message}`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: ${(err as Error).message}`, "network");
   }
 
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (err) {
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: ${(err as Error).message}`, "network");
+  }
   if (!response.ok) {
-    throw new Error(`RPC ${method} failed to ${action}: HTTP ${response.status} ${text.slice(0, 300)}`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: HTTP ${response.status} ${text.slice(0, 300)}`, httpTag(response.status));
   }
 
   let body: unknown;
   try {
     body = JSON.parse(text) as unknown;
   } catch {
-    throw new Error(`RPC ${method} failed to ${action}: invalid JSON response`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: invalid JSON response`, "invalid_json");
   }
 
   const envelope = validateJsonRpcEnvelope(body, method, action);
   if (envelope.error !== undefined) {
-    throw new Error(`RPC ${method} failed to ${action}: ${envelope.error.message}`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: ${envelope.error.message}`, "rpc_error");
   }
   return envelope.result;
 }
@@ -287,7 +312,7 @@ function validateJsonRpcEnvelope(
   action: string,
 ): { result?: unknown; error?: { code: number; message: string } } {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    throw new Error(`RPC ${method} failed to ${action}: invalid JSON-RPC response envelope`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: invalid JSON-RPC response envelope`, "invalid_envelope");
   }
   const envelope = body as JsonRpcResponse;
   const hasResult = Object.prototype.hasOwnProperty.call(envelope, "result");
@@ -297,7 +322,7 @@ function validateJsonRpcEnvelope(
     || envelope.id !== 1
     || hasResult === hasError
   ) {
-    throw new Error(`RPC ${method} failed to ${action}: invalid JSON-RPC response envelope`);
+    throw new EvmRpcError(`RPC ${method} failed to ${action}: invalid JSON-RPC response envelope`, "invalid_envelope");
   }
   if (hasError) {
     if (
@@ -307,7 +332,7 @@ function validateJsonRpcEnvelope(
       || typeof (envelope.error as { code?: unknown }).code !== "number"
       || typeof (envelope.error as { message?: unknown }).message !== "string"
     ) {
-      throw new Error(`RPC ${method} failed to ${action}: invalid JSON-RPC response envelope`);
+      throw new EvmRpcError(`RPC ${method} failed to ${action}: invalid JSON-RPC response envelope`, "invalid_envelope");
     }
     return { error: envelope.error as { code: number; message: string } };
   }

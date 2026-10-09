@@ -370,3 +370,23 @@ test("resolveOwnedAgentId fails clearly when ownerOf candidate probes exceed the
     /ownerOf candidate probe cap exceeded/i,
   );
 });
+
+test("RPC transport and JSON-RPC failures throw a typed EvmRpcError with a safe tag", async () => {
+  const { EvmRpcError } = await import("../dist/handshake/evm.js");
+  const cases = [
+    [async () => { throw new TypeError("fetch failed"); }, "network"],
+    [async () => ({ ok: false, status: 503, text: async () => "upstream unavailable" }), "http_503"],
+    [async () => ({ ok: false, status: 429, text: async () => "rate limited" }), "http_429"],
+    [async () => ({ ok: true, status: 200, text: async () => "<html>" }), "invalid_json"],
+    [async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32005, message: "limit exceeded" } }) }), "rpc_error"],
+    [async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: "2.0", id: 7, result: "0x1" }) }), "invalid_envelope"],
+    [async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: "2.0", id: 1, result: 5 }) }), "unexpected_result"],
+  ];
+  for (const [fetchImpl, tag] of cases) {
+    await assert.rejects(
+      () => readEvmBalance({ rpcUrl: RPC_URL, address: ADDRESS, fetchImpl }),
+      (error) => error instanceof EvmRpcError && error.name === "EvmRpcError" && error.tag === tag && /^RPC eth_getBalance failed/.test(error.message),
+      tag,
+    );
+  }
+});

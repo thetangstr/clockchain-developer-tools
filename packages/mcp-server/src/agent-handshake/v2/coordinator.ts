@@ -199,6 +199,19 @@ export class V2TransientCoordinatorError extends Error {
     this.retryAfterMs = retryAfterMs;
   }
 }
+// Transport/JSON-RPC failures from the EVM node (handshake/evm.ts EvmRpcError,
+// plus viem-style names) are environmental, not protocol rejections.
+const TRANSIENT_RPC_ERROR_NAMES = new Set(["EvmRpcError", "HttpRequestError", "RpcRequestError", "TimeoutError"]);
+const SAFE_RPC_TAG = /^[a-z][a-z0-9_]{0,31}$/;
+function isTransientRpcError(error: unknown): boolean {
+  return TRANSIENT_RPC_ERROR_NAMES.has((error as Error)?.name);
+}
+function transientRpcTag(error: unknown): string {
+  const tag = (error as { tag?: unknown })?.tag;
+  if (typeof tag === "string" && SAFE_RPC_TAG.test(tag)) return tag;
+  const name = (error as Error)?.name;
+  return name === "TimeoutError" ? "timeout" : name === "HttpRequestError" ? "http_error" : "rpc_error";
+}
 function fail(detail?: string): never { throw new V2CoordinatorError(detail); }
 function transient(retryAfterMs?: number): never { throw new V2TransientCoordinatorError(retryAfterMs); }
 function windowExpired(): never { throw new V2SigningWindowExpiredError(); }
@@ -863,19 +876,35 @@ export function createV2Coordinator(options: {
       }
       let registration = null;
       if (current.terms.identityPolicy.erc8004 !== "not_required") {
-        registration = await options.resolveRegistration({ address: current.sessionKeyAddress, fromBlock: current.discovery.sessionOpenedBlock ?? "0" });
+        const awaitingFundingVisibility = () => Object.freeze({
+          needed: "funding_visibility",
+          nextAction: "wait_for_clockchain_host_funding_visibility_then_call_agent_handshake_next_with_unchanged_role_access",
+          retryAfterMs: RETRY_AFTER_MS,
+          role,
+          selfFundingRequired: false,
+          sessionId: auth.keyValue.session,
+          stage: "awaiting_funding_visibility",
+          waitingOn: "clockchain_host",
+        });
+        try {
+          registration = await options.resolveRegistration({ address: current.sessionKeyAddress, fromBlock: current.discovery.sessionOpenedBlock ?? "0" });
+        } catch (error) {
+          // QA F-10: a transient Sepolia RPC failure (provider 429/5xx, network
+          // blip, malformed envelope) is not a protocol rejection. Treat it like
+          // the chain not yet showing the registration: a bounded, retryable
+          // dependency wait. Deterministic resolver failures stay fatal.
+          if (!isTransientRpcError(error)) throw error;
+          console.warn(JSON.stringify({
+            event: "agent_handshake_v2_rpc_transient",
+            op: "resolve_registration",
+            tag: transientRpcTag(error),
+            sessionId: auth.keyValue.session,
+          }));
+          return awaitingFundingVisibility();
+        }
         if (!registration) {
           if (!await options.registrationFundingReady({ address: current.sessionKeyAddress })) {
-            return Object.freeze({
-              needed: "funding_visibility",
-              nextAction: "wait_for_clockchain_host_funding_visibility_then_call_agent_handshake_next_with_unchanged_role_access",
-              retryAfterMs: RETRY_AFTER_MS,
-              role,
-              selfFundingRequired: false,
-              sessionId: auth.keyValue.session,
-              stage: "awaiting_funding_visibility",
-              waitingOn: "clockchain_host",
-            });
+            return awaitingFundingVisibility();
           }
           return Object.freeze({
             needed: "erc8004_registration",
