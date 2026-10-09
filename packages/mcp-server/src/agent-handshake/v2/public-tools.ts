@@ -52,6 +52,11 @@ const RETRYABLE_ERROR_NAMES = new Set([
   "HttpRequestError",
   "RpcRequestError",
   "TimeoutError",
+  // handshake/evm.ts transport/JSON-RPC failure (Sepolia provider 429/5xx,
+  // network blip). Every EVM read in the v2 coordinator (ERC-8004 resolution,
+  // ecrecover via eth_call) runs before any state mutation, so a retry with
+  // unchanged inputs is safe (QA F-10).
+  "EvmRpcError",
   "V2TransientCoordinatorError",
   // A tripped per-dependency breaker (e.g. the anchoring gateway briefly unavailable) is a bounded, transient
   // condition — surface HANDSHAKE_TEMPORARILY_UNAVAILABLE (retryable, session-deadline bounded) instead of a
