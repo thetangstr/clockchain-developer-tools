@@ -16,7 +16,7 @@ import type { ContractRefusalCode } from "./refusals.js";
 import type {
   AgreementRecord, ContractPrincipal, ContractRun, OfferRecord,
 } from "./service.js";
-import type { SimWorld } from "./sim/index.js";
+import { isCalendarDate, type SimWorld } from "./sim/index.js";
 import { loadStandingListings, persistStandingListings, type StandingListingRecord } from "./directory.js";
 
 /**
@@ -193,14 +193,44 @@ const mandateSchemaV3 = z.object({
 type MandateV3 = z.infer<typeof mandateSchemaV3>;
 type Mandate = MandateV2 | MandateV3;
 
-/** The traveler's per-run trip statement (NOT signed). */
+/**
+ * The traveler's per-run trip statement (NOT signed).
+ *
+ * D1459 (all optional, additive): `departDate`/`returnDate` (both or neither,
+ * real calendar dates, return after depart) and `adults`/`childAges` (both or
+ * neither, `adults + childAges.length === partySize`). A trip without them
+ * parses to exactly the old shape. A trip with `departDate` makes the run a
+ * dated run (sim trip detail); the date window is checked in `resolveTrip`.
+ */
+const tripDate = z.string().refine(isCalendarDate);
 const tripSchema = z.object({
   origin: z.string().regex(/^[A-Z]{3}$/),
   destination: z.string().regex(/^[A-Z]{3}$/),
   partySize: z.number().int().min(1).max(9),
   budgetMinor: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
-}).strict().refine((t) => t.origin !== t.destination);
+  departDate: tripDate.optional(),
+  returnDate: tripDate.optional(),
+  adults: z.number().int().min(1).max(9).optional(),
+  childAges: z.array(z.number().int().min(2).max(17)).max(8).optional(),
+}).strict()
+  .refine((t) => t.origin !== t.destination)
+  // zod runs later refinements even after an earlier one failed: each guards its own inputs.
+  .refine((t) => (t.departDate === undefined) === (t.returnDate === undefined))
+  .refine((t) => t.departDate === undefined || t.returnDate === undefined || t.returnDate > t.departDate)
+  .refine((t) => (t.adults === undefined) === (t.childAges === undefined))
+  .refine((t) => t.adults === undefined || !Array.isArray(t.childAges) || t.adults + t.childAges.length === t.partySize);
 type Trip = z.infer<typeof tripSchema>;
+
+/** D1459: how far ahead (days, from the server's UTC today) a trip may depart. */
+const TRIP_MAX_DAYS_AHEAD = 400;
+
+/** D1459: departDate within [today UTC, today + 400 days]. */
+function tripDatesInWindow(trip: Trip, nowMs: number): boolean {
+  if (trip.departDate === undefined) return true;
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  const last = new Date(Date.parse(`${today}T00:00:00Z`) + TRIP_MAX_DAYS_AHEAD * 86_400_000).toISOString().slice(0, 10);
+  return trip.departDate >= today && trip.departDate <= last;
+}
 
 /**
  * Validate a trip statement against a verified mandate. v3: required; party
@@ -208,12 +238,13 @@ type Trip = z.infer<typeof tripSchema>;
  * party must equal the signed partySize and the budget must fit capMinor.
  * Distinct refusal codes, no value in the refusal.
  */
-function resolveTrip(mandate: Mandate, raw: unknown): { trip: Trip | undefined } | ContractRefusalCode {
+function resolveTrip(mandate: Mandate, raw: unknown, nowMs: number): { trip: Trip | undefined } | ContractRefusalCode {
   const v3 = "mandateVersion" in mandate;
   if (raw === undefined) return v3 ? "TRIP_REQUIRED" : { trip: undefined };
   const parsed = tripSchema.safeParse(raw);
   if (!parsed.success) return "TRIP_INVALID";
   const trip = parsed.data;
+  if (!tripDatesInWindow(trip, nowMs)) return "TRIP_INVALID";
   const min = v3 ? mandate.partyMin : (mandate as MandateV2).partySize;
   const max = v3 ? mandate.partyMax : (mandate as MandateV2).partySize;
   if (trip.partySize < min || trip.partySize > max) return "PARTY_OUT_OF_RANGE";
@@ -277,31 +308,46 @@ export const STATUS_MAX_OFFERS = 8;
  * role (`acceptable` is the counterparty's latest live offer — exactly what
  * `offer_accept_prepare` would take, with no cap check, so it never hints at
  * the mandate cap). Short typed values only: no envelopes, digests,
- * signatures, payload objects or ticket details.
+ * signatures, payload objects or ticket details — except, on a D1459 dated
+ * run only, the simulated itinerary on offers/agreement and the booking's
+ * simulated trip block (schedule, fare lines, ticketing status).
  */
 export function contractStatusReadView(run: ContractRun, role: ContractRole): Record<string, unknown> {
   const policy = policySummary(run, role);
   const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  // D1459: a dated run's offers and agreement carry the itinerary (schedule +
+  // per-traveller fares), and its booking the trip block — all simulated.
+  // Undated runs return undefined here, so their views stay byte-identical.
+  const itineraryOf = (itineraryId: unknown, totalMinor: unknown) =>
+    typeof itineraryId === "string" && typeof totalMinor === "number"
+      ? run.simRun?.offerItinerary(itineraryId, totalMinor)
+      : undefined;
   const offers = [...run.offers.values()]
     .sort((a, b) => b.seq - a.seq)
     .slice(0, STATUS_MAX_OFFERS)
-    .map((o) => ({
-      offerId: o.offerId,
-      by: o.role,
-      kind: o.payload.kind === "counter" ? "counter" : "offer",
-      inReplyTo: str(o.payload.inReplyTo),
-      itineraryId: str(o.payload.itineraryId),
-      currency: str(o.payload.currency),
-      fareMinor: o.payload.fareMinor,
-      feeMinor: o.payload.feeMinor,
-      totalMinor: o.payload.totalMinor,
-      note: str(o.payload.note),
-      state: o.state,
-      submittedAt: o.submittedAt,
-    }));
+    .map((o) => {
+      const itinerary = itineraryOf(o.payload.itineraryId, o.payload.totalMinor);
+      return {
+        offerId: o.offerId,
+        by: o.role,
+        kind: o.payload.kind === "counter" ? "counter" : "offer",
+        inReplyTo: str(o.payload.inReplyTo),
+        itineraryId: str(o.payload.itineraryId),
+        currency: str(o.payload.currency),
+        fareMinor: o.payload.fareMinor,
+        feeMinor: o.payload.feeMinor,
+        totalMinor: o.payload.totalMinor,
+        note: str(o.payload.note),
+        state: o.state,
+        submittedAt: o.submittedAt,
+        ...(itinerary !== undefined ? { itinerary } : {}),
+      };
+    });
   const open = run.terminalState === null && run.agreement === undefined;
   const a = run.agreement;
   const b = run.booking;
+  const agreementItinerary = a === undefined ? undefined : itineraryOf(a.itineraryId, a.totalMinor);
+  const bookingTrip = b === undefined ? undefined : run.simRun?.bookingTrip(b.orderRef);
   return {
     negotiation: {
       acceptable: open ? latestCounterpartyOffer(run, role)?.offerId ?? null : null,
@@ -314,6 +360,7 @@ export function contractStatusReadView(run: ContractRun, role: ContractRole): Re
       currency: a.currency,
       totalMinor: a.totalMinor,
       formedAt: a.formedAt,
+      ...(agreementItinerary !== undefined ? { itinerary: agreementItinerary } : {}),
     },
     booking: b === undefined ? null : {
       orderRef: b.orderRef,
@@ -321,6 +368,7 @@ export function contractStatusReadView(run: ContractRun, role: ContractRole): Re
       ticketCount: b.tickets.length,
       bookedAt: b.bookedAt,
       simulated: true,
+      ...(bookingTrip !== undefined ? { trip: bookingTrip } : {}),
     },
     cancellation: run.cancellation === undefined ? null : {
       orderRef: run.cancellation.orderRef,
@@ -345,7 +393,14 @@ function policySummary(run: ContractRun, role: ContractRole): Record<string, unk
   if (role === "provider") {
     return {
       mandateVersion: v3 ? 3 : 2,
-      ...(trip !== undefined ? { trip: { origin: trip.origin, destination: trip.destination, partySize: trip.partySize } } : {}),
+      ...(trip !== undefined ? {
+        trip: {
+          origin: trip.origin, destination: trip.destination, partySize: trip.partySize,
+          // D1459: an agency needs the dates and the ages to quote (never the budget or the cap).
+          ...(trip.departDate !== undefined ? { departDate: trip.departDate, returnDate: trip.returnDate } : {}),
+          ...(trip.adults !== undefined ? { adults: trip.adults, childAges: [...(trip.childAges ?? [])] } : {}),
+        },
+      } : {}),
     };
   }
   return {
@@ -355,7 +410,7 @@ function policySummary(run: ContractRun, role: ContractRole): Record<string, unk
     partyMin: v3 ? m.partyMin : m.partySize,
     partyMax: v3 ? m.partyMax : m.partySize,
     destinations: m.allowedItineraryIds.length === 0 ? "any" : [...m.allowedItineraryIds],
-    ...(trip !== undefined ? { trip: { ...trip } } : {}),
+    ...(trip !== undefined ? { trip: { ...trip, ...(trip.childAges !== undefined ? { childAges: [...trip.childAges] } : {}) } } : {}),
   };
 }
 
@@ -1283,7 +1338,7 @@ export function createBusinessOps(options: {
           const early = liveRun.mandatePrepared;
           const env = args.envelope as { nonce?: unknown } | undefined;
           if (early?.mandate !== undefined && env?.nonce === early.nonce && liveRun.mandate === undefined) {
-            const t = resolveTrip(early.mandate as Mandate, args.trip);
+            const t = resolveTrip(early.mandate as Mandate, args.trip, now());
             if (typeof t === "string") return refuse(t);
           }
         }
@@ -1304,7 +1359,7 @@ export function createBusinessOps(options: {
         if (payload.kind !== "mandate" || typeof mandate === "string") {
           return refuse("MANDATE_INVALID");
         }
-        const tripResolved = resolveTrip(mandate, args.trip);
+        const tripResolved = resolveTrip(mandate, args.trip, now());
         if (typeof tripResolved === "string") return refuse(tripResolved);
         const trip = tripResolved.trip;
         delete liveRun.mandatePrepared;
@@ -1325,6 +1380,15 @@ export function createBusinessOps(options: {
           // per person x that party from here on.
           const stated = trip!;
           liveRun.simRun!.setParty(stated.partySize);
+          // D1459: a trip with dates makes this a dated run (the sim's trip
+          // detail). An undated trip leaves the sim exactly as before.
+          if (stated.departDate !== undefined && stated.returnDate !== undefined) {
+            liveRun.simRun!.setTrip({
+              departDate: stated.departDate,
+              returnDate: stated.returnDate,
+              ...(stated.adults !== undefined ? { adults: stated.adults, childAges: stated.childAges } : {}),
+            });
+          }
           liveRun.mandate = {
             digest: mandateDigest,
             mandateId: mandate.mandateId,
@@ -1550,8 +1614,14 @@ export function createBusinessOps(options: {
       case "agreement_get": {
         const agreement = liveRun.agreement;
         const a = liveRun.anchors?.agreement;
+        // D1459: a dated run's agreement also carries its itinerary (undated: unchanged).
+        const itinerary = agreement === undefined
+          ? undefined
+          : liveRun.simRun?.offerItinerary(agreement.itineraryId, agreement.totalMinor);
         return ok({
-          agreement: agreement === undefined ? null : structuredClone(agreement),
+          agreement: agreement === undefined
+            ? null
+            : itinerary === undefined ? structuredClone(agreement) : { ...structuredClone(agreement), itinerary },
           anchor: agreement === undefined ? null : {
             runId: liveRun.runId,
             agreementDigest: agreement.agreementDigest,

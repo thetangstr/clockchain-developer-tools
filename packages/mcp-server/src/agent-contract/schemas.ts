@@ -129,6 +129,87 @@ const inboxMessage = z.object({
 const simItinerary = opaqueRecord;
 const ticketRecord = opaqueRecord;
 
+// -- D1459 trip detail (dated runs only; every field optional where it is used)
+// Output-only shapes: they never reach a tools/list payload (inputs only), so
+// adding them changes no served schema. All simulated (fictional carrier ZX).
+
+const localDateTime = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+const simCabin = z.enum(["economy", "premium economy"]);
+const simSegment = z.object({
+  direction: z.enum(["outbound", "return"]),
+  origin: z.string().regex(/^[A-Z]{3}$/),
+  destination: z.string().regex(/^[A-Z]{3}$/),
+  carrierCode: z.literal("ZX"),
+  flightNumber: z.string().regex(/^ZX\d{1,4}$/),
+  departureLocal: localDateTime,
+  arrivalLocal: localDateTime,
+  durationMinutes: z.number().int().positive(),
+  cabin: simCabin,
+}).strict();
+const simBaggage = z.object({
+  carryOn: z.literal(1),
+  checkedBagsPerTraveller: z.number().int().min(0).max(4),
+  checkedBagMaxKg: z.literal(23),
+}).strict();
+const simChangeTerms = z.object({
+  changeable: z.literal(true),
+  changeFeePerTravellerMinor: z.number().int().nonnegative(),
+  changeDeadline: isoDate,
+}).strict();
+const simCancelTerms = z.object({
+  refundable: z.literal(false),
+  travelCredit: z.literal(true),
+  cancelFeePerTravellerMinor: z.number().int().nonnegative(),
+  summary: z.string().min(1).max(280),
+}).strict();
+/** A dated-board row's simulated schedule and terms (catalog_quote rows, offers, agreement). */
+export const simItineraryDetailSchema = z.object({
+  simulated: z.literal(true),
+  cabin: simCabin,
+  segments: z.array(simSegment).min(2).max(8),
+  stops: z.union([z.literal(0), z.literal(1)]),
+  baggage: simBaggage,
+  changeTerms: simChangeTerms,
+  cancelTerms: simCancelTerms,
+}).strict();
+const simFareLine = z.object({
+  traveller: z.string().regex(/^(ADT|CHD)\d$/),
+  type: z.enum(["adult", "child"]),
+  age: z.number().int().min(2).max(17).optional(),
+  baseMinor: z.number().int().nonnegative(),
+  taxesMinor: z.number().int().nonnegative(),
+  totalMinor: z.number().int().nonnegative(),
+}).strict();
+/** An offer's (or the agreement's) itinerary on a dated run: the fare lines sum to its totalMinor. */
+export const simOfferItinerarySchema = z.object({
+  detail: simItineraryDetailSchema.optional(),
+  fareLines: z.array(simFareLine).min(1).max(9),
+  fareRule: z.string().min(1).max(280),
+}).strict();
+/** The booking record's trip block on a dated run (booking_lookup observation, contract_status booking). */
+export const simBookingTripSchema = z.object({
+  simulated: z.literal(true),
+  departDate: isoDate,
+  returnDate: isoDate,
+  segments: z.array(simSegment).min(2).max(8).optional(),
+  cabin: simCabin.optional(),
+  baggage: simBaggage.optional(),
+  changeTerms: simChangeTerms.optional(),
+  cancelTerms: simCancelTerms.optional(),
+  travellers: z.array(z.object({
+    ref: z.string().regex(/^(ADT|CHD)\d$/),
+    type: z.enum(["adult", "child"]),
+    age: z.number().int().min(2).max(17).optional(),
+    initials: z.string().regex(/^[A-Z]\.[A-Z]\.$/),
+  }).strict()).min(1).max(9),
+  recordLocator: z.string().min(1).max(32),
+  ticketing: z.object({
+    status: z.enum(["PENDING", "ISSUED", "CANCELLED"]),
+    simulated: z.literal(true),
+    ticketNumbers: z.array(z.string().min(1).max(32)).max(10),
+  }).strict(),
+}).strict();
+
 export interface ContractToolDef {
   readonly name: string;
   readonly role: ContractToolRoleScope;
@@ -855,6 +936,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
           note: z.string().max(280).nullable(),
           state: z.enum(["live", "accepted", "rejected", "superseded"]),
           submittedAt: isoDateTime,
+          // D1459: dated runs only — the simulated schedule + per-traveller fares.
+          itinerary: simOfferItinerarySchema.optional(),
         }).strict()).max(8),
       }).strict().optional(),
       agreement: z.object({
@@ -864,6 +947,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         currency: z.string().min(3).max(3),
         totalMinor: z.number().int().nonnegative(),
         formedAt: isoDateTime,
+        // D1459: dated runs only.
+        itinerary: simOfferItinerarySchema.optional(),
       }).strict().nullable().optional(),
       booking: z.object({
         orderRef,
@@ -871,6 +956,8 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
         ticketCount: z.number().int().nonnegative(),
         bookedAt: isoDateTime,
         simulated: z.literal(true),
+        // D1459: dated runs only — the booking record's simulated trip block.
+        trip: simBookingTripSchema.optional(),
       }).strict().nullable().optional(),
       cancellation: z.object({
         orderRef,
@@ -891,6 +978,11 @@ export const CONTRACT_TOOL_DEFS: readonly ContractToolDef[] = Object.freeze<Cont
           destination: z.string(),
           partySize: z.number().int().min(1),
           budgetMinor: z.number().int().min(1).optional(),
+          // D1459 (when the trip states them; both roles see them).
+          departDate: isoDate.optional(),
+          returnDate: isoDate.optional(),
+          adults: z.number().int().min(1).optional(),
+          childAges: z.array(z.number().int().min(2).max(17)).max(8).optional(),
         }).strict().optional(),
       }).strict().optional(),
       serverNonce,

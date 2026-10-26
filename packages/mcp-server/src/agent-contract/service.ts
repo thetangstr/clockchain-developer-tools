@@ -180,7 +180,11 @@ export interface ContractRun {
     partyMin?: number;
     partyMax?: number;
     /** The traveler's per-run, unsigned trip statement (recorded, enforced). */
-    trip?: { origin: string; destination: string; partySize: number; budgetMinor: number };
+    trip?: {
+      origin: string; destination: string; partySize: number; budgetMinor: number;
+      /** D1459 (optional): travel dates (both or neither) and the travellers' make-up (both or neither). */
+      departDate?: string; returnDate?: string; adults?: number; childAges?: number[];
+    };
     /**
      * N4b-9 (F16 → D12): the principal-signed traveller count (v2.2).
      * The booking issues exactly this many tickets and verification
