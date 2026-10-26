@@ -145,6 +145,8 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
 4. Deploy Research only after the production MCP manifest reports the same
    helper digest and host-root ring that Research pins.
 
+**Brief pin (D1459).** `main` from `452f573b` on ships the family-travel door brief with digest `0x1a4e767a…`, so it needs SSM `/clockchain/mcp/CONTRACT_BRIEFS` = `family-travel-tc-door:0x1a4e767ae04df9be7621e2294242b215dc9b1ea68dc7ab5d9df4068f89f1a4a6` before it is deployed. With the older pin (`0xaac93fd9…`, for `2989630c` and earlier) the mcp refuses the brief at boot and `/contract/mcp` answers 503.
+
 The v2 host reserves both fresh-registration seats before either transfer. Its
 private ledger survives restarts at `/app/runs/private/v2-funding-ledger.jsonl`.
 New reservations use 0.01 Sepolia ETH per address and 0.02 per required-fresh

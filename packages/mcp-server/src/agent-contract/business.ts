@@ -198,9 +198,10 @@ type Mandate = MandateV2 | MandateV3;
  *
  * D1459 (all optional, additive): `departDate`/`returnDate` (both or neither,
  * real calendar dates, return after depart) and `adults`/`childAges` (both or
- * neither, `adults + childAges.length === partySize`). A trip without them
- * parses to exactly the old shape. A trip with `departDate` makes the run a
- * dated run (sim trip detail); the date window is checked in `resolveTrip`.
+ * neither, only together with both dates, `adults + childAges.length ===
+ * partySize`). An undated trip therefore validates exactly as before: the four
+ * base fields and nothing else. A trip with `departDate` makes the run a dated
+ * run (sim trip detail); the date window is checked in `resolveTrip`.
  */
 const tripDate = z.string().refine(isCalendarDate);
 const tripSchema = z.object({
@@ -218,18 +219,24 @@ const tripSchema = z.object({
   .refine((t) => (t.departDate === undefined) === (t.returnDate === undefined))
   .refine((t) => t.departDate === undefined || t.returnDate === undefined || t.returnDate > t.departDate)
   .refine((t) => (t.adults === undefined) === (t.childAges === undefined))
+  .refine((t) => t.adults === undefined || t.departDate !== undefined)
   .refine((t) => t.adults === undefined || !Array.isArray(t.childAges) || t.adults + t.childAges.length === t.partySize);
 type Trip = z.infer<typeof tripSchema>;
 
 /** D1459: how far ahead (days, from the server's UTC today) a trip may depart. */
 const TRIP_MAX_DAYS_AHEAD = 400;
+/** D1459: the longest trip (days from departDate to returnDate). */
+const TRIP_MAX_DAYS_LONG = 60;
 
-/** D1459: departDate within [today UTC, today + 400 days]. */
+const addDays = (date: string, days: number): string =>
+  new Date(Date.parse(`${date}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+
+/** D1459: departDate within [today UTC, today + 400 days]; returnDate at most 60 days after departDate. */
 function tripDatesInWindow(trip: Trip, nowMs: number): boolean {
   if (trip.departDate === undefined) return true;
   const today = new Date(nowMs).toISOString().slice(0, 10);
-  const last = new Date(Date.parse(`${today}T00:00:00Z`) + TRIP_MAX_DAYS_AHEAD * 86_400_000).toISOString().slice(0, 10);
-  return trip.departDate >= today && trip.departDate <= last;
+  if (trip.departDate < today || trip.departDate > addDays(today, TRIP_MAX_DAYS_AHEAD)) return false;
+  return trip.returnDate !== undefined && trip.returnDate <= addDays(trip.departDate, TRIP_MAX_DAYS_LONG);
 }
 
 /**

@@ -98,7 +98,7 @@ const segs = (detail) => detail.segments.map((s) =>
 
 // ---- trip validation -------------------------------------------------------------
 
-test("trip validation: dates both-or-neither, real and in order, inside today..+400 days; adults+childAges both-or-neither and = partySize", async () => {
+test("trip validation: dates both-or-neither, real and in order, depart inside today..+400 days, return at most 60 days later; adults+childAges both-or-neither, only with dates, and = partySize", async () => {
   const env = await boot({ flexPolicy: true });
   try {
     const prep = await prepareMandate(env, uuid(1459));
@@ -114,6 +114,12 @@ test("trip validation: dates both-or-neither, real and in order, inside today..+
       { ...base, departDate: "2027-3-27", returnDate: "2027-04-03" },     // not YYYY-MM-DD
       { ...base, departDate: inDays(-1), returnDate: inDays(6) },         // before the server's today
       { ...base, departDate: inDays(401), returnDate: inDays(408) },      // more than 400 days ahead
+      { ...base, departDate: inDays(150), returnDate: inDays(211) },      // return 61 days after depart
+      { ...base, departDate: inDays(10), returnDate: "9999-12-31" },      // return far in the future
+      { ...base, adults: 2, childAges: [12, 9] },                         // party mix without dates
+      { ...base, adults: 4, childAges: [] },                              // all adults, still without dates
+      { ...base, adults: 2 },                                             // adults alone, no dates
+      { ...base, childAges: [12, 9] },                                    // childAges alone, no dates
       { ...base, ...dates, adults: 2 },                                   // adults without childAges
       { ...base, ...dates, childAges: [12, 9] },                          // childAges without adults
       { ...base, ...dates, adults: 2, childAges: [12] },                  // 2 + 1 != 4
@@ -145,6 +151,17 @@ test("trip validation: dates both-or-neither, real and in order, inside today..+
     const st = await env.callTool("tb1", "contract_status", {});
     assert.ok(statusSchema.safeParse(st).success, JSON.stringify(st));
     assert.deepEqual(st.policy.trip, { ...base, departDate: inDays(400), returnDate: inDays(410), ...FAMILY });
+  } finally { env.close(); }
+});
+
+test("trip validation: the return may be exactly 60 days after the departure (inclusive edge)", async () => {
+  const env = await boot({ flexPolicy: true });
+  try {
+    const prep = await prepareMandate(env, uuid(1474));
+    const trip = { origin: "SFO", destination: "FCO", partySize: 4, budgetMinor: USD(4_200), departDate: inDays(340), returnDate: inDays(400), ...FAMILY };
+    const ok = await submitMandate(env, prep, trip);
+    assert.equal(ok.bound, true, JSON.stringify(ok));
+    assert.deepEqual((await env.callTool("tb1", "contract_status", {})).policy.trip, trip);
   } finally { env.close(); }
 });
 
