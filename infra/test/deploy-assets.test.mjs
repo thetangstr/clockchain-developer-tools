@@ -5,6 +5,7 @@ import { access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 
 const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
@@ -34,7 +35,64 @@ const expectedSecretNames = [
 
 const expectedOptionalSecretNames = [
   "/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS",
+  // H-REQ-01: the coordinator's sender-enrollment key; absent = exported empty = enrollments off.
+  "/clockchain/mcp/AGENT_HANDSHAKE_V2_ENROLLMENT_KEY",
 ];
+
+// H-REQ-01 key material, all synthetic. PKCS#8 private keys in the RFC 8410
+// form Node and OpenSSL write: one 48-byte DER, a fixed 16-byte header for the
+// algorithm, then the 32-byte seed. The seeds are readable 32-byte labels.
+const ED25519_PKCS8_HEADER = Buffer.from("302e020100300506032b657004220420", "hex");
+const X25519_PKCS8_HEADER = Buffer.from("302e020100300506032b656e04220420", "hex");
+const syntheticSeed = (label) => {
+  const seed = Buffer.from(label, "utf8");
+  assert.equal(seed.length, 32, label);
+  return seed;
+};
+const pkcs8Pem = (header, seed) => `-----BEGIN PRIVATE KEY-----\n${Buffer.concat([header, seed]).toString("base64")}\n-----END PRIVATE KEY-----\n`;
+const enrollmentKeyValue = (privateKeyPem) => `${JSON.stringify({ kid: "coordinator-enrollment-2026-10", privateKeyPem })}\n`;
+const ed25519EnrollmentPem = pkcs8Pem(ED25519_PKCS8_HEADER, syntheticSeed("fixture-enrollment-seed-32-bytes"));
+// Refused enrollment keys: the same shape for X25519, a P-256 PKCS#8 key made
+// for this run only, and armour around text that is not a key.
+const notEd25519EnrollmentPems = {
+  ENROLLMENT_KEY_X25519: pkcs8Pem(X25519_PKCS8_HEADER, syntheticSeed("fixture-enrollment-seed-32-bytes")),
+  ENROLLMENT_KEY_P256: generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ type: "pkcs8", format: "pem" }),
+  ENROLLMENT_KEY_NOT_A_KEY: "-----BEGIN PRIVATE KEY-----\nfixture-enrollment\n-----END PRIVATE KEY-----\n",
+};
+// The host's rule: fingerprint = SHA-256 hex of the base64-decoded 32-byte raw public key.
+const fingerprintOf = (publicKey) => createHash("sha256").update(Buffer.from(publicKey, "base64")).digest("hex");
+const rawEd25519PublicKeyOf = (seed) => createPublicKey(createPrivateKey({ key: Buffer.concat([ED25519_PKCS8_HEADER, seed]), format: "der", type: "pkcs8" }))
+  .export({ format: "der", type: "spki" }).subarray(12).toString("base64");
+const ringEntry = Object.freeze({ kid: "coordinator-2026-10", publicKey: "DXVQdU4IAKXSN+71gmA1dmubPloVhoqUCrKJlYeI47A=", fingerprint: "790901b82a89fe505b5f98e2b7bf28e3a74f9a40f1a561c9d353f85f61cc36a2" });
+const nextRingPublicKey = rawEd25519PublicKeyOf(syntheticSeed("fixture-coordinator-next-seed-32"));
+const nextRingEntry = Object.freeze({ kid: "coordinator-2026-11", publicKey: nextRingPublicKey, fingerprint: fingerprintOf(nextRingPublicKey) });
+const ringValue = (entries, indent) => `${JSON.stringify(entries, null, indent)}\n`;
+const flipLastHex = (hex) => hex.slice(0, -1) + (hex.endsWith("0") ? "1" : "0");
+const coordinatorKeyRings = {
+  COORDINATOR_KEYS_TWO: ringValue([ringEntry, nextRingEntry]),
+  // The fingerprint of another key.
+  COORDINATOR_KEYS_FINGERPRINT_OTHER_KEY: ringValue([{ ...ringEntry, fingerprint: nextRingEntry.fingerprint }]),
+  // A valid first entry; the second entry's fingerprint differs in its last digit.
+  COORDINATOR_KEYS_SECOND_FINGERPRINT_WRONG: ringValue([ringEntry, { ...nextRingEntry, fingerprint: flipLastHex(nextRingEntry.fingerprint) }]),
+  // Nonzero pad bits: a lenient decoder yields the same 32 bytes (so the
+  // fingerprint matches them), but the value is not canonical base64.
+  COORDINATOR_KEYS_NONCANONICAL_KEY: ringValue([{ ...ringEntry, publicKey: "DXVQdU4IAKXSN+71gmA1dmubPloVhoqUCrKJlYeI47B=" }]),
+  // A valid ring written over several lines.
+  COORDINATOR_KEYS_MULTILINE: ringValue([ringEntry], 2),
+  COORDINATOR_KEYS_CRLF: `${JSON.stringify([ringEntry])}\r\n`,
+};
+// A bash $'...' literal for a fixture value baked into the aws stub.
+const bashAnsiC = (value) => `$'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n").replace(/\r/g, "\\r")}'`;
+
+// H-REQ-01 phase 1: the v2 host's relay binding and the coordinator key ring
+// it checks enrollments with. Both are optional reads (absent leaves the
+// variable unset); the deploy then sets the binding to off and passes no key
+// ring to the host. Read in both modes, after the /contract/mcp block.
+const expectedHostRelayEnv = {
+  AGENT_HANDSHAKE_V2_RELAY_BINDING: "observe",
+  AGENT_HANDSHAKE_V2_COORDINATOR_KEYS: '[{"kid":"coordinator-2026-10","publicKey":"DXVQdU4IAKXSN+71gmA1dmubPloVhoqUCrKJlYeI47A=","fingerprint":"790901b82a89fe505b5f98e2b7bf28e3a74f9a40f1a561c9d353f85f61cc36a2"}]\n',
+};
+const expectedHostRelayParamNames = Object.keys(expectedHostRelayEnv).map((name) => `/clockchain/mcp/${name}`);
 
 // N7c: the /contract/mcp env surface — every knob is an OPTIONAL SSM read
 // (absent parameter → the env var stays untouched; the route ships disabled
@@ -128,9 +186,11 @@ const expectedEnv = {
   AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: '{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\n',
   AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: '{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\n',
   AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: '{"kid":"accept-previous","secretBase64":"ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ="}\n',
+  AGENT_HANDSHAKE_V2_ENROLLMENT_KEY: enrollmentKeyValue(ed25519EnrollmentPem),
   // N7c: every /contract/mcp knob is optional in SSM; present values are
   // exported byte-for-byte into the docker-compose environment.
   ...expectedContractEnv,
+  ...expectedHostRelayEnv,
 };
 
 const expectedHostSecrets = {
@@ -318,6 +378,19 @@ case "$name" in
   /clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS) value=$'{"kid":"role-previous","secretBase64":"YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M="}\\n' ;;
   /clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS) value=$'{"kid":"accept-previous","secretBase64":"ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ="}\\n' ;;
+  # H-REQ-01 phase 1 — synthetic values only (no real key material).
+  /clockchain/mcp/AGENT_HANDSHAKE_V2_ENROLLMENT_KEY) value=${bashAnsiC(expectedEnv.AGENT_HANDSHAKE_V2_ENROLLMENT_KEY)} ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_V2_RELAY_BINDING) value='observe' ;;
+  /clockchain/mcp/AGENT_HANDSHAKE_V2_COORDINATOR_KEYS) value=$'[{"kid":"coordinator-2026-10","publicKey":"DXVQdU4IAKXSN+71gmA1dmubPloVhoqUCrKJlYeI47A=","fingerprint":"790901b82a89fe505b5f98e2b7bf28e3a74f9a40f1a561c9d353f85f61cc36a2"}]\\n' ;;
+  /clockchain/mcp/RELAY_BINDING_OFF) value='off' ;;
+  /clockchain/mcp/RELAY_BINDING_ENFORCE) value='enforce' ;;
+  /clockchain/mcp/RELAY_BINDING_UNKNOWN) value='strict' ;;
+  /clockchain/mcp/RELAY_BINDING_NEWLINE) value=$'enforce\\n' ;;
+  /clockchain/mcp/COORDINATOR_KEYS_WRONG_SHAPE) value=$'[{"kid":"coordinator-2026-10"}]\\n' ;;
+  /clockchain/mcp/COORDINATOR_KEYS_NOT_JSON) value=$'coordinator-keys\\n' ;;
+  /clockchain/mcp/ENROLLMENT_KEY_WRONG_SHAPE) value=$'{"kid":"coordinator-enrollment-2026-10"}\\n' ;;
+${Object.entries(notEd25519EnrollmentPems).map(([name, pem]) => `  /clockchain/mcp/${name}) value=${bashAnsiC(enrollmentKeyValue(pem))} ;;`).join("\n")}
+${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/${name}) value=${bashAnsiC(ring)} ;;`).join("\n")}
   # N7c /contract/mcp surface — optional reads; every value is synthetic.
   /clockchain/mcp/CONTRACT_MCP_ENABLED) value=$'1\\n' ;;
   /clockchain/mcp/CONTRACT_AUTH_TOKENS) value=$'contract-tb:buyer:kb1:9452:initiator,contract-tp:provider:kp1:9453:responder\\n' ;;
@@ -480,11 +553,13 @@ printf 'docker compose invoked\\n'
   return { temp, callsFile, dockerInvokedFile, dockerOkFile, dockerArgsFile, env };
 }
 
-async function resolvedComposeConfig() {
+async function resolvedComposeConfig(extraEnv = {}) {
+  const ambient = { ...process.env };
+  for (const name of ["AGENT_HANDSHAKE_V2_RELAY_BINDING", "AGENT_HANDSHAKE_V2_COORDINATOR_KEYS", "AGENT_HANDSHAKE_V2_ENROLLMENT_KEY"]) delete ambient[name];
   const result = await run("docker", ["compose", "-f", composeFile, "config", "--format", "json"], {
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...ambient,
       PORT: "8080",
       MCP_TRANSPORT: "http",
       MCP_REQUIRE_AUTH: "1",
@@ -524,6 +599,7 @@ async function resolvedComposeConfig() {
       HANDSHAKE_SHA: expectedHandshakeSha,
       CLOCKCHAIN_HOST_SECRET_DIR: "/run/clockchain-host-secrets",
       CLOCKCHAIN_HOST_ROOT_KEY_ID: "root-2026-08",
+      ...extraEnv,
     },
   });
   assert.equal(result.code, 0, result.stderr);
@@ -696,6 +772,10 @@ test("resolved compose config adds the external host without network ingress", a
     HANDSHAKE_RELAY: "http://44.249.47.220:8080",
     HANDSHAKE_SHA: expectedHandshakeSha,
     SEPOLIA_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com",
+    // H-REQ-01 phase 1: an unset binding resolves to off; an unset key ring
+    // stays unset in the container (null in the resolved config).
+    AGENT_HANDSHAKE_V2_RELAY_BINDING: "off",
+    AGENT_HANDSHAKE_V2_COORDINATOR_KEYS: null,
   });
   assert.equal(host.volumes.length, 2);
   assertHostSecretBindMount(host.volumes[0]);
@@ -766,7 +846,7 @@ test("compose wrapper fetches only locked SSM secrets and preserves bytes into d
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostRelayParamNames, ...expectedHostSecretNames],
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
     for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
@@ -834,7 +914,7 @@ for (const onlyArgs of [["--only", "mcp"], ["--only=mcp"]]) {
       const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
       assert.deepEqual(
         calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-        [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames],
+        [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostRelayParamNames],
         "mcp-only fetches the mcp secrets and no host secrets",
       );
       assert.equal(await pathExists(env.EXPECTED_HOST_SECRET_DIR), false, "host secret files are not rewritten");
@@ -923,6 +1003,10 @@ test("compose wrapper runs under a systemd PATH with no node on it", async () =>
     assert.ok(jqPath, "jq must be installed to run this test");
     const binDir = path.join(temp, "bin");
     await symlink(jqPath, path.join(binDir, "jq"));
+    // sha256sum is coreutils in /usr/bin on the box; macOS keeps it in /sbin.
+    const sha256sumPath = spawnSync("which", ["sha256sum"], { encoding: "utf8" }).stdout.trim();
+    assert.ok(sha256sumPath, "sha256sum must be installed to run this test");
+    await symlink(sha256sumPath, path.join(binDir, "sha256sum"));
     await writeFile(path.join(binDir, "node"), "#!/usr/bin/env bash\nexit 127\n", { mode: 0o755 });
 
     const result = await run(wrapper, [], {
@@ -1025,7 +1109,7 @@ test("compose wrapper treats missing optional previous acceptance HMAC as absent
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostRelayParamNames, ...expectedHostSecretNames],
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
     for (const secret of [...Object.values(expectedEnv), ...Object.values(expectedHostSecrets)]) {
@@ -1061,6 +1145,335 @@ test("compose wrapper fails closed on optional previous acceptance HMAC fetch co
   }
 });
 
+// ---- H-REQ-01 phase 1: sender-enrollment key (mcp) and relay binding (host) ----
+
+const enrollmentKeyParam = "/clockchain/mcp/AGENT_HANDSHAKE_V2_ENROLLMENT_KEY";
+const relayBindingParam = "/clockchain/mcp/AGENT_HANDSHAKE_V2_RELAY_BINDING";
+const coordinatorKeysParam = "/clockchain/mcp/AGENT_HANDSHAKE_V2_COORDINATOR_KEYS";
+const secretValues = () => [
+  ...Object.values(expectedEnv).filter((value) => !Object.values(expectedHostRelayEnv).includes(value)),
+  ...Object.values(expectedHostSecrets),
+];
+
+async function runWrapperExpecting(env, args, expected, unset = []) {
+  const fixture = await createWrapperFixture({ env: { ...env, EXPECTED_UNSET: unset.join(",") } });
+  await writeFile(fixture.env.EXPECTED_ENV_FILE, JSON.stringify(expected), "utf8");
+  const result = await run(wrapper, args, { cwd: fixture.temp, env: fixture.env });
+  return { ...fixture, result };
+}
+
+async function assertRefusedBeforeDocker({ result, dockerInvokedFile }, message) {
+  assert.notEqual(result.code, 0);
+  if (message) assert.match(result.stderr, message);
+  assert.equal(await pathExists(dockerInvokedFile), false, "docker compose was not invoked");
+  for (const secret of secretValues()) {
+    assert.equal(result.stdout.includes(secret), false, "no secret on stdout");
+    assert.equal(result.stderr.includes(secret), false, "no secret on stderr");
+  }
+}
+
+test("H-REQ-01: with no enrollment key in SSM the deploy succeeds and the mcp gets it empty", async () => {
+  const { temp, dockerOkFile, result } = await runWrapperExpecting(
+    { AWS_PARAMETER_NOT_FOUND: enrollmentKeyParam }, [],
+    { ...expectedEnv, AGENT_HANDSHAKE_V2_ENROLLMENT_KEY: "" },
+  );
+  try {
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("H-REQ-01: an enrollment key that is not {kid, privateKeyPem} refuses the deploy before docker", async () => {
+  for (const args of [[], ["--only", "mcp"]]) {
+    const outcome = await runWrapperExpecting(
+      { AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM: "/clockchain/mcp/ENROLLMENT_KEY_WRONG_SHAPE" }, args, expectedEnv,
+    );
+    try {
+      await assertRefusedBeforeDocker(outcome, /invalid AGENT_HANDSHAKE_V2_ENROLLMENT_KEY configuration/);
+      assert.equal(outcome.result.stderr.includes("coordinator-enrollment-2026-10"), false, "the value is not printed");
+    } finally {
+      await rm(outcome.temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H-REQ-01: an enrollment-key fetch that fails other than not-found fails the deploy before docker", async () => {
+  for (const extra of [
+    { AWS_DENY_PARAMETER: enrollmentKeyParam },
+    { AWS_TRANSIENT_PARAMETER: enrollmentKeyParam },
+    { AWS_MALFORMED_PARAMETER: enrollmentKeyParam },
+    { AWS_FAIL_PARAMETER: enrollmentKeyParam },
+  ]) {
+    const outcome = await runWrapperExpecting(extra, [], expectedEnv);
+    try {
+      await assertRefusedBeforeDocker(outcome);
+    } finally {
+      await rm(outcome.temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H-REQ-01: with no relay binding in SSM the host gets off, and with no key ring it gets no key-ring variable", async () => {
+  for (const args of [[], ["--only", "mcp"]]) {
+    const { temp, dockerOkFile, result } = await runWrapperExpecting(
+      { AWS_PARAMETER_NOT_FOUND: `${relayBindingParam},${coordinatorKeysParam}`, EXPECT_MCP_ONLY: args.length ? "1" : "" },
+      args,
+      Object.fromEntries(Object.entries({ ...expectedEnv, AGENT_HANDSHAKE_V2_RELAY_BINDING: "off" })
+        .filter(([name]) => name !== "AGENT_HANDSHAKE_V2_COORDINATOR_KEYS")),
+      ["AGENT_HANDSHAKE_V2_COORDINATOR_KEYS"],
+    );
+    try {
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H-REQ-01: relay binding off with no key ring deploys and passes no key-ring variable", async () => {
+  const { temp, dockerOkFile, result } = await runWrapperExpecting(
+    { AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM: "/clockchain/mcp/RELAY_BINDING_OFF", AWS_PARAMETER_NOT_FOUND: coordinatorKeysParam },
+    [],
+    Object.fromEntries(Object.entries({ ...expectedEnv, AGENT_HANDSHAKE_V2_RELAY_BINDING: "off" })
+      .filter(([name]) => name !== "AGENT_HANDSHAKE_V2_COORDINATOR_KEYS")),
+    ["AGENT_HANDSHAKE_V2_COORDINATOR_KEYS"],
+  );
+  try {
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("H-REQ-01: relay binding enforce with a key ring deploys and passes both values byte for byte", async () => {
+  const { temp, dockerOkFile, result } = await runWrapperExpecting(
+    { AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM: "/clockchain/mcp/RELAY_BINDING_ENFORCE" },
+    [],
+    { ...expectedEnv, AGENT_HANDSHAKE_V2_RELAY_BINDING: "enforce" },
+  );
+  try {
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("H-REQ-01: relay binding observe or enforce with no key ring refuses the deploy before docker", async () => {
+  for (const [bindingParam, args] of [
+    [relayBindingParam, []],
+    ["/clockchain/mcp/RELAY_BINDING_ENFORCE", []],
+    ["/clockchain/mcp/RELAY_BINDING_ENFORCE", ["--only", "mcp"]],
+  ]) {
+    const outcome = await runWrapperExpecting(
+      { AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM: bindingParam, AWS_PARAMETER_NOT_FOUND: coordinatorKeysParam },
+      args, expectedEnv,
+    );
+    try {
+      await assertRefusedBeforeDocker(
+        outcome,
+        /AGENT_HANDSHAKE_V2_RELAY_BINDING=(observe|enforce) requires a non-empty AGENT_HANDSHAKE_V2_COORDINATOR_KEYS/,
+      );
+    } finally {
+      await rm(outcome.temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H-REQ-01: a relay binding other than off, observe or enforce refuses the deploy before docker", async () => {
+  for (const bindingParam of ["/clockchain/mcp/RELAY_BINDING_UNKNOWN", "/clockchain/mcp/RELAY_BINDING_NEWLINE"]) {
+    const outcome = await runWrapperExpecting({ AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM: bindingParam }, [], expectedEnv);
+    try {
+      await assertRefusedBeforeDocker(outcome, /AGENT_HANDSHAKE_V2_RELAY_BINDING must be off, observe or enforce/);
+    } finally {
+      await rm(outcome.temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H-REQ-01: a key ring that is not the host's key-ring shape refuses the deploy, whatever the binding", async () => {
+  for (const [bindingParam, keysParam] of [
+    [relayBindingParam, "/clockchain/mcp/COORDINATOR_KEYS_WRONG_SHAPE"],
+    ["/clockchain/mcp/RELAY_BINDING_OFF", "/clockchain/mcp/COORDINATOR_KEYS_WRONG_SHAPE"],
+    ["/clockchain/mcp/RELAY_BINDING_OFF", "/clockchain/mcp/COORDINATOR_KEYS_NOT_JSON"],
+  ]) {
+    const outcome = await runWrapperExpecting(
+      { AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM: bindingParam, AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM: keysParam },
+      [], expectedEnv,
+    );
+    try {
+      await assertRefusedBeforeDocker(outcome, /invalid AGENT_HANDSHAKE_V2_COORDINATOR_KEYS configuration/);
+    } finally {
+      await rm(outcome.temp, { recursive: true, force: true });
+    }
+  }
+});
+
+// The host's own rule (validateCoordinatorKeyRing): each publicKey is the
+// canonical base64 of 32 raw bytes and each fingerprint is the SHA-256 hex of
+// those bytes; the host parses a present ring in every binding mode.
+async function assertKeyRingRefused(bindingParam, ringName, args) {
+  const outcome = await runWrapperExpecting(
+    { AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM: bindingParam, AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM: `/clockchain/mcp/${ringName}` },
+    args, expectedEnv,
+  );
+  try {
+    await assertRefusedBeforeDocker(outcome, /invalid AGENT_HANDSHAKE_V2_COORDINATOR_KEYS configuration/);
+    const ring = coordinatorKeyRings[ringName];
+    for (const output of [outcome.result.stdout, outcome.result.stderr]) {
+      assert.equal(output.includes(ring.trim()), false, "the ring value is not printed");
+      for (const entry of JSON.parse(ring)) {
+        assert.equal(output.includes(entry.publicKey), false, "no public key is printed");
+        assert.equal(output.includes(entry.fingerprint), false, "no fingerprint is printed");
+      }
+    }
+  } finally {
+    await rm(outcome.temp, { recursive: true, force: true });
+  }
+}
+
+test("H-REQ-01: a key ring whose fingerprint is not the SHA-256 of its raw public key refuses the deploy, whatever the binding", async () => {
+  for (const [bindingParam, ringName, args] of [
+    [relayBindingParam, "COORDINATOR_KEYS_FINGERPRINT_OTHER_KEY", []],
+    [relayBindingParam, "COORDINATOR_KEYS_FINGERPRINT_OTHER_KEY", ["--only", "mcp"]],
+    ["/clockchain/mcp/RELAY_BINDING_OFF", "COORDINATOR_KEYS_FINGERPRINT_OTHER_KEY", []],
+    ["/clockchain/mcp/RELAY_BINDING_ENFORCE", "COORDINATOR_KEYS_SECOND_FINGERPRINT_WRONG", []],
+    ["/clockchain/mcp/RELAY_BINDING_OFF", "COORDINATOR_KEYS_SECOND_FINGERPRINT_WRONG", ["--only", "mcp"]],
+  ]) {
+    await assertKeyRingRefused(bindingParam, ringName, args);
+  }
+});
+
+test("H-REQ-01: a key ring whose public key is not canonical base64 refuses the deploy", async () => {
+  // Its fingerprint matches the bytes a lenient decoder returns; the host still refuses it.
+  assert.equal(fingerprintOf(JSON.parse(coordinatorKeyRings.COORDINATOR_KEYS_NONCANONICAL_KEY)[0].publicKey), ringEntry.fingerprint);
+  await assertKeyRingRefused("/clockchain/mcp/RELAY_BINDING_ENFORCE", "COORDINATOR_KEYS_NONCANONICAL_KEY", []);
+});
+
+test("H-REQ-01: a key ring that is not single-line JSON refuses the deploy, whatever the binding", async () => {
+  for (const [bindingParam, ringName, args] of [
+    [relayBindingParam, "COORDINATOR_KEYS_MULTILINE", []],
+    ["/clockchain/mcp/RELAY_BINDING_OFF", "COORDINATOR_KEYS_MULTILINE", ["--only", "mcp"]],
+    ["/clockchain/mcp/RELAY_BINDING_ENFORCE", "COORDINATOR_KEYS_CRLF", []],
+  ]) {
+    await assertKeyRingRefused(bindingParam, ringName, args);
+  }
+});
+
+test("H-REQ-01: a two-key ring whose fingerprints match deploys and reaches the host byte for byte", async () => {
+  for (const args of [[], ["--only", "mcp"]]) {
+    const { temp, dockerOkFile, result } = await runWrapperExpecting(
+      {
+        AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM: "/clockchain/mcp/RELAY_BINDING_ENFORCE",
+        AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM: "/clockchain/mcp/COORDINATOR_KEYS_TWO",
+        EXPECT_MCP_ONLY: args.length ? "1" : "",
+      },
+      args,
+      { ...expectedEnv, AGENT_HANDSHAKE_V2_RELAY_BINDING: "enforce", AGENT_HANDSHAKE_V2_COORDINATOR_KEYS: coordinatorKeyRings.COORDINATOR_KEYS_TWO },
+    );
+    try {
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H-REQ-01: an enrollment key that is not an Ed25519 PKCS#8 private key refuses the deploy before docker", async () => {
+  for (const [name, pem] of Object.entries(notEd25519EnrollmentPems)) {
+    for (const args of [[], ["--only", "mcp"]]) {
+      const outcome = await runWrapperExpecting(
+        { AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM: `/clockchain/mcp/${name}` }, args, expectedEnv,
+      );
+      try {
+        await assertRefusedBeforeDocker(outcome, /invalid AGENT_HANDSHAKE_V2_ENROLLMENT_KEY configuration/);
+        for (const output of [outcome.result.stdout, outcome.result.stderr]) {
+          assert.equal(output.includes("PRIVATE KEY"), false, `${name}: no key armour is printed`);
+          for (const line of pem.trim().split("\n").slice(1, -1)) {
+            assert.equal(output.includes(line), false, `${name}: no key line is printed`);
+          }
+        }
+      } finally {
+        await rm(outcome.temp, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("H-REQ-01: an Ed25519 PKCS#8 enrollment key deploys and reaches the mcp byte for byte", async () => {
+  // The fixture is the form Node writes for an Ed25519 key, and Node reads it as one.
+  assert.equal(createPrivateKey(ed25519EnrollmentPem).asymmetricKeyType, "ed25519");
+  for (const args of [[], ["--only", "mcp"]]) {
+    const { temp, dockerOkFile, result } = await runWrapperExpecting({ EXPECT_MCP_ONLY: args.length ? "1" : "" }, args, expectedEnv);
+    try {
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+      for (const output of [result.stdout, result.stderr]) {
+        assert.equal(output.includes(ed25519EnrollmentPem.split("\n")[1]), false, "the key is not printed");
+      }
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("H-REQ-01: relay-binding and key-ring fetches that fail other than not-found fail the deploy before docker", async () => {
+  for (const param of [relayBindingParam, coordinatorKeysParam]) {
+    for (const failure of ["AWS_DENY_PARAMETER", "AWS_TRANSIENT_PARAMETER", "AWS_MALFORMED_PARAMETER"]) {
+      const outcome = await runWrapperExpecting({ [failure]: param }, [], expectedEnv);
+      try {
+        await assertRefusedBeforeDocker(outcome);
+      } finally {
+        await rm(outcome.temp, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("H-REQ-01: resolved compose config gives the host off for an unset binding and passes the key ring only when set", async () => {
+  const unset = (await resolvedComposeConfig()).services;
+  assert.equal(unset.host.environment.AGENT_HANDSHAKE_V2_RELAY_BINDING, "off");
+  assert.equal(unset.host.environment.AGENT_HANDSHAKE_V2_COORDINATOR_KEYS, null, "unset in the container");
+  assert.equal(unset.mcp.environment.AGENT_HANDSHAKE_V2_ENROLLMENT_KEY, "");
+
+  const empty = (await resolvedComposeConfig({ AGENT_HANDSHAKE_V2_RELAY_BINDING: "" })).services;
+  assert.equal(empty.host.environment.AGENT_HANDSHAKE_V2_RELAY_BINDING, "off", "an empty binding is never passed");
+
+  const set = (await resolvedComposeConfig({
+    AGENT_HANDSHAKE_V2_RELAY_BINDING: "enforce",
+    AGENT_HANDSHAKE_V2_COORDINATOR_KEYS: expectedHostRelayEnv.AGENT_HANDSHAKE_V2_COORDINATOR_KEYS,
+    AGENT_HANDSHAKE_V2_ENROLLMENT_KEY: "enrollment-key-fixture",
+  })).services;
+  assert.equal(set.host.environment.AGENT_HANDSHAKE_V2_RELAY_BINDING, "enforce");
+  assert.equal(set.host.environment.AGENT_HANDSHAKE_V2_COORDINATOR_KEYS, expectedHostRelayEnv.AGENT_HANDSHAKE_V2_COORDINATOR_KEYS);
+  assert.equal(set.mcp.environment.AGENT_HANDSHAKE_V2_ENROLLMENT_KEY, "enrollment-key-fixture");
+  // Each value reaches only its own service.
+  assert.equal(Object.hasOwn(set.host.environment, "AGENT_HANDSHAKE_V2_ENROLLMENT_KEY"), false);
+  assert.equal(Object.hasOwn(set.mcp.environment, "AGENT_HANDSHAKE_V2_RELAY_BINDING"), false);
+  assert.equal(Object.hasOwn(set.mcp.environment, "AGENT_HANDSHAKE_V2_COORDINATOR_KEYS"), false);
+});
+
+test("H-REQ-01: host replicas are started with host-1's environment copied verbatim", async () => {
+  const rendered = spawnSync(path.join(repoRoot, "scripts", "box-host-replicas.sh"), ["2", "--yes"], {
+    encoding: "utf8",
+    env: { ...process.env, BOX_REPLICAS_RENDER_ONLY: "1" },
+  });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  const script = rendered.stdout;
+  assert.match(script, /docker inspect -f '\{\{range \.Config\.Env\}\}\{\{println \.\}\}\{\{end\}\}' "\$H1" \| sed '\/\^\$\/d' > "\$ENVF"/);
+  // The replica's docker run takes its environment only from that file.
+  const dockerRun = script.slice(script.indexOf("docker run -d"), script.indexOf("node bin/agent-handshake-host.mjs"));
+  assert.notEqual(dockerRun, "", "the replica docker run is present");
+  assert.match(dockerRun, /--env-file "\$ENVF"/);
+  assert.doesNotMatch(dockerRun, /\s(-e|--env)\s/);
+  assert.doesNotMatch(script, /AGENT_HANDSHAKE_V2_RELAY_BINDING|AGENT_HANDSHAKE_V2_COORDINATOR_KEYS/);
+});
+
 test("compose wrapper reads the /contract/mcp surface optionally — absent params leave the env untouched", async () => {
   // CONTRACT_MCP_ENABLED absent in SSM and unset on the host: the route ships
   // disabled — the variable must stay UNSET (never exported empty).
@@ -1081,7 +1494,7 @@ test("compose wrapper reads the /contract/mcp surface optionally — absent para
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostRelayParamNames, ...expectedHostSecretNames],
       "the parameter is still fetched — only the export is skipped",
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
@@ -1136,7 +1549,7 @@ test("CDT wiring: all new contract settings absent in SSM leave every one of the
     const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
     assert.deepEqual(
       calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
-      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostSecretNames],
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostRelayParamNames, ...expectedHostSecretNames],
       "every new parameter is still fetched — only the export is skipped",
     );
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");

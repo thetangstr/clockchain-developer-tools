@@ -162,6 +162,11 @@ export function createHandshakeRelayClient(options: {
       role: MessageRole;
       senderKey: string;
       sessionId: string;
+      // Optional freshness guard for a post bounded by a window. It runs after
+      // the sequence read and immediately before every post attempt; whatever
+      // it throws ends the post with no further attempt and reaches the caller
+      // unchanged.
+      beforeSend?: () => void;
     }): Promise<HandshakeRelayPostResult> => {
       validateSessionId(input.sessionId);
       validateMessageRole(input.role);
@@ -181,6 +186,7 @@ export function createHandshakeRelayClient(options: {
           seq: String(seq),
           sessionId: input.sessionId,
         });
+        input.beforeSend?.();
         const { json, response } = await request(`/v1/sessions/${encodeURIComponent(input.sessionId)}/messages`, {
           body: JSON.stringify(envelope),
           headers: { "content-type": "application/json" },

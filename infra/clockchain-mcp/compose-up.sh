@@ -55,6 +55,9 @@ AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE_PARAM="${AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE_P
 AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM="${AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS}"
 AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM="${AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE}"
 AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM="${AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS}"
+AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM="${AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_V2_ENROLLMENT_KEY}"
+AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM="${AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_V2_RELAY_BINDING}"
+AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM="${AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_V2_COORDINATOR_KEYS}"
 SECRET_SENTINEL=$'\001clockchain-mcp-secret-end\001'
 
 fetch_secret() {
@@ -306,6 +309,104 @@ validate_v2_server_config() {
     seen_kids="$seen_kids|$kid"
     seen_secrets="$seen_secrets|$secret"
   done
+  # H-REQ-01: the coordinator's optional sender-enrollment key, JSON
+  # {"kid","privateKeyPem"} with an unencrypted PKCS#8 PEM. Empty: the mcp posts
+  # no enrollments. The mcp refuses at load any key that is not Ed25519, so the
+  # deploy refuses it first: the PEM must be the RFC 8410 form that Node and
+  # `openssl genpkey -algorithm ed25519` write, one 64-character base64 line
+  # whose 48 decoded bytes are the fixed Ed25519 PKCS#8 header
+  # 302e020100300506032b657004220420 followed by the 32-byte seed. The value
+  # only ever passes through pipes (printf is a builtin, so it is never in a
+  # process argument list), is never written to a file and is never printed;
+  # refusals name the parameter only.
+  local enrollment_filter enrollment_der_hex
+  enrollment_filter='type == "object" and (keys | sort) == ["kid","privateKeyPem"] and (.kid | type == "string" and test("\\A[a-z0-9][a-z0-9-]{0,63}\\z")) and (.privateKeyPem | type == "string" and test("\\A-----BEGIN PRIVATE KEY-----\\n") and test("\\n-----END PRIVATE KEY-----\\n?\\z"))'
+  if [[ -n "${AGENT_HANDSHAKE_V2_ENROLLMENT_KEY:-}" ]]; then
+    if ! printf '%s' "$AGENT_HANDSHAKE_V2_ENROLLMENT_KEY" | jq -e "$enrollment_filter" >/dev/null 2>&1; then
+      printf 'invalid AGENT_HANDSHAKE_V2_ENROLLMENT_KEY configuration (SSM %s)\n' "$AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM" >&2
+      return 1
+    fi
+    # The jq pattern pins the body to exactly 64 base64 characters before
+    # anything decodes it (macOS and GNU base64 disagree on malformed input).
+    if ! enrollment_der_hex="$(printf '%s' "$AGENT_HANDSHAKE_V2_ENROLLMENT_KEY" |
+           jq -j '.privateKeyPem | capture("\\A-----BEGIN PRIVATE KEY-----\\n(?<body>[A-Za-z0-9+/]{64})\\n-----END PRIVATE KEY-----\\n?\\z").body' 2>/dev/null |
+           base64 -d 2>/dev/null | od -An -v -tx1 | tr -d ' \n')" ||
+       [[ ! "$enrollment_der_hex" =~ ^302e020100300506032b657004220420[0-9a-f]{64}$ ]]; then
+      enrollment_der_hex=""
+      printf 'invalid AGENT_HANDSHAKE_V2_ENROLLMENT_KEY configuration: privateKeyPem is not an Ed25519 PKCS#8 private key (SSM %s)\n' "$AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM" >&2
+      return 1
+    fi
+    enrollment_der_hex=""
+  fi
+}
+
+# H-REQ-01: the v2 host's relay binding. The host reads
+# AGENT_HANDSHAKE_V2_RELAY_BINDING (off | observe | enforce) and treats an unset
+# value as off with one startup warning (an empty or unknown value fails at
+# load); it parses AGENT_HANDSHAKE_V2_COORDINATOR_KEYS whenever the
+# variable is set, in every mode. So the deploy sets the binding to off when SSM
+# has none, never passes an empty key ring (it is unset instead, and compose
+# leaves it unset in the container), and refuses before docker when observe or
+# enforce has no key ring, or when a present key ring fails the host's own rule
+# (validateCoordinatorKeyRing in the handshake repo): 1-2 entries of
+# {kid, publicKey, fingerprint} with distinct kids and keys, each publicKey the
+# canonical base64 of 32 raw bytes and each fingerprint the SHA-256 hex of those
+# bytes. The ring must also be single-line JSON (one optional trailing newline):
+# replicas made by scripts/box-host-replicas.sh copy host-1's environment through
+# an env file that holds one variable per line. The ring is public; refusals
+# still name the parameter only. Runs in both modes: compose interpolates the
+# host service either way.
+validate_v2_host_relay_binding() {
+  local ring_filter ring_line ring_count ring_index ring_public_key ring_fingerprint ring_digest
+  if [[ -z "${AGENT_HANDSHAKE_V2_RELAY_BINDING:-}" ]]; then
+    AGENT_HANDSHAKE_V2_RELAY_BINDING=off
+  fi
+  case "$AGENT_HANDSHAKE_V2_RELAY_BINDING" in
+    off|observe|enforce) ;;
+    *)
+      printf 'AGENT_HANDSHAKE_V2_RELAY_BINDING must be off, observe or enforce\n' >&2
+      return 1
+      ;;
+  esac
+  if [[ -z "${AGENT_HANDSHAKE_V2_COORDINATOR_KEYS:-}" ]]; then
+    unset AGENT_HANDSHAKE_V2_COORDINATOR_KEYS
+    if [[ "$AGENT_HANDSHAKE_V2_RELAY_BINDING" != "off" ]]; then
+      printf 'AGENT_HANDSHAKE_V2_RELAY_BINDING=%s requires a non-empty AGENT_HANDSHAKE_V2_COORDINATOR_KEYS (SSM %s); refusing to deploy\n' \
+        "$AGENT_HANDSHAKE_V2_RELAY_BINDING" "$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM" >&2
+      return 1
+    fi
+  else
+    ring_line="${AGENT_HANDSHAKE_V2_COORDINATOR_KEYS%$'\n'}"
+    if [[ "$ring_line" == *[$'\r\n']* ]]; then
+      printf 'invalid AGENT_HANDSHAKE_V2_COORDINATOR_KEYS configuration: not single-line JSON (SSM %s)\n' "$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM" >&2
+      return 1
+    fi
+    ring_filter='type == "array" and length >= 1 and length <= 2 and all(.[]; type == "object" and (keys | sort) == ["fingerprint","kid","publicKey"] and (.kid | type == "string" and test("\\A[a-z0-9][a-z0-9-]{0,63}\\z")) and (.publicKey | type == "string" and test("\\A[A-Za-z0-9+/]{43}=\\z")) and (.fingerprint | type == "string" and test("\\A[0-9a-f]{64}\\z"))) and ([.[].kid] | unique | length) == length and ([.[].publicKey] | unique | length) == length'
+    if ! jq -e "$ring_filter" >/dev/null 2>&1 <<<"$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS"; then
+      printf 'invalid AGENT_HANDSHAKE_V2_COORDINATOR_KEYS configuration\n' >&2
+      return 1
+    fi
+    # The filter above proved each publicKey is 43 base64 characters plus "="
+    # (32 bytes) and each fingerprint 64 lowercase hex characters, so neither
+    # holds whitespace that $(...) could strip.
+    ring_count="$(jq 'length' <<<"$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS")"
+    for (( ring_index = 0; ring_index < ring_count; ring_index += 1 )); do
+      ring_public_key="$(jq -r --argjson index "$ring_index" '.[$index].publicKey' <<<"$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS")"
+      ring_fingerprint="$(jq -r --argjson index "$ring_index" '.[$index].fingerprint' <<<"$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS")"
+      # Canonical: nonzero pad bits never re-encode to the same text.
+      if [[ "$(printf '%s' "$ring_public_key" | base64 -d 2>/dev/null | base64 | tr -d '\n')" != "$ring_public_key" ]]; then
+        printf 'invalid AGENT_HANDSHAKE_V2_COORDINATOR_KEYS configuration: a publicKey is not canonical base64 (SSM %s)\n' "$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM" >&2
+        return 1
+      fi
+      if ! ring_digest="$(printf '%s' "$ring_public_key" | base64 -d | sha256sum)" ||
+         [[ "${ring_digest%% *}" != "$ring_fingerprint" ]]; then
+        printf 'invalid AGENT_HANDSHAKE_V2_COORDINATOR_KEYS configuration: a fingerprint is not the SHA-256 of its raw publicKey (SSM %s)\n' "$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM" >&2
+        return 1
+      fi
+    done
+    export AGENT_HANDSHAKE_V2_COORDINATOR_KEYS
+  fi
+  export AGENT_HANDSHAKE_V2_RELAY_BINDING
 }
 
 materialize_host_secrets() {
@@ -363,6 +464,8 @@ read_secret AGENT_HANDSHAKE_ROLE_ACCESS_ACTIVE "$AGENT_HANDSHAKE_ROLE_ACCESS_ACT
 read_secret AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS "$AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS_PARAM"
 read_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE_PARAM"
 read_optional_secret AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS "$AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM"
+# H-REQ-01 sender enrollments (mcp): absent = exported empty = no enrollments posted (the behaviour before).
+read_optional_secret AGENT_HANDSHAKE_V2_ENROLLMENT_KEY "$AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM"
 # /contract/mcp surface (N7c): ALL contract/telemetry knobs are optional reads —
 # an absent parameter leaves the variable unset (never exported empty), and the
 # route ships disabled: no CONTRACT_MCP_ENABLED → the container answers 404.
@@ -435,7 +538,12 @@ read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM /clockchain/mcp/HANDSHAKE_
 read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL
 read_optional_env HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN
 read_optional_env HANDSHAKE_V2_RECEIPTS_FILE /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE
+# H-REQ-01 relay binding (host): optional reads; absent = binding off and no key ring
+# (validate_v2_host_relay_binding). The key ring is public JSON.
+read_optional_env AGENT_HANDSHAKE_V2_RELAY_BINDING "$AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM"
+read_optional_env AGENT_HANDSHAKE_V2_COORDINATOR_KEYS "$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM"
 validate_v2_server_config
+validate_v2_host_relay_binding
 # Read-only; exports the HANDSHAKE_* values compose interpolates, so the resolved compose
 # config is the same in both modes.
 validate_handshake_checkout

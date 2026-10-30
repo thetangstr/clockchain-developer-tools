@@ -36,6 +36,23 @@ Provisioning does not report success until the exact new instance is SSM
 - `/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE`
 - `/clockchain/mcp/AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS` — optional; keep only while
   durable keyed accepts minted under the prior HMAC key can still retry
+- `/clockchain/mcp/AGENT_HANDSHAKE_V2_ENROLLMENT_KEY` — optional (mcp); the coordinator's
+  sender-enrollment key, JSON `{"kid","privateKeyPem"}` with a PKCS#8 Ed25519 PEM. Absent: the
+  mcp gets it empty and posts no sender enrollments (the behaviour before them). `compose-up.sh`
+  refuses any other key: the PEM must be the form `openssl genpkey -algorithm ed25519` and Node
+  write (one 64-character base64 line, 48 bytes: the Ed25519 PKCS#8 header, then the seed).
+- `/clockchain/mcp/AGENT_HANDSHAKE_V2_RELAY_BINDING` — optional (host); `off`, `observe` or
+  `enforce`. Absent: the deploy passes `off` (the host itself also treats an unset value as `off` and logs one startup warning, `agent_handshake_v2_relay_binding_default_off`; an empty or unknown value fails at load).
+- `/clockchain/mcp/AGENT_HANDSHAKE_V2_COORDINATOR_KEYS` — optional (host); the public
+  coordinator key ring, single-line JSON array of 1-2 `{"kid","publicKey","fingerprint"}`:
+  `publicKey` is the canonical base64 of the 32-byte raw Ed25519 public key and `fingerprint` the
+  SHA-256 hex of those 32 bytes (`printf '%s' "$publicKey" | base64 -d | sha256sum`). Absent: the
+  host gets no key-ring variable. `compose-up.sh` refuses to deploy when the binding is `observe`
+  or `enforce` and this is absent, or when it is present and breaks any of these rules (the host
+  applies the same rules in every binding mode).
+  These two reach the host only through a full restart (`scripts/deploy-box.sh <sha> --full-restart`);
+  code-only deploys leave the host running as it is. Replicas from `scripts/box-host-replicas.sh`
+  copy host-1's environment, so re-run it after the full restart to bring them back.
 - `/clockchain/host/FUNDING_WALLET_JSON`
 - `/clockchain/host/FUNDING_WALLET_PUBLIC_JSON`
 - `/clockchain/host/FUNDING_PASSWORD`
