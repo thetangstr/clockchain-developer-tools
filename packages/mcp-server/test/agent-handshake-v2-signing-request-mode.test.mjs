@@ -7,8 +7,10 @@
 // version defaults to V2_HELPER_VERSION. In both formats the coordinator
 // verifies the proposal before it builds an acceptance.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { gunzipSync } from "node:zlib";
 
 import { V2_HELPER_VERSION } from "../dist/agent-handshake/v2/instructions.js";
 import * as h from "./helpers/agent-handshake-v2-fixture-harness.mjs";
@@ -31,6 +33,53 @@ function requestBase64UrlOf(response) {
   return response.localAction.helperStep.shellCommand.match(/--payload-base64url\s+([A-Za-z0-9_-]+)$/)[1];
 }
 
+// gzip output is not the same on every platform: the header's OS byte (19 on
+// macOS, 3 on Linux) and the deflate stream depend on the zlib build, while
+// the bytes it decompresses to do not. The known answers were recorded on
+// macOS, so a request is compared with bytesGzipBase64Url replaced by the hex
+// of its gunzipped bytes; every other field stays byte-exact, in its order.
+function withSignedBytesHex(request) {
+  return { ...request, bytesGzipBase64Url: gunzipSync(Buffer.from(request.bytesGzipBase64Url, "base64url")).toString("hex") };
+}
+
+// The request (base64url of its JSON) as JSON text, with the gzip replaced as
+// above. The decoding is checked to be exact both ways, so nothing but the
+// gzip is relaxed.
+function normalizedRequestText(requestBase64Url, label) {
+  const text = Buffer.from(requestBase64Url, "base64url").toString("utf8");
+  assert.equal(Buffer.from(text, "utf8").toString("base64url"), requestBase64Url, `${label}: request base64url round-trips`);
+  const request = JSON.parse(text);
+  assert.equal(JSON.stringify(request), text, `${label}: request JSON round-trips`);
+  return JSON.stringify(withSignedBytesHex(request));
+}
+
+const sha256Hex = (value) => createHash("sha256").update(value).digest("hex");
+
+// The whole response (JSON text) with the request inside shellCommand
+// normalized as above. commandLength, commandSha256 and shellCommandFetch are
+// functions of the shellCommand bytes, so of the gzip encoding: each is first
+// checked against this response's own shellCommand, then the length and the
+// digest (and its 16-character file-name prefix) are replaced by markers.
+// Everything else stays byte-exact.
+function normalizedResponseText(responseText, label) {
+  const response = JSON.parse(responseText);
+  assert.equal(JSON.stringify(response), responseText, `${label}: response JSON round-trips`);
+  const step = response.localAction.helperStep;
+  const [, payload] = step.shellCommand.match(/--payload-base64url\s+([A-Za-z0-9_-]+)$/);
+  assert.equal(step.commandLength, Buffer.byteLength(step.shellCommand), `${label}: commandLength`);
+  assert.equal(step.commandSha256, sha256Hex(step.shellCommand), `${label}: commandSha256`);
+  response.localAction.helperStep = {
+    ...step,
+    commandLength: "<byte length of shellCommand>",
+    commandSha256: "<sha256 of shellCommand>",
+    shellCommandFetch: step.shellCommandFetch
+      .replaceAll(step.commandSha256, "<sha256 of shellCommand>")
+      .replaceAll(step.commandSha256.slice(0, 16), "<sha256 of shellCommand, first 16>"),
+    shellCommand: step.shellCommand.slice(0, -payload.length) + normalizedRequestText(payload, label),
+  };
+  return JSON.stringify(response);
+}
+
 function atLeast230(version) {
   const [major, minor] = version.split(".").map(Number);
   return major > 2 || (major === 2 && minor >= 3);
@@ -47,8 +96,17 @@ test("H-REQ-02: with helper 2.1.8 pinned, every signing response is byte-identic
     assert.equal(request.schema, V1_SCHEMA, step);
     assert.equal(request.helperVersion, "2.1.8", step);
     assert.deepEqual(Object.keys(request), V1_REQUEST_KEYS, step);
-    assert.equal(requestBase64UrlOf(response), V1_KNOWN_ANSWER.steps[step].requestBase64Url, `${step}: request bytes`);
-    assert.equal(JSON.stringify(response), V1_KNOWN_ANSWER.steps[step].response, `${step}: whole response`);
+    assert.equal(sha256Hex(h.signedBytesOf(request)), request.bytesSha256, `${step}: the gzip decompresses to the bytes bytesSha256 names`);
+    assert.equal(
+      normalizedRequestText(requestBase64UrlOf(response), step),
+      normalizedRequestText(V1_KNOWN_ANSWER.steps[step].requestBase64Url, `${step} (known answer)`),
+      `${step}: request bytes`,
+    );
+    assert.equal(
+      normalizedResponseText(JSON.stringify(response), step),
+      normalizedResponseText(V1_KNOWN_ANSWER.steps[step].response, `${step} (known answer)`),
+      `${step}: whole response`,
+    );
   }
   // The acceptance of the canonical proposal signs the canonical acceptance bytes.
   const acceptance = h.signingRequestOf(responses.acceptance_of_fixture_proposal);
@@ -62,7 +120,13 @@ test("H-REQ-02: with no pinned version configured, the coordinator pins V2_HELPE
     const request = h.signingRequestOf(response);
     assert.equal(request.helperVersion, V2_HELPER_VERSION, step);
     assert.equal(request.schema, v2 ? V2_SCHEMA : V1_SCHEMA, step);
-    if (!v2) assert.equal(requestBase64UrlOf(response), V1_KNOWN_ANSWER.steps[step].requestBase64Url, step);
+    if (!v2) {
+      assert.equal(
+        normalizedRequestText(requestBase64UrlOf(response), step),
+        normalizedRequestText(V1_KNOWN_ANSWER.steps[step].requestBase64Url, `${step} (known answer)`),
+        step,
+      );
+    }
   }
 });
 
@@ -81,10 +145,11 @@ test("H-REQ-02: with helper 2.3.0 pinned, every request is signing-request/v2 an
       assert.equal(request.proposalEnvelope, null, step);
     }
     // Apart from its schema, helperVersion and proposalEnvelope, each request
-    // is the v1 request of the same step.
+    // is the v1 request of the same step (the gzip compared by the bytes it
+    // decompresses to).
     const v1 = JSON.parse(Buffer.from(V1_KNOWN_ANSWER.steps[step].requestBase64Url, "base64url").toString("utf8"));
     const { proposalEnvelope: _carried, ...rest } = request;
-    assert.deepEqual({ ...rest, schema: V1_SCHEMA, helperVersion: "2.1.8" }, v1, step);
+    assert.deepEqual(withSignedBytesHex({ ...rest, schema: V1_SCHEMA, helperVersion: "2.1.8" }), withSignedBytesHex(v1), step);
   }
   const fixtureAcceptance = h.signingRequestOf(responses.acceptance_of_fixture_proposal);
   assert.equal(JSON.stringify(fixtureAcceptance.proposalEnvelope), JSON.stringify(h.F.proposalEnvelope));
