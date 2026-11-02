@@ -1,0 +1,201 @@
+{
+  "schema": "clockchain.agent-handshake-sender-enrollment-vector/v1",
+  "note": "H-REQ-01 known-answer vector. Every key is a TEST key derived from a public seed string; never deploy any of them. Ed25519 (RFC 8032) is deterministic, so the same seed and canonical bytes give the same signature.",
+  "canonicalization": "src/core/canonical.mjs: UTF-8 JSON, object keys sorted by UTF-16 code unit, no whitespace, strings and booleans only (millisecond values are decimal strings).",
+  "enrollmentSignature": "ed25519 over canonicalBytes(enrollment), base64 with padding",
+  "envelopeSignature": "ed25519 by the enrolled sender key over canonicalBytes({sessionId, seq, role, kind, body}), base64 with padding",
+  "keys": {
+    "coordinator": {
+      "label": "coordinator-test-2026-10",
+      "seedDerivation": "sha256(utf8(\"clockchain-test:coordinator-test-2026-10\"))",
+      "seedHex": "8dc65791ac8965722cd330052e9290df2a2b6b9e982b2bc802d83e21e2628a09",
+      "publicKey": "ztlKw8qiA/8UsJMZimBP52VYzEcbIgbiy249QRuIZ1I=",
+      "keyRingEntry": {
+        "kid": "coordinator-test-2026-10",
+        "publicKey": "ztlKw8qiA/8UsJMZimBP52VYzEcbIgbiy249QRuIZ1I=",
+        "fingerprint": "b8e3ab17a716c8e45212c109f20bf7674a0079a84ca72c3ba8dd711725741c98"
+      }
+    },
+    "initiator": {
+      "label": "relay-sender-initiator",
+      "seedDerivation": "sha256(utf8(\"clockchain-test:relay-sender-initiator\"))",
+      "seedHex": "fb6ec7b15d174b62e5528f0870e11f0d7fdb867388e5ad2a7b95b65d61f14ac3",
+      "publicKey": "QFjtH2DxqTFK8B1QhspZ3/5F+BnmtzYhdHxYZUtvt04="
+    },
+    "responder": {
+      "label": "relay-sender-responder",
+      "seedDerivation": "sha256(utf8(\"clockchain-test:relay-sender-responder\"))",
+      "seedHex": "3f752048fc231743af2556f6c8b41a5936442da2fd898507cdac444ae48ebe4f",
+      "publicKey": "QfhGeiUWWnLj/RyBc2ekhv/kFFS0hvid6FWaiq0ypgg="
+    },
+    "host": {
+      "label": "relay-sender-host",
+      "seedDerivation": "sha256(utf8(\"clockchain-test:relay-sender-host\"))",
+      "seedHex": "f9cd8f1778eab8d7568247c3b2c760cbfb47da0065347d6dc819f9153b758922",
+      "publicKey": "ayWpD46UNxiqNknYaM3iibCafKNXx6CaeB4WHCRXH0A="
+    }
+  },
+  "relayAuthorization": {
+    "schema": "clockchain.agent-handshake-relay-authorization/v1",
+    "coordinatorKeys": [
+      {
+        "kid": "coordinator-test-2026-10",
+        "publicKey": "ztlKw8qiA/8UsJMZimBP52VYzEcbIgbiy249QRuIZ1I=",
+        "fingerprint": "b8e3ab17a716c8e45212c109f20bf7674a0079a84ca72c3ba8dd711725741c98"
+      }
+    ],
+    "hostSenderKey": "ayWpD46UNxiqNknYaM3iibCafKNXx6CaeB4WHCRXH0A="
+  },
+  "enrollments": {
+    "initiator": {
+      "enrollment": {
+        "schema": "clockchain.agent-handshake-sender-enrollment/v1",
+        "protocol": "clockchain.agent-handshake/v2",
+        "sessionId": "22222222-3333-4444-8555-666666666666",
+        "role": "initiator",
+        "senderKey": "QFjtH2DxqTFK8B1QhspZ3/5F+BnmtzYhdHxYZUtvt04=",
+        "statementDigest": "e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9",
+        "sessionDeadlineMs": "1786337600000",
+        "invitationDigest": "f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6",
+        "claimExpiresAtMs": "1786337262106",
+        "event": "minted",
+        "eventAtMs": "1786337082106",
+        "issuedAtMs": "1786337082111",
+        "externalBusinessActionPerformed": false
+      },
+      "canonicalJson": "{\"claimExpiresAtMs\":\"1786337262106\",\"event\":\"minted\",\"eventAtMs\":\"1786337082106\",\"externalBusinessActionPerformed\":false,\"invitationDigest\":\"f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6\",\"issuedAtMs\":\"1786337082111\",\"protocol\":\"clockchain.agent-handshake/v2\",\"role\":\"initiator\",\"schema\":\"clockchain.agent-handshake-sender-enrollment/v1\",\"senderKey\":\"QFjtH2DxqTFK8B1QhspZ3/5F+BnmtzYhdHxYZUtvt04=\",\"sessionDeadlineMs\":\"1786337600000\",\"sessionId\":\"22222222-3333-4444-8555-666666666666\",\"statementDigest\":\"e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9\"}",
+      "canonicalBytesHex": "7b22636c61696d4578706972657341744d73223a2231373836333337323632313036222c226576656e74223a226d696e746564222c226576656e7441744d73223a2231373836333337303832313036222c2265787465726e616c427573696e657373416374696f6e506572666f726d6564223a66616c73652c22696e7669746174696f6e446967657374223a2266303432363337626262303261616437623234646364363735323631613136616166663765333235336232663738373163623930396261313563306533376136222c2269737375656441744d73223a2231373836333337303832313131222c2270726f746f636f6c223a22636c6f636b636861696e2e6167656e742d68616e647368616b652f7632222c22726f6c65223a22696e69746961746f72222c22736368656d61223a22636c6f636b636861696e2e6167656e742d68616e647368616b652d73656e6465722d656e726f6c6c6d656e742f7631222c2273656e6465724b6579223a2251466a74483244787154464b384231516873705a332f35462b426e6d747a5968644878595a5574767430343d222c2273657373696f6e446561646c696e654d73223a2231373836333337363030303030222c2273657373696f6e4964223a2232323232323232322d333333332d343434342d383535352d363636363636363636363636222c2273746174656d656e74446967657374223a2265323566306461303839303765653861336233653261326433313665656133343133656666623630656237346431393661346636336338643861356635366439227d",
+      "digest": "6d9cc4d38eced9c78d0bb1347f9d1bb5eb88b195878060f466aa8aa478bbe377",
+      "body": {
+        "enrollment": {
+          "schema": "clockchain.agent-handshake-sender-enrollment/v1",
+          "protocol": "clockchain.agent-handshake/v2",
+          "sessionId": "22222222-3333-4444-8555-666666666666",
+          "role": "initiator",
+          "senderKey": "QFjtH2DxqTFK8B1QhspZ3/5F+BnmtzYhdHxYZUtvt04=",
+          "statementDigest": "e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9",
+          "sessionDeadlineMs": "1786337600000",
+          "invitationDigest": "f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6",
+          "claimExpiresAtMs": "1786337262106",
+          "event": "minted",
+          "eventAtMs": "1786337082106",
+          "issuedAtMs": "1786337082111",
+          "externalBusinessActionPerformed": false
+        },
+        "coordinatorSignature": {
+          "algorithm": "ed25519",
+          "keyId": "coordinator-test-2026-10",
+          "signature": "fTlRLHYmSiqv5D65P1ZmYxC2shzk4tNMz0iSO8kUCSS8RElJeriK2Im5/f444uSEypcl11er1YxZ/wDmgF64DQ=="
+        },
+        "externalBusinessActionPerformed": false
+      },
+      "envelope": {
+        "sessionId": "22222222-3333-4444-8555-666666666666",
+        "seq": "1",
+        "role": "initiator",
+        "kind": "agent_v2_sender_enrollment",
+        "body": {
+          "enrollment": {
+            "schema": "clockchain.agent-handshake-sender-enrollment/v1",
+            "protocol": "clockchain.agent-handshake/v2",
+            "sessionId": "22222222-3333-4444-8555-666666666666",
+            "role": "initiator",
+            "senderKey": "QFjtH2DxqTFK8B1QhspZ3/5F+BnmtzYhdHxYZUtvt04=",
+            "statementDigest": "e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9",
+            "sessionDeadlineMs": "1786337600000",
+            "invitationDigest": "f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6",
+            "claimExpiresAtMs": "1786337262106",
+            "event": "minted",
+            "eventAtMs": "1786337082106",
+            "issuedAtMs": "1786337082111",
+            "externalBusinessActionPerformed": false
+          },
+          "coordinatorSignature": {
+            "algorithm": "ed25519",
+            "keyId": "coordinator-test-2026-10",
+            "signature": "fTlRLHYmSiqv5D65P1ZmYxC2shzk4tNMz0iSO8kUCSS8RElJeriK2Im5/f444uSEypcl11er1YxZ/wDmgF64DQ=="
+          },
+          "externalBusinessActionPerformed": false
+        },
+        "senderKey": "QFjtH2DxqTFK8B1QhspZ3/5F+BnmtzYhdHxYZUtvt04=",
+        "sig": "JmY3VgFmYflw5QfuvSaPrdEGwKjbw30h72E5ZuXC3egxRoBAfOMdeLTLj4lg50B095EtKUy2nP4GHYILkPeeDw=="
+      },
+      "envelopeSigningBytesHex": "7b22626f6479223a7b22636f6f7264696e61746f725369676e6174757265223a7b22616c676f726974686d223a2265643235353139222c226b65794964223a22636f6f7264696e61746f722d746573742d323032362d3130222c227369676e6174757265223a2266546c524c48596d536971763544363550315a6d5978433273687a6b34744e4d7a3069534f386b554353533852456c4a6572694b32496d352f663434347553457970636c313165723159785a2f77446d6746363444513d3d227d2c22656e726f6c6c6d656e74223a7b22636c61696d4578706972657341744d73223a2231373836333337323632313036222c226576656e74223a226d696e746564222c226576656e7441744d73223a2231373836333337303832313036222c2265787465726e616c427573696e657373416374696f6e506572666f726d6564223a66616c73652c22696e7669746174696f6e446967657374223a2266303432363337626262303261616437623234646364363735323631613136616166663765333235336232663738373163623930396261313563306533376136222c2269737375656441744d73223a2231373836333337303832313131222c2270726f746f636f6c223a22636c6f636b636861696e2e6167656e742d68616e647368616b652f7632222c22726f6c65223a22696e69746961746f72222c22736368656d61223a22636c6f636b636861696e2e6167656e742d68616e647368616b652d73656e6465722d656e726f6c6c6d656e742f7631222c2273656e6465724b6579223a2251466a74483244787154464b384231516873705a332f35462b426e6d747a5968644878595a5574767430343d222c2273657373696f6e446561646c696e654d73223a2231373836333337363030303030222c2273657373696f6e4964223a2232323232323232322d333333332d343434342d383535352d363636363636363636363636222c2273746174656d656e74446967657374223a2265323566306461303839303765653861336233653261326433313665656133343133656666623630656237346431393661346636336338643861356635366439227d2c2265787465726e616c427573696e657373416374696f6e506572666f726d6564223a66616c73657d2c226b696e64223a226167656e745f76325f73656e6465725f656e726f6c6c6d656e74222c22726f6c65223a22696e69746961746f72222c22736571223a2231222c2273657373696f6e4964223a2232323232323232322d333333332d343434342d383535352d363636363636363636363636227d"
+    },
+    "responder": {
+      "enrollment": {
+        "schema": "clockchain.agent-handshake-sender-enrollment/v1",
+        "protocol": "clockchain.agent-handshake/v2",
+        "sessionId": "22222222-3333-4444-8555-666666666666",
+        "role": "responder",
+        "senderKey": "QfhGeiUWWnLj/RyBc2ekhv/kFFS0hvid6FWaiq0ypgg=",
+        "statementDigest": "e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9",
+        "sessionDeadlineMs": "1786337600000",
+        "invitationDigest": "f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6",
+        "claimExpiresAtMs": "1786337262106",
+        "event": "redeemed",
+        "eventAtMs": "1786337158124",
+        "issuedAtMs": "1786337158129",
+        "externalBusinessActionPerformed": false
+      },
+      "canonicalJson": "{\"claimExpiresAtMs\":\"1786337262106\",\"event\":\"redeemed\",\"eventAtMs\":\"1786337158124\",\"externalBusinessActionPerformed\":false,\"invitationDigest\":\"f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6\",\"issuedAtMs\":\"1786337158129\",\"protocol\":\"clockchain.agent-handshake/v2\",\"role\":\"responder\",\"schema\":\"clockchain.agent-handshake-sender-enrollment/v1\",\"senderKey\":\"QfhGeiUWWnLj/RyBc2ekhv/kFFS0hvid6FWaiq0ypgg=\",\"sessionDeadlineMs\":\"1786337600000\",\"sessionId\":\"22222222-3333-4444-8555-666666666666\",\"statementDigest\":\"e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9\"}",
+      "canonicalBytesHex": "7b22636c61696d4578706972657341744d73223a2231373836333337323632313036222c226576656e74223a2272656465656d6564222c226576656e7441744d73223a2231373836333337313538313234222c2265787465726e616c427573696e657373416374696f6e506572666f726d6564223a66616c73652c22696e7669746174696f6e446967657374223a2266303432363337626262303261616437623234646364363735323631613136616166663765333235336232663738373163623930396261313563306533376136222c2269737375656441744d73223a2231373836333337313538313239222c2270726f746f636f6c223a22636c6f636b636861696e2e6167656e742d68616e647368616b652f7632222c22726f6c65223a22726573706f6e646572222c22736368656d61223a22636c6f636b636861696e2e6167656e742d68616e647368616b652d73656e6465722d656e726f6c6c6d656e742f7631222c2273656e6465724b6579223a225166684765695557576e4c6a2f5279426332656b68762f6b464653306876696436465761697130797067673d222c2273657373696f6e446561646c696e654d73223a2231373836333337363030303030222c2273657373696f6e4964223a2232323232323232322d333333332d343434342d383535352d363636363636363636363636222c2273746174656d656e74446967657374223a2265323566306461303839303765653861336233653261326433313665656133343133656666623630656237346431393661346636336338643861356635366439227d",
+      "digest": "a8a71cca17ee00daff45ad965188bd96560122be6792fb2d7732b1073fb9c16d",
+      "body": {
+        "enrollment": {
+          "schema": "clockchain.agent-handshake-sender-enrollment/v1",
+          "protocol": "clockchain.agent-handshake/v2",
+          "sessionId": "22222222-3333-4444-8555-666666666666",
+          "role": "responder",
+          "senderKey": "QfhGeiUWWnLj/RyBc2ekhv/kFFS0hvid6FWaiq0ypgg=",
+          "statementDigest": "e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9",
+          "sessionDeadlineMs": "1786337600000",
+          "invitationDigest": "f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6",
+          "claimExpiresAtMs": "1786337262106",
+          "event": "redeemed",
+          "eventAtMs": "1786337158124",
+          "issuedAtMs": "1786337158129",
+          "externalBusinessActionPerformed": false
+        },
+        "coordinatorSignature": {
+          "algorithm": "ed25519",
+          "keyId": "coordinator-test-2026-10",
+          "signature": "gPwLLVkFQhmybEa7/uUJ1c6PZ74wP8eSyOS+esVuLUWWO6BdgyFvjqcv1F1UWOfDyGgwtttGk7Yxg2x9/hUBCg=="
+        },
+        "externalBusinessActionPerformed": false
+      },
+      "envelope": {
+        "sessionId": "22222222-3333-4444-8555-666666666666",
+        "seq": "3",
+        "role": "responder",
+        "kind": "agent_v2_sender_enrollment",
+        "body": {
+          "enrollment": {
+            "schema": "clockchain.agent-handshake-sender-enrollment/v1",
+            "protocol": "clockchain.agent-handshake/v2",
+            "sessionId": "22222222-3333-4444-8555-666666666666",
+            "role": "responder",
+            "senderKey": "QfhGeiUWWnLj/RyBc2ekhv/kFFS0hvid6FWaiq0ypgg=",
+            "statementDigest": "e25f0da08907ee8a3b3e2a2d316eea3413effb60eb74d196a4f63c8d8a5f56d9",
+            "sessionDeadlineMs": "1786337600000",
+            "invitationDigest": "f042637bbb02aad7b24dcd675261a16aaff7e3253b2f7871cb909ba15c0e37a6",
+            "claimExpiresAtMs": "1786337262106",
+            "event": "redeemed",
+            "eventAtMs": "1786337158124",
+            "issuedAtMs": "1786337158129",
+            "externalBusinessActionPerformed": false
+          },
+          "coordinatorSignature": {
+            "algorithm": "ed25519",
+            "keyId": "coordinator-test-2026-10",
+            "signature": "gPwLLVkFQhmybEa7/uUJ1c6PZ74wP8eSyOS+esVuLUWWO6BdgyFvjqcv1F1UWOfDyGgwtttGk7Yxg2x9/hUBCg=="
+          },
+          "externalBusinessActionPerformed": false
+        },
+        "senderKey": "QfhGeiUWWnLj/RyBc2ekhv/kFFS0hvid6FWaiq0ypgg=",
+        "sig": "zaWAgvL/SenBaxJJpf+nhnT9OsgUhBlJUYAgMO4GiI2GU7ul498qpmUROMrsg8l6k0IdVXlwPITDvj9YesJQCg=="
+      },
+      "envelopeSigningBytesHex": "7b22626f6479223a7b22636f6f7264696e61746f725369676e6174757265223a7b22616c676f726974686d223a2265643235353139222c226b65794964223a22636f6f7264696e61746f722d746573742d323032362d3130222c227369676e6174757265223a226750774c4c566b4651686d79624561372f75554a316336505a37347750386553794f532b657356754c5557574f364264677946766a71637631463155574f664479476777747474476b375978673278392f68554243673d3d227d2c22656e726f6c6c6d656e74223a7b22636c61696d4578706972657341744d73223a2231373836333337323632313036222c226576656e74223a2272656465656d6564222c226576656e7441744d73223a2231373836333337313538313234222c2265787465726e616c427573696e657373416374696f6e506572666f726d6564223a66616c73652c22696e7669746174696f6e446967657374223a2266303432363337626262303261616437623234646364363735323631613136616166663765333235336232663738373163623930396261313563306533376136222c2269737375656441744d73223a2231373836333337313538313239222c2270726f746f636f6c223a22636c6f636b636861696e2e6167656e742d68616e647368616b652f7632222c22726f6c65223a22726573706f6e646572222c22736368656d61223a22636c6f636b636861696e2e6167656e742d68616e647368616b652d73656e6465722d656e726f6c6c6d656e742f7631222c2273656e6465724b6579223a225166684765695557576e4c6a2f5279426332656b68762f6b464653306876696436465761697130797067673d222c2273657373696f6e446561646c696e654d73223a2231373836333337363030303030222c2273657373696f6e4964223a2232323232323232322d333333332d343434342d383535352d363636363636363636363636222c2273746174656d656e74446967657374223a2265323566306461303839303765653861336233653261326433313665656133343133656666623630656237346431393661346636336338643861356635366439227d2c2265787465726e616c427573696e657373416374696f6e506572666f726d6564223a66616c73657d2c226b696e64223a226167656e745f76325f73656e6465725f656e726f6c6c6d656e74222c22726f6c65223a22726573706f6e646572222c22736571223a2233222c2273657373696f6e4964223a2232323232323232322d333333332d343434342d383535352d363636363636363636363636227d"
+    }
+  }
+}

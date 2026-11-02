@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, verify as verifySignature } from "node:crypto";
 import { gzipSync } from "node:zlib";
 
 import { ClockchainClient, readConfigFromEnv } from "@clockchain/core";
@@ -13,12 +13,21 @@ import type { ClaimPhase, V2AcceptanceHmacKey, V2InvitationClaim, V2InvitationMe
 import { createV2InvitationService, createV2InvitationStore, V2InvitationWindowUnavailableError } from "./invitation-store.js";
 import { V2_HELPER_VERSION, V2_PUBLIC_ENDPOINT, readV2ReleasePin, verifiedV2HelperPrefix } from "./instructions.js";
 import {
+  AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_EVENTS,
+  AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_KIND,
+  AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_SCHEMA,
+  signSenderEnrollment,
+  type V2SenderEnrollmentKey,
+} from "./relay-enrollment.js";
+import {
   commitmentCheckpointDigest,
   commitmentCheckpointSigningBytes,
   normalizeV2CommitmentCheckpoint,
 } from "./commitment-checkpoint.js";
 import {
   AGENT_HANDSHAKE_V2_MCP_ORIGIN,
+  AgentHandshakeV2ValidationError,
+  assertV2AcceptanceBinding,
   normalizeV2Acceptance,
   normalizeV2Descriptor,
   normalizeV2EvidenceResult,
@@ -29,9 +38,14 @@ import {
   normalizeV2Result,
   normalizeV2Terms,
   v2CanonicalRecord,
+  verifyV2ProposalEnvelope,
 } from "./protocol.js";
 
 type JsonObject = Record<string, any>;
+type SigningOperation = "identity_claim" | "proposal" | "acceptance" | "evidence";
+// A pending acceptance keeps, beside it, the verified proposal envelope it
+// accepts (H-REQ-02); every other pending operation has none.
+type PendingSigning = { operation: SigningOperation; payload: JsonObject; proposalEnvelope?: JsonObject };
 type InvitationService = Readonly<{
   create(input: { sessionId: string; statementDigest: string; nbfMs: string | number; expMs: string | number; invitationExpMs?: string | number; metadata?: V2InvitationMetadata; commitGuard?: () => boolean }): Promise<{ initiatorAccess: string; responderInvitation: string }>;
   accept(input: { invitation: string; acceptanceIdempotencyKey?: string }): Promise<{ claimedAtMs: string | null; responderAccess: string; metadata: V2InvitationMetadata | null; claim: V2InvitationClaim | null }>;
@@ -44,7 +58,10 @@ export type Relay = Readonly<{
   // (relay GET /v1/runs). Absent => invite() uses only the relay's "current" session.
   listSessions?(): Promise<readonly RelaySessionListing[]>;
   getMessages(input: { sessionId: string; after?: string; waitMs?: number }): Promise<{ highestSeq?: string; messages: readonly JsonObject[] }>;
-  postMessage(input: { body: unknown; kind: string; privateKeyPem: string; role: V2Role; senderKey: string; sessionId: string }): Promise<unknown>;
+  // beforeSend (optional): a freshness guard the relay runs immediately before
+  // every post attempt; whatever it throws ends the post with nothing further
+  // sent.
+  postMessage(input: { body: unknown; kind: string; privateKeyPem: string; role: V2Role; senderKey: string; sessionId: string; beforeSend?: () => void }): Promise<unknown>;
   getResult(input: { sessionId: string }): Promise<unknown>;
 }>;
 type CoordinatorData = JsonObject & {
@@ -54,7 +71,7 @@ type CoordinatorData = JsonObject & {
   sessionKeyAddress?: string;
   party?: JsonObject;
   counterpart?: JsonObject;
-  pending?: { operation: "identity_claim" | "proposal" | "acceptance" | "evidence"; payload: JsonObject } | null;
+  pending?: PendingSigning | null;
   proposalEnvelope?: JsonObject;
   acceptanceEnvelope?: JsonObject;
   proposalCheckpoint?: JsonObject;
@@ -65,6 +82,9 @@ type CoordinatorData = JsonObject & {
   evidenceUploaded?: boolean;
   certificateAvailable?: boolean;
   relay?: { senderKey: string };
+  // H-REQ-01: this role's signed sender enrollment, kept so a retry re-posts
+  // identical bytes.
+  senderEnrollment?: JsonObject;
   stage?: string;
 };
 
@@ -341,7 +361,38 @@ function relayPrivateKeyMatchesSender(input: { privateKeyPem: string; senderKey:
   }
 }
 
-function signRequest(current: CoordinatorData, role: V2Role, operation: string, payload: JsonObject): JsonObject {
+// The signing-request format a pinned helper release reads (H-REQ-02).
+// Releases below 2.3.0 read signing-request/v1; 2.3.0 and later read
+// signing-request/v2, which adds proposalEnvelope. A version that is not
+// MAJOR.MINOR.PATCH refuses.
+type SigningRequestFormat = Readonly<{ helperVersion: string; schemaVersion: 1 | 2 }>;
+const PINNED_HELPER_VERSION = /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/;
+const SIGNING_REQUEST_V2_FIRST_HELPER = [2, 3, 0] as const;
+
+function signingRequestFormat(helperVersion: unknown): SigningRequestFormat {
+  const match = typeof helperVersion === "string" ? PINNED_HELPER_VERSION.exec(helperVersion) : null;
+  if (!match) fail("helper_version_invalid");
+  const parts = match.slice(1, 4).map(Number);
+  const index = parts.findIndex((part, position) => part !== SIGNING_REQUEST_V2_FIRST_HELPER[position]);
+  const readsV2 = index === -1 || parts[index] > SIGNING_REQUEST_V2_FIRST_HELPER[index];
+  return Object.freeze({ helperVersion: helperVersion as string, schemaVersion: readsV2 ? 2 : 1 });
+}
+
+// The signing request, in the pinned helper's REQUEST_KEYS order. v1 is the
+// request as before H-REQ-02. v2 adds proposalEnvelope (H-REQ-02): for an
+// acceptance, the verified proposal envelope it accepts exactly as the
+// initiator released it; null for every other operation. In both formats an
+// acceptance with no stored verified proposal it binds to gets no request at
+// all.
+function signRequest(format: SigningRequestFormat, current: CoordinatorData, role: V2Role, operation: string, payload: JsonObject, proposalEnvelope: JsonObject | null = null): JsonObject {
+  if (operation === "acceptance") {
+    if (proposalEnvelope === null) fail("acceptance_proposal_missing");
+    try {
+      assertV2AcceptanceBinding({ acceptance: payload, proposal: proposalEnvelope.payload });
+    } catch {
+      fail("acceptance_proposal_unbound");
+    }
+  } else if (proposalEnvelope !== null) fail();
   const bytes = canonicalBytes(payload);
   const descriptorEnvelope = operation === "evidence"
     ? current.descriptorEnvelope
@@ -354,9 +405,9 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
   const previousCheckpointDigest = operation === "acceptance"
     ? (current.proposalCheckpoint ? commitmentCheckpointDigest(current.proposalCheckpoint) : fail())
     : null;
-  return Object.freeze({
-    schema: "clockchain.agent-handshake-signing-request/v1",
-    helperVersion: V2_HELPER_VERSION,
+  const head = {
+    schema: `clockchain.agent-handshake-signing-request/v${format.schemaVersion}`,
+    helperVersion: format.helperVersion,
     operation,
     role,
     sessionId: current.discovery.sessionId,
@@ -367,10 +418,41 @@ function signRequest(current: CoordinatorData, role: V2Role, operation: string, 
     policyDigest: current.policyDigest,
     previousCheckpointDigest,
     descriptorEnvelope,
+  };
+  const tail = {
     bytesGzipBase64Url: gzipSync(bytes).toString("base64url"),
     bytesSha256: createHash("sha256").update(bytes).digest("hex"),
     externalBusinessActionPerformed: false,
-  });
+  };
+  return Object.freeze(format.schemaVersion === 2 ? { ...head, proposalEnvelope, ...tail } : { ...head, ...tail });
+}
+
+// H-REQ-07: the instant from which a submitted signature for this pending item
+// is refused — the proposal or acceptance payload's expiry (never later than
+// the session deadline), or the session deadline for identity claims and
+// evidence.
+function signingWindowEndMs(pending: PendingSigning, sessionDeadlineMs: string): bigint {
+  const deadline = BigInt(sessionDeadlineMs);
+  if (pending.operation !== "proposal" && pending.operation !== "acceptance") return deadline;
+  const expiresAtMs = BigInt(pending.payload.expiresAtMs);
+  return expiresAtMs < deadline ? expiresAtMs : deadline;
+}
+
+// H-REQ-07: the clock for one call, read from its authorization onwards: a
+// submission through signer recovery to publication, and agent_handshake_next
+// through the descriptor phase's anchoring and evidence request. Every read
+// must be a non-negative safe integer no earlier than the read before it;
+// anything else refuses the call (coordination_failed) at that read, before
+// anything further is written or sent.
+function nonDecreasingClock(read: () => number): () => number {
+  let previous = 0;
+  return () => {
+    const value = read();
+    if (!Number.isSafeInteger(value) || value < 0) fail("clock_invalid");
+    if (value < previous) fail("clock_backwards");
+    previous = value;
+    return value;
+  };
 }
 
 function signatureEnvelope(kind: "proposal" | "acceptance", payload: JsonObject, address: string, signatureHex: string): JsonObject {
@@ -493,7 +575,7 @@ function signingLocalAction(verifiedHelperPrefix: string, signingRequest: JsonOb
   });
 }
 
-function certificateLocalAction(verifiedHelperPrefix: string, input: {
+function certificateLocalAction(verifiedHelperPrefix: string, helperVersion: string, input: {
   certificate: JsonObject;
   discovery: JsonObject;
   role: V2Role;
@@ -501,7 +583,7 @@ function certificateLocalAction(verifiedHelperPrefix: string, input: {
 }, registerCommand?: LocalActionCommandRegistrar): JsonObject {
   const payload = Object.freeze({
     schema: "clockchain.agent-handshake-certificate-verification/v1",
-    helperVersion: V2_HELPER_VERSION,
+    helperVersion,
     role: input.role,
     sessionId: input.sessionId,
     repositorySha: input.discovery.repositorySha,
@@ -571,6 +653,18 @@ function hostSessionFailed(reasonCode: string): never {
   throw new V2SessionFailedError(reasonCode);
 }
 
+// H-REQ-01: both enrollments name the invitation by the digest the invitation
+// store keys it by — SHA-256 of the responder invitation token — which the
+// mint and the redemption both hold.
+function invitationDigestOf(invitation: string): string {
+  return createHash("sha256").update(invitation, "utf8").digest("hex");
+}
+
+function isRoleAlreadyBound(error: unknown): boolean {
+  const relayError = error as { code?: unknown; status?: unknown } | null;
+  return relayError?.code === "ROLE_ALREADY_BOUND" && relayError?.status === 409;
+}
+
 function funded(entries: readonly JsonObject[], role: V2Role, address: string): boolean {
   return entries.some((entry) => entry?.kind === "agent_v2_funding_record" && entry?.role === "host" && entry?.body?.role === role && entry?.body?.address === address);
 }
@@ -585,10 +679,21 @@ export function createV2Coordinator(options: {
   recoverEip191Address(input: { bytes: Buffer; signatureHex: string }): Promise<string>;
   registrationFundingReady(input: { address: string }): Promise<boolean>;
   resolveRegistration(input: { address: string; fromBlock: string }): Promise<JsonObject | null>;
-  advanceTransitions(input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]>;
+  // `beforeAnchor` (H-REQ-07) runs immediately before each ledger write;
+  // whatever it throws ends the anchoring with nothing further written.
+  advanceTransitions(input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[]; beforeAnchor?: () => void }): Promise<JsonObject[]>;
   nextWaitDefaultMs?: number;
   verifiedHelperPrefix: string;
+  // H-REQ-01: the coordinator's sender-enrollment key. Absent: no enrollments
+  // are posted (the behaviour before sender binding).
+  enrollmentKey?: V2SenderEnrollmentKey | null;
+  // The pinned helper release version (MAJOR.MINOR.PATCH); default
+  // V2_HELPER_VERSION. It is stamped in every helper request, is the only
+  // version join accepts, and selects the signing-request format (H-REQ-02).
+  // A version that does not parse refuses here, at creation.
+  helperVersion?: string;
 }) {
+  const requestFormat = signingRequestFormat(options.helperVersion === undefined ? V2_HELPER_VERSION : options.helperVersion);
   const store = options.stateStore ?? createHandshakeStateStore();
   const now = options.now ?? Date.now;
   const acceptSerializers = new Map<string, Promise<void>>();
@@ -608,7 +713,7 @@ export function createV2Coordinator(options: {
   // stored record shows the role joined but never reached party_ready on an
   // erc8004-required session with no host funding record on the relay, the
   // honest terminal reason is a stalled host funder, not a bad token.
-  async function classifyAccessFailure(access: string, tool: string, original: Error): Promise<Error> {
+  async function classifyAccessFailure(access: string, tool: string, original: Error, readNow: () => number = now): Promise<Error> {
     try {
       const untrusted = readV2RoleAccessPayload(access);
       const verified = verifyV2RoleAccess(access, {
@@ -620,7 +725,7 @@ export function createV2Coordinator(options: {
         expectedExpMs: untrusted.expMs,
         requiredTool: tool,
       });
-      if (now() < Number(untrusted.expMs)) return original;
+      if (readNow() < Number(untrusted.expMs)) return original;
       const record = await store.get(key(verified.principal, untrusted.sessionId, untrusted.role));
       if (!record) return original;
       const current = data(record);
@@ -636,13 +741,16 @@ export function createV2Coordinator(options: {
     }
   }
 
-  async function authorize(access: string, tool: string) {
+  // `readNow` (optional) is the clock this authorization reads; a submission
+  // passes its non-decreasing clock (H-REQ-07).
+  async function authorize(access: string, tool: string, readNow: () => number = now) {
+    const nowMs = readNow();
     let verified: ReturnType<typeof authorizeV2RoleAccess>;
     try {
-      verified = authorizeV2RoleAccess(access, { keys: options.accessKeys, nowMs: now(), requiredTool: tool });
+      verified = authorizeV2RoleAccess(access, { keys: options.accessKeys, nowMs, requiredTool: tool });
     } catch (error) {
       if (!(error instanceof V2RoleAccessError)) throw error;
-      throw await classifyAccessFailure(access, tool, error);
+      throw await classifyAccessFailure(access, tool, error, readNow);
     }
     const keyValue = key(verified.principal, verified.payload.sessionId, verified.payload.role);
     const record = await store.get(keyValue);
@@ -652,12 +760,18 @@ export function createV2Coordinator(options: {
     return { verified, keyValue, record, current };
   }
 
-  async function post(keyValue: HandshakeKey, kind: string, body: unknown): Promise<void> {
+  // `assertFresh` (optional) bounds a publication by a window (H-REQ-07): it
+  // runs after each awaited read here and is handed to the relay, which runs
+  // it immediately before every post attempt. Whatever it throws ends the
+  // publication with nothing further sent.
+  async function post(keyValue: HandshakeKey, kind: string, body: unknown, assertFresh?: () => void): Promise<void> {
     const record = await store.get(keyValue);
+    assertFresh?.();
     const current = data(record);
     if (!record?.relayEd25519Pem || !current.relay?.senderKey) fail();
     const existing = (await options.relay.getMessages({ sessionId: keyValue.session })).messages
       .filter((entry) => entry?.kind === kind && entry?.role === keyValue.role);
+    assertFresh?.();
     if (existing.length > 0) {
       for (const entry of existing) {
         if (entry.senderKey !== current.relay.senderKey || !sameCanonical(entry.body, body)) fail();
@@ -667,6 +781,7 @@ export function createV2Coordinator(options: {
     await options.relay.postMessage({
       body, kind, privateKeyPem: record.relayEd25519Pem, role: keyValue.role as V2Role,
       senderKey: current.relay.senderKey, sessionId: keyValue.session,
+      ...(assertFresh ? { beforeSend: assertFresh } : {}),
     });
   }
 
@@ -698,6 +813,80 @@ export function createV2Coordinator(options: {
     }
     const updated = await store.update(keyValue, (value) => merge(value, keyValue, patch));
     return data(updated);
+  }
+
+  // H-REQ-01: enroll this role's relay sender key. The enrollment is signed
+  // once and kept with the role's state, so a retry re-posts identical bytes;
+  // it is posted as the role's first relay message, signed by the enrolled key
+  // like every other message from this role. Returns the enrollment, or null
+  // when no enrollment key is configured.
+  async function enrollSender(keyValue: HandshakeKey, fields: {
+    role: V2Role;
+    eventAtMs: string;
+    claimExpiresAtMs: string;
+    invitationDigest: string;
+    statementDigest: string;
+    sessionDeadlineMs: string;
+  }): Promise<JsonObject | null> {
+    const enrollmentKey = options.enrollmentKey;
+    if (!enrollmentKey) return null;
+    const record = await store.get(keyValue);
+    const senderKey = data(record).relay?.senderKey;
+    if (!record || typeof senderKey !== "string") fail("enrollment_sender_missing");
+    const expected: JsonObject = {
+      schema: AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_SCHEMA,
+      protocol: "clockchain.agent-handshake/v2",
+      sessionId: keyValue.session,
+      role: fields.role,
+      senderKey,
+      statementDigest: fields.statementDigest,
+      sessionDeadlineMs: fields.sessionDeadlineMs,
+      invitationDigest: fields.invitationDigest,
+      claimExpiresAtMs: fields.claimExpiresAtMs,
+      event: AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_EVENTS[fields.role],
+      eventAtMs: fields.eventAtMs,
+    };
+    let signed = data(record).senderEnrollment;
+    if (!signed) {
+      let fresh: JsonObject;
+      try {
+        fresh = signSenderEnrollment({
+          enrollment: {
+            ...expected,
+            // The signing time, never earlier than the event it records.
+            issuedAtMs: String(Math.max(now(), Number(fields.eventAtMs))),
+            externalBusinessActionPerformed: false,
+          },
+          keyId: enrollmentKey.kid,
+          privateKeyPem: enrollmentKey.privateKeyPem,
+        }) as JsonObject;
+      } catch {
+        fail("enrollment_invalid");
+      }
+      const updated = await store.update(keyValue, (value) =>
+        data(value).senderEnrollment ? value : merge(value, keyValue, { senderEnrollment: JSON.parse(JSON.stringify(fresh)) }));
+      signed = data(updated).senderEnrollment;
+    }
+    // A kept enrollment must still describe this role's key and invitation.
+    const kept = signed?.enrollment as JsonObject | undefined;
+    if (!kept || Object.entries(expected).some(([field, value]) => kept[field] !== value)) fail("enrollment_mismatch");
+    await postEnrollment(keyValue, senderKey, signed as JsonObject);
+    return kept;
+  }
+
+  async function postEnrollment(keyValue: HandshakeKey, senderKey: string, body: JsonObject): Promise<void> {
+    try {
+      await post(keyValue, AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_KIND, body);
+    } catch (error) {
+      if (!isRoleAlreadyBound(error)) throw error;
+      // The relay already binds this role. That is success only when the
+      // binding is this enrollment: this role's own key and these bytes.
+      const bound = (await options.relay.getMessages({ sessionId: keyValue.session })).messages
+        .filter((entry) => entry?.kind === AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_KIND && entry?.role === keyValue.role);
+      if (bound.length !== 1 || bound[0].senderKey !== senderKey || !sameCanonical(bound[0].body, body)) {
+        fail("enrollment_role_bound_elsewhere");
+      }
+    }
   }
 
   async function storeInitial(access: string, metadata: V2InvitationMetadata, role: V2Role, missingTermsEvent?: string): Promise<HandshakeKey> {
@@ -796,7 +985,7 @@ export function createV2Coordinator(options: {
         role,
         sessionId: keyValue.session,
       }),
-      localAction: certificateLocalAction(options.verifiedHelperPrefix, {
+      localAction: certificateLocalAction(options.verifiedHelperPrefix, requestFormat.helperVersion, {
         certificate: envelope,
         discovery: current.discovery,
         role,
@@ -805,7 +994,40 @@ export function createV2Coordinator(options: {
     });
   }
 
-  async function evaluateNext(auth: Awaited<ReturnType<typeof authorize>>, role: V2Role): Promise<JsonObject> {
+  // H-REQ-02: a proposal read off the relay is verified before the responder
+  // accepts it: the initiator's EIP-191 signature over
+  // its canonical bytes, this session, repository, terms and window, an expiry
+  // inside the session, and the exact two parties this session paired (the
+  // counterpart as initiator, this role's own party as responder). Returns
+  // the envelope exactly as it was read off the relay; anything else refuses.
+  async function verifiedCounterpartProposal(current: CoordinatorData, sessionId: string): Promise<JsonObject> {
+    let verified: Readonly<JsonObject>;
+    try {
+      verified = await verifyV2ProposalEnvelope({
+        envelope: current.proposalEnvelope,
+        expectedSessionId: sessionId,
+        expectedRepositorySha: current.discovery.repositorySha,
+        expectedTerms: current.terms,
+        nowMs: now(),
+        recoverEip191Address: options.recoverEip191Address,
+      });
+    } catch (error) {
+      if (error instanceof AgentHandshakeV2ValidationError) fail("proposal_unverified");
+      throw error;
+    }
+    const payload = verified.payload as JsonObject;
+    if (
+      !current.counterpart || !current.party ||
+      !sameCanonical(payload.initiator, current.counterpart) ||
+      !sameCanonical(payload.responder, current.party) ||
+      BigInt(payload.expiresAtMs) > BigInt(current.discovery.sessionDeadlineMs)
+    ) fail("proposal_unbound");
+    return JSON.parse(JSON.stringify(current.proposalEnvelope)) as JsonObject;
+  }
+
+  // `clock` is the call's non-decreasing clock (the one its authorization
+  // read); the descriptor phase reads the agreement window on it (H-REQ-07).
+  async function evaluateNext(auth: Awaited<ReturnType<typeof authorize>>, role: V2Role, clock: () => number): Promise<JsonObject> {
     const observed: { entries?: readonly JsonObject[] } = {};
     let current = await refresh(auth.keyValue, observed);
     // A signed host failure notice ends the session for both roles before any
@@ -844,7 +1066,7 @@ export function createV2Coordinator(options: {
         current = data(updated);
         if (!current.pending) fail();
       }
-      const signingRequest = signRequest(current, role, current.pending.operation, current.pending.payload);
+      const signingRequest = signRequest(requestFormat, current, role, current.pending.operation, current.pending.payload, current.pending.proposalEnvelope ?? null);
       return Object.freeze({ stage: current.stage, signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
     }
     const entries = (await options.relay.getMessages({ sessionId: auth.keyValue.session })).messages;
@@ -926,28 +1148,34 @@ export function createV2Coordinator(options: {
         data(value).pending ? value : merge(value, auth.keyValue, { pending: { operation: "proposal", payload: proposal }, stage: "sign_proposal" }));
       const storedProposal = data(updated).pending;
       if (storedProposal?.operation !== "proposal") fail("proposal_pending");
-      const signingRequest = signRequest(data(updated), role, "proposal", storedProposal.payload);
+      const signingRequest = signRequest(requestFormat, data(updated), role, "proposal", storedProposal.payload);
       return Object.freeze({ stage: "sign_proposal", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
     }
     if (role === "responder" && !current.acceptanceEnvelope) {
       if (!current.proposalEnvelope?.payload) return Object.freeze({ needed: "proposal", nextAction: NEXT_ACTION, retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_proposal" });
       const proposal = normalizeV2Proposal(current.proposalEnvelope.payload) as JsonObject;
       if (BigInt(proposal.expiresAtMs) <= BigInt(now())) windowExpired();
+      const proposalEnvelope = await verifiedCounterpartProposal(current, auth.keyValue.session);
+      // The verification awaited signer recovery; the acceptance is issued at
+      // a fresh read, which must still lie inside the proposal's window.
+      const acceptedAtMs = now();
+      if (BigInt(proposal.expiresAtMs) <= BigInt(acceptedAtMs)) windowExpired();
       const acceptance = normalizeV2Acceptance({
         schema: "clockchain.agent-handshake-acceptance/v2", protocol: "clockchain.agent-handshake/v2",
         sessionId: proposal.sessionId, repositorySha: proposal.repositorySha, reference: proposal.reference,
         statementDigest: proposal.statementDigest, identityPolicy: proposal.identityPolicy,
         initiator: proposal.initiator, responder: proposal.responder, proposalDigest: digestHex(proposal),
-        decision: "ACCEPTED", issuedAtMs: String(now()), expiresAtMs: proposal.expiresAtMs,
+        decision: "ACCEPTED", issuedAtMs: String(acceptedAtMs), expiresAtMs: proposal.expiresAtMs,
         externalBusinessActionPerformed: false,
       }) as JsonObject;
       // Same concurrent-mint guard as the proposal branch: keep the first
-      // stored pending and serve its request, never a discarded mint's.
+      // stored pending and serve its request, never a discarded mint's. The
+      // verified proposal envelope is stored with the acceptance it binds.
       const updated = await store.update(auth.keyValue, (value) =>
-        data(value).pending ? value : merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance }, stage: "sign_acceptance" }));
+        data(value).pending ? value : merge(value, auth.keyValue, { pending: { operation: "acceptance", payload: acceptance, proposalEnvelope }, stage: "sign_acceptance" }));
       const storedAcceptance = data(updated).pending;
       if (storedAcceptance?.operation !== "acceptance") fail("acceptance_pending");
-      const signingRequest = signRequest(data(updated), role, "acceptance", storedAcceptance.payload);
+      const signingRequest = signRequest(requestFormat, data(updated), role, "acceptance", storedAcceptance.payload, storedAcceptance.proposalEnvelope ?? null);
       return Object.freeze({
         stage: "sign_acceptance",
         signingSummary: signingSummary(signingRequest),
@@ -958,13 +1186,31 @@ export function createV2Coordinator(options: {
     current = await refresh(auth.keyValue);
     if (!current.descriptorEnvelope?.descriptor || !current.sessionDigest) return Object.freeze({ needed: "descriptor", nextAction: NEXT_ACTION, retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_descriptor" });
     const descriptor = normalizeV2Descriptor(current.descriptorEnvelope.descriptor) as JsonObject;
-    const transitions = await options.advanceTransitions({ descriptor, role, existing: current.transitions ?? [] });
+    // H-REQ-07: nothing is anchored to the ledger, reported or requested for
+    // evidence at or after the agreement's expiry. The window is read on the
+    // call's clock before anchoring, immediately before each ledger write,
+    // after anchoring, immediately before each attempt to post the report
+    // (inside post() and the relay) and inside the state write that stores the
+    // evidence request; once it has closed nothing further is written or sent.
+    // A role whose evidence is already uploaded reaches its certificate as
+    // before; after the expiry it does so without anchoring anything.
+    const agreementEndMs = BigInt(descriptor.agreementExpiresAtMs);
+    const agreementOpen = () => BigInt(clock()) < agreementEndMs;
+    const assertAgreementOpen = () => { if (!agreementOpen()) windowExpired(); };
+    if (!agreementOpen()) {
+      if (current.evidenceUploaded) return certificateResponse(auth.keyValue, current, role);
+      windowExpired();
+    }
+    const transitions = await options.advanceTransitions({ descriptor, role, existing: current.transitions ?? [], beforeAnchor: assertAgreementOpen });
     if (transitions.length !== 3) {
       await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { transitions, stage: "awaiting_anchors" }));
       return Object.freeze({ needed: "counterpart_transition", nextAction: NEXT_ACTION, retryAfterMs: RETRY_AFTER_MS, role, sessionId: auth.keyValue.session, stage: "awaiting_anchors" });
     }
-    if (role === "initiator") await post(auth.keyValue, "agent_v2_anchor_report", { transitions });
+    // With evidence uploaded the report is already on the relay (it precedes
+    // the evidence request), so this post only confirms it and is not bounded.
+    if (role === "initiator") await post(auth.keyValue, "agent_v2_anchor_report", { transitions }, current.evidenceUploaded ? undefined : assertAgreementOpen);
     if (current.evidenceUploaded) return certificateResponse(auth.keyValue, current, role);
+    assertAgreementOpen();
     const evidence = normalizeV2EvidenceResult({
       externalBusinessActionPerformed: false, party: current.party, policyDigest: current.policyDigest,
       reference: current.terms.reference, repositorySha: current.discovery.repositorySha, role,
@@ -974,13 +1220,15 @@ export function createV2Coordinator(options: {
     }, current.terms.identityPolicy) as JsonObject;
     // Concurrent-mint guard: keep the first stored pending (transitions are
     // recomputed on every poll, so refreshing them here stays safe).
-    const updated = await store.update(auth.keyValue, (value) =>
-      data(value).pending
+    const updated = await store.update(auth.keyValue, (value) => {
+      assertAgreementOpen();
+      return data(value).pending
         ? merge(value, auth.keyValue, { transitions })
-        : merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" }));
+        : merge(value, auth.keyValue, { transitions, pending: { operation: "evidence", payload: evidence }, stage: "sign_evidence" });
+    });
     const storedEvidence = data(updated).pending;
     if (storedEvidence?.operation !== "evidence") fail("evidence_pending");
-    const signingRequest = signRequest(data(updated), role, "evidence", storedEvidence.payload);
+    const signingRequest = signRequest(requestFormat, data(updated), role, "evidence", storedEvidence.payload);
     return Object.freeze({ stage: "sign_evidence", signingSummary: signingSummary(signingRequest), localAction: signingLocalAction(options.verifiedHelperPrefix, signingRequest, registerLocalActionCommand) });
   }
 
@@ -1011,7 +1259,8 @@ export function createV2Coordinator(options: {
     // second invite would fail closed inside post() on the sender-key check.
     // The condition self-heals at session rotation, so surface it as
     // transient instead of a terminal coordination failure.
-    const takenInvitation = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages
+    const sessionEntries = (await options.relay.getMessages({ sessionId: found.sessionId as string })).messages;
+    const takenInvitation = sessionEntries
       .find((entry) => entry?.kind === "agent_v2_invitation_created" && entry?.role === "initiator");
     if (takenInvitation) {
       // An unclaimed mint lapses at its claimExpiresAtMs and the host rotates
@@ -1021,6 +1270,12 @@ export function createV2Coordinator(options: {
       return Number.isSafeInteger(claimExpMs)
         ? Math.min(Math.max(claimExpMs - inviteNow + 2_500, 15_000), 120_000)
         : rotationRetryMs;
+    }
+    // H-REQ-01: an initiator enrollment with no invitation message is a mint
+    // that did not finish. The relay binds the initiator role to that mint's
+    // key, so the session cannot take another invitation.
+    if (sessionEntries.some((entry) => entry?.kind === AGENT_HANDSHAKE_V2_SENDER_ENROLLMENT_KIND && entry?.role === "initiator")) {
+      return rotationRetryMs;
     }
     return null;
   }
@@ -1147,6 +1402,17 @@ export function createV2Coordinator(options: {
     }
     const createdAtMs = now();
     const keyValue = await storeInitial(created.initiatorAccess, metadata, "initiator");
+    // H-REQ-01: the initiator's enrollment is its first relay message. It
+    // records this mint, so invitation_created below carries exactly its
+    // createdAtMs (eventAtMs) and claimExpiresAtMs.
+    await enrollSender(keyValue, {
+      role: "initiator",
+      eventAtMs: String(createdAtMs),
+      claimExpiresAtMs: invitationExpMs,
+      invitationDigest: invitationDigestOf(created.responderInvitation),
+      statementDigest: v2CanonicalRecord(activeTerms).digest,
+      sessionDeadlineMs: found.sessionDeadlineMs,
+    });
     await post(keyValue, "agent_v2_invitation_created", {
       claimExpiresAtMs: invitationExpMs,
       createdAtMs: String(createdAtMs),
@@ -1183,9 +1449,22 @@ export function createV2Coordinator(options: {
     async acceptInvitation(invitation: string, acceptanceIdempotencyKey?: string): Promise<JsonObject> {
       const accepted = await options.invitationService.accept({ invitation, acceptanceIdempotencyKey });
       if (!accepted.metadata || !accepted.claimedAtMs) fail();
+      const claimedAtMs = accepted.claimedAtMs;
       const build = async () => {
         const keyValue = await storeInitial(accepted.responderAccess, accepted.metadata!, "responder", "agent_handshake_v2_accept_without_host_terms");
         if (accepted.claim) await options.invitationService.advanceClaim({ claim: accepted.claim, phase: "initialized" });
+        // H-REQ-01: the responder's enrollment is its first relay message. It
+        // records this redemption, so invitation_claimed below carries exactly
+        // its claimedAtMs (eventAtMs). The claim window is the invitation's
+        // own expiry, which accept() verified against the stored invitation.
+        await enrollSender(keyValue, {
+          role: "responder",
+          eventAtMs: claimedAtMs,
+          claimExpiresAtMs: readV2RoleAccessPayload(invitation).expMs,
+          invitationDigest: invitationDigestOf(invitation),
+          statementDigest: v2CanonicalRecord(accepted.metadata!.terms).digest,
+          sessionDeadlineMs: accepted.metadata!.sessionDeadlineMs,
+        });
         await post(keyValue, "agent_v2_invitation_claimed", {
           claimedAtMs: accepted.claimedAtMs,
           externalBusinessActionPerformed: false,
@@ -1201,7 +1480,7 @@ export function createV2Coordinator(options: {
     },
 
     async join(input: { access: string; helperVersion: string; sessionKeyAddress: string; policyDigest: string }): Promise<JsonObject> {
-      if (input.helperVersion !== V2_HELPER_VERSION || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
+      if (input.helperVersion !== requestFormat.helperVersion || !ADDRESS.test(input.sessionKeyAddress) || !DIGEST.test(input.policyDigest)) fail();
       const sessionKeyAddress = input.sessionKeyAddress.toLowerCase();
       const auth = await authorize(input.access, "agent_handshake_join");
       const expectedPolicy = localPolicy(auth.current.terms, auth.verified.payload.role);
@@ -1218,7 +1497,7 @@ export function createV2Coordinator(options: {
         policyDigest: input.policyDigest, sessionKeyAddress,
         pending: { operation: "identity_claim", payload: claim }, stage: "sign_identity",
       }));
-      const signingRequest = signRequest(data(updated), auth.verified.payload.role, "identity_claim", claim);
+      const signingRequest = signRequest(requestFormat, data(updated), auth.verified.payload.role, "identity_claim", claim);
       return Object.freeze({
         role: auth.verified.payload.role, sessionId: auth.keyValue.session,
         repositorySha: auth.current.discovery.repositorySha, sessionDeadlineMs: auth.current.discovery.sessionDeadlineMs,
@@ -1236,7 +1515,10 @@ export function createV2Coordinator(options: {
     },
 
     async next(input: { access: string; waitMs?: number }): Promise<JsonObject> {
-      const auth = await authorize(input.access, "agent_handshake_next");
+      // H-REQ-07: one non-decreasing clock from authorization through the
+      // descriptor phase's anchoring and evidence request.
+      const clock = nonDecreasingClock(now);
+      const auth = await authorize(input.access, "agent_handshake_next", clock);
       const role = auth.verified.payload.role;
       const waitMs = boundedNextWaitMs(input.waitMs ?? options.nextWaitDefaultMs);
       const startedMs = now();
@@ -1245,7 +1527,7 @@ export function createV2Coordinator(options: {
       // replaying the backlog with after=0 would return instantly and spin.
       let cursor: string | undefined;
       for (let polls = 0; ; polls += 1) {
-        const result = await evaluateNext(auth, role);
+        const result = await evaluateNext(auth, role, clock);
         // retryAfterMs marks a dependency wait; signing requests, localActions,
         // join instructions, and terminal results never carry it.
         if (typeof result.retryAfterMs !== "number" || polls >= MAX_NEXT_WAIT_POLLS) return result;
@@ -1268,7 +1550,10 @@ export function createV2Coordinator(options: {
 
     async submitCheckpoint(input: { access: string; artifactSignatureHex: string; checkpoint: unknown }): Promise<JsonObject> {
       if (!SIGNATURE.test(input.artifactSignatureHex)) fail("signature_hex");
-      const auth = await authorize(input.access, "agent_handshake_submit_checkpoint");
+      // H-REQ-07: one non-decreasing clock from authorization through signer
+      // recovery to publication, as in submit.
+      const clock = nonDecreasingClock(now);
+      const auth = await authorize(input.access, "agent_handshake_submit_checkpoint", clock);
       const current = await refresh(auth.keyValue);
       const operation = current.pending?.operation;
       if (!current.sessionKeyAddress || (operation !== "proposal" && operation !== "acceptance")) fail("no_pending_signing_op");
@@ -1281,6 +1566,7 @@ export function createV2Coordinator(options: {
         ? null
         : current.proposalCheckpoint ? commitmentCheckpointDigest(current.proposalCheckpoint) : fail("missing_prior_proposal_checkpoint");
       const signature = checkpoint.signature as JsonObject;
+      const checkedAtMs = clock();
       const mismatch =
         checkpoint.sessionId !== auth.keyValue.session ? "sessionId" :
         checkpoint.role !== expectedRole ? "role" :
@@ -1288,9 +1574,23 @@ export function createV2Coordinator(options: {
         checkpoint.sequence !== expectedSequence ? "sequence" :
         checkpoint.previousCheckpointDigest !== expectedPrevious ? "previousCheckpointDigest" :
         checkpoint.signerAddress !== current.sessionKeyAddress ? "signerAddress" :
-        Number(checkpoint.issuedAtMs) > now() + CHECKPOINT_ISSUED_FUTURE_SKEW_MS ? "issuedAtMs_future" :
-        Number(checkpoint.expiresAtMs) <= now() ? "expiresAtMs" : null;
+        Number(checkpoint.issuedAtMs) > checkedAtMs + CHECKPOINT_ISSUED_FUTURE_SKEW_MS ? "issuedAtMs_future" :
+        Number(checkpoint.expiresAtMs) <= checkedAtMs ? "expiresAtMs" : null;
       if (mismatch) fail(`checkpoint.${mismatch}`);
+      // H-REQ-07: the checkpoint is published only while the pending item's
+      // signing window is open (as in submit) and before the checkpoint's own
+      // expiry. Both are read before and after each awaited signer recovery,
+      // after every awaited step of publication and immediately before each
+      // post attempt (inside post() and the relay), and inside the state write
+      // that records the checkpoint. Once either has passed nothing further is
+      // sent or recorded and the pending item is kept.
+      const windowEndMs = signingWindowEndMs(pending, current.discovery.sessionDeadlineMs);
+      const assertCheckpointOpen = () => {
+        const nowMs = clock();
+        if (BigInt(nowMs) >= windowEndMs) windowExpired();
+        if (Number(checkpoint.expiresAtMs) <= nowMs) fail("checkpoint.expiresAtMs");
+      };
+      assertCheckpointOpen();
       const artifactBytes = canonicalBytes(pending.payload);
       const artifactSigner = (await options.recoverEip191Address({
         bytes: artifactBytes,
@@ -1303,6 +1603,7 @@ export function createV2Coordinator(options: {
       if (artifactSigner !== current.sessionKeyAddress) {
         fail(`artifact_signer.${artifactSigner.slice(0, 12)}.${createHash("sha256").update(artifactBytes).digest("hex").slice(0, 8)}`);
       }
+      assertCheckpointOpen();
       const envelope = signatureEnvelope(operation, pending.payload, artifactSigner, input.artifactSignatureHex);
       const expectedArtifactDigest = v2CanonicalRecord(envelope).digest;
       if (checkpoint.artifactDigest !== expectedArtifactDigest) fail(`artifact_digest.${expectedArtifactDigest.slice(0, 8)}`);
@@ -1311,11 +1612,15 @@ export function createV2Coordinator(options: {
         signatureHex: signature.value,
       })).toLowerCase();
       if (recovered !== current.sessionKeyAddress) fail(`checkpoint_signer.${recovered.slice(0, 12)}`);
+      assertCheckpointOpen();
       const field = operation === "proposal" ? "proposalCheckpoint" : "acceptanceCheckpoint";
       const prior = operation === "proposal" ? current.proposalCheckpoint : current.acceptanceCheckpoint;
       if (prior && commitmentCheckpointDigest(prior) !== commitmentCheckpointDigest(checkpoint)) fail("prior_checkpoint_mismatch");
-      await post(auth.keyValue, "agent_v2_commitment_checkpoint", { checkpoint });
-      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { [field]: checkpoint }));
+      await post(auth.keyValue, "agent_v2_commitment_checkpoint", { checkpoint }, assertCheckpointOpen);
+      await store.update(auth.keyValue, (value) => {
+        assertCheckpointOpen();
+        return merge(value, auth.keyValue, { [field]: checkpoint });
+      });
       return Object.freeze({
         role: expectedRole,
         sessionId: auth.keyValue.session,
@@ -1326,33 +1631,51 @@ export function createV2Coordinator(options: {
 
     async submit(input: { access: string; policyDigest: string; signatureHex: string }): Promise<JsonObject> {
       if (!DIGEST.test(input.policyDigest) || !SIGNATURE.test(input.signatureHex)) fail();
-      const auth = await authorize(input.access, "agent_handshake_submit");
+      // H-REQ-07: one non-decreasing clock from authorization through signer
+      // recovery to publication.
+      const clock = nonDecreasingClock(now);
+      const auth = await authorize(input.access, "agent_handshake_submit", clock);
       const current = auth.current;
       if (!current.pending || current.policyDigest !== input.policyDigest || !current.sessionKeyAddress) fail();
+      // H-REQ-07: the signature is accepted only while its signing window is
+      // open. The window is read before the awaited signer recovery and after
+      // it, after every awaited step of publication and immediately before
+      // each post attempt (inside post() and the relay), and inside each state
+      // write that follows publication, so the pending item is cleared only
+      // while the window is open. Once it has closed nothing further is sent
+      // and the pending item is kept.
+      const windowEndMs = signingWindowEndMs(current.pending, current.discovery.sessionDeadlineMs);
+      const assertWindowOpen = () => { if (BigInt(clock()) >= windowEndMs) windowExpired(); };
+      const whileWindowOpen = (patch: Partial<CoordinatorData>) => (value: HandshakeRecord | null) => {
+        assertWindowOpen();
+        return merge(value, auth.keyValue, patch);
+      };
+      assertWindowOpen();
       const bytes = canonicalBytes(current.pending.payload);
       const recovered = (await options.recoverEip191Address({ bytes, signatureHex: input.signatureHex })).toLowerCase();
       if (recovered !== current.sessionKeyAddress) fail();
+      assertWindowOpen();
       if (current.pending.operation === "identity_claim") {
         await post(auth.keyValue, "agent_v2_identity_claim", {
           claim: current.pending.payload,
           signature: { address: recovered, algorithm: "eip191", value: input.signatureHex },
-        });
+        }, assertWindowOpen);
       } else if (current.pending.operation === "proposal") {
         const proposalEnvelope = signatureEnvelope("proposal", current.pending.payload, recovered, input.signatureHex);
         if (!current.proposalCheckpoint || current.proposalCheckpoint.artifactDigest !== v2CanonicalRecord(proposalEnvelope).digest) fail();
-        await post(auth.keyValue, "agent_v2_proposal", { proposalEnvelope });
-        await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { proposalEnvelope }));
+        await post(auth.keyValue, "agent_v2_proposal", { proposalEnvelope }, assertWindowOpen);
+        await store.update(auth.keyValue, whileWindowOpen({ proposalEnvelope }));
       } else if (current.pending.operation === "acceptance") {
         const acceptanceEnvelope = signatureEnvelope("acceptance", current.pending.payload, recovered, input.signatureHex);
         if (!current.acceptanceCheckpoint || current.acceptanceCheckpoint.artifactDigest !== v2CanonicalRecord(acceptanceEnvelope).digest) fail();
-        await post(auth.keyValue, "agent_v2_acceptance", { acceptanceEnvelope });
-        await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { acceptanceEnvelope }));
+        await post(auth.keyValue, "agent_v2_acceptance", { acceptanceEnvelope }, assertWindowOpen);
+        await store.update(auth.keyValue, whileWindowOpen({ acceptanceEnvelope }));
       } else {
-        await post(auth.keyValue, "agent_v2_evidence", { evidenceEnvelope: evidenceEnvelope(current.pending.payload, recovered, input.signatureHex) });
-        await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { evidenceUploaded: true }));
+        await post(auth.keyValue, "agent_v2_evidence", { evidenceEnvelope: evidenceEnvelope(current.pending.payload, recovered, input.signatureHex) }, assertWindowOpen);
+        await store.update(auth.keyValue, whileWindowOpen({ evidenceUploaded: true }));
       }
       const stage = current.pending.operation === "identity_claim" ? "identity_claimed" : `${current.pending.operation}_submitted`;
-      await store.update(auth.keyValue, (value) => merge(value, auth.keyValue, { pending: null, stage }));
+      await store.update(auth.keyValue, whileWindowOpen({ pending: null, stage }));
       return Object.freeze({ role: auth.verified.payload.role, sessionId: auth.keyValue.session, stage });
     },
 
@@ -1421,6 +1744,32 @@ function assertDistinctRuntimeKeys(groups: readonly (readonly V2AccessKey[])[]):
   }
 }
 
+// H-REQ-01: the coordinator's sender-enrollment key, by name, in the same form
+// as its other keys: AGENT_HANDSHAKE_V2_ENROLLMENT_KEY holds JSON
+// {"kid": "<key id>", "privateKeyPem": "<PKCS#8 Ed25519 PEM>"}. Unset or empty:
+// enrollments are off (logged once); present but malformed: fails at load.
+export function __runtimeV2EnrollmentKey(
+  env: Record<string, string | undefined>,
+  warn: (line: string) => void = (line) => console.warn(line),
+): V2SenderEnrollmentKey | null {
+  const raw = env.AGENT_HANDSHAKE_V2_ENROLLMENT_KEY;
+  if (!raw) {
+    warn(JSON.stringify({ event: "agent_handshake_v2_sender_enrollment_disabled" }));
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as { kid?: unknown; privateKeyPem?: unknown };
+    if (
+      parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
+      Object.keys(parsed).sort().join(",") !== "kid,privateKeyPem" ||
+      typeof parsed.kid !== "string" || !RUNTIME_KEY_ID.test(parsed.kid) ||
+      typeof parsed.privateKeyPem !== "string" ||
+      createPrivateKey(parsed.privateKeyPem).asymmetricKeyType !== "ed25519"
+    ) fail();
+    return Object.freeze({ kid: parsed.kid, privateKeyPem: parsed.privateKeyPem });
+  } catch { fail(); }
+}
+
 export function __runtimeV2KeyConfig(env: Record<string, string | undefined>): {
   activeAccessKey: V2AccessKey;
   accessKeys: readonly V2AccessKey[];
@@ -1476,13 +1825,16 @@ export function runtimeRelay(relayUrl: string): Relay {
   });
 }
 
-async function anchorV2(client: any, transition: JsonObject, canWrite: boolean): Promise<JsonObject | null> {
+async function anchorV2(client: any, transition: JsonObject, canWrite: boolean, beforeWrite?: () => void): Promise<JsonObject | null> {
   const digest = v2CanonicalRecord(transition).digest;
   const reference = `agent-handshake-v2:${transition.sessionDigest}:${transition.kind.toLowerCase()}`;
   const found = (await client.searchAsset(reference)).filter((entry: JsonObject) => entry.assetReferenceId === reference && entry.assetHash === digest);
   if (found.length > 1) fail();
   let record = found[0];
-  if (!record && canWrite) record = await client.log({ assetHash: digest, assetReferenceId: reference, additionalInfo: `agent handshake v2 ${transition.kind}` });
+  if (!record && canWrite) {
+    beforeWrite?.();
+    record = await client.log({ assetHash: digest, assetReferenceId: reference, additionalInfo: `agent handshake v2 ${transition.kind}` });
+  }
   if (!record) return null;
   const ledgerId = String(record.ledgerId ?? "");
   if (!UUID.test(ledgerId)) fail();
@@ -1507,7 +1859,7 @@ async function anchorV2(client: any, transition: JsonObject, canWrite: boolean):
   return Object.freeze({ blockTimeRaw, digest, message: transition, onChain: Object.freeze({ blockHeight, ledgerId }) });
 }
 
-export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[] }): Promise<JsonObject[]> {
+export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonObject; role: V2Role; existing: readonly JsonObject[]; beforeAnchor?: () => void }): Promise<JsonObject[]> {
   const descriptor = input.descriptor;
   const sessionDigest = v2CanonicalRecord(descriptor).digest;
   const base = {
@@ -1531,7 +1883,7 @@ export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonO
   const receipts: JsonObject[] = [];
   for (let index = 0; index < transitions.length; index += 1) {
     const owner = index === 1 ? "responder" : "initiator";
-    const anchored = await anchorV2(client, transitions[index], input.role === owner);
+    const anchored = await anchorV2(client, transitions[index], input.role === owner, input.beforeAnchor);
     if (!anchored) return receipts;
     receipts.push(anchored);
   }
@@ -1541,6 +1893,7 @@ export async function __advanceRuntimeV2(client: any, input: { descriptor: JsonO
 export function createRuntimeV2Coordinator(env: Record<string, string | undefined> = process.env) {
   const releasePin = readV2ReleasePin(env);
   const { activeAccessKey, accessKeys, acceptanceHmacKeys } = __runtimeV2KeyConfig(env);
+  const enrollmentKey = __runtimeV2EnrollmentKey(env);
   const relayUrl = normalizeRelayBaseUrl(env.HANDSHAKE_RELAY ?? "");
   const relay = runtimeRelay(relayUrl);
   const invitationStore = createV2InvitationStore({ path: env.AGENT_HANDSHAKE_V2_INVITATION_FILE });
@@ -1577,5 +1930,6 @@ export function createRuntimeV2Coordinator(env: Record<string, string | undefine
     },
     advanceTransitions: (input) => __advanceRuntimeV2(clockchain, input),
     verifiedHelperPrefix: verifiedV2HelperPrefix(releasePin),
+    enrollmentKey,
   });
 }

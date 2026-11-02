@@ -170,3 +170,30 @@ test("Caddy is the only ingress and has the one trusted internal address", async
   assert.match(source, /ipv4_address:\s*172\.30\.0\.2/);
   assert.match(source, /ipv4_address:\s*172\.30\.0\.3/);
 });
+
+// H-REQ-01 phase 1. The mcp carries the coordinator's sender-enrollment key
+// (optional; "" == absent == enrollments off). The host carries the relay
+// binding, off unless set (the host's own default when unset is enforce, so
+// an unset or empty value must never reach it), and the coordinator key ring
+// only when it is set: a value-less entry leaves an unset variable unset in
+// the container, because the host parses any value it is given.
+test("H-REQ-01: the enrollment key reaches only mcp; the relay binding (default off) and key ring (only when set) reach only the host", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const hostBlock = source.slice(source.indexOf("  host:"), source.indexOf("  telemetry-sink:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+
+  assert.match(mcpBlock, /^\s+AGENT_HANDSHAKE_V2_ENROLLMENT_KEY:\s*"\$\{AGENT_HANDSHAKE_V2_ENROLLMENT_KEY:-\}"\s*$/m);
+  assert.match(hostBlock, /^\s+AGENT_HANDSHAKE_V2_RELAY_BINDING:\s*"\$\{AGENT_HANDSHAKE_V2_RELAY_BINDING:-off\}"\s*$/m);
+  assert.match(hostBlock, /^\s+AGENT_HANDSHAKE_V2_COORDINATOR_KEYS:\s*$/m);
+  assert.doesNotMatch(hostBlock, /AGENT_HANDSHAKE_V2_ENROLLMENT_KEY/);
+  assert.doesNotMatch(mcpBlock, /AGENT_HANDSHAKE_V2_RELAY_BINDING|AGENT_HANDSHAKE_V2_COORDINATOR_KEYS/);
+
+  for (const name of ["AGENT_HANDSHAKE_V2_ENROLLMENT_KEY", "AGENT_HANDSHAKE_V2_RELAY_BINDING", "AGENT_HANDSHAKE_V2_COORDINATOR_KEYS"]) {
+    assert.match(up, new RegExp(`^${name}_PARAM="\\$\\{${name}_PARAM:-/clockchain/mcp/${name}\\}"$`, "m"), `${name} SSM name`);
+    assert.doesNotMatch(up, new RegExp(`^read_(secret|required_env) ${name} `, "m"), `${name} is never a required read`);
+  }
+  assert.match(up, /^read_optional_secret AGENT_HANDSHAKE_V2_ENROLLMENT_KEY "\$AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM"$/m);
+  assert.match(up, /^read_optional_env AGENT_HANDSHAKE_V2_RELAY_BINDING "\$AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM"$/m);
+  assert.match(up, /^read_optional_env AGENT_HANDSHAKE_V2_COORDINATOR_KEYS "\$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM"$/m);
+});

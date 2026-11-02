@@ -167,6 +167,76 @@ export function normalizeV2Acceptance(value: unknown): Readonly<JsonRecord> {
   return agreement(value, "acceptance");
 }
 
+const SIGNATURE = /^0x[0-9a-f]{130}$/;
+
+function sameCanonical(left: unknown, right: unknown): boolean {
+  return canonicalBytes(left).equals(canonicalBytes(right));
+}
+
+// H-REQ-02: a proposal envelope is used only once it verifies — the exact
+// envelope shape, this session, repository and terms, a window exactly
+// validForSeconds wide with nowMs inside it, and an EIP-191 signature over the
+// payload's canonical bytes that recovers to the initiator it names. Mirrors
+// the helper's verifyAgentHandshakeV2Proposal; signer recovery is a function
+// the caller supplies, and its own errors (for example an unreachable RPC)
+// propagate unchanged.
+export async function verifyV2ProposalEnvelope(input: {
+  envelope: unknown;
+  expectedSessionId: string;
+  expectedRepositorySha: string;
+  expectedTerms: unknown;
+  nowMs: number;
+  recoverEip191Address(input: { bytes: Buffer; signatureHex: string }): Promise<string>;
+}): Promise<Readonly<JsonRecord>> {
+  const item = exact(input.envelope, ["payload", "schema", "signature"]);
+  const payload = normalizeV2Proposal(item.payload);
+  const signature = exact(item.signature, ["address", "algorithm", "value"]);
+  const terms = normalizeV2Terms(input.expectedTerms);
+  if (
+    item.schema !== "clockchain.agent-handshake-proposal-envelope/v2" ||
+    typeof signature.address !== "string" || !ADDRESS.test(signature.address) ||
+    signature.algorithm !== "eip191" ||
+    typeof signature.value !== "string" || !SIGNATURE.test(signature.value) ||
+    !Number.isSafeInteger(input.nowMs) ||
+    payload.sessionId !== input.expectedSessionId ||
+    payload.repositorySha !== input.expectedRepositorySha ||
+    payload.reference !== terms.reference ||
+    payload.statementDigest !== digestHex(terms) ||
+    !sameCanonical(payload.identityPolicy, terms.identityPolicy) ||
+    BigInt(payload.expiresAtMs) !== BigInt(payload.issuedAtMs) + BigInt(terms.validForSeconds) * 1000n ||
+    BigInt(input.nowMs) < BigInt(payload.issuedAtMs) ||
+    BigInt(input.nowMs) >= BigInt(payload.expiresAtMs) ||
+    signature.address !== payload.initiator.sessionKeyAddress
+  ) invalid();
+  const recovered = await input.recoverEip191Address({ bytes: canonicalBytes(payload), signatureHex: signature.value });
+  if (typeof recovered !== "string" || recovered.toLowerCase() !== payload.initiator.sessionKeyAddress) invalid();
+  return Object.freeze({ payload, schema: item.schema, signature: Object.freeze(signature) });
+}
+
+// H-REQ-02: what an acceptance must share with the proposal it accepts — the
+// proposal's digest, session, repository, reference, statement, expiry,
+// identity policy and both parties — issued no earlier than the proposal and
+// before the shared expiry. Mirrors the helper's
+// assertAgentHandshakeV2AcceptanceBinding; both arguments are payloads.
+export function assertV2AcceptanceBinding(input: { acceptance: unknown; proposal: unknown }): Readonly<JsonRecord> {
+  const accepted = normalizeV2Acceptance(input.acceptance);
+  const proposed = normalizeV2Proposal(input.proposal);
+  if (
+    accepted.proposalDigest !== digestHex(proposed) ||
+    accepted.sessionId !== proposed.sessionId ||
+    accepted.repositorySha !== proposed.repositorySha ||
+    accepted.reference !== proposed.reference ||
+    accepted.statementDigest !== proposed.statementDigest ||
+    accepted.expiresAtMs !== proposed.expiresAtMs ||
+    !sameCanonical(accepted.identityPolicy, proposed.identityPolicy) ||
+    !sameCanonical(accepted.initiator, proposed.initiator) ||
+    !sameCanonical(accepted.responder, proposed.responder) ||
+    BigInt(proposed.issuedAtMs) > BigInt(accepted.issuedAtMs) ||
+    BigInt(accepted.issuedAtMs) >= BigInt(accepted.expiresAtMs)
+  ) invalid();
+  return accepted;
+}
+
 export function normalizeV2EvidenceResult(value: unknown, rawPolicy: unknown): Readonly<JsonRecord> {
   const item = exact(value, [
     "externalBusinessActionPerformed", "party", "policyDigest", "reference", "repositorySha",

@@ -23,6 +23,8 @@ services:
       AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS: "${AGENT_HANDSHAKE_ROLE_ACCESS_PREVIOUS:-}"
       AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE: "${AGENT_HANDSHAKE_ACCEPTANCE_HMAC_ACTIVE}"
       AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS: "${AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS:-}"
+      # H-REQ-01: the coordinator's sender-enrollment key (optional; "" == absent == no enrollments).
+      AGENT_HANDSHAKE_V2_ENROLLMENT_KEY: "${AGENT_HANDSHAKE_V2_ENROLLMENT_KEY:-}"
       AGENT_HANDSHAKE_V2_INVITATION_FILE: /app/state/agent-handshake-v2-invitations.json
       AGENT_HANDSHAKE_V2_STATE_FILE: /app/state/agent-handshake-v2-state.json
       # B2 durability: Standalone sessions and the csha_/ccra_ role-handle maps live under
@@ -150,6 +152,13 @@ services:
       CLOCKCHAIN_FUNDING_KEYSTORE: /app/keys/funding-wallet.json
       CLOCKCHAIN_FUNDING_PASSWORD_FILE: /app/keys/funding.password
       SEPOLIA_RPC_URL: "${EVM_RPC_URL}"
+      # H-REQ-01 relay binding: off unless set (the host also treats an unset
+      # value as off, with one startup warning; it always gets a value here). The
+      # coordinator key ring has no value here on purpose: compose passes it
+      # only when compose-up.sh exported it, and otherwise leaves it unset in
+      # the container (the host parses any value it is given).
+      AGENT_HANDSHAKE_V2_RELAY_BINDING: "${AGENT_HANDSHAKE_V2_RELAY_BINDING:-off}"
+      AGENT_HANDSHAKE_V2_COORDINATOR_KEYS:
     volumes:
       - ${CLOCKCHAIN_HOST_SECRET_DIR:-/run/clockchain-host-secrets}:/app/keys:ro
       - host_runs:/app/runs
