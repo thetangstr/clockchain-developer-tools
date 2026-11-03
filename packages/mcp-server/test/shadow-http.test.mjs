@@ -1,7 +1,7 @@
 // Hosted Shadow over the real runHttp wiring: the SHADOW_ENABLED gate, /mcp's authentication on /shadow/mcp, owner
 // identity (acct, jti, static token; never sub), the tool surface, and the public capability links.
 import assert from "node:assert/strict";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -20,7 +20,11 @@ import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 const SECRET = "shadow-http-test-secret";
 const STATIC = "static-shadow-token";
 const ACCEPT = "application/json, text/event-stream";
-const ENV_KEYS = ["PORT", "MCP_PORT", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "MCP_AUTH_TOKENS", "MCP_TOKEN_SIGNING_SECRET", "MCP_RATE_PER_MIN", "MCP_SURFACE", "SHADOW_LINKS_PER_MINUTE"];
+const ENV_KEYS = [
+  "PORT", "MCP_PORT", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "MCP_AUTH_TOKENS", "MCP_TOKEN_SIGNING_SECRET", "MCP_RATE_PER_MIN", "MCP_SURFACE",
+  "SHADOW_LINKS_PER_MINUTE", "SHADOW_ALLOW_NON_ACCT", "MCP_REQUIRE_AUTH", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_TRUSTED_PROXY",
+  "SHADOW_LINK_CONCURRENCY", "SHADOW_LINK_PER_CLIENT", "SHADOW_LINK_IDLE_MS", "SHADOW_LINK_MAX_MS",
+];
 const SHADOW_TOOLS = ["shadow_start_session", "shadow_record", "shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_verify"];
 
 async function boot(env) {
@@ -72,18 +76,28 @@ function signedToken(claims, secret = SECRET) {
   const seg = b64(JSON.stringify({ v: 1, tier: "demo", iat: now, exp: now + 3600, jti: randomUUID(), ...claims }));
   return `cc_${seg}.${createHmac("sha256", secret).update(seg).digest("base64url")}`;
 }
+/** A token as the OAuth token endpoint mints it: a signed-in account. */
+const acctToken = (acct = "acct_" + randomBytes(16).toString("base64url")) => signedToken({ acct });
 
-test("off by default: every /shadow path is 404, nothing is created, and /mcp keeps its 50 tools", async () => {
+test("off by default: /shadow/* falls through to the handling it had before Shadow, nothing is created, /mcp keeps 50 tools", async () => {
   const stateDir = path.join(mkdtempSync(path.join(tmpdir(), "shadow-off-")), "state");
   const app = await boot({ SHADOW_STATE_DIR: stateDir });
   try {
-    for (const p of ["/shadow/mcp", "/shadow", "/shadow/s/AAAAAAAAAAAAAAAAAAAAAA", "/shadow/p/AAAAAAAAAAAAAAAAAAAAAA.json"]) {
-      const res = await fetch(`${app.url}${p}`, { method: p === "/shadow/mcp" ? "POST" : "GET", headers: { authorization: `Bearer ${STATIC}`, accept: "text/html" } });
-      assert.equal(res.status, 404, p);
-      assert.deepEqual(await res.json(), { error: "not_found" });
+    const page = async (p) => {
+      const res = await fetch(`${app.url}${p}`, { headers: { accept: "text/html" } });
+      return { status: res.status, type: res.headers.get("content-type"), body: await res.text() };
+    };
+    const landing = await page("/");
+    for (const p of ["/shadow", "/shadow/connect", "/shadow/s/AAAAAAAAAAAAAAAAAAAAAA", "/shadow/p/AAAAAAAAAAAAAAAAAAAAAA.json"]) {
+      assert.deepEqual(await page(p), landing, `${p} is the landing page, as before`);
     }
+    const mcp401 = await rpc(`${app.url}/mcp`, "tools/list", {});
+    const shadow401 = await rpc(`${app.url}/shadow/mcp`, "tools/list", {});
+    assert.deepEqual(shadow401, mcp401, "the same 401 as /mcp");
     const list = await rpc(`${app.url}/mcp`, "tools/list", {}, { bearer: STATIC });
     assert.equal(list.body.result.tools.length, 50);
+    const fallThrough = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: STATIC });
+    assert.equal(fallThrough.body.result.tools.length, 50, "/shadow/mcp is the /mcp surface when Shadow is off, as before");
     assert.equal(existsSync(stateDir), false);
   } finally {
     await app.close();
@@ -97,20 +111,25 @@ test("enabled: /mcp is unchanged, /shadow/mcp has the seven Shadow tools and its
     const list = await rpc(`${app.url}/mcp`, "tools/list", {}, { bearer: STATIC });
     assert.equal(list.body.result.tools.length, 50);
     assert.ok(!list.body.result.tools.some((t) => t.name.startsWith("shadow_")));
-    const tools = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: STATIC });
+    const account = { bearer: acctToken() };
+    const tools = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, account);
     assert.deepEqual(tools.body.result.tools.map((t) => t.name).sort(), [...SHADOW_TOOLS].sort());
-    const init = await rpc(`${app.url}/shadow/mcp`, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } }, { bearer: STATIC });
+    for (const t of tools.body.result.tools.filter((x) => ["shadow_start_session", "shadow_close_session", "shadow_get_session"].includes(x.name)))
+      assert.match(t.description, /kept 30 days.*cannot be revoked/, t.name);
+    const init = await rpc(`${app.url}/shadow/mcp`, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } }, account);
     assert.equal(init.body.result.instructions, SHADOW_INSTRUCTIONS);
     assert.match(init.body.result.instructions, /shadow_start_session.*\n.*shadow_record/s);
+    assert.match(init.body.result.instructions, /kept on this server for 30\ndays/);
+    assert.match(init.body.result.instructions, /links cannot be revoked/);
   } finally {
     await app.close();
     __setShadowLedgerForTests(undefined);
   }
 });
 
-test("auth matrix: /mcp's credentials work, everything else gets /mcp's own 401", async () => {
+test("auth matrix (with the test-only SHADOW_ALLOW_NON_ACCT=1): /mcp's credentials work, everything else gets /mcp's own 401", async () => {
   __setShadowLedgerForTests(new FakeLedger());
-  const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-auth-")) });
+  const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-auth-")), SHADOW_ALLOW_NON_ACCT: "1" });
   try {
     const mcp401 = await rpc(`${app.url}/mcp`, "tools/list", {});
     assert.equal(mcp401.status, 401);
@@ -152,9 +171,9 @@ test("auth matrix: /mcp's credentials work, everything else gets /mcp's own 401"
   }
 });
 
-test("owner identity: acct when present, else the token's jti; a forged or shared sub never grants access", async () => {
+test("owner identity (with SHADOW_ALLOW_NON_ACCT=1): acct when present, else the token's jti; a forged or shared sub never grants access", async () => {
   __setShadowLedgerForTests(new FakeLedger());
-  const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-owner-")) });
+  const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-owner-")), SHADOW_ALLOW_NON_ACCT: "1" });
   try {
     // POST /token tokens with the same (unauthenticated) sub are different owners.
     const alice = mintToken(SECRET, 3600, undefined, "alice@example.com").token;
@@ -197,7 +216,7 @@ test("over HTTP: record, close, and anyone with a link can read the summary and 
   const captured = [];
   const orig = { error: console.error, warn: console.warn, log: console.log };
   for (const k of Object.keys(orig)) console[k] = (...a) => { captured.push(a.map(String).join(" ")); };
-  const token = mintToken(SECRET).token;
+  const token = acctToken();
   let app;
   try {
     app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-flow-")) });
@@ -211,7 +230,7 @@ test("over HTTP: record, close, and anyone with a link can read the summary and 
     const refused = await call(app, "shadow_record", { session_id: s.session_id, agent: "assistant", kind: "message", content: { reasoning: "hidden" } }, cred);
     assert.equal(refused.isError, true);
     assert.equal(refused.value.error, "SHADOW_REASONING_REFUSED");
-    assert.match(refused.value.message, /never recorded/);
+    assert.match(refused.value.message, /^Nothing was recorded: .* never records/);
     const cp = await call(app, "shadow_checkpoint", { session_id: s.session_id }, cred);
     assert.equal(cp.value.checkpoint.status, "anchored");
     const closed = await call(app, "shadow_close_session", { session_id: s.session_id, status: "succeeded" }, cred);
@@ -257,7 +276,7 @@ test("links are rate limited per IP, and /shadow/mcp tool calls share /mcp's per
   __setShadowLedgerForTests(new FakeLedger());
   const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-rl-")), SHADOW_LINKS_PER_MINUTE: "2", MCP_RATE_PER_MIN: "3" });
   try {
-    const token = mintToken(SECRET).token;
+    const token = acctToken();
     const { value: s } = await call(app, "shadow_start_session", { title: "rl" }, { bearer: token });
     assert.equal((await fetch(s.links.packet)).status, 200);
     assert.equal((await fetch(s.links.viewer)).status, 200);
@@ -279,7 +298,7 @@ test("links are rate limited per IP, and /shadow/mcp tool calls share /mcp's per
 
 test("open mode (no MCP_AUTH_TOKENS, local use): a presented credential owns its sessions; none, or a forged signed token, is 401", async () => {
   __setShadowLedgerForTests(new FakeLedger());
-  const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-open-")), MCP_AUTH_TOKENS: "" });
+  const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-open-")), MCP_AUTH_TOKENS: "", SHADOW_ALLOW_NON_ACCT: "1" });
   try {
     assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {})).status, 401);
     assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: signedToken({}, "other-secret") })).status, 401);

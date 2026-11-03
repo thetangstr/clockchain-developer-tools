@@ -47,6 +47,11 @@ export type ShadowLimits = {
   /** Online verification is skipped (offline verdict, with a note) for sessions with more receipts than this. */
   onlineVerifyMaxReceipts: number;
   anchorWaitMs: number;
+  /** Bytes one owner's sessions may hold on disk; new steps and sessions are refused past it. */
+  maxBytesPerOwner: number;
+  maxSessionStartsPerOwnerPerDay: number;
+  /** Built link bodies (packets and summaries) kept in memory and shared by every reader, in bytes. */
+  linkCacheBytes: number;
 };
 
 export const DEFAULT_SHADOW_LIMITS: ShadowLimits = {
@@ -64,6 +69,9 @@ export const DEFAULT_SHADOW_LIMITS: ShadowLimits = {
   sweepIntervalMs: 60 * 60_000,
   onlineVerifyMaxReceipts: 12,
   anchorWaitMs: 12_000,
+  maxBytesPerOwner: 40 * 1024 * 1024,
+  maxSessionStartsPerOwnerPerDay: 30,
+  linkCacheBytes: 48 * 1024 * 1024,
 };
 
 const RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out", "unknown"] as const;
@@ -74,6 +82,7 @@ const MAX_OUTBOX = 20;
 const MAX_PASSES = 10;
 const COLLECTOR_STEP_HEADROOM = 500;
 const ONLINE_TIMEOUT_MS = 20_000;
+const LINKS_NOTE = "Anyone with these links can read the whole record until it is deleted, 30 days after the session started; links cannot be revoked.";
 /** How long one call may spend anchoring before it reports what is still pending. */
 const ANCHOR_BUDGET_MS = 25_000;
 
@@ -136,6 +145,46 @@ class Gate {
   }
 }
 
+/** A least-recently-used map of Buffers bounded by their total size. */
+class ByteLru {
+  private readonly items = new Map<string, Buffer>();
+  private bytes = 0;
+  constructor(private readonly maxBytes: number) {}
+  get(key: string): Buffer | undefined {
+    const v = this.items.get(key);
+    if (v) {
+      this.items.delete(key);
+      this.items.set(key, v);
+    }
+    return v;
+  }
+  set(key: string, value: Buffer): void {
+    if (value.length > this.maxBytes / 2) return;
+    const prior = this.items.get(key);
+    if (prior) {
+      this.items.delete(key);
+      this.bytes -= prior.length;
+    }
+    this.items.set(key, value);
+    this.bytes += value.length;
+    for (const [k, v] of this.items) {
+      if (this.bytes <= this.maxBytes) break;
+      this.items.delete(k);
+      this.bytes -= v.length;
+    }
+  }
+  get size(): number {
+    return this.bytes;
+  }
+}
+
+/** What a link body depends on: the steps (append-only, so the count), the checkpoint, and the queued checkpoints. */
+function linkKey(kind: "packet" | "summary", meta: SessionMeta): string {
+  const cp = meta.checkpoint;
+  const queued = meta.outbox.filter((r) => r.kind === "checkpoint").map((r) => r.hash).join(",");
+  return `${kind}:${meta.sessionId}:${meta.seq}:${cp?.hash ?? "-"}:${cp?.body.count ?? -1}:${queued}`;
+}
+
 // ---- input checks -----------------------------------------------------------------------------------------------------
 
 const notFound = () => new ShadowError("SHADOW_NOT_FOUND", "No session with that id belongs to you. Call shadow_list_sessions to see yours.");
@@ -192,6 +241,12 @@ export class ShadowService {
   private readonly agentEventsMax: number;
   private readonly maxEvents: number;
   private usageBytes = 0;
+  /** Bytes per owner, computed on first use and kept current by appends; the sweep starts it afresh. */
+  private readonly ownerUsage = new Map<string, number>();
+  private readonly linkCache: ByteLru;
+  private readonly linkBuilds = new Map<string, Promise<Buffer | undefined>>();
+  /** Link bodies built (not served from the cache), for tests and logs. */
+  linkBuildCount = 0;
   private timer: NodeJS.Timeout | undefined;
 
   constructor(o: ServiceOptions) {
@@ -208,6 +263,27 @@ export class ShadowService {
     this.eventsMax = this.limits.maxSessionBytes - metaBudget;
     this.agentEventsMax = this.eventsMax - Math.min(256 * 1024, Math.floor(this.eventsMax / 4));
     this.maxEvents = this.limits.maxStepsPerSession + COLLECTOR_STEP_HEADROOM;
+    this.linkCache = new ByteLru(this.limits.linkCacheBytes);
+  }
+
+  private ownerBytes(ownerKey: string): number {
+    let n = this.ownerUsage.get(ownerKey);
+    if (n === undefined) {
+      n = this.store.ownerBytes(ownerKey);
+      if (this.ownerUsage.size >= 10_000) this.ownerUsage.clear();
+      this.ownerUsage.set(ownerKey, n);
+    }
+    return n;
+  }
+
+  private accountFull(ownerKey: string, extra: number): ShadowError | null {
+    const used = this.ownerBytes(ownerKey);
+    if (used + extra <= this.limits.maxBytesPerOwner) return null;
+    const mb = (x: number) => (x >= 10 * 1048576 ? String(Math.round(x / 1048576)) : (x / 1048576).toFixed(1));
+    return new ShadowError(
+      "SHADOW_LIMIT_ACCOUNT_STORAGE",
+      `Your account's Shadow records use ${mb(used)} MB of the ${mb(this.limits.maxBytesPerOwner)} MB it may keep. Close open sessions; space comes back as sessions expire ${Math.round(this.limits.retentionMs / 86_400_000)} days after they start.`,
+    );
   }
 
   /** The start-up retention sweep, then one every sweepIntervalMs. */
@@ -231,6 +307,7 @@ export class ShadowService {
   sweep(): { removed: number; bytes: number } {
     const r = this.store.sweep(this.now().getTime(), this.limits.retentionMs, (o, s) => this.locks.busy(`${o}/${s}`));
     this.usageBytes = r.bytes;
+    this.ownerUsage.clear();
     this.log("shadow_sweep", { removed: r.removed, bytes: r.bytes });
     return r;
   }
@@ -319,6 +396,8 @@ export class ShadowService {
       throw new ShadowError("SHADOW_LIMIT_SESSION_SIZE", `This session is full (${Math.round(this.limits.maxSessionBytes / 1048576)} MB on disk). Close it and start a new one.`);
     this.store.appendLine(meta, line, this.eventsMax);
     this.usageBytes += bytes;
+    const owned = this.ownerUsage.get(meta.ownerKey);
+    if (owned !== undefined) this.ownerUsage.set(meta.ownerKey, owned + bytes);
     advance(meta, event, bytes);
     if (agent) meta.agentSteps++;
     return event;
@@ -378,6 +457,10 @@ export class ShadowService {
         throw new ShadowError("SHADOW_LIMIT_OPEN_SESSIONS", `You have ${open} open sessions, the most allowed. Close one with shadow_close_session first.`);
       if (this.usageBytes >= this.limits.maxStateBytes)
         throw new ShadowError("SHADOW_STORAGE_FULL", "Shadow's storage is full right now, so no new session can start. Try again later.");
+      const full = this.accountFull(ownerKey, 4096);
+      if (full) throw full;
+      if (this.store.bump(ownerKey, "starts", this.today(), 1, this.limits.maxSessionStartsPerOwnerPerDay) === null)
+        throw new ShadowError("SHADOW_LIMIT_SESSION_STARTS", `Your account has started ${this.limits.maxSessionStartsPerOwnerPerDay} sessions today, the most allowed per day. Try again tomorrow (UTC).`);
       const op = this.store.operator(ownerKey, now);
       const sessionId = randomUUID(), nonce = randomUUID();
       const meta: SessionMeta = {
@@ -388,6 +471,8 @@ export class ShadowService {
       };
       this.store.createSession(meta);
       this.usageBytes += 4096;
+      const owned = this.ownerUsage.get(ownerKey);
+      if (owned !== undefined) this.ownerUsage.set(ownerKey, owned + 4096);
       // Openers wait for the start marker, as the library's openSession does: its receipt goes into session.opened.
       return this.session(ownerKey, sessionId, async (m) => {
         const outcome = await this.anchorNetwork(ownerKey, m.sessionId, this.row("start", m.startHash, null), Date.now() + ANCHOR_BUDGET_MS);
@@ -415,6 +500,7 @@ export class ShadowService {
             : { status: "pending", note: "The start marker will be anchored with your next checkpoint." },
           expires_at: m.expiresAt,
           links: this.links(m, base),
+          links_note: LINKS_NOTE,
           next: "Record each step with shadow_record, in order. Call shadow_close_session when the work is done.",
         };
       }, true);
@@ -459,6 +545,8 @@ export class ShadowService {
         throw new ShadowError("SHADOW_UNKNOWN_AGENT", `"${agent}" is not one of this session's agents (${meta.agents.map((a) => a.id).join(", ")}).`);
       if (meta.agentSteps >= this.limits.maxStepsPerSession)
         throw new ShadowError("SHADOW_LIMIT_STEPS", `This session has ${meta.agentSteps} steps, the most allowed. Close it and start a new one.`);
+      const full = this.accountFull(meta.ownerKey, size);
+      if (full) throw full;
       // The disk brake: existing sessions can still close and anchor, but no longer grow.
       if (this.usageBytes >= this.limits.maxStateBytes * 1.25)
         throw new ShadowError("SHADOW_STORAGE_FULL", "Shadow's storage is full right now, so no more steps can be recorded. Close this session; its record is kept.");
@@ -546,6 +634,7 @@ export class ShadowService {
         final_checkpoint: this.anchorView(meta, made.target, made.refused),
         pin,
         links: this.links(meta, base),
+        links_note: LINKS_NOTE,
         share: "Send the viewer or packet link to whoever should check this record, and the pin through a different channel.",
       };
     });
@@ -570,6 +659,7 @@ export class ShadowService {
         pending_anchors: meta.outbox.map(pendingView),
         time_windows: windowsView(windows(events)),
         links: this.links(meta, base),
+        links_note: LINKS_NOTE,
         ...(pin ? { pin } : { pin_note: "The pin is issued when the session is closed." }),
       };
     }));
@@ -629,11 +719,55 @@ export class ShadowService {
 
   // ---- public links (anyone with the capability) -------------------------------------------------------------------
 
-  private async byCap<T>(cap: string, fn: (meta: SessionMeta, events: ShadowEvent[]) => Promise<T> | T): Promise<T | undefined> {
+  /**
+   * A link's body, built at most once per (session, steps, checkpoint, queued checkpoints) and shared: every reader of
+   * the same link gets the same Buffer, from a cache bounded in bytes, and concurrent first readers wait on one build.
+   * So a crowd of readers costs one copy, not one per reader (security review: OOM from slow-reading link clients).
+   */
+  async linkBody(cap: string, kind: "packet" | "summary"): Promise<Buffer | undefined> {
     const target = this.store.resolveCap(cap);
     if (!target) return undefined;
+    let meta: SessionMeta | undefined;
     try {
-      return await this.session(target.ownerKey, target.sessionId, (meta) => this.withEvents(meta, (events) => fn(meta, events)));
+      meta = this.store.readMeta(target.ownerKey, target.sessionId);
+    } catch {
+      meta = undefined;
+    }
+    if (!meta || Date.parse(meta.expiresAt) <= this.now().getTime()) return undefined;
+    const hit = this.linkCache.get(linkKey(kind, meta));
+    if (hit) return hit;
+    const flight = `${kind}:${meta.sessionId}:${meta.seq}`;
+    const running = this.linkBuilds.get(flight);
+    if (running) return running;
+    const build = this.buildLink(target.ownerKey, target.sessionId, kind).finally(() => this.linkBuilds.delete(flight));
+    this.linkBuilds.set(flight, build);
+    return build;
+  }
+
+  private async buildLink(ownerKey: string, sessionId: string, kind: "packet" | "summary"): Promise<Buffer | undefined> {
+    try {
+      return await this.session(ownerKey, sessionId, (meta) => {
+        const cached = this.linkCache.get(linkKey(kind, meta));
+        if (cached) return cached;
+        return this.withEvents(meta, async (events) => {
+          const cp = this.latest(meta, events);
+          const packet = buildPacket(meta, cp, events, this.network, this.now());
+          const pin = buildPin(meta, cp);
+          let body: Buffer;
+          if (kind === "packet") {
+            body = Buffer.from(JSON.stringify({
+              packet, pin,
+              verify: "Save packet and pin as packet.json and pin.json, then run: shadow-verify packet.json --pin pin.json --online. The pin is independent assurance only if it reached you separately from the packet.",
+            }, null, 1));
+          } else {
+            const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
+            body = Buffer.from(summarize(packet, report, { packetFile: "packet.json", pinFile: "pin.json" }).html);
+          }
+          this.linkBuildCount++;
+          this.linkCache.set(linkKey(kind, meta), body);
+          return body;
+        });
+      });
     } catch (e) {
       if (e instanceof ShadowError && e.code === "SHADOW_NOT_FOUND") return undefined;
       throw e;
@@ -641,26 +775,13 @@ export class ShadowService {
   }
 
   /** The evidence packet and its pin, as one JSON document. */
-  packetForCap(cap: string): Promise<string | undefined> {
-    return this.byCap(cap, (meta, events) => {
-      const cp = this.latest(meta, events);
-      return JSON.stringify({
-        packet: buildPacket(meta, cp, events, this.network, this.now()),
-        pin: buildPin(meta, cp),
-        verify: "Save packet and pin as packet.json and pin.json, then run: shadow-verify packet.json --pin pin.json --online. The pin is independent assurance only if it reached you separately from the packet.",
-      }, null, 1);
-    });
+  async packetForCap(cap: string): Promise<string | undefined> {
+    return (await this.linkBody(cap, "packet"))?.toString("utf8");
   }
 
   /** The library's static evidence summary (no scripts, no network), verified offline against its pin. */
-  summaryForCap(cap: string): Promise<string | undefined> {
-    return this.byCap(cap, async (meta, events) => {
-      const cp = this.latest(meta, events);
-      const packet = buildPacket(meta, cp, events, this.network, this.now());
-      const pin = buildPin(meta, cp);
-      const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
-      return summarize(packet, report, { packetFile: "packet.json", pinFile: "pin.json" }).html;
-    });
+  async summaryForCap(cap: string): Promise<string | undefined> {
+    return (await this.linkBody(cap, "summary"))?.toString("utf8");
   }
 
   // ---- anchoring -----------------------------------------------------------------------------------------------------

@@ -191,13 +191,15 @@ test("hidden reasoning is refused, with a code, and nothing is recorded", async 
   for (const r of refusals) {
     await assert.rejects(svc.record(A, { session_id, agent: "agent", ...r }), (e) => {
       assert.equal(e.code, "SHADOW_REASONING_REFUSED", `${r.kind}: ${e.message}`);
-      assert.match(e.message, /never recorded/);
+      assert.match(e.message, /^Nothing was recorded: .* never records/);
       return true;
     });
   }
   assert.equal((await svc.getSession(A, { session_id }, BASE)).steps, 1, "only session.opened");
-  // Visible tool arguments may use the word, and counts of reasoning tokens are fine.
-  await svc.record(A, { session_id, agent: "agent", kind: "tool_call", content: { tool: "decide", args: { reasoning: "shown to the user" } } });
+  // Hosted policy is stricter than the library's: tool arguments are checked too, even for visible text. Counts of
+  // reasoning tokens are numbers, not text, and are fine.
+  await rejects(svc.record(A, { session_id, agent: "agent", kind: "tool_call", content: { tool: "decide", args: { reasoning: "shown to the user" } } }), "SHADOW_REASONING_REFUSED");
+  await svc.record(A, { session_id, agent: "agent", kind: "tool_call", content: { tool: "decide", args: { why: "shown to the user" } } });
   await svc.record(A, { session_id, agent: "agent", kind: "message", content: { text: "ok", reasoningTokens: 12 } });
   const closed = await svc.close(A, { session_id }, BASE);
   const { packet } = await packetOf(svc, closed.links);

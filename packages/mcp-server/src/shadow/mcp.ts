@@ -14,7 +14,10 @@ import { ShadowError, type ShadowService } from "./service.js";
 export const SHADOW_INSTRUCTIONS = [
   "Shadow is a flight recorder for your work. It keeps a tamper-evident record of each step you take (tasks, prompts,",
   "messages, tool calls and results, files, notes), signs it, anchors fingerprints of it on Clockchain, and gives you",
-  "links anyone can open to check the record. Only hashes go to Clockchain; the record is kept on this server for 30 days.",
+  "links anyone can open to check the record. Only hashes go to Clockchain. The record is kept on this server for 30",
+  "days and then deleted. Anyone who has a session's viewer or packet link can read the whole record until then, and",
+  "links cannot be revoked, so share them only with people who may see everything recorded. Sessions belong to the",
+  "signed-in account that started them.",
   "",
   "Order of calls:",
   "1. shadow_start_session {title, agents?} once, before you start. Keep the session_id.",
@@ -27,11 +30,19 @@ export const SHADOW_INSTRUCTIONS = [
   "5. shadow_get_session and shadow_verify show the result. Share the viewer or packet link, and give the pin",
   "   to the person checking through a different channel.",
   "",
-  "Record what you showed or did, as it happened. Never record hidden reasoning (thinking blocks, reasoning fields or",
-  "<think> sections): Shadow refuses it. Each step's content is at most 32 KB.",
+  "Record what you showed or did, as it happened. Never record hidden reasoning. Shadow refuses any step that contains",
+  "a <think>, <thinking> or <reasoning> tag, a thinking or reasoning block, or a field whose name starts with",
+  "reasoning, thinking or thought, in any kind of step, tool arguments and files included. Each step's content is at",
+  "most 32 KB. Send one JSON-RPC message per request (batches are refused).",
 ].join("\n");
 
-export type ShadowAuth = { ok: true; ownerId: string; rateKey: string } | { ok: false };
+/** Retention and sharing, said wherever a tool hands out or describes links. */
+const RETENTION = "Records are kept 30 days, then deleted; anyone with a link can read the record until then, and links cannot be revoked.";
+
+export type ShadowAuth = { ok: true; ownerId: string; rateKey: string } | { ok: false; accountRequired?: boolean };
+
+/** Bounds on the public link responses (security review finding 1). */
+export type LinkLimits = { concurrent: number; perClient: number; idleMs: number; maxMs: number };
 
 export interface ShadowHttpDeps {
   service: ShadowService;
@@ -39,12 +50,37 @@ export interface ShadowHttpDeps {
   authenticate(req: IncomingMessage): ShadowAuth;
   /** Writes /mcp's JSON 401 (given the request, it can add /shadow/mcp's OAuth challenge header). */
   unauthorized(res: ServerResponse, req?: IncomingMessage): void;
+  /** Writes the 403 for an authenticated caller that is not a signed-in account. */
+  accountRequired(res: ServerResponse, req: IncomingMessage): void;
   readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown>;
   /** /mcp's per-caller limit: false when it already answered 429. */
   allowCall(rateKey: string, body: unknown, res: ServerResponse): boolean;
-  /** Per-IP limit on the public links. */
+  /** The client a link request counts against: its IP behind the trusted proxy, IPv6 by /64. */
+  linkClient(req: IncomingMessage): string;
+  /** Per-client limit on the public links (per minute). */
   allowLink(req: IncomingMessage): boolean;
   onLinkRateLimited?(): void;
+  links?: Partial<LinkLimits>;
+}
+
+/** The page a 403 points at: how to connect to hosted Shadow with sign-in. Plain text, for people and agents. */
+export function connectInstructions(base: string): string {
+  return [
+    "Hosted Shadow: connect with sign-in",
+    "",
+    `Endpoint: ${base}/shadow/mcp (Streamable HTTP)`,
+    "",
+    "Hosted Shadow keeps records for signed-in Clockchain accounts only. Add the endpoint above to your MCP client as",
+    "a connector or remote MCP server with OAuth sign-in, then approve the Clockchain sign-in page it opens. ChatGPT",
+    "connectors and Claude (claude.ai connectors, or `claude mcp add --transport http shadow <endpoint>` in Claude Code,",
+    "then /mcp to sign in) discover sign-in on their own from the server's 401.",
+    "",
+    "A token from POST /token or a static MCP token is not accepted on /shadow/mcp; it gets 403 account_required.",
+    "",
+    "Records are kept 30 days, then deleted. Anyone with a session's viewer or packet link can read the whole record",
+    "until then, and links cannot be revoked.",
+    "",
+  ].join("\n");
 }
 
 const first = (h: string | string[] | undefined): string => (Array.isArray(h) ? h[0] : h) ?? "";
@@ -113,7 +149,7 @@ export function buildShadowServer(service: ShadowService, ownerId: string, base:
 
   server.registerTool("shadow_start_session", {
     title: "Start a Shadow session",
-    description: "Start recording. Call once before your first step. Returns the session_id for the other Shadow tools and anchors a start marker on Clockchain.",
+    description: `Start recording. Call once before your first step. Returns the session_id for the other Shadow tools, the session's viewer and packet links, and anchors a start marker on Clockchain. ${RETENTION}`,
     inputSchema: {
       title: z.string().describe("What this session is about, up to 200 characters."),
       agents: z.array(z.object({
@@ -128,7 +164,9 @@ export function buildShadowServer(service: ShadowService, ownerId: string, base:
     title: "Record a step",
     description:
       "Record one step, right after it happens. kind: task (starts a run), prompt, message, tool_call ({tool, args}), " +
-      "tool_result ({tool, result, is_error}), file ({path, content}), note. Never include hidden reasoning. Returns seq and hash.",
+      "tool_result ({tool, result, is_error}), file ({path, content}), note. Never include hidden reasoning: a step with " +
+      "a <think>/<thinking>/<reasoning> tag or a reasoning*, thinking* or thought* field is refused, whatever its kind. " +
+      "Returns seq and hash.",
     inputSchema: {
       session_id: sessionId,
       agent: z.string().describe("Which declared agent took the step."),
@@ -148,7 +186,7 @@ export function buildShadowServer(service: ShadowService, ownerId: string, base:
 
   server.registerTool("shadow_close_session", {
     title: "Close the session",
-    description: "Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share. No steps can be added afterwards.",
+    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share. No steps can be added afterwards. ${RETENTION}`,
     inputSchema: {
       session_id: sessionId,
       status: z.enum(["succeeded", "failed", "cancelled", "timed_out", "unknown"]).optional()
@@ -159,7 +197,7 @@ export function buildShadowServer(service: ShadowService, ownerId: string, base:
 
   server.registerTool("shadow_get_session", {
     title: "Get a session",
-    description: "A session's status, step count, Clockchain anchors, time windows, and its viewer and packet links (and its pin once closed).",
+    description: `A session's status, step count, Clockchain anchors, time windows, and its viewer and packet links (and its pin once closed). ${RETENTION}`,
     inputSchema: { session_id: sessionId },
     annotations: READ,
   }, run((a) => service.getSession(ownerId, a, base)));
@@ -197,37 +235,87 @@ function notFound(res: ServerResponse): void {
 
 /** Handles every /shadow and /shadow/* request (http.ts only routes here when SHADOW_ENABLED=1). */
 export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  return async (req, res) => {
-    const path = (req.url ?? "").split("?")[0];
-    if (path === "/shadow/mcp") return mcp(req, res);
-    const view = /^\/shadow\/s\/([A-Za-z0-9_-]{22})$/.exec(path);
-    const packet = /^\/shadow\/p\/([A-Za-z0-9_-]{22})\.json$/.exec(path);
-    if ((!view && !packet) || req.method !== "GET") return notFound(res);
+  const limits: LinkLimits = { concurrent: 4, perClient: 1, idleMs: 20_000, maxMs: 120_000, ...(deps.links ?? {}) };
+  // Link responses in flight, globally and per client: each holds a socket and a reference to a (shared) body.
+  let active = 0;
+  const perClient = new Map<string, number>();
+
+  function busy(res: ServerResponse): void {
+    res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "5", connection: "close" });
+    res.end(JSON.stringify({ error: "busy" }));
+  }
+
+  async function link(req: IncomingMessage, res: ServerResponse, kind: "packet" | "summary", cap: string): Promise<void> {
     if (!deps.allowLink(req)) {
       deps.onLinkRateLimited?.();
       res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
       res.end(JSON.stringify({ error: "rate_limited" }));
       return;
     }
-    let body: string | undefined;
+    const client = deps.linkClient(req);
+    if (active >= limits.concurrent || (perClient.get(client) ?? 0) >= limits.perClient) {
+      deps.onLinkRateLimited?.();
+      return busy(res);
+    }
+    active++;
+    perClient.set(client, (perClient.get(client) ?? 0) + 1);
+    // A client that stops reading is dropped: idle (no bytes moving) for idleMs, or still not done after maxMs. The
+    // connection closes after the response, so these timers never carry over to another request on the socket.
+    const socket = req.socket;
+    socket.setTimeout(limits.idleMs, () => socket.destroy());
+    const deadline = setTimeout(() => socket.destroy(), limits.maxMs);
+    deadline.unref();
+    let released = false;
+    res.on("close", () => {
+      if (released) return;
+      released = true;
+      clearTimeout(deadline);
+      active--;
+      const n = (perClient.get(client) ?? 1) - 1;
+      if (n <= 0) perClient.delete(client);
+      else perClient.set(client, n);
+    });
+    let body: Buffer | undefined;
     try {
-      body = view ? await deps.service.summaryForCap(view[1]) : await deps.service.packetForCap(packet![1]);
+      body = await deps.service.linkBody(cap, kind);
     } catch (e) {
-      const busy = e instanceof ShadowError && e.code === "SHADOW_BUSY";
-      res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store", ...(busy ? { "retry-after": "5" } : {}) });
-      res.end(JSON.stringify({ error: busy ? "busy" : "shadow_unavailable" }));
+      if (res.writableEnded || res.destroyed) return;
+      const isBusy = e instanceof ShadowError && e.code === "SHADOW_BUSY";
+      res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store", connection: "close", ...(isBusy ? { "retry-after": "5" } : {}) });
+      res.end(JSON.stringify({ error: isBusy ? "busy" : "shadow_unavailable" }));
       return;
     }
+    if (res.destroyed) return;
     if (body === undefined) return notFound(res);
-    res.writeHead(200, view
-      ? { ...LINK_HEADERS, "content-type": "text/html; charset=utf-8", "content-security-policy": HTML_CSP }
-      : { ...LINK_HEADERS, "content-type": "application/json; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'" });
+    res.writeHead(200, {
+      ...LINK_HEADERS,
+      connection: "close",
+      "content-length": String(body.length),
+      ...(kind === "summary"
+        ? { "content-type": "text/html; charset=utf-8", "content-security-policy": HTML_CSP }
+        : { "content-type": "application/json; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'" }),
+    });
+    // The shared Buffer itself: no per-reader copy.
     res.end(body);
+  }
+
+  return async (req, res) => {
+    const path = (req.url ?? "").split("?")[0];
+    if (path === "/shadow/mcp") return mcp(req, res);
+    if (path === "/shadow/connect" && req.method === "GET") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
+      res.end(connectInstructions(publicBaseUrl(req.headers)));
+      return;
+    }
+    const view = /^\/shadow\/s\/([A-Za-z0-9_-]{22})$/.exec(path);
+    const packet = /^\/shadow\/p\/([A-Za-z0-9_-]{22})\.json$/.exec(path);
+    if ((!view && !packet) || req.method !== "GET") return notFound(res);
+    return view ? link(req, res, "summary", view[1]) : link(req, res, "packet", packet![1]);
   };
 
   async function mcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const auth = deps.authenticate(req);
-    if (!auth.ok) return deps.unauthorized(res, req);
+    if (!auth.ok) return auth.accountRequired ? deps.accountRequired(res, req) : deps.unauthorized(res, req);
     let body: unknown;
     if (req.method === "POST") {
       try {
@@ -235,6 +323,16 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
       } catch {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "invalid_json_body" }));
+        return;
+      }
+      // JSON-RPC batches were removed from MCP in 2025-06-18; here they would multiply one rate-limited request
+      // into many tool calls (security review finding 4), so one message per request.
+      if (Array.isArray(body)) {
+        res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0", id: null,
+          error: { code: -32600, message: "JSON-RPC batches are not supported on /shadow/mcp. Send one message per request." },
+        }));
         return;
       }
     }
