@@ -37,8 +37,8 @@ export interface ShadowHttpDeps {
   service: ShadowService;
   /** Resolves the authenticated owner exactly as /mcp authenticates (never from the unauthenticated `sub`). */
   authenticate(req: IncomingMessage): ShadowAuth;
-  /** Writes /mcp's JSON 401. */
-  unauthorized(res: ServerResponse): void;
+  /** Writes /mcp's JSON 401 (given the request, it can add /shadow/mcp's OAuth challenge header). */
+  unauthorized(res: ServerResponse, req?: IncomingMessage): void;
   readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown>;
   /** /mcp's per-caller limit: false when it already answered 429. */
   allowCall(rateKey: string, body: unknown, res: ServerResponse): boolean;
@@ -226,7 +226,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
 
   async function mcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const auth = deps.authenticate(req);
-    if (!auth.ok) return deps.unauthorized(res);
+    if (!auth.ok) return deps.unauthorized(res, req);
     let body: unknown;
     if (req.method === "POST") {
       try {

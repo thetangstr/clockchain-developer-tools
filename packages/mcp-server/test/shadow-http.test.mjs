@@ -179,9 +179,12 @@ test("owner identity: acct when present, else the token's jti; a forged or share
     assert.equal(seen.isError, false);
     assert.equal(seen.value.title, "account session");
     assert.equal((await call(app, "shadow_get_session", { session_id: shared.session_id }, { bearer: other })).value.error, "SHADOW_NOT_FOUND");
-    // A malformed acct is ignored: the token owns by its jti.
+    // A malformed acct is never minted (mintToken refuses one), so verifyToken refuses the whole token:
+    // it gets /mcp's 401 and owns nothing, rather than falling back to its jti.
     const odd = signedToken({ acct: "acct_short" });
-    assert.equal((await call(app, "shadow_get_session", { session_id: shared.session_id }, { bearer: odd })).value.error, "SHADOW_NOT_FOUND");
+    const refused = await rpc(`${app.url}/shadow/mcp`, "tools/call", { name: "shadow_get_session", arguments: { session_id: shared.session_id } }, { bearer: odd });
+    assert.equal(refused.status, 401);
+    assert.equal(refused.body.error, "unauthorized");
   } finally {
     await app.close();
     __setShadowLedgerForTests(undefined);

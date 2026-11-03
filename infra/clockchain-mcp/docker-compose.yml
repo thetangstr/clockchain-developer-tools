@@ -80,6 +80,13 @@ services:
       # under SHADOW_STATE_DIR, default /app/state/shadow on the mcp_state volume.
       SHADOW_ENABLED: "${SHADOW_ENABLED:-}"
       SHADOW_STATE_DIR: "${SHADOW_STATE_DIR:-}"
+      # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
+      # MCP_OAUTH=1 exists in SSM ("" == absent == off: no OAuth routes, 401 unchanged).
+      # The issuer is MCP_PUBLIC_URL, default https://mcp.clockchain.network (never the Host
+      # header). Approval rate limits key on X-Forwarded-For only from Caddy's address.
+      MCP_OAUTH: "${MCP_OAUTH:-}"
+      MCP_OAUTH_APPROVALS_PER_HOUR: "${MCP_OAUTH_APPROVALS_PER_HOUR:-}"
+      MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3"
       TELEMETRY_CLOSE_URL: "${TELEMETRY_CLOSE_URL:-}"
       TELEMETRY_CLOSE_BACKOFF_MS: "${TELEMETRY_CLOSE_BACKOFF_MS:-}"
       TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS: "${TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS:-}"
