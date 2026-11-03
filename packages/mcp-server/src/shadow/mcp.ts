@@ -10,6 +10,7 @@ import { z } from "zod";
 import { VERSION } from "./recorder.js";
 import { SUMMARY_CSP } from "./lib/summary.js";
 import { ShadowError, type ShadowService } from "./service.js";
+import { accountCreatedDay, AccountUnavailableError, cleanAccountName, displayAccountName, looksLikeAccountKey, shortAccountId, type Account, type AccountStore } from "../accounts.js";
 
 export const SHADOW_INSTRUCTIONS = [
   "Shadow is a flight recorder for your work. It keeps a tamper-evident record of each step you take (tasks, prompts,",
@@ -34,6 +35,19 @@ export const SHADOW_INSTRUCTIONS = [
   "a <think>, <thinking> or <reasoning> tag, a thinking or reasoning block, or a field whose name starts with",
   "reasoning, thinking or thought, in any kind of step, tool arguments and files included. Each step's content is at",
   "most 32 KB. Send one JSON-RPC message per request (batches are refused).",
+].join("\n");
+
+/** Added on the chat sign-in endpoint (SHADOW_LAZY_AUTH), which also carries the three account tools. */
+export const ACCOUNT_INSTRUCTIONS = [
+  "",
+  "Clockchain account: Shadow records belong to a free Clockchain account (testnet, no email needed).",
+  "- When the person asks to create or set up a Clockchain account (for example \"create a Clockchain account for",
+  "  Acme\"), call clockchain_create_account {name: \"Acme\"}. If this connection is not signed in yet, the person is",
+  "  asked to connect: they click Create account in the Clockchain window, save their account key there, and the",
+  "  call is retried on its own. Any other tool also asks them to connect first.",
+  "- clockchain_whoami {} says which account this connection uses; clockchain_signup_help {} explains sign-up.",
+  "- The account key is shown only in the Clockchain window. Never ask for it, repeat it or put it in a tool call.",
+  "  If someone pastes one into the chat, tell them to keep it private and not to share it again.",
 ].join("\n");
 
 /** Retention and sharing, said wherever a tool hands out or describes links. */
@@ -61,7 +75,26 @@ export interface ShadowHttpDeps {
   allowLink(req: IncomingMessage): boolean;
   onLinkRateLimited?(): void;
   links?: Partial<LinkLimits>;
+  /**
+   * The chat sign-in endpoint (SHADOW_LAZY_AUTH=1; absent = off, and its path is a 404 like any unknown /shadow path).
+   * It serves the same Shadow tools plus the account tools. Without any credential, initialize, tools/list and ping go
+   * through so a client can connect before sign-in; everything else (every tools/call) gets the same 401 and
+   * challenge as /shadow/mcp, which starts the client's sign-in and its retry of the call.
+   */
+  chat?: {
+    path: string;
+    /** The OAuth account store (shared with the sign-in page). */
+    accounts?: AccountStore;
+    /** True when the request carries no credential header at all (a refused credential stays a 401). */
+    anonymous(req: IncomingMessage): boolean;
+    /** Per-client limit on anonymous requests: false = answer 429. */
+    allowAnonymous(req: IncomingMessage): boolean;
+  };
 }
+
+/** What a client may do on the chat endpoint before signing in, in a body of at most 16 KB. */
+const ANONYMOUS_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "ping"]);
+const ANONYMOUS_MAX_BODY = 16 * 1024;
 
 /** The page a 403 points at: how to connect to hosted Shadow with sign-in. Plain text, for people and agents. */
 export function connectInstructions(base: string): string {
@@ -136,10 +169,19 @@ const sessionId = z.string().describe("The session_id from shadow_start_session.
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
 const READ = { readOnlyHint: true, openWorldHint: false } as const;
 
-/** One McpServer per request, bound to the authenticated owner (stateless, like /mcp). */
-export function buildShadowServer(service: ShadowService, ownerId: string, base: string): McpServer {
-  const server = new McpServer({ name: "clockchain-shadow", version: VERSION }, { instructions: SHADOW_INSTRUCTIONS });
+/**
+ * One McpServer per request, bound to the authenticated owner (stateless, like /mcp). `ownerId` null is the chat
+ * endpoint's anonymous server, which only answers initialize and tools/list: the HTTP gate refuses any tools/call
+ * without a token (401) before this server runs, and its tools fail closed anyway. `accounts` adds the account tools.
+ */
+export function buildShadowServer(service: ShadowService, ownerId: string | null, base: string, accounts?: AccountStore): McpServer {
+  const server = new McpServer(
+    { name: "clockchain-shadow", version: VERSION },
+    { instructions: accounts ? SHADOW_INSTRUCTIONS + "\n" + ACCOUNT_INSTRUCTIONS : SHADOW_INSTRUCTIONS },
+  );
+  const owner = ownerId ?? "";
   const run = <A>(fn: (a: A) => Promise<unknown>) => async (a: A) => {
+    if (ownerId === null) return toolError(signInRequired());
     try {
       return ok(await fn(a));
     } catch (e) {
@@ -158,7 +200,7 @@ export function buildShadowServer(service: ShadowService, ownerId: string, base:
       })).optional().describe('Who will act in this session. Default: one agent with id "agent".'),
     },
     annotations: WRITE,
-  }, run((a) => service.startSession(ownerId, a, base)));
+  }, run((a) => service.startSession(owner, a, base)));
 
   server.registerTool("shadow_record", {
     title: "Record a step",
@@ -175,14 +217,14 @@ export function buildShadowServer(service: ShadowService, ownerId: string, base:
       run_id: z.string().optional().describe("Optional. A task step starts a run (returned as run_id); other steps join the agent's latest open run unless you pass one."),
     },
     annotations: WRITE,
-  }, run((a) => service.record(ownerId, a)));
+  }, run((a) => service.record(owner, a)));
 
   server.registerTool("shadow_checkpoint", {
     title: "Anchor a checkpoint",
     description: "Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way).",
     inputSchema: { session_id: sessionId },
     annotations: WRITE,
-  }, run((a) => service.checkpoint(ownerId, a)));
+  }, run((a) => service.checkpoint(owner, a)));
 
   server.registerTool("shadow_close_session", {
     title: "Close the session",
@@ -193,30 +235,121 @@ export function buildShadowServer(service: ShadowService, ownerId: string, base:
         .describe("How the recorded task(s) ended, as you report it. Without it, runs still open are recorded as capture gaps."),
     },
     annotations: WRITE,
-  }, run((a) => service.close(ownerId, a, base)));
+  }, run((a) => service.close(owner, a, base)));
 
   server.registerTool("shadow_get_session", {
     title: "Get a session",
     description: `A session's status, step count, Clockchain anchors, time windows, and its viewer and packet links (and its pin once closed). ${RETENTION}`,
     inputSchema: { session_id: sessionId },
     annotations: READ,
-  }, run((a) => service.getSession(ownerId, a, base)));
+  }, run((a) => service.getSession(owner, a, base)));
 
   server.registerTool("shadow_list_sessions", {
     title: "List sessions",
     description: "Your Shadow sessions, newest first.",
     inputSchema: {},
     annotations: READ,
-  }, run(() => service.listSessions(ownerId)));
+  }, run(() => service.listSessions(owner)));
 
   server.registerTool("shadow_verify", {
     title: "Verify a session",
     description: "Run the Shadow verifier on the session's evidence packet, online against Clockchain where possible. Returns pass, indeterminate or fail, with each check.",
     inputSchema: { session_id: sessionId },
     annotations: READ,
-  }, run((a) => service.verify(ownerId, a, base)));
+  }, run((a) => service.verify(owner, a, base)));
 
+  if (accounts) registerAccountTools(server, accounts, ownerId);
   return server;
+}
+
+const signInRequired = () => new ShadowError("SIGN_IN_REQUIRED", "Sign in to Clockchain first: connect this server with sign-in, then try again.");
+const accountError = (code: string, message: string) => toolError(new ShadowError(code, message));
+/** What the account tools say about an account: its name ("an unnamed account" until named), short id, creation day. */
+const accountView = (account: Account) => ({
+  name: displayAccountName(account), short_id: shortAccountId(account.acct), named: account.unnamed !== true, created: accountCreatedDay(account),
+});
+/** "an unnamed account (abc123, created 3 Nov)" or "Acme (abc123)", for status lines. */
+const accountLine = (v: ReturnType<typeof accountView>) => (v.named ? `${v.name} (${v.short_id})` : `${v.name} (${v.short_id}, created ${v.created})`);
+
+/**
+ * clockchain_create_account, clockchain_whoami and clockchain_signup_help (chat sign-in endpoint only). They see the
+ * account through the token's verified acct and return only its name, short id and a status line: never the account
+ * key, a token, a cookie or a link.
+ */
+function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId: string | null): void {
+  const withAccount = <A>(fn: (acct: string, a: A) => unknown) => async (a: A) => {
+    if (ownerId === null) return toolError(signInRequired());
+    if (!ACCT.test(ownerId)) return accountError("ACCOUNT_REQUIRED", "This connection is not signed in with a Clockchain account. Connect with sign-in, then try again.");
+    try {
+      return ok(fn(ownerId, a));
+    } catch (e) {
+      if (e instanceof AccountUnavailableError) return accountError("ACCOUNT_UNAVAILABLE", "Clockchain can't read this account right now. Try again in a few minutes.");
+      return toolError(e);
+    }
+  };
+  const SIGNED_IN = { readOnlyHint: true, openWorldHint: false } as const;
+
+  server.registerTool("clockchain_create_account", {
+    title: "Create a Clockchain account",
+    description:
+      "Create the person's free Clockchain account (Shadow needs one) and name it, for example after their company. " +
+      "If this connection is not signed in, the person is first asked to connect and creates the account in the " +
+      "Clockchain window; the call is then retried. An account that already has a name keeps it. Returns the name " +
+      "and a short account id, never the account key.",
+    inputSchema: { name: z.string().describe("The company or account name, 1 to 40 characters.") },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, withAccount((acct, a: { name: string }) => {
+    if (looksLikeAccountKey(a.name)) {
+      throw new ShadowError("ACCOUNT_NAME_IS_A_KEY", "That looks like an account key, not a name. It was not stored. Account keys must never go in the chat or a tool call; ask the person for a company or account name instead.");
+    }
+    const name = cleanAccountName(a.name);
+    if (name === undefined) throw new ShadowError("ACCOUNT_NAME_INVALID", "Choose a name of 1 to 40 characters with at least one letter or digit.");
+    const result = accounts.nameOnce(acct, name);
+    if (!result) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
+    const view = accountView(result.account);
+    if (result.outcome === "too_late") {
+      throw new ShadowError("ACCOUNT_NAMING_CLOSED",
+        `This connection uses ${accountLine(view)}, which was created more than 15 minutes ago without a name, so it was not named. ` +
+        "An account gets its name when it is created: from the chat within 15 minutes of signing up, or typed on the Clockchain sign-in page.");
+    }
+    if (result.outcome === "named") console.log(JSON.stringify({ event: "shadow_account_named", acct })); // the id only, never the name
+    return result.outcome === "named"
+      ? { status: "created", account: view, message: `The Clockchain account ${accountLine(view)} is ready and this connection uses it. Its account key was shown once in the Clockchain sign-in window, not here.` }
+      : { status: "already_named", account: view, message: `This connection already uses the Clockchain account ${accountLine(view)}. It keeps that name; nothing was renamed.` };
+  }));
+
+  server.registerTool("clockchain_whoami", {
+    title: "Which Clockchain account",
+    description: "The Clockchain account this connection uses: its name and short id. Asks the person to connect first if they are not signed in.",
+    inputSchema: {},
+    annotations: SIGNED_IN,
+  }, withAccount((acct) => {
+    const account = accounts.get(acct);
+    if (!account) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
+    const view = accountView(account);
+    return {
+      status: "signed_in",
+      account: view,
+      message: view.named
+        ? `This connection uses the Clockchain account ${accountLine(view)}.`
+        : `This connection uses ${accountLine(view)}. If it was created in the last 15 minutes, ask the person for a name and call clockchain_create_account {name}; after that it can no longer be named from the chat.`,
+    };
+  }));
+
+  server.registerTool("clockchain_signup_help", {
+    title: "How Clockchain sign-up works",
+    description: "Explains, in plain words, how to get a Clockchain account from this chat and where the account key is shown.",
+    inputSchema: {},
+    annotations: SIGNED_IN,
+  }, withAccount(() => ({
+    status: "help",
+    message: [
+      "Clockchain accounts are free (testnet) and need no email.",
+      "To get one from this chat: ask for it (for example \"create a Clockchain account for Acme\"). A Connect button appears; in the Clockchain window that opens, click Create account. The window shows the account key once, with a Download key file link: save it there. Then the chat carries on and names the account.",
+      "The account key is shown only in that window. It never appears in this chat, and nobody should ask for it here. It signs you in on another device or app: choose \"I have an account key\" in the Clockchain window.",
+      "Already have an account? When the Clockchain window opens, choose \"I have an account key\", or click Allow if it shows your account.",
+    ].join("\n"),
+  })));
 }
 
 const LINK_HEADERS = {
@@ -302,6 +435,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
   return async (req, res) => {
     const path = (req.url ?? "").split("?")[0];
     if (path === "/shadow/mcp") return mcp(req, res);
+    if (deps.chat && path === deps.chat.path) return mcp(req, res, deps.chat);
     if (path === "/shadow/connect" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
       res.end(connectInstructions(publicBaseUrl(req.headers)));
@@ -313,9 +447,12 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     return view ? link(req, res, "summary", view[1]) : link(req, res, "packet", packet![1]);
   };
 
-  async function mcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function mcp(req: IncomingMessage, res: ServerResponse, chat?: NonNullable<ShadowHttpDeps["chat"]>): Promise<void> {
     const auth = deps.authenticate(req);
-    if (!auth.ok) return auth.accountRequired ? deps.accountRequired(res, req) : deps.unauthorized(res, req);
+    if (!auth.ok) {
+      if (chat && !auth.accountRequired && chat.anonymous(req)) return anonymous(req, res, chat);
+      return auth.accountRequired ? deps.accountRequired(res, req) : deps.unauthorized(res, req);
+    }
     let body: unknown;
     if (req.method === "POST") {
       try {
@@ -331,13 +468,43 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
         res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({
           jsonrpc: "2.0", id: null,
-          error: { code: -32600, message: "JSON-RPC batches are not supported on /shadow/mcp. Send one message per request." },
+          error: { code: -32600, message: `JSON-RPC batches are not supported on ${chat ? chat.path : "/shadow/mcp"}. Send one message per request.` },
         }));
         return;
       }
     }
     if (!deps.allowCall(auth.rateKey, body, res)) return;
-    const server = buildShadowServer(deps.service, auth.ownerId, publicBaseUrl(req.headers));
+    await serve(req, res, body, buildShadowServer(deps.service, auth.ownerId, publicBaseUrl(req.headers), chat?.accounts));
+  }
+
+  /**
+   * The chat endpoint without a credential: one discovery message per request, or the 401 that starts sign-in. Every
+   * such request counts against the per-client anonymous limit before its body is read, and the body is small.
+   */
+  async function anonymous(req: IncomingMessage, res: ServerResponse, chat: NonNullable<ShadowHttpDeps["chat"]>): Promise<void> {
+    if (!chat.allowAnonymous(req)) {
+      res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
+      res.end(JSON.stringify({ error: "rate_limited" }));
+      return;
+    }
+    // Nothing bigger is a discovery message; a larger tool call still gets the 401 that starts sign-in.
+    if (req.method !== "POST" || Number(req.headers["content-length"] ?? "0") > ANONYMOUS_MAX_BODY) return deps.unauthorized(res, req);
+    let body: unknown;
+    try {
+      body = await deps.readJsonBody(req, ANONYMOUS_MAX_BODY);
+    } catch {
+      if (res.destroyed || res.headersSent) return;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid_json_body" }));
+      return;
+    }
+    const method = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as { method?: unknown }).method : undefined;
+    // Before the SDK runs: a tool handler can only answer 200, and only a 401 starts the client's sign-in.
+    if (typeof method !== "string" || !ANONYMOUS_METHODS.has(method)) return deps.unauthorized(res, req);
+    await serve(req, res, body, buildShadowServer(deps.service, null, publicBaseUrl(req.headers), chat.accounts));
+  }
+
+  async function serve(req: IncomingMessage, res: ServerResponse, body: unknown, server: McpServer): Promise<void> {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();

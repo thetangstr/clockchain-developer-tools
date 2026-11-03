@@ -39,20 +39,46 @@ const ENV_KEYS = [
   "PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_APPROVALS_PER_HOUR", "MCP_OAUTH_TRUSTED_PROXY",
   "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS", "MCP_REQUIRE_AUTH", "MCP_RATE_PER_MIN", "MCP_TOKEN_MINT_PER_HOUR",
   "MCP_TOKEN_TTL_DAYS", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "MCP_STATE_DIR", "CLOCKCHAIN_ENDPOINT",
+  "SHADOW_LAZY_AUTH", "SHADOW_ANON_PER_MINUTE",
 ];
 const tempDir = (label) => mkdtempSync(path.join(tmpdir(), `oauth-${label}-`));
 
 /** Hosted Shadow on, in a fresh state directory, so /shadow/mcp exists and answers /mcp's 401. */
 const shadowOn = () => ({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "oauth-shadow-")) });
 
-/** The REAL runHttp wiring with the given env (static token set, so auth is not open). */
+/** A port nothing is listening on at 127.0.0.1 right now (the kernel's pick for a bind to exactly that address). */
+async function freeLoopbackPort() {
+  const probe = createServer().listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const { port } = probe.address();
+  await new Promise((r) => probe.close(r));
+  return port;
+}
+
+/**
+ * The REAL runHttp wiring with the given env (static token set, so auth is not open). runHttp listens on every
+ * interface, and the kernel may give that wildcard bind a port another program holds on 127.0.0.1 alone (once,
+ * Tailscale's): so the port is picked free on 127.0.0.1 first, and a probe must reach this server, else it retries.
+ */
 async function boot(env) {
   const saved = {};
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
-  Object.assign(process.env, { MCP_PORT: "0", MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: tempDir("state") }, env);
-  for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k];
-  const server = await runHttp();
-  if (!server.listening) await once(server, "listening");
+  let server;
+  for (let attempt = 1; ; attempt++) {
+    Object.assign(process.env, { MCP_PORT: String(await freeLoopbackPort()), MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: tempDir("state") }, env);
+    for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k];
+    server = await runHttp();
+    if (!server.listening) await once(server, "listening");
+    let reached = false;
+    const mark = () => { reached = true; };
+    server.prependListener("request", mark);
+    await fetch(`http://127.0.0.1:${server.address().port}/health`).then((r) => r.arrayBuffer()).catch(() => {});
+    server.removeListener("request", mark);
+    if (reached) break;
+    server.closeAllConnections?.();
+    await new Promise((r) => server.close(r));
+    assert.ok(attempt < 5, "no 127.0.0.1 port reached this server in 5 tries");
+  }
   const url = `http://127.0.0.1:${server.address().port}`;
   return {
     url,
@@ -149,7 +175,7 @@ async function signUp(base, name = "Test Person", o = {}) {
   const html = await res.text();
   assert.equal(res.status, 200, html);
   const cookie = cookieOf(res);
-  const key = /<code>(cck_[A-Za-z0-9_-]{32})<\/code>/.exec(html)?.[1];
+  const key = /class="keyfield" type="text" value="(cck_[A-Za-z0-9_-]{32})"/.exec(html)?.[1];
   const grant = /name="grant" value="([^"]+)"/.exec(html)?.[1];
   assert.ok(cookie && key && grant, "the key page sets the cookie and shows the key");
   return { consent, res, html, cookie, key, grant, acct: acctOfCookie(cookie), name };
@@ -289,6 +315,7 @@ const NEW_ROUTES = [
   ["GET", "/.well-known/oauth-authorization-server"],
   ["GET", "/.well-known/openid-configuration"],
   ["GET", "/oauth/authorize?client_id=x"],
+  ["GET", "/oauth/assets/inter-latin-v20.woff2"],
   ["POST", "/oauth/authorize"],
   ["POST", "/oauth/register"],
   ["POST", "/oauth/token"],
@@ -491,14 +518,16 @@ test("happy path: register → create-account page → create → key page → C
     assert.equal(consent.page.headers.get("access-control-allow-origin"), null);
     assert.doesNotMatch(consent.html, /<script/i);
     // No account cookie: the page is sign-up.
-    assert.match(consent.html, /<h1>Create your Clockchain account<\/h1>/);
-    assert.match(consent.html, /allow ChatGPT to record and anchor your agents’ work on Clockchain/);
+    assert.match(consent.html, /<h1>Connect ChatGPT to Clockchain<\/h1>/);
+    assert.match(consent.html, /<p class="app">ChatGPT · returns you to <code>chatgpt\.com<\/code><\/p>/);
+    assert.match(consent.html, /<label for="name">Company or account name<\/label>/);
     assert.match(consent.html, /<input id="name" name="name" type="text" maxlength="40" required/);
-    assert.match(consent.html, />Create account and allow ChatGPT<\/button>/);
+    assert.match(consent.html, /value="create" class="primary">Create account<\/button>/);
     assert.match(consent.html, /<summary><span class="when-closed">I have an account key<\/span>/);
     assert.match(consent.html, /name="key" type="password"/);
     assert.match(consent.html, /<code>chatgpt\.com<\/code>/);
-    assert.match(consent.html, /<h2>If you allow it<\/h2>/);
+    assert.match(consent.html, /<p>Free testnet · only fingerprints go on the Clockchain ledger<\/p>/);
+    assert.match(consent.html, /<details class="more">\n<summary>What this allows<\/summary>/);
     assert.match(consent.html, /<li>ChatGPT can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps\.<\/li>/);
     assert.match(consent.html, /<li>Its writes are paid from Clockchain’s free testnet pool, not by you\.<\/li>/);
     assert.match(consent.html, /30 days/);
@@ -520,8 +549,9 @@ test("happy path: register → create-account page → create → key page → C
     assert.equal(created.headers.get("cache-control"), "no-store");
     assert.equal(created.headers.get("x-frame-options"), "DENY");
     assert.match(keyHtml, /Signed in as <strong>Ada Lovelace<\/strong>/);
-    const key = /<code>(cck_[A-Za-z0-9_-]{32})<\/code>/.exec(keyHtml)[1];
-    assert.match(keyHtml, /Save this key to sign in on another device\. We can’t show it again\./);
+    const key = /class="keyfield" type="text" value="(cck_[A-Za-z0-9_-]{32})" readonly/.exec(keyHtml)[1];
+    assert.match(keyHtml, /<h1>Save your account key<\/h1>/);
+    assert.match(keyHtml, /You’ll need it to sign in on another device\. We can’t show it again\./);
     assert.match(keyHtml, /value="continue" class="primary">Continue<\/button>/);
     assert.doesNotMatch(keyHtml, /<script/i);
     const cookie = setCookie.split(";")[0];
@@ -1057,16 +1087,17 @@ test("accounts: a second app in the same browser, and a key sign-in from a new b
     const claude = await registerClient(s.url, { client_name: "Claude Code", redirect_uris: ["http://localhost:53111/callback"] });
     const shown = await openConsent(s.url, { client: claude, cookie: person.cookie, redirectUri: "http://localhost:60123/callback" });
     assert.match(shown.html, /Signed in as <strong>Grace<\/strong>/);
-    assert.match(shown.html, />Allow Claude Code<\/button>/);
-    assert.match(shown.html, /value="cancel">Cancel<\/button>/);
-    assert.match(shown.html, />Not you\? Use a different account<\/button>/);
+    assert.match(shown.html, /<h1>Connect Claude Code to Clockchain<\/h1>/);
+    assert.match(shown.html, /value="approve" class="primary">Allow<\/button>/);
+    assert.match(shown.html, /value="cancel" class="link">Cancel<\/button>/);
+    assert.match(shown.html, /value="switch" class="link">Not you\?<\/button>/);
     assert.match(shown.html, /<code>localhost:60123<\/code>/);
     assert.equal(shown.page.headers.get("location"), null, "a valid cookie never approves by itself");
     const a2 = await approve(s.url, { client: claude, account: person, redirectUri: "http://localhost:60123/callback" });
     const t2 = await exchangeCode(s.url, a2);
     // App 3 (another ChatGPT connector), a new browser with no cookie: sign in with the account key.
     const fresh = await openConsent(s.url, { meta: { client_name: "ChatGPT (work)" } });
-    assert.match(fresh.html, /Create your Clockchain account/);
+    assert.match(fresh.html, /value="create" class="primary">Create account<\/button>/);
     const signin = await decide(s.url, fresh.requestToken, "signin", { origin: PUBLIC }, { key: ` ${person.key} ` });
     assert.equal(signin.status, 303);
     assert.match(signin.headers.get("set-cookie"), /^__Host-cc_acct=cc_ac_[^;]+; Max-Age=31536000; Path=\/; Secure; HttpOnly; SameSite=Lax$/);
@@ -1099,13 +1130,13 @@ test("accounts: bad, tampered, foreign, unknown and expired cookies are signed o
     ]) {
       const c = await openConsent(h.url, { cookie });
       assert.equal(c.page.status, 200, label);
-      assert.match(c.html, /Create your Clockchain account/, label);
+      assert.match(c.html, /value="create" class="primary">Create account<\/button>/, label);
       assert.doesNotMatch(c.html, /Signed in as/, label);
       assert.equal(c.page.headers.get("set-cookie"), SECURE_CLEAR, `${label}: cleared`);
     }
     // Not our cookie name (the non-Secure loopback name, on an https issuer): ignored, not cleared.
     const misnamed = await openConsent(h.url, { cookie: `cc_acct=${value}` });
-    assert.match(misnamed.html, /Create your Clockchain account/);
+    assert.match(misnamed.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(misnamed.page.headers.get("set-cookie"), null);
     // Approve with a bad cookie: the page again (signed out), never a code.
     const c = await openConsent(h.url, { cookie: person.cookie });
@@ -1118,7 +1149,7 @@ test("accounts: bad, tampered, foreign, unknown and expired cookies are signed o
     assert.match((await openConsent(h.url, { cookie: person.cookie })).html, /Signed in as/);
     h.advance(60_000);
     const expired = await openConsent(h.url, { cookie: person.cookie });
-    assert.match(expired.html, /Create your Clockchain account/);
+    assert.match(expired.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(expired.page.headers.get("set-cookie"), SECURE_CLEAR);
   } finally {
     await h.close();
@@ -1127,7 +1158,7 @@ test("accounts: bad, tampered, foreign, unknown and expired cookies are signed o
   }
 });
 
-test("accounts: 'Not you? Use a different account' clears the cookie and the same request continues as someone new", async () => {
+test("accounts: 'Not you?' clears the cookie and the same request continues as someone new", async () => {
   const h = await harness();
   try {
     const person = await accountFor(h.url);
@@ -1137,7 +1168,8 @@ test("accounts: 'Not you? Use a different account' clears the cookie and the sam
     assert.equal(switched.status, 200);
     assert.equal(switched.headers.get("set-cookie"), SECURE_CLEAR);
     const html = await switched.text();
-    assert.match(html, /Create your Clockchain account/);
+    assert.match(html, /<h1>Connect ChatGPT to Clockchain<\/h1>/);
+    assert.match(html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(/name="request" value="([^"]+)"/.exec(html)[1], c.requestToken);
     const created = await decide(h.url, c.requestToken, "create", { origin: PUBLIC }, { name: "Someone New" });
     const grant = /name="grant" value="([^"]+)"/.exec(await created.text())[1];
@@ -1199,7 +1231,7 @@ test("accounts: names are cleaned, bounded to 40 characters and always escaped (
     const zalgo = await signUp(h.url, `A${"\u0336\u0337\u0338\u0316\u0317".repeat(8)}lice`);
     assert.match(zalgo.html, /Signed in as <strong>A\u0336\u0337lice<\/strong>/);
     const id = zalgo.acct.slice(5, 11).replace(/[-_]/g, "\\$&");
-    assert.match(zalgo.html, new RegExp(`Signed in as <strong>[^<]*</strong> <span class="muted">\\(account ${id}\\)</span>`));
+    assert.match(zalgo.html, new RegExp(`Signed in as <strong>[^<]*</strong> <span class="id">\\(${id}\\)</span>`));
     assert.equal(cleanAccountName("Alice\uD800"), "Alice", "a lone surrogate is dropped (forms already turn one into U+FFFD)");
     assert.match((await signUp(h.url, "\u3164Bob\u3164")).html, /Signed in as <strong>Bob<\/strong>/);
     for (const bad of ["", "   ", "\u0007", "x".repeat(41), "🙂".repeat(3), "\u3164", "\u2800\u2800", "\u3164\uFFA0\u115F", "!!! ...", "\u0301\u0301"]) {
@@ -1423,6 +1455,76 @@ test("accounts: every page states what the app may do, and every account page an
   }
 });
 
+test("sign-in pages: one hashed stylesheet, self-hosted fonts and an inline logo, nothing else loaded; the key page's only link is the key file", async () => {
+  const h = await harness();
+  try {
+    const person = await signUp(h.url, "Ada");
+    const fresh = await openConsent(h.url);
+    const signedIn = await openConsent(h.url, { cookie: person.cookie });
+    const err = await fetch(`${h.url}/oauth/authorize?client_id=cc_client_bogus`);
+    const pages = [["create", fresh.page, fresh.html], ["signed-in", signedIn.page, signedIn.html], ["key", person.res, person.html], ["error", err, await err.text()]];
+    for (const [label, res, html] of pages) {
+      const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]);
+      assert.equal(styles.length, 1, label);
+      const hash = createHash("sha256").update(styles[0], "utf8").digest("base64").replace(/[+/]/g, "\\$&");
+      const csp = res.headers.get("content-security-policy");
+      // The only addition to the old policy is font-src 'self': no img-src, script-src, connect-src or unsafe-inline.
+      assert.match(csp, new RegExp(`^default-src 'none'; style-src 'sha256-${hash}'; font-src 'self'; form-action [^;]+; frame-ancestors 'none'; base-uri 'none'$`), label);
+      assert.doesNotMatch(html, /\sstyle=|<img|<script|<link|<iframe/i, `${label}: inline style attributes would be blocked; nothing else is loaded`);
+      assert.deepEqual([...styles[0].matchAll(/url\(([^)]+)\)/g)].map((m) => m[1]), ["assets/inter-latin-v20.woff2", "assets/jetbrains-mono-latin-v24.woff2"], `${label}: fonts relative to /oauth/authorize, so a /staging mount finds them`);
+      assert.match(html, /<main>\n<svg class="logo" viewBox="0 0 1613 286" role="img" aria-label="Clockchain" fill="currentColor">/, label);
+    }
+    // The key page: the key in a read-only field, and the file as a data: link (nothing fetched, nothing to allow).
+    assert.match(person.html, new RegExp(`<input class="keyfield" type="text" value="${person.key}" readonly`));
+    assert.equal(person.html.match(/<a\b[^>]*>/g).length, 1);
+    const href = /<a class="download" href="(data:text\/plain;charset=utf-8,[^"]+)" download="clockchain-account-key\.txt">Download key file<\/a>/.exec(person.html)?.[1];
+    assert.ok(href, "the download link");
+    const file = decodeURIComponent(href.replace(/&#39;/g, "'").replace(/&amp;/g, "&").slice("data:text/plain;charset=utf-8,".length));
+    assert.match(file, /^Clockchain account key\n\nAccount: Ada \([A-Za-z0-9_-]{6}\)\n/);
+    assert.ok(file.includes(`\nKey: ${person.key}\n`));
+    // Only the create flow's key page carries the key: the signed-in and create pages have no link and no key.
+    for (const page of [fresh.html, signedIn.html]) {
+      assert.doesNotMatch(page, /<a\b|cck_|data:/);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("sign-in pages: the two self-hosted fonts are served from this origin, cacheable and same-origin only; nothing else under /oauth/assets", async () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const h = await harness();
+  try {
+    for (const name of ["inter-latin-v20.woff2", "jetbrains-mono-latin-v24.woff2"]) {
+      const res = await fetch(`${h.url}/oauth/assets/${name}`);
+      assert.equal(res.status, 200, name);
+      assert.equal(res.headers.get("content-type"), "font/woff2");
+      assert.equal(res.headers.get("cache-control"), "public, max-age=31536000, immutable");
+      assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(res.headers.get("cross-origin-resource-policy"), "same-origin");
+      assert.equal(res.headers.get("access-control-allow-origin"), null);
+      assert.equal(res.headers.get("set-cookie"), null);
+      const body = Buffer.from(await res.arrayBuffer());
+      assert.equal(body.subarray(0, 4).toString("latin1"), "wOF2");
+      assert.deepEqual(body, readFileSync(path.join(here, "..", "assets", "fonts", name)));
+      const head = await fetch(`${h.url}/oauth/assets/${name}`, { method: "HEAD" });
+      assert.equal(head.status, 200);
+      assert.equal((await head.arrayBuffer()).byteLength, 0);
+      const post = await fetch(`${h.url}/oauth/assets/${name}`, { method: "POST" });
+      assert.equal(post.status, 405);
+      assert.equal(post.headers.get("allow"), "GET, HEAD");
+    }
+    // Exactly those two names: no directory listing, no licence text, no path walking.
+    for (const p of ["/oauth/assets/", "/oauth/assets/Inter-OFL.txt", "/oauth/assets/inter-latin-v20.woff2/", "/oauth/assets/%2e%2e/oauth.js", "/oauth/assets/INTER-LATIN-V20.WOFF2"]) {
+      const r = await fetch(`${h.url}${p}`);
+      assert.equal(r.status, 404, p);
+      assert.equal(await r.text(), "fell through", p);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test("account keys are refused on /mcp in every credential slot and never reach the gateway (flag on or off)", async () => {
   // A fake gateway that records every request it gets.
   const seen = [];
@@ -1523,7 +1625,7 @@ test("accounts: an unreadable record answers 503, keeps the cookie and is quaran
   try {
     const c = await openConsent(later.url, { cookie: person.cookie });
     assert.equal(c.page.status, 200);
-    assert.match(c.html, /Create your Clockchain account/);
+    assert.match(c.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(c.page.headers.get("set-cookie"), SECURE_CLEAR);
   } finally {
     await later.close();
@@ -1551,7 +1653,7 @@ test("accounts: a key pasted as a name is refused and points to the key form; it
       assert.equal(res.status, 400, name);
       assert.equal(res.headers.get("set-cookie"), null);
       const html = await res.text();
-      assert.match(html, /role="alert">That looks like an account key, not a name\. To sign in with it, use “I have an account key” below\./);
+      assert.match(html, /role="alert">That looks like an account key, not a name\. To sign in with it, paste it below\./);
       assert.match(html, /<details class="havekey" open>/, "the key form is open");
       assert.equal(html.includes(person.key.slice(4, 24)), false, "the key is not echoed");
     }
@@ -1571,7 +1673,7 @@ test("app names get the same hygiene: marks capped, blank look-alikes blank, no 
     for (let c = 0x316; c <= 0x333; c++) below.push(String.fromCodePoint(c));
     const zalgo = await openConsent(h.url, { meta: { client_name: `ChatGPT${below.join("").repeat(3).slice(0, 53)}` } });
     assert.match(zalgo.client.client_name, /^ChatGPT\p{M}{2}$/u, "two marks after the last letter, no more (NFC orders them)");
-    assert.match(zalgo.html, new RegExp(`allow ${zalgo.client.client_name} to record`));
+    assert.match(zalgo.html, new RegExp(`<h1>Connect ${zalgo.client.client_name} to Clockchain</h1>`));
     for (const blank of ["ㅤ", "⠀⠀", "ㅤ ﾠ", "...", "́́"]) {
       const c = await openConsent(h.url, { meta: { client_name: blank } });
       assert.equal(c.client.client_name, undefined, JSON.stringify(blank));
@@ -1622,7 +1724,7 @@ test("prefixed base (staging): every emitted URL carries the path, and the cooki
     // A production cookie (another name) is neither read nor cleared; the staging cookie signs in.
     const prodCookie = `__Host-cc_acct=${cookie.slice(cookie.indexOf("=") + 1)}`;
     const withProd = await openConsent(h.url, { cookie: prodCookie, resource: `${STAGING}/mcp` });
-    assert.match(withProd.html, /Create your Clockchain account/);
+    assert.match(withProd.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(withProd.page.headers.get("set-cookie"), null, "production's cookie is not touched");
     assert.match((await openConsent(h.url, { cookie, resource: `${STAGING}/mcp` })).html, /Signed in as <strong>Stella<\/strong>/);
   } finally {
@@ -1684,10 +1786,13 @@ test("prefixed base behind a prefix-stripping proxy: the MCP SDK client and a Ch
     assert.equal(pending.searchParams.get("resource"), `${PROXY}/staging/mcp`);
     const page = await (await browse(pending.href)).text();
     assert.match(page, /action="\/staging\/oauth\/authorize"/);
+    const font = await browse(new URL("assets/inter-latin-v20.woff2", pending.href).href);
+    assert.equal(font.status, 200, "the page's relative font URL resolves under /staging");
+    assert.equal(font.headers.get("content-type"), "font/woff2");
     const request_ = /name="request" value="([^"]+)"/.exec(page)[1];
     const keyPage = await (await click({ request: request_, decision: "create", name: "Proxy Pat" })).text();
     assert.ok(jar.has("cc_acct_staging"), "loopback http: the non-__Host- staging name");
-    const key = /<code>(cck_[^<]+)<\/code>/.exec(keyPage)[1];
+    const key = /class="keyfield" type="text" value="(cck_[^"]+)"/.exec(keyPage)[1];
     const cont = await click({ request: request_, decision: "continue", grant: /name="grant" value="([^"]+)"/.exec(keyPage)[1] });
     const code = new URL(cont.headers.get("location")).searchParams.get("code");
     assert.equal(await auth(provider, { serverUrl: new URL(`${PROXY}/staging/mcp`), resourceMetadataUrl: new URL(prmUrl), authorizationCode: code }), "AUTHORIZED");
@@ -1973,6 +2078,415 @@ test("verifier: acct is optional, returned when present, and must be well-formed
   const seg = Buffer.from(JSON.stringify({ v: 1, tier: "demo", iat: now, exp: now + 60, jti: "j", acct: "acct_bad" })).toString("base64url");
   const sig = createHmac("sha256", SECRET).update(seg).digest("base64url");
   assert.deepEqual(verifyToken(SECRET, `cc_${seg}.${sig}`), { valid: false, reason: "bad acct" });
+});
+
+// ===========================================================================
+// Sign-up from the chat (SHADOW_LAZY_AUTH=1): /shadow/chat/mcp, for claude.ai's "Sign in when needed"
+// ===========================================================================
+
+const CHAT = "/shadow/chat/mcp";
+const CLAUDE_CB = "https://claude.ai/api/mcp/auth_callback";
+const CHAT_CHALLENGE = `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource/shadow/chat/mcp"`;
+const chatOn = (extra = {}) => ({ ...shadowOn(), MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, SHADOW_LAZY_AUTH: "1", ...extra });
+const rpc = (method, params, id = 1) => ({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, ...(params ? { params } : {}) });
+const callTool = (name, args = {}) => rpc("tools/call", { name, arguments: args });
+const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_signup_help", "clockchain_whoami"];
+
+/** A tool call on the chat endpoint with a token. Every raw result is pushed to `seen`, for the secret scan. */
+async function chatTool(base, token, name, args, seen) {
+  const res = await mcpPost(base, callTool(name, args), { authorization: `Bearer ${token}` }, CHAT);
+  assert.equal(res.status, 200, name);
+  const { result } = await rpcResult(res);
+  seen?.push(JSON.stringify(result));
+  return { isError: result.isError === true, value: JSON.parse(result.content[0].text) };
+}
+
+/**
+ * claude.ai's sign-in, as an anonymous call's 401 starts it: protected-resource metadata from the challenge, DCR,
+ * authorize with that resource, the one-click create (no name), the key page, Continue, the token exchange.
+ */
+async function chatSignIn(base, unauthorized) {
+  const prmUrl = new URL(/resource_metadata="([^"]+)"/.exec(unauthorized.headers.get("www-authenticate"))[1]);
+  const prm = await (await fetch(`${base}${prmUrl.pathname}`)).json();
+  assert.equal(prm.resource, `${PUBLIC}${CHAT}`);
+  const client = await registerClient(base, { client_name: "Claude", redirect_uris: [CLAUDE_CB] });
+  const consent = await openConsent(base, { client, resource: prm.resource });
+  assert.equal(consent.page.status, 200, consent.html);
+  const created = await decide(base, consent.requestToken, "create", { origin: PUBLIC });
+  const keyHtml = await created.text();
+  assert.equal(created.status, 200, keyHtml);
+  const key = /class="keyfield" type="text" value="(cck_[A-Za-z0-9_-]{32})"/.exec(keyHtml)[1];
+  const grant = /name="grant" value="([^"]+)"/.exec(keyHtml)[1];
+  const cont = await decide(base, consent.requestToken, "continue", { origin: PUBLIC }, { grant });
+  assert.equal(cont.status, 303);
+  const issued = await exchangeCode(base, { ...consent, code: new URL(cont.headers.get("location")).searchParams.get("code") }, { resource: prm.resource });
+  assert.equal(issued.status, 200, JSON.stringify(issued.body));
+  return { consent, keyHtml, key, cookie: cookieOf(created), token: issued.body.access_token, refresh: issued.body.refresh_token, acct: tokenAcct(issued) };
+}
+
+test("chat sign-in off (flag unset or not 1): /shadow/chat/mcp and its metadata answer like unknown paths, and /shadow/mcp is unchanged", async () => {
+  const on = await boot(chatOn());
+  try {
+    for (const flag of [undefined, "true", "0"]) {
+      const off = await boot(chatOn({ SHADOW_LAZY_AUTH: flag }));
+      try {
+        for (const [p, unknown] of [[CHAT, "/shadow/nope/mcp"], [`/.well-known/oauth-protected-resource${CHAT}`, "/.well-known/oauth-protected-resource/shadow/nope"]]) {
+          for (const method of ["GET", "POST"]) {
+            const init = { method, headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, ...(method === "POST" ? { body: JSON.stringify(INIT) } : {}) };
+            assert.deepEqual(await snapshot(await fetch(`${off.url}${p}`, init)), await snapshot(await fetch(`${off.url}${unknown}`, init)), `${flag} ${method} ${p}`);
+          }
+        }
+        // /shadow/mcp answers the same with the flag on or off: same 401, same challenge, nothing anonymous.
+        for (const body of [INIT, rpc("tools/list")]) {
+          assert.deepEqual(await snapshot(await mcpPost(on.url, body, {}, "/shadow/mcp")), await snapshot(await mcpPost(off.url, body, {}, "/shadow/mcp")));
+        }
+        assert.match((await (await fetch(`${off.url}/.well-known/oauth-authorization-server`)).text()), /authorization_endpoint/);
+      } finally {
+        await off.close();
+      }
+    }
+  } finally {
+    await on.close();
+  }
+});
+
+test("chat sign-in on: initialize, tools/list and ping work without a token; every tools/call and anything else gets /shadow/mcp's 401 with this path's challenge", async () => {
+  const env = chatOn();
+  const s = await boot(env);
+  try {
+    const init = await mcpPost(s.url, INIT, {}, CHAT);
+    assert.equal(init.status, 200);
+    const { result } = await rpcResult(init);
+    assert.match(result.instructions, /call clockchain_create_account \{name: "Acme"\}/);
+    assert.match(result.instructions, /Never ask for it, repeat it or put it in a tool call/);
+    assert.equal((await mcpPost(s.url, rpc("notifications/initialized", undefined, null), {}, CHAT)).status, 202);
+    assert.deepEqual((await rpcResult(await mcpPost(s.url, rpc("ping"), {}, CHAT))).result, {});
+    const tools = (await rpcResult(await mcpPost(s.url, rpc("tools/list"), {}, CHAT))).result.tools.map((t) => t.name).sort();
+    assert.deepEqual(tools.filter((n) => n.startsWith("clockchain_")), ACCOUNT_TOOLS);
+    assert.equal(tools.length, 10, "the seven Shadow tools and the three account tools");
+
+    // The 401 every refused request gets on /shadow/mcp, with the chat path's metadata URL instead.
+    const expected = await snapshot(await mcpPost(s.url, callTool("shadow_start_session", { title: "x" }), {}, "/shadow/mcp"));
+    expected.headers["www-authenticate"] = CHAT_CHALLENGE;
+    for (const body of [
+      ...[...ACCOUNT_TOOLS, "shadow_start_session", "shadow_list_sessions", "no_such_tool"].map((n) => callTool(n, { name: "Acme" })),
+      rpc("resources/list"), rpc("prompts/list"), rpc("notifications/cancelled", { requestId: 1 }, null), [INIT], { id: 1 }, "initialize",
+    ]) {
+      assert.deepEqual(await snapshot(await mcpPost(s.url, body, {}, CHAT)), expected, JSON.stringify(body));
+    }
+    for (const method of ["GET", "DELETE", "PUT"]) assert.deepEqual(await snapshot(await fetch(`${s.url}${CHAT}`, { method })), expected, method);
+    // A credential that fails is never anonymous: a bad token, an account key, an empty header, a static token typo.
+    for (const headers of [{ authorization: "Bearer cc_nope.nope" }, { authorization: `Bearer cck_${"A".repeat(32)}` }, { "x-api-key": "" }, { "x-clockchain-api-key": "k" }]) {
+      const r = await mcpPost(s.url, INIT, headers, CHAT);
+      assert.equal(r.status, 401, JSON.stringify(headers));
+      assert.match(r.headers.get("www-authenticate"), /^Bearer resource_metadata="[^"]+\/shadow\/chat\/mcp"/);
+    }
+    // A free POST /token token: 403 account_required (with insufficient_scope, so a client re-runs sign-in), even for tools/list.
+    const free = (await (await fetch(`${s.url}/token`, { method: "POST" })).json()).token;
+    for (const body of [INIT, rpc("tools/list"), callTool("clockchain_whoami")]) {
+      const r = await mcpPost(s.url, body, { authorization: `Bearer ${free}` }, CHAT);
+      assert.equal(r.status, 403);
+      assert.equal((await r.json()).error, "account_required");
+      assert.equal(r.headers.get("www-authenticate"), `${CHAT_CHALLENGE}, error="insufficient_scope", error_description="sign in with a Clockchain account"`);
+    }
+    // Its own protected-resource metadata, and nothing was stored by any of this.
+    assert.equal((await (await fetch(`${s.url}/.well-known/oauth-protected-resource${CHAT}`)).json()).resource, `${PUBLIC}${CHAT}`);
+    assert.equal(existsSync(path.join(env.SHADOW_STATE_DIR, "owners")) ? readdirSync(path.join(env.SHADOW_STATE_DIR, "owners")).length : 0, 0);
+  } finally {
+    await s.close();
+  }
+});
+
+test("chat sign-in, as claude.ai does it: tools/list, create_account -> 401 -> one-click sign-in -> retried call names the account; no key, token or cookie in any tool result", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const s = await boot(chatOn());
+  const seen = [];
+  try {
+    assert.equal((await mcpPost(s.url, rpc("tools/list"), {}, CHAT)).status, 200);
+    const first = await mcpPost(s.url, callTool("clockchain_create_account", { name: "Acme Robotics" }), {}, CHAT);
+    assert.equal(first.status, 401);
+    assert.equal(first.headers.get("www-authenticate"), CHAT_CHALLENGE);
+    const person = await chatSignIn(s.url, first);
+    // The one-click page: no name field, Create account, the key form and Cancel; the key page shows "an unnamed account".
+    assert.doesNotMatch(person.consent.html, /name="name"|Company or account name/);
+    assert.match(person.consent.html, /value="create" class="primary">Create account<\/button>/);
+    assert.match(person.consent.html, /<summary><span class="when-closed">I have an account key<\/span>/);
+    const day = `${new Date().getUTCDate()} ${new Date().toUTCString().slice(8, 11)}`;
+    const sid = person.acct.slice(5, 11).replace(/[-_]/g, "\\$&");
+    assert.match(person.keyHtml, new RegExp(`<p>Signed in as an unnamed account <span class="id">\\(${sid}, created ${day}\\)</span></p>`));
+    assert.doesNotMatch(person.keyHtml, /New account/);
+    // The unnamed account, as the signed-in page shows it before the chat names it.
+    const before = await openConsent(s.url, { cookie: person.cookie });
+    assert.match(before.html, new RegExp(`<p class="who">Signed in as an unnamed account <span class="id">\\(${sid}, created ${day}\\)</span></p>`));
+    const unnamedWho = await chatTool(s.url, person.token, "clockchain_whoami", {}, seen);
+    assert.deepEqual(unnamedWho.value.account, { name: "an unnamed account", short_id: person.acct.slice(5, 11), named: false, created: day });
+    assert.match(unnamedWho.value.message, new RegExp(`uses an unnamed account \\(${sid}, created ${day}\\)`));
+
+    // Claude retries the same call with the new token: the account gets the chat's name.
+    const named = await chatTool(s.url, person.token, "clockchain_create_account", { name: "Acme Robotics" }, seen);
+    assert.equal(named.isError, false);
+    assert.deepEqual(named.value.account, { name: "Acme Robotics", short_id: person.acct.slice(5, 11), named: true, created: day });
+    assert.equal(named.value.status, "created");
+    assert.match(named.value.message, /shown once in the Clockchain sign-in window, not here/);
+    const who = await chatTool(s.url, person.token, "clockchain_whoami", {}, seen);
+    assert.deepEqual(who.value.account, { name: "Acme Robotics", short_id: person.acct.slice(5, 11), named: true, created: day });
+    assert.match((await openConsent(s.url, { cookie: person.cookie })).html, /Signed in as <strong>Acme Robotics<\/strong>/);
+    // A second create (a retry, or another name) renames nothing.
+    const again = await chatTool(s.url, person.token, "clockchain_create_account", { name: "Someone Else" }, seen);
+    assert.equal(again.value.status, "already_named");
+    assert.equal(again.value.account.name, "Acme Robotics");
+    assert.match(again.value.message, /nothing was renamed/);
+    // Shadow works for the account, and the help tool explains where the key is.
+    const started = await chatTool(s.url, person.token, "shadow_start_session", { title: "chat sign-up" }, seen);
+    assert.equal(started.isError, false);
+    assert.match(started.value.session_id, /^[0-9a-f-]{36}$/);
+    for (const [name, args] of [["shadow_list_sessions", {}], ["shadow_get_session", { session_id: started.value.session_id }], ["clockchain_signup_help", {}], ["clockchain_create_account", { name: person.key }]]) {
+      await chatTool(s.url, person.token, name, args, seen);
+    }
+    assert.match(seen.at(-2), /shown only in that window/);
+    // The same token on /shadow/mcp: the same account and sessions, and no account tools there.
+    const plainTools = (await rpcResult(await mcpPost(s.url, rpc("tools/list"), { authorization: `Bearer ${person.token}` }, "/shadow/mcp"))).result.tools.map((t) => t.name);
+    assert.equal(plainTools.length, 7);
+    assert.equal(plainTools.some((n) => n.startsWith("clockchain_")), false);
+    assert.equal((await shadowCall(s.url, "shadow_get_session", { session_id: started.value.session_id }, person.token)).isError, false);
+
+    // The scan: no account key, access or refresh token, cookie, code, grant or request token in any tool result,
+    // and no link at all from the account tools.
+    const cookieValue = person.cookie.slice(person.cookie.indexOf("=") + 1);
+    const all = seen.join("\n");
+    for (const secret of [person.key, person.key.slice(4), person.token, person.token.split(".")[1], person.refresh, cookieValue, person.consent.requestToken]) {
+      assert.equal(all.includes(secret), false, "a secret reached a tool result");
+    }
+    assert.doesNotMatch(all, /cck_[A-Za-z0-9_-]{8}|cc_(rt|code|grant|req|ac|client)_|\bcc_[A-Za-z0-9_-]{20,}\./);
+    for (const r of seen.filter((x) => /clockchain_|"short_id"|Clockchain account|account key/.test(x) && !/session_id/.test(x))) {
+      assert.doesNotMatch(r, /https?:\/\/|\/shadow\/[sp]\//, "account tools return no links");
+    }
+  } finally {
+    await s.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("chat sign-in: an account with a name is never renamed, a nameless sign-in needs the chat endpoint, and names get the page's hygiene", async () => {
+  const s = await boot(chatOn());
+  try {
+    // A typed name on the regular page (here for the chat resource too) makes a named account: create_account keeps it.
+    for (const resource of [`${PUBLIC}/shadow/mcp`, `${PUBLIC}${CHAT}`]) {
+      const grace = await signUp(s.url, "Grace", { resource });
+      const a = await approve(s.url, { account: grace, resource });
+      const token = (await exchangeCode(s.url, a, { resource })).body.access_token;
+      const r = await chatTool(s.url, token, "clockchain_create_account", { name: "Hijack" });
+      assert.equal(r.value.status, "already_named", resource);
+      assert.equal(r.value.account.name, "Grace");
+      assert.equal((await chatTool(s.url, token, "clockchain_whoami", {})).value.account.name, "Grace");
+    }
+    // Only a sign-in for the chat endpoint may skip the name: /shadow/mcp and /mcp keep the required field.
+    for (const resource of [`${PUBLIC}/shadow/mcp`, `${PUBLIC}/mcp`]) {
+      const c = await openConsent(s.url, { resource });
+      assert.match(c.html, /<input id="name" name="name" type="text" maxlength="40" required/, resource);
+      const res = await decide(s.url, c.requestToken, "create", { origin: PUBLIC });
+      assert.equal(res.status, 400, resource);
+      assert.match(await res.text(), /role="alert">Choose an account name of 1 to 40 characters\./);
+      assert.equal(res.headers.get("set-cookie"), null);
+    }
+
+    // An unnamed account: hygiene on the name, a key-looking name refused and never echoed, then named once.
+    const first = await mcpPost(s.url, callTool("clockchain_create_account", { name: "x" }), {}, CHAT);
+    const person = await chatSignIn(s.url, first);
+    // A key split by invisible, control or space characters (removed or blanked by the name hygiene) is still a key:
+    // the normal refusal, never a stored key or an internal error (in-chat review, informational).
+    const split = (sep) => `${person.key.slice(0, 12)}${sep}${person.key.slice(12)}`;
+    const disguised = [split("\u034F"), split("\u17B4"), split("\u0000"), split(" "), split("\u200B"), split("\uD800")];
+    for (const name of [person.key, `my key is ${person.key}`, "cck_" + "B".repeat(20), ...disguised]) {
+      const r = await chatTool(s.url, person.token, "clockchain_create_account", { name });
+      assert.equal(r.isError, true, JSON.stringify(name));
+      assert.equal(r.value.error, "ACCOUNT_NAME_IS_A_KEY", JSON.stringify(name));
+      assert.equal(JSON.stringify(r.value).includes("cck_"), false);
+    }
+    for (const name of [...disguised.slice(0, 5), split("\uFFFD"), split("\u00AD")]) {
+      const c = await openConsent(s.url, { resource: `${PUBLIC}/shadow/mcp` });
+      const res = await decide(s.url, c.requestToken, "create", { origin: PUBLIC }, { name });
+      assert.equal(res.status, 400, JSON.stringify(name));
+      assert.match(await res.text(), /role="alert">That looks like an account key, not a name\./);
+      assert.equal(cleanAccountName(name), undefined);
+    }
+    for (const name of ["", "   ", "ㅤ", "...", "x".repeat(41)]) {
+      const r = await chatTool(s.url, person.token, "clockchain_create_account", { name });
+      assert.equal(r.value.error, "ACCOUNT_NAME_INVALID", JSON.stringify(name));
+    }
+    assert.deepEqual((await chatTool(s.url, person.token, "clockchain_whoami", {})).value.account.named, false, "refusals leave it unnamed");
+    const zalgo = await chatTool(s.url, person.token, "clockchain_create_account", { name: ` A${"̶̷̸̖".repeat(5)}cme\u0000 <b>Co</b> ` });
+    assert.equal(zalgo.value.status, "created");
+    assert.equal(zalgo.value.account.name, "A̶̷cme <b>Co</b>");
+    assert.match((await openConsent(s.url, { cookie: person.cookie })).html, /Signed in as <strong>A̶̷cme &lt;b&gt;Co&lt;\/b&gt;<\/strong>/);
+  } finally {
+    await s.close();
+  }
+});
+
+test("chat sign-in: an unnamed account can be named from the chat only within 15 minutes of its creation (in-chat review L2)", async () => {
+  // Two unnamed accounts made before the server starts, 16 and 14 minutes ago, each signed in with its key.
+  const state = tempDir("state");
+  const { AccountStore } = await import("../dist/accounts.js");
+  const made = (minutesAgo) => new AccountStore(path.join(state, "accounts"), 50_000, () => Date.now() - minutesAgo * 60_000).create(null);
+  const late = made(16);
+  const inTime = made(14);
+  const s = await boot(chatOn({ MCP_STATE_DIR: state }));
+  try {
+    const tokenFor = async (key) => {
+      const c = await openConsent(s.url, { resource: `${PUBLIC}${CHAT}` });
+      const res = await decide(s.url, c.requestToken, "signin", { origin: PUBLIC }, { key });
+      assert.equal(res.status, 303, await res.clone().text());
+      const issued = await exchangeCode(s.url, { ...c, code: new URL(res.headers.get("location")).searchParams.get("code") }, { resource: `${PUBLIC}${CHAT}` });
+      return issued.body.access_token;
+    };
+    const lateToken = await tokenFor(late.key);
+    const refused = await chatTool(s.url, lateToken, "clockchain_create_account", { name: "Too Late Ltd" });
+    assert.equal(refused.isError, true);
+    assert.equal(refused.value.error, "ACCOUNT_NAMING_CLOSED");
+    assert.match(refused.value.message, /created more than 15 minutes ago without a name, so it was not named/);
+    assert.match(refused.value.message, /from the chat within 15 minutes of signing up, or typed on the Clockchain sign-in page/);
+    const still = await chatTool(s.url, lateToken, "clockchain_whoami", {});
+    assert.equal(still.value.account.named, false);
+    assert.equal(still.value.account.name, "an unnamed account");
+    const ok = await chatTool(s.url, await tokenFor(inTime.key), "clockchain_create_account", { name: "On Time Ltd" });
+    assert.equal(ok.value.status, "created");
+    assert.equal(ok.value.account.name, "On Time Ltd");
+  } finally {
+    await s.close();
+  }
+  // The window itself, on the store's clock: 15:00 is in, 15:01 is out, and an unreadable date is out.
+  let t = Date.UTC(2026, 10, 3, 12, 0, 0);
+  const store = new AccountStore(path.join(tempDir("window"), "accounts"), 50_000, () => t);
+  const a = store.create(null).account;
+  const b = store.create(null).account;
+  t += 15 * 60_000;
+  assert.equal(store.nameOnce(a.acct, "A").outcome, "named");
+  t += 1_000;
+  assert.equal(store.nameOnce(b.acct, "B").outcome, "too_late");
+  assert.equal(store.get(b.acct).unnamed, true, "not named");
+});
+
+test("chat sign-in: the 403 and the batch refusal name the path that was asked for", async () => {
+  const s = await boot(chatOn());
+  try {
+    const free = (await (await fetch(`${s.url}/token`, { method: "POST" })).json()).token;
+    for (const p of [CHAT, "/shadow/mcp"]) {
+      const r = await mcpPost(s.url, INIT, { authorization: `Bearer ${free}` }, p);
+      assert.equal(r.status, 403);
+      const body = await r.json();
+      assert.ok(body.message.includes(`Connect http://${new URL(s.url).host}${p} with sign-in`), body.message);
+    }
+    const person = await chatSignIn(s.url, await mcpPost(s.url, callTool("clockchain_whoami"), {}, CHAT));
+    for (const p of [CHAT, "/shadow/mcp"]) {
+      const r = await mcpPost(s.url, [rpc("tools/list")], { authorization: `Bearer ${person.token}` }, p);
+      assert.equal(r.status, 400);
+      assert.equal((await r.json()).error.message, `JSON-RPC batches are not supported on ${p}. Send one message per request.`);
+    }
+  } finally {
+    await s.close();
+  }
+});
+
+test("chat sign-in: rate limits hold (account creation per IP, anonymous discovery per client, tool calls per account)", async () => {
+  const s = await boot(chatOn({ MCP_RATE_PER_MIN: "3", SHADOW_ANON_PER_MINUTE: "4" }));
+  try {
+    // Every anonymous request counts, 4 a minute per client, before its body is read: discovery, the 401s and the
+    // oversized alike. A body over 16 KB is never read (a 401, which still starts sign-in).
+    const person = await chatSignIn(s.url, await mcpPost(s.url, callTool("clockchain_whoami"), {}, CHAT));
+    const big = await mcpPost(s.url, { ...rpc("tools/list"), pad: "x".repeat(17 * 1024) }, {}, CHAT);
+    assert.equal(big.status, 401);
+    assert.equal(big.headers.get("www-authenticate"), CHAT_CHALLENGE);
+    const statuses = [];
+    for (const body of [rpc("tools/list"), callTool("clockchain_whoami"), rpc("tools/list"), rpc("tools/list"), callTool("clockchain_whoami")]) {
+      statuses.push((await mcpPost(s.url, body, {}, CHAT)).status);
+    }
+    assert.deepEqual(statuses, [200, 401, 429, 429, 429], "4 anonymous requests a minute: the sign-in call, the big one, then two more");
+    assert.equal((await fetch(`${s.url}${CHAT}`)).status, 429, "a GET counts too");
+    // Signed-in calls are not anonymous: they count against the account's per-caller budget like /shadow/mcp.
+    const calls = [];
+    for (let i = 0; i < 4; i++) calls.push((await mcpPost(s.url, callTool("clockchain_whoami"), { authorization: `Bearer ${person.token}` }, CHAT)).status);
+    assert.deepEqual(calls, [200, 200, 200, 429]);
+  } finally {
+    await s.close();
+  }
+  // The one-click create spends the same per-IP account budget as the page's named create.
+  const h = await harness({ chatPaths: [CHAT], accountCreationsPerHour: 1 });
+  try {
+    const resource = `${PUBLIC}${CHAT}`;
+    const one = await openConsent(h.url, { resource });
+    assert.equal((await decide(h.url, one.requestToken, "create", { origin: PUBLIC })).status, 200);
+    const two = await openConsent(h.url, { resource });
+    const limited = await decide(h.url, two.requestToken, "create", { origin: PUBLIC });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.headers.get("set-cookie"), null);
+    // CSRF and the signed request still guard the one-click create: no Origin is refused, and a /mcp sign-in can't
+    // be turned into a nameless one by editing its resource.
+    assert.equal((await decide(h.url, two.requestToken, "create", {})).status, 403);
+    const plain = await openConsent(h.url, { resource: `${PUBLIC}/mcp` });
+    assert.equal((await decide(h.url, tamper(plain.requestToken, "cc_req_", (b) => { b.rs = resource; }), "create", { origin: PUBLIC })).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test("chat sign-in with the real MCP SDK client: connects and lists tools without a token; its first tool call starts sign-in for this resource; after it, the call works", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  // The client must reach the server at its public URL, so a pass-through proxy fixes the port before boot.
+  let upstreamPort;
+  const proxy = createServer((req, res) => {
+    const out = request({ host: "127.0.0.1", port: upstreamPort, method: req.method, path: req.url, headers: req.headers }, (up) => { res.writeHead(up.statusCode, up.headers); up.pipe(res); });
+    out.on("error", () => { res.writeHead(502); res.end(); });
+    req.pipe(out);
+  }).listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  const PROXY = `http://127.0.0.1:${proxy.address().port}`;
+  const s = await boot({ ...shadowOn(), MCP_OAUTH: "1", MCP_PUBLIC_URL: PROXY, SHADOW_LAZY_AUTH: "1" });
+  upstreamPort = Number(new URL(s.url).port);
+  try {
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+    const { UnauthorizedError } = await import("@modelcontextprotocol/sdk/client/auth.js");
+    const store = {};
+    let pending;
+    const provider = {
+      redirectUrl: "http://localhost:54321/callback",
+      clientMetadata: { client_name: "Claude Code", redirect_uris: ["http://localhost:54321/callback"], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
+      clientInformation: () => store.client, saveClientInformation: (c) => { store.client = c; },
+      tokens: () => store.tokens, saveTokens: (t) => { store.tokens = t; },
+      redirectToAuthorization: (u) => { pending = u; },
+      saveCodeVerifier: (v) => { store.v = v; }, codeVerifier: () => store.v,
+    };
+    const url = new URL(`${PROXY}${CHAT}`);
+    const transport = new StreamableHTTPClientTransport(url, { authProvider: provider });
+    const client = new Client({ name: "lazy-sdk", version: "1" });
+    await client.connect(transport);
+    assert.ok((await client.listTools()).tools.some((t) => t.name === "clockchain_create_account"), "connected and listed without a token");
+    assert.equal(store.tokens, undefined);
+    await assert.rejects(client.callTool({ name: "clockchain_create_account", arguments: { name: "Lazy Labs" } }), UnauthorizedError);
+    assert.equal(pending.origin + pending.pathname, `${PROXY}/oauth/authorize`);
+    assert.equal(pending.searchParams.get("resource"), `${PROXY}${CHAT}`);
+    // The person's browser: the one-click page, Create, Continue; the client finishes with the code.
+    const page = await (await fetch(pending.href, { headers: { accept: "text/html" } })).text();
+    assert.doesNotMatch(page, /name="name"/);
+    const requestToken = /name="request" value="([^"]+)"/.exec(page)[1];
+    const click = (fields) => fetch(`${PROXY}/oauth/authorize`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", origin: PROXY }, body: new URLSearchParams({ request: requestToken, ...fields }) });
+    const keyPage = await (await click({ decision: "create" })).text();
+    const cont = await click({ decision: "continue", grant: /name="grant" value="([^"]+)"/.exec(keyPage)[1] });
+    assert.equal(cont.status, 303);
+    await transport.finishAuth(new URL(cont.headers.get("location")).searchParams.get("code"));
+    assert.ok(store.tokens?.access_token);
+    await client.close();
+    const signedIn = new Client({ name: "lazy-sdk", version: "1" });
+    await signedIn.connect(new StreamableHTTPClientTransport(url, { authProvider: provider }));
+    const r = await signedIn.callTool({ name: "clockchain_create_account", arguments: { name: "Lazy Labs" } });
+    assert.equal(JSON.parse(r.content[0].text).account.name, "Lazy Labs");
+    await signedIn.close();
+  } finally {
+    await s.close();
+    proxy.close();
+    __setShadowLedgerForTests(undefined);
+  }
 });
 
 // ===========================================================================

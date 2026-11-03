@@ -1,8 +1,9 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import {
-  AccountStore, AccountUnavailableError, cleanAccountName, cleanDisplayText, DEFAULT_MAX_ACCOUNTS, displayAccountName,
+  accountCreatedDay, AccountStore, AccountUnavailableError, cleanAccountName, cleanDisplayText, DEFAULT_MAX_ACCOUNTS, displayAccountName,
   hasLetterOrDigit, looksLikeAccountKey, shortAccountId, type Account,
 } from "./accounts.js";
 import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
@@ -180,6 +181,11 @@ export interface OAuthOptions {
   /** Per-IP account-key sign-in attempts per hour (default 20). */
   keyAttemptsPerHour?: number;
   /**
+   * MCP paths for sign-up from the chat (SHADOW_LAZY_AUTH): served and challenged like /mcp and /shadow/mcp, and a
+   * sign-in for one of them (its `resource`) gets the one-click create page, the name coming later from the chat.
+   */
+  chatPaths?: readonly string[];
+  /**
    * Where spent codes, spent refresh tokens and revoked families are kept across restarts (src/oauth-replay.ts).
    * Unset: memory only (tests). Set but unusable: the token endpoint refuses closed (503).
    */
@@ -202,6 +208,8 @@ export interface OAuthHandler {
    * or undefined for any other path. `tokenPresented` adds error="invalid_token".
    */
   challenge(path: string, tokenPresented: boolean): Record<string, string> | undefined;
+  /** The account store the sign-in page uses (undefined when unusable), shared with the chat account tools. */
+  readonly accounts: AccountStore | undefined;
 }
 
 type ArtifactKind = "client" | "request" | "code" | "refresh" | "grant" | "cookie";
@@ -289,47 +297,91 @@ const escapeHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 
 // ---- HTML -------------------------------------------------------------------
+//
+// The sign-in pages follow clockchain.network: its daylight and eclipse palettes (picked here by
+// prefers-color-scheme, since the site's toggle is a script), Inter and JetBrains Mono, the green logo and
+// pill buttons. No script anywhere; one stylesheet, allowed by its hash. Both fonts are served from this
+// origin (FONT_FILES) and the logo is inline SVG, so the policy adds only font-src 'self'.
 
-const STYLE = `:root{color-scheme:light dark;--bg:#f5f6f8;--card:#fff;--text:#14181f;--muted:#5a6372;--line:#e1e4ea;--accent:#1d4ed8;--on-accent:#fff;--note:#6b4600;--note-bg:#fff5e0}
-@media (prefers-color-scheme:dark){:root{--bg:#0d1015;--card:#161a21;--text:#e7eaef;--muted:#9aa3b1;--line:#2a303b;--accent:#4f7cff;--on-accent:#fff;--note:#f2c46d;--note-bg:#2a2214}}
+/**
+ * Self-hosted fonts (SIL OFL 1.1, licences beside them in assets/fonts): the latin subsets of Inter and
+ * JetBrains Mono that clockchain.network uses. Read once at boot; a missing file is a 404, never a crash.
+ * The page refers to them relative to /oauth/authorize, so a prefixed mount (/staging) finds them too.
+ */
+const FONT_FILES: ReadonlyMap<string, Buffer | null> = new Map(
+  ["inter-latin-v20.woff2", "jetbrains-mono-latin-v24.woff2"].map((name): [string, Buffer | null] => {
+    let body: Buffer | null = null;
+    try {
+      body = readFileSync(new URL(`../assets/fonts/${name}`, import.meta.url));
+    } catch {
+      body = null;
+    }
+    return [`/oauth/assets/${name}`, body];
+  }),
+);
+
+const LATIN =
+  "U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD";
+
+const STYLE = `@font-face{font-family:Inter;font-style:normal;font-weight:300 600;font-display:swap;src:url(assets/inter-latin-v20.woff2) format("woff2");unicode-range:${LATIN}}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:400 500;font-display:swap;src:url(assets/jetbrains-mono-latin-v24.woff2) format("woff2");unicode-range:${LATIN}}
+:root{color-scheme:light dark;--bg:#f5f5f7;--surface:#fff;--field:#fff;--fg:#1d1d1f;--fg-2:#6e6e73;--fg-3:#86868b;--line:#e9e9ee;--line-2:#d8d8df;--accent:#00cc00;--on-accent:#fff;--logo:#00cc00;--error:#d9534f;--shadow:0 1px 2px rgba(0,0,0,.04),0 12px 40px -24px rgba(0,0,0,.25);--sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#050905;--surface:#0e130f;--field:#050905;--fg:#f3f6f3;--fg-2:#a7ada7;--fg-3:#808680;--line:rgba(255,255,255,.09);--line-2:rgba(255,255,255,.16);--logo:#fff;--error:#e8716d;--shadow:0 1px 2px rgba(0,0,0,.4),0 24px 60px -30px rgba(0,0,0,.8)}}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:100%;max-width:460px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px}
-.eyebrow{margin:0 0 12px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
-h1{margin:0 0 6px;font-size:20px;line-height:1.35;font-weight:600;overflow-wrap:anywhere}
-.sub{margin:0 0 20px;color:var(--muted)}
-dl{margin:0 0 20px;border:1px solid var(--line);border-radius:10px}
-dl div{display:flex;gap:12px;padding:10px 14px}
-dl div+div{border-top:1px solid var(--line)}
-dt{flex:0 0 110px;color:var(--muted)}
-dd{margin:0;min-width:0;overflow-wrap:anywhere}
-.muted{color:var(--muted);font-size:13px}
-h2{margin:0 0 8px;font-size:14px;font-weight:600}
-ul{margin:0 0 20px;padding-left:20px}
-li{margin:6px 0}
-.note{margin:0 0 20px;padding:10px 14px;border-radius:10px;background:var(--note-bg);color:var(--note);font-size:14px}
-.actions{display:flex;gap:10px}
-button{flex:1;padding:11px 16px;border-radius:10px;font:inherit;font-weight:600;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--text)}
-button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
-.foot{margin:18px 0 0;font-size:12px;color:var(--muted)}
-label,.label{display:block;margin:0 0 6px;font-size:14px;font-weight:600}
-input[type=text],input[type=password]{display:block;width:100%;padding:10px 12px;margin:0 0 8px;border:1px solid var(--line);border-radius:10px;font:inherit;background:var(--bg);color:var(--text)}
-input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.hint{margin:0 0 14px;font-size:13px;color:var(--muted)}
-.stack button{width:100%}
-.choice{display:flex;flex-direction:column}
-.choice .create{order:1}
-.havekey{order:2;margin:14px 0 0}
-.havekey[open]~.create{display:none}
-summary{cursor:pointer;color:var(--accent);font-size:14px;margin:0 0 12px}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;min-height:100vh;display:flex;padding:40px 16px;background:var(--bg);color:var(--fg);font:300 15px/1.55 var(--sans);letter-spacing:-.01em;-webkit-font-smoothing:antialiased}
+main{width:100%;max-width:440px;margin:auto;padding:36px 32px 26px;background:var(--surface);border:1px solid transparent;border-radius:18px;box-shadow:var(--shadow)}
+@media (prefers-color-scheme:dark){main{border-color:var(--line)}}
+.logo{display:block;width:auto;height:24px;margin:0 0 34px;color:var(--logo)}
+h1{margin:0;font-size:28px;font-weight:300;line-height:1.15;letter-spacing:-.025em;overflow-wrap:anywhere;text-wrap:balance}
+p{margin:0;text-wrap:pretty}
+.app,.lead{margin:10px 0 0;color:var(--fg-2);overflow-wrap:anywhere}
+.app{font-size:14px}
+code,.id{font-family:var(--mono);font-size:.9em;letter-spacing:0}
+.app code{color:var(--fg)}
+.id{color:var(--fg-3)}
+.alert{margin:20px 0 0;color:var(--error);font-size:14px;font-weight:400}
+.who{margin:26px 0 0;color:var(--fg-2);font-size:14px;overflow-wrap:anywhere}
+.who strong,.foot strong{color:var(--fg);font-weight:500}
+.flow{margin:28px 0 0}
+.who+.flow{margin-top:14px}
+label{display:block;margin:0 0 8px;color:var(--fg-3);font:500 12px/1.3 var(--mono);letter-spacing:.05em;text-transform:uppercase}
+input[type=text],input[type=password]{display:block;width:100%;height:48px;margin:0;padding:0 14px;border:1px solid var(--line-2);border-radius:10px;background:var(--field);color:var(--fg);font:400 16px var(--sans);letter-spacing:-.01em}
+input:focus{outline:none;border-color:var(--accent)}
+button{margin:0;font:inherit;color:inherit;cursor:pointer}
+.primary{display:block;width:100%;min-height:48px;margin:16px 0 0;padding:12px 24px;border:0;border-radius:980px;background:var(--accent);color:var(--on-accent);font-size:15px;font-weight:500;letter-spacing:-.01em;transition:transform .18s ease,filter .18s ease}
+.primary:hover{transform:translateY(-1px);filter:brightness(1.06)}
+.row{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:2px 28px;margin:12px 0 0}
+.link,.havekey>summary,.download{display:inline-block;padding:6px 2px;border:0;border-radius:6px;background:none;color:var(--fg-2);font-size:14px;font-weight:400;text-decoration:none;cursor:pointer}
+.link:hover,.havekey>summary:hover,.download:hover,.more>summary:hover{color:var(--fg)}
+summary{list-style:none}
+summary::-webkit-details-marker{display:none}
+.primary:focus-visible,.link:focus-visible,summary:focus-visible,.download:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .havekey:not([open]) .when-open,.havekey[open] .when-closed{display:none}
-button.link{flex:none;width:auto;padding:0;border:0;background:none;color:var(--accent);font-weight:500;font-size:14px;text-decoration:underline}
-.switch{margin:14px 0 0}
-.key{margin:0 0 14px;padding:12px 14px;border:1px dashed var(--muted);border-radius:10px;overflow-wrap:anywhere;user-select:all}
-.key code{font-size:15px}`;
+.flow:has(.havekey[open])>.create{display:none}
+.flow:has(.havekey[open])>.row{display:block;margin:0}
+.havekey[open]>summary{margin:-6px 0 14px -2px}
+.havekey[open]>summary::before{content:"\\2190\\00a0"}
+.flow:has(.havekey[open]) .cancel{margin:12px 0 0;text-align:center}
+.foot{margin:30px 0 0;padding:16px 0 0;border-top:1px solid var(--line);color:var(--fg-3);font-size:13px;overflow-wrap:anywhere}
+.foot p+p{margin-top:4px}
+.more{margin:6px 0 0}
+.more>summary{display:inline-flex;align-items:center;gap:8px;padding:4px 0;border-radius:6px;color:var(--fg-2);cursor:pointer}
+.more>summary::after{content:"";width:6px;height:6px;margin-top:-3px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg)}
+.more[open]>summary::after{margin-top:3px;transform:rotate(225deg)}
+.more ul{margin:10px 0 0;padding:0 0 0 18px;color:var(--fg-2);font-size:13.5px;line-height:1.5}
+.more li{margin:6px 0;padding-left:2px}
+.more li::marker{color:var(--accent)}
+.more p{margin:12px 0 2px}
+.keyfield[type=text]{height:54px;margin:26px 0 0;padding:0 12px;font:500 clamp(10px,calc((100vw - 130px)/21.6),15px) var(--mono);letter-spacing:0;text-align:center;-webkit-user-select:all;user-select:all}
+.download{margin:8px 0 0}
+.code{margin:18px 0 0;color:var(--fg-3);font:400 12px var(--mono);letter-spacing:.02em}
+@media (max-width:480px){body{padding:20px 16px}main{margin:0 auto auto;padding:28px 22px 20px;border-radius:16px}h1{font-size:25px}.logo{margin-bottom:28px}}
+@media (prefers-reduced-motion:reduce){.primary{transition:none}.primary:hover{transform:none}}`;
 const STYLE_HASH = createHash("sha256").update(STYLE, "utf8").digest("base64");
+
+/** clockchain.network's logo (the mark and the wordmark), drawn inline so the policy needs no img-src. */
+const LOGO = `<svg class="logo" viewBox="0 0 1613 286" role="img" aria-label="Clockchain" fill="currentColor"><path fill-rule="evenodd" d="M143 0a143 143 0 1 0 0 286a143 143 0 1 0 0-286zm0 0a111 111 0 1 0 0 222a111 111 0 1 0 0-222z"/><circle cx="143" cy="56" r="56"/><path transform="matrix(1 0 0-1 0 286)" d="M468 229c-42-7-65-36-65-82-1-36 13-61 40-76 26-13 65-11 89 5 14 10 28 33 28 48l0 3-16 0-15 0-2-6c-5-18-17-28-35-31-21-3-41 6-49 23-9 18-9 48 0 66 17 34 71 32 83-3l1-5 17 0 16 0-1 3c-6 27-24 46-51 53-9 2-31 3-40 2zM583 146l0-80 15 0 15 0 0 80 0 80-15 0-15 0 0-80zM916 146l0-80 15 0 15 0 0 18 0 19 9 8c4 4 8 8 9 8 0 0 8-12 18-26l17-27 18 0 17 0-10 15c-6 9-17 25-25 36l-14 21 14 13c7 8 18 17 23 22l9 9-18 0-18 0-24-23-24-24-1 46 0 45-15 0-15 0 0-80zM1174 146l0-80 15 0 16 0 0 38c1 42 0 41 8 48 11 12 33 10 39-2 2-4 2-8 2-44l0-40 15 0 15 0 0 45 0 46-4 6c-11 25-49 30-70 10l-5-5 0 29 0 29-15 0-16 0 0-80zM1444 211l0-14 15 0 15 0 0 14 0 13-15 0-15 0 0-13zM683 183c-30-6-49-32-47-63 3-35 26-56 63-56 38 0 61 23 61 61 0 42-34 67-77 58zm25-23c27-7 30-58 4-70-12-6-30-2-38 8-7 10-9 31-4 44 6 15 22 22 38 18zM824 184c-31-7-48-31-46-64 2-33 23-54 57-57 30-2 58 18 60 44l1 3-15 0-15 0-2-6c-7-21-40-23-50-2-7 14-6 36 1 48 12 17 43 14 49-6l1-4 15 0c17 0 17-1 13 10-5 16-17 27-33 32-9 3-28 4-36 2zM1082 184c-29-7-45-28-45-60 0-37 23-60 60-60 28 0 49 14 55 38 1 3 2 7 1 7 0 1-6 1-15 1l-14 0-1-3c-6-26-46-26-54 0-4 17-2 36 7 46 12 12 35 10 43-3 2-2 3-6 4-7l0-3 15 0 15 0 0 2c0 4-4 14-6 19-11 18-40 28-65 23zM1353 184c-24-3-38-16-41-35l0-4 15 0 14 1 1 4c3 10 9 13 24 13 6 0 12 0 14-1 7-3 10-10 8-17-2-6-7-8-27-10-25-2-37-6-46-14-14-15-11-41 8-51 12-7 32-9 46-4 7 2 17 9 18 12 1 2 3 0 3-2 0-1 1-4 1-6l1-4 16 0 15 0-2 4c-2 4-3 6-3 47-1 47-1 46-8 54-8 10-19 13-40 13-8 1-16 1-17 0zm36-71c-2-20-11-28-31-28-14-1-21 5-21 14 0 11 6 15 29 18 7 0 15 2 18 3 2 1 5 2 5 2 0 0 0-4 0-9zM1558 184c-8-2-15-6-21-12l-5-5 0 8 0 7-14 0-15 0 0-58 0-58 15 0 15 0 0 38c1 42 0 42 9 49 12 11 33 9 38-3 2-4 2-7 2-44l0-40 16 0 15 0 0 38c0 43-1 51-5 60-8 16-29 25-50 20zM1444 124l0-58 15 0 15 0 0 58 0 58-15 0-15 0 0-58z"/></svg>`;
 
 function htmlDocument(title: string, body: string): string {
   return `<!doctype html>
@@ -343,6 +395,7 @@ function htmlDocument(title: string, body: string): string {
 </head>
 <body>
 <main>
+${LOGO}
 ${body}
 </main>
 </body>
@@ -363,7 +416,7 @@ function pageHeaders(formAction: string): Record<string, string> {
     "cache-control": "no-store",
     pragma: "no-cache",
     "content-security-policy":
-      `default-src 'none'; style-src 'sha256-${STYLE_HASH}'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
+      `default-src 'none'; style-src 'sha256-${STYLE_HASH}'; font-src 'self'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
     "x-frame-options": "DENY",
     "x-content-type-options": "nosniff",
     // same-origin keeps a non-null Origin on the form POST (the CSRF check) and sends no Referer off-site.
@@ -378,10 +431,31 @@ function pageHeaders(formAction: string): Record<string, string> {
  */
 function sendErrorPage(res: ServerResponse, status: number, title: string, message: string, code?: string, extra: Record<string, string> = {}): void {
   res.writeHead(status, { ...pageHeaders("'none'"), ...extra });
-  res.end(htmlDocument(title, `<p class="eyebrow">Clockchain sign-in</p>
-<h1>${escapeHtml(title)}</h1>
-<p class="sub">${escapeHtml(message)}</p>${code ? `
-<p class="muted">Error code: ${escapeHtml(code)}</p>` : ""}`));
+  res.end(htmlDocument(title, `<h1>${escapeHtml(title)}</h1>
+<p class="lead">${escapeHtml(message)}</p>${code ? `
+<p class="code">Error code: ${escapeHtml(code)}</p>` : ""}`));
+}
+
+/** A self-hosted font: public, cacheable for a year (the names carry the version), and only for this origin. */
+function sendFont(req: IncomingMessage, res: ServerResponse, body: Buffer | null): void {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.writeHead(405, { "content-type": "text/plain; charset=utf-8", allow: "GET, HEAD" });
+    res.end("method not allowed");
+    return;
+  }
+  if (!body) {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("not found");
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": "font/woff2",
+    "content-length": body.length,
+    "cache-control": "public, max-age=31536000, immutable",
+    "x-content-type-options": "nosniff",
+    "cross-origin-resource-policy": "same-origin",
+  });
+  res.end(req.method === "HEAD" ? undefined : body);
 }
 
 interface ConsentView {
@@ -391,20 +465,35 @@ interface ConsentView {
   redirectHost: string;
   requestToken: string;
   /** The signed-in account (name and short id) and the grant binding it to this request; absent = the create page. */
-  signedIn?: { name: string; shortId: string; grant: string };
+  signedIn?: { account: Account; grant: string };
   error?: string;
   /** Show the account-key form (after a rejected key). */
   keyOpen?: boolean;
+  /** A sign-in from the chat: Create account needs no name (the chat names the account afterwards). */
+  oneClick?: boolean;
 }
 
 const requestField = (token: string): string => `<input type="hidden" name="request" value="${escapeHtml(token)}">`;
 
-function appFacts(app: string, redirectHost: string): string {
-  return `<dl>
-<div><dt>App</dt><dd>${app}<br><span class="muted">Name supplied by the app, not verified by Clockchain</span></dd></div>
-<div><dt>Sends you back to</dt><dd><code>${escapeHtml(redirectHost)}</code></dd></div>
-</dl>
-<h2>If you allow it</h2>
+/** "Signed in as" an account: its name in bold, or "an unnamed account" (not styled as a name) with its creation day. */
+function signedInAs(account: Account): string {
+  const id = escapeHtml(shortAccountId(account.acct));
+  return account.unnamed
+    ? `Signed in as ${escapeHtml(displayAccountName(account))} <span class="id">(${id}, created ${escapeHtml(accountCreatedDay(account))})</span>`
+    : `Signed in as <strong>${escapeHtml(displayAccountName(account))}</strong> <span class="id">(${id})</span>`;
+}
+
+/** The app and where Continue/Allow sends you, as plain text: the return host is the phishing check, always shown. */
+function appLine(app: string, redirectHost: string): string {
+  return `<p class="app">${app} · returns you to <code>${escapeHtml(redirectHost)}</code></p>`;
+}
+
+/** The small print: testnet, then what allowing means (the reviewed wording, unchanged), folded. */
+function smallPrint(app: string, redirectHost: string): string {
+  return `<footer class="foot">
+<p>Free testnet · only fingerprints go on the Clockchain ledger</p>
+<details class="more">
+<summary>What this allows</summary>
 <ul>
 <li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
 <li>${app} can read and add to every Shadow record in this account, including records made from other apps.</li>
@@ -412,77 +501,103 @@ function appFacts(app: string, redirectHost: string): string {
 <li>Shadow keeps the records of your agents’ work for 30 days.</li>
 <li>Only fingerprints go on the Clockchain ledger, never the content itself.</li>
 </ul>
-<p class="note">Only continue if you just started connecting from this app and the address above is where you expect to return.</p>`;
+<p>Only continue if you just started connecting from this app and <code>${escapeHtml(redirectHost)}</code> is where you expect to return. The app’s name comes from the app; Clockchain doesn’t verify it.</p>
+</details>
+</footer>`;
 }
 
-/** The approval page: sign-up (no account cookie) or "Signed in as" (a valid one). No script; plain forms. */
+/**
+ * The approval page: create an account (no account cookie) or "Signed in as" (a valid one). No script; plain
+ * forms. The account-key form is a native <details> that, open, takes the create form's place (CSS :has()).
+ */
 function consentPage(v: ConsentView): string {
   const app = escapeHtml(v.appName || "An unnamed app");
-  const alert = v.error ? `<p class="note" role="alert">${escapeHtml(v.error)}</p>\n` : "";
+  const title = `Connect ${v.appName || "an unnamed app"} to Clockchain`;
+  const action = escapeHtml(v.action);
+  const head = `<h1>${escapeHtml(title)}</h1>
+${appLine(app, v.redirectHost)}${v.error ? `
+<p class="alert" role="alert">${escapeHtml(v.error)}</p>` : ""}`;
   if (v.signedIn) {
-    return htmlDocument(`Connect ${v.appName || "an app"} to Clockchain`, `<p class="eyebrow">Clockchain sign-in</p>
-<h1>Allow ${app} to record and anchor your agents’ work on Clockchain?</h1>
-<p class="sub">Signed in as <strong>${escapeHtml(v.signedIn.name)}</strong> <span class="muted">(account ${escapeHtml(v.signedIn.shortId)})</span>. Free testnet credits.</p>
-${alert}${appFacts(app, v.redirectHost)}
-<form method="post" action="${escapeHtml(v.action)}">
+    return htmlDocument(title, `${head}
+<p class="who">${signedInAs(v.signedIn.account)}</p>
+<form method="post" action="${action}" class="flow">
 ${requestField(v.requestToken)}
 <input type="hidden" name="grant" value="${escapeHtml(v.signedIn.grant)}">
-<div class="actions">
-<button type="submit" name="decision" value="cancel">Cancel</button>
-<button type="submit" name="decision" value="approve" class="primary">Allow ${app}</button>
+<button type="submit" name="decision" value="approve" class="primary">Allow</button>
+<div class="row">
+<button type="submit" name="decision" value="switch" class="link">Not you?</button>
+<button type="submit" name="decision" value="cancel" class="link">Cancel</button>
 </div>
 </form>
-<form method="post" action="${escapeHtml(v.action)}" class="switch">
-${requestField(v.requestToken)}
-<button type="submit" name="decision" value="switch" class="link">Not you? Use a different account</button>
-</form>
-<p class="foot">Clockchain testnet</p>`);
+${smallPrint(app, v.redirectHost)}`);
   }
-  return htmlDocument("Create your Clockchain account", `<p class="eyebrow">Clockchain sign-in</p>
-<h1>Create your Clockchain account</h1>
-<p class="sub">Then allow ${app} to record and anchor your agents’ work on Clockchain. Free testnet credits, no email needed.</p>
-${alert}${appFacts(app, v.redirectHost)}
-<div class="choice">
+  return htmlDocument(title, `${head}
+<div class="flow">
+<form method="post" action="${action}" class="create">
+${requestField(v.requestToken)}${v.oneClick ? "" : `
+<label for="name">Company or account name</label>
+<input id="name" name="name" type="text" maxlength="40" required autocomplete="organization" spellcheck="false">`}
+<button type="submit" name="decision" value="create" class="primary">Create account</button>
+</form>
+<div class="row">
 <details class="havekey"${v.keyOpen ? " open" : ""}>
 <summary><span class="when-closed">I have an account key</span><span class="when-open">Create a new account instead</span></summary>
-<form method="post" action="${escapeHtml(v.action)}" class="stack">
+<form method="post" action="${action}">
 ${requestField(v.requestToken)}
 <label for="key">Account key</label>
 <input id="key" name="key" type="password" required autocomplete="current-password" spellcheck="false">
-<button type="submit" name="decision" value="signin" class="primary">Sign in and allow ${app}</button>
+<button type="submit" name="decision" value="signin" class="primary">Sign in</button>
 </form>
 </details>
-<form method="post" action="${escapeHtml(v.action)}" class="stack create">
-${requestField(v.requestToken)}
-<label for="name">Account name</label>
-<input id="name" name="name" type="text" maxlength="40" required autocomplete="nickname" spellcheck="false">
-<p class="hint">Shown to you when you sign in. Any name works.</p>
-<button type="submit" name="decision" value="create" class="primary">Create account and allow ${app}</button>
-</form>
-</div>
-<form method="post" action="${escapeHtml(v.action)}" class="switch">
+<form method="post" action="${action}" class="cancel">
 ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="cancel" class="link">Cancel</button>
 </form>
-<p class="foot">Clockchain testnet</p>`);
+</div>
+</div>
+${smallPrint(app, v.redirectHost)}`);
 }
 
-/** Shown once, right after the create click: the account key, then Continue on to the app. */
-function accountKeyPage(action: string, appName: string, accountName: string, shortId: string, key: string, requestToken: string, grant: string): string {
-  const v = { action };
-  return htmlDocument("Save your Clockchain account key", `<p class="eyebrow">Clockchain sign-in</p>
-<h1>Your Clockchain account is ready</h1>
-<p class="sub">Signed in as <strong>${escapeHtml(accountName)}</strong> <span class="muted">(account ${escapeHtml(shortId)})</span>.</p>
-<p class="label">Your account key</p>
-<p class="key"><code>${escapeHtml(key)}</code></p>
-<p class="note">Save this key to sign in on another device. We can’t show it again.</p>
-<form method="post" action="${escapeHtml(v.action)}" class="stack">
-${requestField(requestToken)}
-<input type="hidden" name="grant" value="${escapeHtml(grant)}">
+interface KeyView {
+  action: string;
+  appName: string;
+  redirectHost: string;
+  account: Account;
+  key: string;
+  requestToken: string;
+  grant: string;
+}
+
+/**
+ * Shown once, right after the create click: the account key, then Continue on to the app. The key file is a
+ * data: link with the download attribute (no script, nothing fetched, so nothing for the CSP to allow).
+ */
+function accountKeyPage(v: KeyView): string {
+  const file = [
+    "Clockchain account key",
+    "",
+    `Account: ${displayAccountName(v.account)} (${shortAccountId(v.account.acct)})`,
+    `Key: ${v.key}`,
+    "",
+    "Keep this key private: anyone who has it can use this Clockchain account.",
+    "To sign in on another device, choose “I have an account key” when you connect an app to Clockchain.",
+    "",
+  ].join("\n");
+  return htmlDocument("Save your Clockchain account key", `<h1>Save your account key</h1>
+<p class="lead">You’ll need it to sign in on another device. We can’t show it again.</p>
+<input class="keyfield" type="text" value="${escapeHtml(v.key)}" readonly aria-label="Your account key" spellcheck="false" autocomplete="off" autocapitalize="off">
+<a class="download" href="${escapeHtml(`data:text/plain;charset=utf-8,${encodeURIComponent(file)}`)}" download="clockchain-account-key.txt">Download key file</a>
+<form method="post" action="${escapeHtml(v.action)}" class="flow">
+${requestField(v.requestToken)}
+<input type="hidden" name="grant" value="${escapeHtml(v.grant)}">
 <button type="submit" name="decision" value="continue" class="primary">Continue</button>
 </form>
-<p class="foot">Continue sends you back to ${escapeHtml(appName || "the app")}.</p>`);
+<footer class="foot">
+<p>${signedInAs(v.account)}</p>
+<p>Continue returns you to ${escapeHtml(v.appName || "the app")} at <code>${escapeHtml(v.redirectHost)}</code>.</p>
+</footer>`);
 }
+
 
 // ---- request plumbing ---------------------------------------------------------
 
@@ -650,7 +765,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
   }
 
-  const resourceHrefs = new Set([`${base}/`, ...MCP_PATHS.map((p) => `${base}${p}`)]);
+  const mcpPaths: readonly string[] = [...MCP_PATHS, ...(options.chatPaths ?? [])];
+  const chatResources = new Set((options.chatPaths ?? []).map((p) => `${base}${p}`));
+  /** A sign-in started by a chat endpoint's 401 (its resource): the create page needs no name. */
+  const fromChat = (request: RequestBlob): boolean => request.rs !== undefined && chatResources.has(request.rs);
+  const resourceHrefs = new Set([`${base}/`, ...mcpPaths.map((p) => `${base}${p}`)]);
   /** undefined = absent; null = not one of ours; else the normalized href. */
   function resourceParam(values: string[]): string | undefined | null {
     if (values.length === 0) return undefined;
@@ -732,7 +851,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   });
   const metadataRoutes = new Map<string, unknown>([
     ["/.well-known/oauth-protected-resource", protectedResource(base)],
-    ...MCP_PATHS.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${p}`, protectedResource(`${base}${p}`)]),
+    ...mcpPaths.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${p}`, protectedResource(`${base}${p}`)]),
     ["/.well-known/oauth-authorization-server", serverMetadata],
     ["/.well-known/openid-configuration", serverMetadata],
     // An issuer with a path: RFC 8414 and RFC 9728 insert it after /.well-known/<name>. Behind a prefix-stripping proxy
@@ -743,7 +862,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
           [`/.well-known/oauth-authorization-server${basePath}`, serverMetadata],
           [`/.well-known/openid-configuration${basePath}`, serverMetadata],
           [`/.well-known/oauth-protected-resource${basePath}`, protectedResource(base)],
-          ...MCP_PATHS.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${basePath}${p}`, protectedResource(`${base}${p}`)]),
+          ...mcpPaths.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${basePath}${p}`, protectedResource(`${base}${p}`)]),
         ] as [string, unknown][]
       : []),
   ]);
@@ -854,8 +973,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     const iat = nowSec();
     const signedIn = o.account
       ? {
-          name: displayAccountName(o.account),
-          shortId: shortAccountId(o.account.acct),
+          account: o.account,
           grant: seal({ t: "grant", acct: o.account.acct, rid: sha256b64url(requestToken), via: "session", iat, exp: iat + REQUEST_TTL_S }),
         }
       : undefined;
@@ -868,6 +986,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       ...(signedIn ? { signedIn } : {}),
       ...(o.error ? { error: o.error } : {}),
       ...(o.keyOpen ? { keyOpen: true } : {}),
+      ...(fromChat(request) ? { oneClick: true } : {}),
     }));
   }
 
@@ -1031,13 +1150,15 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         // A returning person pasted their key into the name box: point them at the key form, keep nothing.
         sendConsent(res, request, requestToken, {
           status: 400,
-          error: "That looks like an account key, not a name. To sign in with it, use “I have an account key” below.",
+          error: "That looks like an account key, not a name. To sign in with it, paste it below.",
           keyOpen: true,
         });
         return;
       }
-      const name = cleanAccountName(form!.get("name"));
-      if (!name) {
+      // A sign-in from a chat endpoint creates the account with one click and no name; the chat names it afterwards
+      // (clockchain_create_account). Every other sign-in still needs a name.
+      const name = fromChat(request) && !(form!.get("name") ?? "").trim() ? null : cleanAccountName(form!.get("name"));
+      if (name === undefined) {
         sendConsent(res, request, requestToken, { status: 400, error: "Choose an account name of 1 to 40 characters." });
         return;
       }
@@ -1068,7 +1189,15 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       const iat = nowSec();
       const grant = seal({ t: "grant", acct: created.account.acct, rid, via: "create", iat, exp: iat + REQUEST_TTL_S });
       res.writeHead(200, { ...pageHeaders(formActionSources(request.ru)), "set-cookie": setAccountCookie(created.account.acct) });
-      res.end(accountKeyPage(AUTHORIZE_ACTION, request.n, displayAccountName(created.account), shortAccountId(created.account.acct), created.key, requestToken, grant));
+      res.end(accountKeyPage({
+        action: AUTHORIZE_ACTION,
+        appName: request.n,
+        redirectHost: new URL(request.ru).host,
+        account: created.account,
+        key: created.key,
+        requestToken,
+        grant,
+      }));
       return;
     }
 
@@ -1314,6 +1443,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   return {
     async handle(req, res) {
       const path = pathOf(req.url);
+      const font = FONT_FILES.get(path);
+      if (font !== undefined) {
+        sendFont(req, res, font);
+        return true;
+      }
       if (!metadataRoutes.has(path) && path !== "/oauth/register" && path !== "/oauth/token" && path !== "/oauth/authorize") return false;
       // CORS for the metadata, register and token routes only, on every response they give.
       if (CORS_ROUTES.has(path)) for (const [k, v] of Object.entries(CORS_HEADERS)) res.setHeader(k, v);
@@ -1326,8 +1460,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       }
       return true;
     },
+    accounts,
     challenge(path, tokenPresented) {
-      if (!(MCP_PATHS as readonly string[]).includes(path)) return undefined;
+      if (!mcpPaths.includes(path)) return undefined;
       const metadataUrl = `${base}/.well-known/oauth-protected-resource${path}`;
       return {
         "www-authenticate": `Bearer resource_metadata="${metadataUrl}"${tokenPresented ? ', error="invalid_token"' : ""}`,
