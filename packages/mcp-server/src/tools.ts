@@ -254,8 +254,8 @@ function okWrite(result: object): Record<string, unknown> {
  * if pool health cannot be read, we fail OPEN (allow the write) rather than
  * block on a transient time-endpoint hiccup.
  */
-async function ensurePoolHealthy(
-  client: ClockchainClient,
+export async function ensurePoolHealthy(
+  client: Pick<ClockchainClient, "getPoolHealth">,
   allowDegraded: boolean | undefined,
 ): Promise<PoolHealth | null> {
   let health: PoolHealth | null = null;
@@ -274,6 +274,45 @@ async function ensurePoolHealthy(
   // Returned so a caller (e.g. attest_action) can thread it through and avoid a
   // second getPoolHealth round-trip.
   return health;
+}
+
+/**
+ * Ledger references under `shadow:` belong to hosted Shadow (`shadow:v1:<sessionId>`, written with the delegated key).
+ * Its verifier counts every ledger record under a session's reference as part of that session, so a record written
+ * there through /mcp, which uses the same delegated key, would make an honest session fail verification. Every /mcp
+ * write is refused when its final reference, after any `did` is folded in, starts with `shadow:` (any case).
+ */
+const RESERVED_REFERENCE = /^\s*shadow:/i;
+
+export class ReservedReferenceError extends Error {
+  constructor() {
+    super(
+      'References starting with "shadow:" are reserved for hosted Shadow records, so this write was refused and nothing ' +
+        "was anchored. Choose an asset_reference_id (or did / agent_id) that does not make the reference start with \"shadow:\".",
+    );
+    this.name = "ReservedReferenceError";
+  }
+}
+
+/** Throws {@link ReservedReferenceError} for a reference hosted Shadow owns. */
+export function refuseReservedReference(reference: string): void {
+  if (RESERVED_REFERENCE.test(reference)) throw new ReservedReferenceError();
+}
+
+/**
+ * Makes `client.log` refuse reserved references, so every write that goes through this client is covered: the
+ * tools below (log_action, attest_action, stopwatch, mint/revoke/delegate identity, the TSA tools) and the handshake
+ * coordinators the tools drive. Those other paths build references with fixed prefixes, so today only log_action and
+ * attest_action can reach one; this is the backstop if that ever changes.
+ */
+export function guardReservedReferences<T extends Pick<ClockchainClient, "log">>(client: T): T {
+  const log = client.log.bind(client);
+  // Async, so a refusal is a rejected promise like any other write failure (callers may chain .catch()).
+  client.log = (async (entry: Parameters<ClockchainClient["log"]>[0]) => {
+    refuseReservedReference(entry.assetReferenceId);
+    return log(entry);
+  }) as T["log"];
+  return client;
 }
 
 /** Map a thrown error to an actionable MCP error payload. */
@@ -433,7 +472,7 @@ export function registerTools(
     };
   }
 
-  const client = new ClockchainClient(config);
+  const client = guardReservedReferences(new ClockchainClient(config));
   // Budget (MCP_LOG_BUDGET) caps writes that spend OUR delegated key's credits.
   // Delegated requests share the process-wide cap; bring-your-own-key requests
   // (opts.delegated === false) spend the caller's own credits, so we don't cap
@@ -605,6 +644,8 @@ export function registerTools(
       allow_degraded,
     }) =>
       run("log_action", () => idempotent(idempotency_key, async () => {
+        // The reference exactly as it will be stored (did folded in): never under hosted Shadow's `shadow:`.
+        refuseReservedReference(did ? `${did}:${asset_reference_id}` : asset_reference_id);
         // Truthful anchoring: refuse the write up front if the pool is degraded (unless opted in).
         await ensurePoolHealthy(client, allow_degraded);
         // Enforce the optional per-process write cap before spending a credit.
@@ -1208,6 +1249,8 @@ export function registerTools(
     },
     async ({ agent_id, action, inputs, outputs, wait, wait_ms, idempotency_key, allow_degraded }) =>
       run("attest_action", () => idempotent(idempotency_key, async () => {
+        // attestAction stores `${agent_id}:${action}:<ms>`: refuse it before any network call if that is reserved.
+        refuseReservedReference(`${agent_id}:${action}:`);
         // Guard + reuse: thread the health the guard already fetched into
         // attestAction so it doesn't fetch /getTime twice.
         const poolHealth = await ensurePoolHealthy(client, allow_degraded);

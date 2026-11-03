@@ -138,6 +138,37 @@ test("the mcp service carries the handshake v2 receipts env and compose-up reads
   }
 });
 
+test("hosted Shadow: the mcp service carries SHADOW_* (empty default = off) and compose-up reads each optionally", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  for (const name of ["SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_MAX_BYTES", "SHADOW_ACCOUNT_MAX_BYTES", "SHADOW_SESSION_STARTS_PER_DAY", "SHADOW_LINK_CONCURRENCY"]) {
+    assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
+    assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
+    assert.doesNotMatch(up, new RegExp(`^read_(secret|optional_secret|required_env) ${name} `, "m"), name);
+  }
+  // Only the mcp service sees it, and its state stays on the mcp_state volume.
+  assert.equal(source.match(/^\s+SHADOW_ENABLED:/gm)?.length, 1);
+  // The test-only override that lets non-account tokens use /shadow/mcp never reaches production.
+  assert.doesNotMatch(source, /SHADOW_ALLOW_NON_ACCT/);
+  assert.doesNotMatch(up, /SHADOW_ALLOW_NON_ACCT/);
+  assert.match(mcpBlock, /- mcp_state:\/app\/state/);
+});
+
+test("OAuth sign-in: the mcp service carries MCP_OAUTH* and compose-up reads each knob optionally, never turning it on", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  for (const name of ["MCP_OAUTH", "MCP_OAUTH_APPROVALS_PER_HOUR", "MCP_OAUTH_ACCOUNTS_PER_HOUR", "MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR", "MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR"]) {
+    assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
+    assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
+    assert.doesNotMatch(up, new RegExp(`^(export ${name}=|read_(secret|optional_secret|required_env) ${name} )`, "m"), name);
+  }
+  // Approval rate limits trust X-Forwarded-For only from Caddy's fixed edge address.
+  assert.match(mcpBlock, /^\s+MCP_OAUTH_TRUSTED_PROXY:\s*"172\.30\.0\.3"\s*$/m);
+  assert.match(source, /ipv4_address: 172\.30\.0\.3/);
+});
+
 test("CDT wiring: compose-up reads every new contract setting optionally and compose passes it through", async () => {
   assert.equal(CDT_FEATURE_ENV_NAMES.length, 14);
   const source = await readFile(composeFile, "utf8");

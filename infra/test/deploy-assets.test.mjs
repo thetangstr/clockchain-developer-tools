@@ -160,6 +160,18 @@ const expectedContractEnv = {
   HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL: "2027-10-01T00:00:00.000Z\n",
   HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN: "handshake-receipt-feed-token\n",
   HANDSHAKE_V2_RECEIPTS_FILE: "/app/state/handshake-v2-receipts.jsonl\n",
+  SHADOW_ENABLED: "shadow-on\n",
+  SHADOW_STATE_DIR: "/app/state/shadow-fixture\n",
+  SHADOW_MAX_BYTES: "shadow-max-bytes\n",
+  SHADOW_ACCOUNT_MAX_BYTES: "shadow-account-max-bytes\n",
+  SHADOW_SESSION_STARTS_PER_DAY: "shadow-starts-per-day\n",
+  SHADOW_LINK_CONCURRENCY: "shadow-link-concurrency\n",
+  // OAuth connector sign-in (optional reads, after the receipts block).
+  MCP_OAUTH: "oauth-flag-on\n",
+  MCP_OAUTH_APPROVALS_PER_HOUR: "oauth-approvals\n",
+  MCP_OAUTH_ACCOUNTS_PER_HOUR: "oauth-accounts\n",
+  MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR: "oauth-accounts-per-ip\n",
+  MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR: "oauth-key-attempts-per-ip\n",
 };
 const expectedContractParamNames = Object.keys(expectedContractEnv).map(
   (name) => `/clockchain/mcp/${name}`,
@@ -448,6 +460,17 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL) value=$'2027-10-01T00:00:00.000Z\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN) value=$'handshake-receipt-feed-token\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE) value=$'/app/state/handshake-v2-receipts.jsonl\\n' ;;
+  /clockchain/mcp/SHADOW_ENABLED) value=$'shadow-on\\n' ;;
+  /clockchain/mcp/SHADOW_STATE_DIR) value=$'/app/state/shadow-fixture\\n' ;;
+  /clockchain/mcp/SHADOW_MAX_BYTES) value=$'shadow-max-bytes\\n' ;;
+  /clockchain/mcp/SHADOW_ACCOUNT_MAX_BYTES) value=$'shadow-account-max-bytes\\n' ;;
+  /clockchain/mcp/SHADOW_SESSION_STARTS_PER_DAY) value=$'shadow-starts-per-day\\n' ;;
+  /clockchain/mcp/SHADOW_LINK_CONCURRENCY) value=$'shadow-link-concurrency\\n' ;;
+  /clockchain/mcp/MCP_OAUTH) value=$'oauth-flag-on\\n' ;;
+  /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR) value=$'oauth-approvals\\n' ;;
+  /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_HOUR) value=$'oauth-accounts\\n' ;;
+  /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR) value=$'oauth-accounts-per-ip\\n' ;;
+  /clockchain/mcp/MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR) value=$'oauth-key-attempts-per-ip\\n' ;;
   /clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=="}\\n' ;;
   /clockchain/mcp/SHORT_ACCEPTANCE_HMAC) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw="}\\n' ;;
   /clockchain/mcp/NEWLINE_KID_HMAC) value=$'{"kid":"accept-fresh\\n","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU="}\\n' ;;
@@ -1502,6 +1525,32 @@ test("compose wrapper reads the /contract/mcp surface optionally — absent para
       assert.equal(result.stdout.includes(secret), false);
       assert.equal(result.stderr.includes(secret), false);
     }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper: MCP_OAUTH absent in SSM stays unset, so the OAuth routes ship off", async () => {
+  const { temp, callsFile, dockerOkFile, env } = await createWrapperFixture({
+    env: {
+      AWS_PARAMETER_NOT_FOUND: "/clockchain/mcp/MCP_OAUTH,/clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR",
+      EXPECTED_UNSET: "MCP_OAUTH,MCP_OAUTH_APPROVALS_PER_HOUR",
+    },
+  });
+
+  try {
+    const { MCP_OAUTH: _flag, MCP_OAUTH_APPROVALS_PER_HOUR: _limit, ...expectedMinusOAuth } = expectedEnv;
+    await writeFile(env.EXPECTED_ENV_FILE, JSON.stringify(expectedMinusOAuth), "utf8");
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
+    assert.deepEqual(
+      calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostRelayParamNames, ...expectedHostSecretNames],
+    );
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
   } finally {
     await rm(temp, { recursive: true, force: true });
   }

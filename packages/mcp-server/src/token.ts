@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 /**
  * Self-serve testnet tokens — stateless, HMAC-signed, no database.
@@ -40,7 +40,27 @@ export interface TokenPayload {
    * of the single shared delegated key every demo token uses today.
    */
   sub?: string;
+  /**
+   * Optional OAuth account id: `acct_` + 22 base64url characters (128 random
+   * bits), fixed when a person approves an app on the OAuth consent page and
+   * carried unchanged through every refresh. Set ONLY by the OAuth token
+   * endpoint (src/oauth.ts); `POST /token` never sets it, and nothing a caller
+   * sends there can. Absent on every token minted before OAuth existed, and
+   * those keep verifying. {@link verifyToken} rejects a token whose `acct` is
+   * present but not in this exact format.
+   */
+  acct?: string;
 }
+
+/** The exact `acct` claim format: `acct_` + 22 base64url characters. */
+export const ACCT_PATTERN = /^acct_[A-Za-z0-9_-]{22}$/;
+
+/** True iff `value` is a well-formed `acct` id. */
+export const isAcctId = (value: unknown): value is string =>
+  typeof value === "string" && ACCT_PATTERN.test(value);
+
+/** A fresh `acct` id: `acct_` + base64url(16 random bytes) = 22 characters. */
+export const newAcctId = (): string => `acct_${randomBytes(16).toString("base64url")}`;
 
 const b64url = (buf: Buffer): string =>
   buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -56,7 +76,9 @@ const sign = (payloadSeg: string, secret: string): string =>
  * gets a unique `jti` so it is independently rate-limitable (per-user auth). `sub` is
  * an optional NON-AUTHORITATIVE label only (see {@link TokenPayload.sub}); it
  * never affects bucketing. Callers should sanitize `sub` before passing it.
- * `nowSec` and `jti` are injectable for tests.
+ * `nowSec` and `jti` are injectable for tests. `acct` is passed only by the
+ * OAuth token endpoint (see {@link TokenPayload.acct}); it must already be a
+ * well-formed id, or this throws rather than mint a token the verifier rejects.
  */
 export function mintToken(
   secret: string,
@@ -64,9 +86,14 @@ export function mintToken(
   nowSec: number = Math.floor(Date.now() / 1000),
   sub?: string,
   jti: string = randomUUID(),
+  acct?: string,
 ): { token: string; payload: TokenPayload } {
   const payload: TokenPayload = { v: 1, tier: "demo", iat: nowSec, exp: nowSec + ttlSeconds, jti };
   if (sub) payload.sub = sub;
+  if (acct !== undefined) {
+    if (!isAcctId(acct)) throw new Error("mintToken: malformed acct");
+    payload.acct = acct;
+  }
   const seg = b64url(Buffer.from(JSON.stringify(payload), "utf8"));
   return { token: `${PREFIX}${seg}.${sign(seg, secret)}`, payload };
 }
@@ -105,6 +132,9 @@ export function verifyToken(
   if (payload.v !== 1) return { valid: false, reason: "bad version" };
   if (typeof payload.exp !== "number" || nowSec >= payload.exp) {
     return { valid: false, reason: "expired" };
+  }
+  if (payload.acct !== undefined && !isAcctId(payload.acct)) {
+    return { valid: false, reason: "bad acct" };
   }
   return { valid: true, payload };
 }
