@@ -14,6 +14,7 @@ import path from "node:path";
 
 import { runHttp, signedTokenSubject } from "../dist/http.js";
 import { createOAuthHandler, loadOAuthConfig } from "../dist/oauth.js";
+import { durableExpiringSet } from "../dist/oauth-replay.js";
 import { ACCT_PATTERN, mintToken, verifyToken } from "../dist/token.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { ownerKeyOf } from "../dist/shadow/store.js";
@@ -262,10 +263,10 @@ test("config: off unless MCP_OAUTH=1 with a signing secret; bad values are misco
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "http://mcp.clockchain.network" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/mcp" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_OAUTH_APPROVALS_PER_HOUR: "lots" }, SECRET).kind, "misconfigured");
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsDir: "/app/state/accounts" });
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsDir: "/app/state/accounts", replayDir: "/app/state/oauth" });
   assert.deepEqual(
     loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/", MCP_OAUTH_APPROVALS_PER_HOUR: "40", MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3", MCP_STATE_DIR: "/srv/state" }, SECRET),
-    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsDir: "/srv/state/accounts", trustedProxy: "172.30.0.3" },
+    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsDir: "/srv/state/accounts", replayDir: "/srv/state/oauth", trustedProxy: "172.30.0.3" },
   );
 });
 
@@ -1417,6 +1418,96 @@ test("per-caller rate limit: all tokens of one account share one bucket on /mcp 
   } finally {
     await s.close();
     __setShadowLedgerForTests(undefined);
+  }
+});
+
+// ===========================================================================
+// Replay state survives restarts (security review, LOW)
+// ===========================================================================
+
+test("restart: a spent refresh token, its revoked family and a spent code stay refused after a restart", async () => {
+  const stateDir = tempDir("replay");
+  const env = { MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_STATE_DIR: stateDir };
+  let first = await boot(env);
+  let person, a, rt0, rt1, rt2, codeA, other;
+  try {
+    person = await signUp(first.url, "Restart Rita");
+    a = await approve(first.url, { account: person });
+    codeA = a.code;
+    rt0 = (await exchangeCode(first.url, a)).body.refresh_token;
+    const r1 = await refreshOnce(first.url, a.client.client_id, rt0);
+    rt1 = r1.body.refresh_token;
+    // Replaying rt0 revokes the family: rt1 dies too.
+    assert.equal((await refreshOnce(first.url, a.client.client_id, rt0)).body.error, "invalid_grant");
+    assert.equal((await refreshOnce(first.url, a.client.client_id, rt1)).body.error, "invalid_grant");
+    // A second, healthy family: rt2 spent once (its successor stays good).
+    const b = await approve(first.url, { client: a.client, account: person });
+    const t = await exchangeCode(first.url, b);
+    const r2 = await refreshOnce(first.url, a.client.client_id, t.body.refresh_token);
+    rt2 = t.body.refresh_token;
+    other = { client: a.client, rt: r2.body.refresh_token };
+  } finally {
+    await first.close();
+  }
+  for (const name of readdirSync(path.join(stateDir, "oauth"))) assert.equal(statSync(path.join(stateDir, "oauth", name)).mode & 0o777, 0o600, name);
+
+  const second = await boot(env);
+  try {
+    assert.equal((await refreshOnce(second.url, a.client.client_id, rt0)).body.error, "invalid_grant", "spent + revoked stays spent");
+    assert.equal((await refreshOnce(second.url, a.client.client_id, rt1)).body.error, "invalid_grant", "the revoked family stays revoked");
+    assert.equal((await exchangeCode(second.url, { ...a, code: codeA })).body.error, "invalid_grant", "a spent code stays spent");
+    // The healthy family: its spent token is still refused (and that replay now revokes it); before that, its
+    // current token works across the restart.
+    const ok = await refreshOnce(second.url, other.client.client_id, other.rt);
+    assert.equal(ok.status, 200);
+    assert.equal(tokenAcct(ok), person.acct);
+    assert.equal((await refreshOnce(second.url, other.client.client_id, rt2)).body.error, "invalid_grant");
+    assert.equal((await refreshOnce(second.url, other.client.client_id, ok.body.refresh_token)).body.error, "invalid_grant", "the replay revoked the family");
+  } finally {
+    await second.close();
+  }
+  // And once more: the revocation made after the first restart also survives.
+  const third = await boot(env);
+  try {
+    assert.equal((await refreshOnce(third.url, other.client.client_id, other.rt)).body.error, "invalid_grant");
+  } finally {
+    await third.close();
+  }
+});
+
+test("replay state files: journal per entry, torn lines skipped, expired entries dropped, compacted at open; corruption fails closed", async () => {
+  const dir = path.join(tempDir("replay-unit"), "oauth");
+  let t = 1_000;
+  const set = durableExpiringSet(dir, "used-refresh", 10, () => t);
+  set.add("aaaa-1", 2_000);
+  set.add("bbbb-2", 1_500);
+  assert.equal(readFileSync(path.join(dir, "used-refresh.jsonl"), "utf8"), '["aaaa-1",2000]\n["bbbb-2",1500]\n');
+  writeFileSync(path.join(dir, "used-refresh.jsonl"), '["aaaa-1",2000]\n["bbbb-2",1500]\n["cccc', { flag: "w", mode: 0o600 });
+  assert.throws(() => set.add("bad key!", 2_000));
+  t = 1_600; // bbbb-2 has expired
+  const reopened = durableExpiringSet(dir, "used-refresh", 10, () => t);
+  assert.equal(reopened.has("aaaa-1"), true);
+  assert.equal(reopened.has("bbbb-2"), false);
+  assert.equal(reopened.has("cccc"), false);
+  assert.equal(existsSync(path.join(dir, "used-refresh.jsonl")), false, "folded into the snapshot");
+  assert.deepEqual(JSON.parse(readFileSync(path.join(dir, "used-refresh.json"), "utf8")).value, [["aaaa-1", 2000]]);
+  for (const name of readdirSync(dir)) assert.equal(statSync(path.join(dir, name)).mode & 0o777, 0o600, name);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+
+  // A corrupt snapshot with no valid backup: the OAuth token endpoint refuses closed.
+  const broken = path.join(tempDir("replay-corrupt"), "oauth");
+  durableExpiringSet(broken, "used-codes", 10, () => t).add("x-1", 5_000);
+  durableExpiringSet(broken, "used-codes", 10, () => t); // compacts: snapshot written, journal gone
+  for (const name of readdirSync(broken)) if (name.startsWith("used-codes.json")) writeFileSync(path.join(broken, name), "{not json", { mode: 0o600 });
+  const h = await harness({ replayDir: broken });
+  try {
+    const a = await approve(h.url);
+    const res = await exchangeCode(h.url, a);
+    assert.equal(res.status, 503);
+    assert.equal(res.body.error, "temporarily_unavailable");
+    assert.ok(h.logs.some((e) => e.event === "oauth_replay_state_unavailable"));
+  } finally {
+    await h.close();
   }
 });
 

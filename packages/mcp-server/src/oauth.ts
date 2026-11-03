@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import { AccountStore, cleanAccountName, DEFAULT_MAX_ACCOUNTS, type Account } from "./accounts.js";
+import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
 import { isAcctId, mintToken } from "./token.js";
 
@@ -29,8 +30,9 @@ import { isAcctId, mintToken } from "./token.js";
  * derived from MCP_TOKEN_SIGNING_SECRET under its own label, so no artifact can
  * be replayed as another kind or as an access token. Prefixes all start `cc_`,
  * so one presented to /mcp is refused (401) instead of falling through to the
- * bring-your-own-key path. The only state is in memory: the single-use sets for
- * codes and refresh tokens, and revoked refresh-token families.
+ * bring-your-own-key path. The only server state is the accounts and the replay
+ * state (spent codes, spent refresh tokens, revoked families; src/oauth-replay.ts),
+ * both on the state volume so they survive restarts.
  *
  * Logs carry only event names, client_name and acct ids: never codes, tokens,
  * refresh tokens, verifiers or client_id blobs.
@@ -54,7 +56,7 @@ const COOKIE_MAX_AGE_S = 365 * 24 * 60 * 60;
 export type OAuthConfig =
   | { kind: "disabled" }
   | { kind: "misconfigured"; reason: string }
-  | { kind: "ready"; publicUrl: string; approvalsPerHour: number; accountsDir: string; trustedProxy?: string };
+  | { kind: "ready"; publicUrl: string; approvalsPerHour: number; accountsDir: string; replayDir: string; trustedProxy?: string };
 
 /** An https origin (http only on loopback, for local runs) with no path, query or credentials. */
 export function normalizePublicUrl(raw: string): string | undefined {
@@ -89,8 +91,9 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     kind: "ready",
     publicUrl,
     approvalsPerHour: rawApprovals === "" ? 10 : Number(rawApprovals),
-    // Accounts live on the state volume, next to the handshake and Shadow state.
+    // Accounts and replay state live on the state volume, next to the handshake and Shadow state.
     accountsDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "accounts"),
+    replayDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "oauth"),
     ...(trustedProxy ? { trustedProxy } : {}),
   };
 }
@@ -116,6 +119,11 @@ export interface OAuthOptions {
   accountCreationsPerHour?: number;
   /** Per-IP account-key sign-in attempts per hour (default 20). */
   keyAttemptsPerHour?: number;
+  /**
+   * Where spent codes, spent refresh tokens and revoked families are kept across restarts (src/oauth-replay.ts).
+   * Unset: memory only (tests). Set but unusable: the token endpoint refuses closed (503).
+   */
+  replayDir?: string;
   /** Refresh grants per refresh-token family per hour (default 30). */
   refreshesPerFamilyPerHour?: number;
   /** Refresh grants per IP per hour (default 30). */
@@ -552,30 +560,20 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     return blob as T;
   }
 
-  // Single-use bookkeeping. Entries live until the artifact itself expires;
-  // the size cap evicts the oldest entry first (best effort under a flood).
-  function expiringSet(cap: number) {
-    const entries = new Map<string, number>();
-    let nextSweep = 0;
-    return {
-      has: (key: string) => {
-        const exp = entries.get(key);
-        return exp !== undefined && nowSec() < exp;
-      },
-      add: (key: string, exp: number) => {
-        const t = nowSec();
-        if (t >= nextSweep || entries.size >= cap) {
-          for (const [k, e] of entries) if (t >= e) entries.delete(k);
-          nextSweep = t + 60;
-        }
-        while (entries.size >= cap) entries.delete(entries.keys().next().value as string);
-        entries.set(key, exp);
-      },
+  // Single-use and revocation bookkeeping. Entries live until the artifact itself expires. Durable when replayDir
+  // is set (production: <MCP_STATE_DIR>/oauth), so a restart cannot resurrect a spent or revoked token.
+  let replay: { usedCodes: ExpiringSet; usedRefreshTokens: ExpiringSet; revokedFamilies: ExpiringSet } | undefined;
+  try {
+    const make = (name: string, cap: number): ExpiringSet =>
+      options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec) : memoryExpiringSet(cap, nowSec);
+    replay = {
+      usedCodes: make("used-codes", 100_000),
+      usedRefreshTokens: make("used-refresh", 200_000),
+      revokedFamilies: make("revoked-families", 100_000),
     };
+  } catch (e) {
+    log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
   }
-  const usedCodes = expiringSet(100_000);
-  const usedRefreshTokens = expiringSet(200_000);
-  const revokedFamilies = expiringSet(100_000);
 
   const resourceHrefs = new Set([`${base}/`, ...MCP_PATHS.map((p) => `${base}${p}`)]);
   /** undefined = absent; null = not one of ours; else the normalized href. */
@@ -1070,6 +1068,23 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     }
 
     const grant = params.get("grant_type");
+    if ((grant === "authorization_code" || grant === "refresh_token") && !replay) {
+      // Without durable replay state a spent token could come back after a restart: refuse closed.
+      sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
+      return;
+    }
+    const { usedCodes, usedRefreshTokens, revokedFamilies } = replay ?? ({} as NonNullable<typeof replay>);
+    /** Records a spent or revoked id durably before anything is issued; false (after a 503) when it cannot. */
+    const mark = (set: ExpiringSet, key: string, exp: number, failStatus = true): boolean => {
+      try {
+        set.add(key, exp);
+        return true;
+      } catch {
+        log({ event: "oauth_replay_state_write_failed" });
+        if (failStatus) sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
+        return false;
+      }
+    };
     if (grant === "authorization_code") {
       const code = unseal<CodeBlob>("code", params.get("code"));
       if (!code || !safeEqual(code.cid, cid)) {
@@ -1093,12 +1108,12 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       // Check-then-mark with no await in between: single use holds under concurrency.
       if (usedCodes.has(code.jti)) {
         // A replayed code: refuse it and kill the refresh tokens the first use produced.
-        revokedFamilies.add(code.jti, nowSec() + REFRESH_TTL_S);
+        mark(revokedFamilies, code.jti, nowSec() + REFRESH_TTL_S, false);
         log({ event: "oauth_code_reuse", acct: code.acct });
         sendOAuthError(res, 400, "invalid_grant", "The authorization code was already used.");
         return;
       }
-      usedCodes.add(code.jti, code.exp);
+      if (!mark(usedCodes, code.jti, code.exp)) return;
       issueTokens(res, "authorization_code", { cid, n: client.n, acct: code.acct, rs: code.rs ?? resource, fam: code.jti });
       return;
     }
@@ -1114,7 +1129,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       }
       if (usedRefreshTokens.has(refresh.jti)) {
         // Rotation reuse (RFC 9700 §4.14.2): revoke the whole family.
-        revokedFamilies.add(refresh.fam, nowSec() + REFRESH_TTL_S);
+        mark(revokedFamilies, refresh.fam, nowSec() + REFRESH_TTL_S, false);
         log({ event: "oauth_refresh_reuse", acct: refresh.acct });
         sendOAuthError(res, 400, "invalid_grant", "The refresh token was already used.");
         return;
@@ -1125,7 +1140,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         sendOAuthError(res, 429, "temporarily_unavailable", "Too many token refreshes. Try again later; this refresh token stays valid.", { "retry-after": "3600" });
         return;
       }
-      usedRefreshTokens.add(refresh.jti, refresh.exp);
+      if (!mark(usedRefreshTokens, refresh.jti, refresh.exp)) return;
       issueTokens(res, "refresh_token", { cid, n: client.n, acct: refresh.acct, rs: refresh.rs ?? resource, fam: refresh.fam });
       return;
     }
