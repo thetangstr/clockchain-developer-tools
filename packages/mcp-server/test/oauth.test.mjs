@@ -2345,13 +2345,19 @@ test("chat sign-in: an unnamed account can be named from the chat only within 15
 test("chat sign-in: rate limits hold (account creation per IP, anonymous discovery per client, tool calls per account)", async () => {
   const s = await boot(chatOn({ MCP_RATE_PER_MIN: "3", SHADOW_ANON_PER_MINUTE: "4" }));
   try {
-    // Anonymous discovery: 4 a minute per client, then 429 (a tools/call still gets its 401 first).
-    const statuses = [];
-    for (let i = 0; i < 5; i++) statuses.push((await mcpPost(s.url, rpc("tools/list"), {}, CHAT)).status);
-    assert.deepEqual(statuses, [200, 200, 200, 200, 429]);
-    assert.equal((await mcpPost(s.url, callTool("clockchain_whoami"), {}, CHAT)).status, 401);
-    // Tool calls count against the account's per-caller budget like /shadow/mcp.
+    // Every anonymous request counts, 4 a minute per client, before its body is read: discovery, the 401s and the
+    // oversized alike. A body over 16 KB is never read (a 401, which still starts sign-in).
     const person = await chatSignIn(s.url, await mcpPost(s.url, callTool("clockchain_whoami"), {}, CHAT));
+    const big = await mcpPost(s.url, { ...rpc("tools/list"), pad: "x".repeat(17 * 1024) }, {}, CHAT);
+    assert.equal(big.status, 401);
+    assert.equal(big.headers.get("www-authenticate"), CHAT_CHALLENGE);
+    const statuses = [];
+    for (const body of [rpc("tools/list"), callTool("clockchain_whoami"), rpc("tools/list"), rpc("tools/list"), callTool("clockchain_whoami")]) {
+      statuses.push((await mcpPost(s.url, body, {}, CHAT)).status);
+    }
+    assert.deepEqual(statuses, [200, 401, 429, 429, 429], "4 anonymous requests a minute: the sign-in call, the big one, then two more");
+    assert.equal((await fetch(`${s.url}${CHAT}`)).status, 429, "a GET counts too");
+    // Signed-in calls are not anonymous: they count against the account's per-caller budget like /shadow/mcp.
     const calls = [];
     for (let i = 0; i < 4; i++) calls.push((await mcpPost(s.url, callTool("clockchain_whoami"), { authorization: `Bearer ${person.token}` }, CHAT)).status);
     assert.deepEqual(calls, [200, 200, 200, 429]);

@@ -92,8 +92,9 @@ export interface ShadowHttpDeps {
   };
 }
 
-/** What a client may do on the chat endpoint before signing in. */
+/** What a client may do on the chat endpoint before signing in, in a body of at most 16 KB. */
 const ANONYMOUS_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "ping"]);
+const ANONYMOUS_MAX_BODY = 16 * 1024;
 
 /** The page a 403 points at: how to connect to hosted Shadow with sign-in. Plain text, for people and agents. */
 export function connectInstructions(base: string): string {
@@ -476,13 +477,23 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     await serve(req, res, body, buildShadowServer(deps.service, auth.ownerId, publicBaseUrl(req.headers), chat?.accounts));
   }
 
-  /** The chat endpoint without a credential: one discovery message per request, or the 401 that starts sign-in. */
+  /**
+   * The chat endpoint without a credential: one discovery message per request, or the 401 that starts sign-in. Every
+   * such request counts against the per-client anonymous limit before its body is read, and the body is small.
+   */
   async function anonymous(req: IncomingMessage, res: ServerResponse, chat: NonNullable<ShadowHttpDeps["chat"]>): Promise<void> {
-    if (req.method !== "POST") return deps.unauthorized(res, req);
+    if (!chat.allowAnonymous(req)) {
+      res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
+      res.end(JSON.stringify({ error: "rate_limited" }));
+      return;
+    }
+    // Nothing bigger is a discovery message; a larger tool call still gets the 401 that starts sign-in.
+    if (req.method !== "POST" || Number(req.headers["content-length"] ?? "0") > ANONYMOUS_MAX_BODY) return deps.unauthorized(res, req);
     let body: unknown;
     try {
-      body = await deps.readJsonBody(req, 512 * 1024);
+      body = await deps.readJsonBody(req, ANONYMOUS_MAX_BODY);
     } catch {
+      if (res.destroyed || res.headersSent) return;
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "invalid_json_body" }));
       return;
@@ -490,11 +501,6 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     const method = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as { method?: unknown }).method : undefined;
     // Before the SDK runs: a tool handler can only answer 200, and only a 401 starts the client's sign-in.
     if (typeof method !== "string" || !ANONYMOUS_METHODS.has(method)) return deps.unauthorized(res, req);
-    if (!chat.allowAnonymous(req)) {
-      res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
-      res.end(JSON.stringify({ error: "rate_limited" }));
-      return;
-    }
     await serve(req, res, body, buildShadowServer(deps.service, null, publicBaseUrl(req.headers), chat.accounts));
   }
 
