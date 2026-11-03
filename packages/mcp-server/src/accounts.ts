@@ -10,7 +10,7 @@ import { isAcctId, newAcctId } from "./token.js";
  * with the handshake surfaces' durable writer (0700 dirs, 0600 files, fsync, rename, .bak), like the hosted Shadow
  * store, so accounts survive restarts and code-only deploys on the /app/state volume:
  *
- *   a/<acct>.json        { acct, name, createdAt, keyHash }
+ *   a/<acct>.json        { acct, name, createdAt, keyHash, unnamed? }
  *   k/<keyHash>.json     { acct }        lookup index for account-key sign-in
  *
  * The account key (`cck_` + 32 base64url characters, 192 random bits) is shown once at creation. Only its SHA-256 is
@@ -29,7 +29,15 @@ export interface Account {
   name: string;
   createdAt: string;
   keyHash: string;
+  /**
+   * Created with one click from a chat sign-in (SHADOW_LAZY_AUTH), before it had a name: `name` holds the placeholder
+   * "New account" (so older code reads the record unchanged) until clockchain_create_account names it, once.
+   */
+  unnamed?: true;
 }
+
+/** What an unnamed account is called until it is named. */
+export const UNNAMED_ACCOUNT_NAME = "New account";
 
 /** True for text holding (part of) an account key: cck_ and 16 or more key characters (follow-up finding 7). */
 export const looksLikeAccountKey = (raw: unknown): boolean => typeof raw === "string" && /cck_[A-Za-z0-9_-]{16,}/.test(raw);
@@ -92,7 +100,7 @@ function validateAccount(value: unknown): Account {
     !isObject(value) || !isAcctId(value.acct) || typeof value.name !== "string" || value.name.length === 0 || value.name.length > 1000 ||
     typeof value.createdAt !== "string" || typeof value.keyHash !== "string" || !KEY_HASH.test(value.keyHash)
   ) throw new Error("bad account record");
-  return { acct: value.acct, name: value.name, createdAt: value.createdAt, keyHash: value.keyHash };
+  return { acct: value.acct, name: value.name, createdAt: value.createdAt, keyHash: value.keyHash, ...(value.unnamed === true ? { unnamed: true as const } : {}) };
 }
 
 function validateKeyEntry(value: unknown): { acct: string } {
@@ -193,21 +201,42 @@ export class AccountStore {
     return account;
   }
 
-  /** Creates an account with an already-cleaned name. Refuses past the global cap. Throws if it cannot be persisted. */
-  create(name: string): CreateResult {
+  /**
+   * Creates an account with an already-cleaned name, or unnamed (null: the one-click chat sign-in, named later by
+   * {@link nameOnce}). Refuses past the global cap. Throws if it cannot be persisted.
+   */
+  create(name: string | null): CreateResult {
     if (this.total >= this.maxAccounts) return { ok: false, reason: "full" };
-    const clean = cleanAccountName(name);
-    if (clean === undefined || clean !== name) throw new Error("account name must be cleaned first");
+    if (name !== null && cleanAccountName(name) !== name) throw new Error("account name must be cleaned first");
     let acct = newAcctId();
     while (this.get(acct)) acct = newAcctId();
     const key = `cck_${randomBytes(24).toString("base64url")}`;
-    const account: Account = { acct, name, createdAt: new Date(this.now()).toISOString(), keyHash: hashKey(key) };
+    const account: Account = {
+      acct, name: name ?? UNNAMED_ACCOUNT_NAME, createdAt: new Date(this.now()).toISOString(), keyHash: hashKey(key),
+      ...(name === null ? { unnamed: true as const } : {}),
+    };
     // The account first, then its key index: a crash in between leaves an account the cookie still reaches.
     this.accountFile(acct, account).save("now");
     this.keyFile(account.keyHash, { acct }).save("now");
     this.cache.set(acct, account);
     this.total += 1;
     return { ok: true, account, key };
+  }
+
+  /**
+   * Names an unnamed account, once, with an already-cleaned name. An account that already has a name is returned
+   * unchanged (named: false): nothing is ever renamed. Undefined when there is no such account; throws
+   * AccountUnavailableError when its record cannot be read, or when the new record cannot be persisted.
+   */
+  nameOnce(acct: string, name: string): { account: Account; named: boolean } | undefined {
+    if (cleanAccountName(name) !== name) throw new Error("account name must be cleaned first");
+    const account = this.get(acct);
+    if (!account) return undefined;
+    if (!account.unnamed) return { account, named: false };
+    const named: Account = { acct: account.acct, name, createdAt: account.createdAt, keyHash: account.keyHash };
+    this.accountFile(acct, named).save("now");
+    this.cache.set(acct, named);
+    return { account: named, named: true };
   }
 
   /** The account an account key belongs to, or undefined. Throws AccountUnavailableError when a record cannot be read. */

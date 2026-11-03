@@ -166,6 +166,7 @@ const expectedContractEnv = {
   SHADOW_ACCOUNT_MAX_BYTES: "shadow-account-max-bytes\n",
   SHADOW_SESSION_STARTS_PER_DAY: "shadow-starts-per-day\n",
   SHADOW_LINK_CONCURRENCY: "shadow-link-concurrency\n",
+  SHADOW_LAZY_AUTH: "shadow-lazy-auth\n",
   // OAuth connector sign-in (optional reads, after the receipts block).
   MCP_OAUTH: "oauth-flag-on\n",
   MCP_OAUTH_APPROVALS_PER_HOUR: "oauth-approvals\n",
@@ -466,6 +467,7 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_ACCOUNT_MAX_BYTES) value=$'shadow-account-max-bytes\\n' ;;
   /clockchain/mcp/SHADOW_SESSION_STARTS_PER_DAY) value=$'shadow-starts-per-day\\n' ;;
   /clockchain/mcp/SHADOW_LINK_CONCURRENCY) value=$'shadow-link-concurrency\\n' ;;
+  /clockchain/mcp/SHADOW_LAZY_AUTH) value=$'shadow-lazy-auth\\n' ;;
   /clockchain/mcp/MCP_OAUTH) value=$'oauth-flag-on\\n' ;;
   /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR) value=$'oauth-approvals\\n' ;;
   /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_HOUR) value=$'oauth-accounts\\n' ;;

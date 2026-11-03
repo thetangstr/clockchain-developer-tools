@@ -610,6 +610,12 @@ export async function runHttp(): Promise<Server> {
   // the Clockchain account the person signed up or signed in with (accounts live
   // under ${MCP_STATE_DIR:-/app/state}/accounts).
   const oauthConfig = loadOAuthConfig(process.env, signingSecret);
+  // SHADOW_LAZY_AUTH=1 (with hosted Shadow and OAuth on) adds the chat sign-in endpoint for claude.ai's "Sign in when
+  // needed" connectors: it connects and lists tools without a token, and its first tool call starts sign-in. A
+  // separate path, so /shadow/mcp (ChatGPT, Claude Code, "Sign in now" connectors) is untouched. Off: no such path.
+  const shadowChatPath = (process.env.SHADOW_LAZY_AUTH ?? "").trim() === "1" && loadShadowConfig(process.env).enabled && oauthConfig.kind === "ready"
+    ? "/shadow/chat/mcp"
+    : undefined;
   if (oauthConfig.kind === "misconfigured") {
     console.error(`[clockchain-mcp] OAuth misconfigured (routes off): ${oauthConfig.reason}`);
   }
@@ -626,6 +632,7 @@ export async function runHttp(): Promise<Server> {
         cookieName: oauthConfig.cookieName,
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
+        ...(shadowChatPath ? { chatPaths: [shadowChatPath] } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
       })
     : undefined;
@@ -1097,6 +1104,8 @@ export async function runHttp(): Promise<Server> {
   let shadowHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined;
   let shadowService: ShadowService | undefined;
   const shadowLinkLimit = keyedWindowLimiter(Number(process.env.SHADOW_LINKS_PER_MINUTE || "60"), 60_000, Date.now);
+  // Discovery before sign-in on the chat endpoint, per client (generous: claude.ai calls from shared egress).
+  const shadowAnonymousLimit = keyedWindowLimiter(Number(process.env.SHADOW_ANON_PER_MINUTE || "600"), 60_000, Date.now);
   // Link clients are bucketed like OAuth's: the real client behind Caddy (MCP_OAUTH_TRUSTED_PROXY), IPv6 by /64.
   const shadowTrustedProxy = (process.env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim() || undefined;
   const shadowLinkClient = (req: IncomingMessage): string =>
@@ -1116,7 +1125,7 @@ export async function runHttp(): Promise<Server> {
   const shadowAccountRequired = (res: ServerResponse, req: IncomingMessage): void => {
     const base = publicBaseUrl(req.headers);
     const headers: Record<string, string> = { "content-type": "application/json", "cache-control": "no-store" };
-    const challenge = oauth?.challenge("/shadow/mcp", false)?.["www-authenticate"];
+    const challenge = oauth?.challenge(pathOf(req.url) === shadowChatPath ? shadowChatPath : "/shadow/mcp", false)?.["www-authenticate"];
     if (challenge) headers["www-authenticate"] = `${challenge}, error="insufficient_scope", error_description="sign in with a Clockchain account"`;
     res.writeHead(403, headers);
     res.end(JSON.stringify({
@@ -1202,6 +1211,14 @@ export async function runHttp(): Promise<Server> {
         },
         linkClient: shadowLinkClient,
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
+        ...(shadowChatPath ? {
+          chat: {
+            path: shadowChatPath,
+            accounts: oauth?.accounts,
+            anonymous: (req: IncomingMessage) => !req.rawHeaders.some((h, i) => i % 2 === 0 && CREDENTIAL_HEADERS.has(h.toLowerCase())),
+            allowAnonymous: (req: IncomingMessage) => shadowAnonymousLimit(`shadowanon:${shadowLinkClient(req)}`),
+          },
+        } : {}),
         links: {
           concurrent: shadowConfig.linkConcurrency,
           perClient: Number(process.env.SHADOW_LINK_PER_CLIENT || "1"),

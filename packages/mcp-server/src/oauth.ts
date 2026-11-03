@@ -181,6 +181,11 @@ export interface OAuthOptions {
   /** Per-IP account-key sign-in attempts per hour (default 20). */
   keyAttemptsPerHour?: number;
   /**
+   * MCP paths for sign-up from the chat (SHADOW_LAZY_AUTH): served and challenged like /mcp and /shadow/mcp, and a
+   * sign-in for one of them (its `resource`) gets the one-click create page, the name coming later from the chat.
+   */
+  chatPaths?: readonly string[];
+  /**
    * Where spent codes, spent refresh tokens and revoked families are kept across restarts (src/oauth-replay.ts).
    * Unset: memory only (tests). Set but unusable: the token endpoint refuses closed (503).
    */
@@ -203,6 +208,8 @@ export interface OAuthHandler {
    * or undefined for any other path. `tokenPresented` adds error="invalid_token".
    */
   challenge(path: string, tokenPresented: boolean): Record<string, string> | undefined;
+  /** The account store the sign-in page uses (undefined when unusable), shared with the chat account tools. */
+  readonly accounts: AccountStore | undefined;
 }
 
 type ArtifactKind = "client" | "request" | "code" | "refresh" | "grant" | "cookie";
@@ -462,6 +469,8 @@ interface ConsentView {
   error?: string;
   /** Show the account-key form (after a rejected key). */
   keyOpen?: boolean;
+  /** A sign-in from the chat: Create account needs no name (the chat names the account afterwards). */
+  oneClick?: boolean;
 }
 
 const requestField = (token: string): string => `<input type="hidden" name="request" value="${escapeHtml(token)}">`;
@@ -517,9 +526,9 @@ ${smallPrint(app, v.redirectHost)}`);
   return htmlDocument(title, `${head}
 <div class="flow">
 <form method="post" action="${action}" class="create">
-${requestField(v.requestToken)}
+${requestField(v.requestToken)}${v.oneClick ? "" : `
 <label for="name">Company or account name</label>
-<input id="name" name="name" type="text" maxlength="40" required autocomplete="organization" spellcheck="false">
+<input id="name" name="name" type="text" maxlength="40" required autocomplete="organization" spellcheck="false">`}
 <button type="submit" name="decision" value="create" class="primary">Create account</button>
 </form>
 <div class="row">
@@ -749,7 +758,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
   }
 
-  const resourceHrefs = new Set([`${base}/`, ...MCP_PATHS.map((p) => `${base}${p}`)]);
+  const mcpPaths: readonly string[] = [...MCP_PATHS, ...(options.chatPaths ?? [])];
+  const chatResources = new Set((options.chatPaths ?? []).map((p) => `${base}${p}`));
+  /** A sign-in started by a chat endpoint's 401 (its resource): the create page needs no name. */
+  const fromChat = (request: RequestBlob): boolean => request.rs !== undefined && chatResources.has(request.rs);
+  const resourceHrefs = new Set([`${base}/`, ...mcpPaths.map((p) => `${base}${p}`)]);
   /** undefined = absent; null = not one of ours; else the normalized href. */
   function resourceParam(values: string[]): string | undefined | null {
     if (values.length === 0) return undefined;
@@ -831,7 +844,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   });
   const metadataRoutes = new Map<string, unknown>([
     ["/.well-known/oauth-protected-resource", protectedResource(base)],
-    ...MCP_PATHS.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${p}`, protectedResource(`${base}${p}`)]),
+    ...mcpPaths.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${p}`, protectedResource(`${base}${p}`)]),
     ["/.well-known/oauth-authorization-server", serverMetadata],
     ["/.well-known/openid-configuration", serverMetadata],
     // An issuer with a path: RFC 8414 and RFC 9728 insert it after /.well-known/<name>. Behind a prefix-stripping proxy
@@ -842,7 +855,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
           [`/.well-known/oauth-authorization-server${basePath}`, serverMetadata],
           [`/.well-known/openid-configuration${basePath}`, serverMetadata],
           [`/.well-known/oauth-protected-resource${basePath}`, protectedResource(base)],
-          ...MCP_PATHS.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${basePath}${p}`, protectedResource(`${base}${p}`)]),
+          ...mcpPaths.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${basePath}${p}`, protectedResource(`${base}${p}`)]),
         ] as [string, unknown][]
       : []),
   ]);
@@ -967,6 +980,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       ...(signedIn ? { signedIn } : {}),
       ...(o.error ? { error: o.error } : {}),
       ...(o.keyOpen ? { keyOpen: true } : {}),
+      ...(fromChat(request) ? { oneClick: true } : {}),
     }));
   }
 
@@ -1135,8 +1149,10 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         });
         return;
       }
-      const name = cleanAccountName(form!.get("name"));
-      if (!name) {
+      // A sign-in from a chat endpoint creates the account with one click and no name; the chat names it afterwards
+      // (clockchain_create_account). Every other sign-in still needs a name.
+      const name = fromChat(request) && !(form!.get("name") ?? "").trim() ? null : cleanAccountName(form!.get("name"));
+      if (name === undefined) {
         sendConsent(res, request, requestToken, { status: 400, error: "Choose an account name of 1 to 40 characters." });
         return;
       }
@@ -1439,8 +1455,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       }
       return true;
     },
+    accounts,
     challenge(path, tokenPresented) {
-      if (!(MCP_PATHS as readonly string[]).includes(path)) return undefined;
+      if (!mcpPaths.includes(path)) return undefined;
       const metadataUrl = `${base}/.well-known/oauth-protected-resource${path}`;
       return {
         "www-authenticate": `Bearer resource_metadata="${metadataUrl}"${tokenPresented ? ', error="invalid_token"' : ""}`,
