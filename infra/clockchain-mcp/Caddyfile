@@ -47,16 +47,6 @@ mcp.clockchain.network {
 			header_up X-Forwarded-Prefix /staging
 		}
 	}
-	# OAuth discovery for the staging mount (MCP_PUBLIC_URL=https://mcp.clockchain.network/staging). RFC 8414 and
-	# RFC 9728 put an issuer's or resource's path AFTER the well-known prefix
-	# (/.well-known/oauth-authorization-server/staging), outside /staging/*. Only these exact staging discovery URLs
-	# go to the staging container, unchanged (it serves the path-inserted forms itself); production never sees them.
-	@staging_oauth_discovery path /.well-known/oauth-authorization-server/staging /.well-known/openid-configuration/staging /.well-known/oauth-protected-resource/staging /.well-known/oauth-protected-resource/staging/*
-	handle @staging_oauth_discovery {
-		reverse_proxy mcp-staging:8080 {
-			header_up X-Forwarded-Prefix /staging
-		}
-	}
 	# ACM4 demo instance: a second MCP server pinned to the build the Clark/Clint pair
 	# (helper 2.1.6) is proven against, with its own state and invite limiter. Runs from
 	# /opt/clockchain-mcp/acm4-compose.yml on the box; production stays on the main build.

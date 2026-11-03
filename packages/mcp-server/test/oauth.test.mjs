@@ -1635,9 +1635,11 @@ test("prefixed base behind a prefix-stripping proxy: the MCP SDK client and a Ch
   const production = createServer((req, res) => { res.writeHead(401, { "content-type": "application/json" }); res.end('{"error":"unauthorized"}'); }).listen(0, "127.0.0.1");
   await once(production, "listening");
   let stagingPort;
-  // The proxy, as infra/clockchain-mcp/Caddyfile routes: /staging/* -> strip the prefix, add X-Forwarded-Prefix
-  // (handle_path); the staging issuer's RFC 8414 / 9728 path-inserted discovery URLs -> staging unchanged
-  // (@staging_oauth_discovery); everything else -> production.
+  // The proxy: /staging/* -> strip the prefix, add X-Forwarded-Prefix (Caddy's handle_path today); the staging
+  // issuer's RFC 8414 / 9728 path-inserted discovery URLs -> staging unchanged. That second route is NOT in the
+  // deployed Caddyfile (a Caddy reload is off-limits this week), so on real staging only clients that discover
+  // through the WWW-Authenticate resource_metadata URL complete the flow; this test proves the app side is ready.
+  // Everything else -> production.
   const discovery = /^\/\.well-known\/(oauth-authorization-server\/staging|openid-configuration\/staging|oauth-protected-resource\/staging(\/.*)?)$/;
   const proxy = createServer((req, res) => {
     const staged = req.url.startsWith("/staging/");
