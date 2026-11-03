@@ -31,9 +31,15 @@ export interface Account {
   keyHash: string;
 }
 
-/** A display name: control and format characters dropped, whitespace collapsed and trimmed, 1 to 40 characters. */
+/** True for text holding (part of) an account key: cck_ and 16 or more key characters (follow-up finding 7). */
+export const looksLikeAccountKey = (raw: unknown): boolean => typeof raw === "string" && /cck_[A-Za-z0-9_-]{16,}/.test(raw);
+
+/**
+ * A display name: control and format characters dropped, whitespace collapsed and trimmed, 1 to 40 characters.
+ * Never something that looks like an account key, so a key pasted into the name box is never stored as a name.
+ */
 export function cleanAccountName(raw: unknown): string | undefined {
-  if (typeof raw !== "string" || raw.length > 1000) return undefined;
+  if (typeof raw !== "string" || raw.length > 1000 || looksLikeAccountKey(raw)) return undefined;
   const text = raw.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
   const length = Array.from(text).length;
   return length >= 1 && length <= ACCOUNT_NAME_MAX ? text : undefined;

@@ -1524,6 +1524,30 @@ test("presentsAccountKey reads every credential header line, so a repeated heade
   assert.equal(presentsAccountKey(["x-api-key", "my-cck_-like-but-short"]), false);
 });
 
+test("accounts: a key pasted as a name is refused and points to the key form; it is never stored or echoed (p13)", async () => {
+  const accountsDir = path.join(tempDir("keyname"), "accounts");
+  const h = await harness({ accountsDir });
+  try {
+    const person = await signUp(h.url, "Alice");
+    for (const name of [person.key, `  ${person.key} `, `"${person.key}"`, person.key.slice(0, 24), `my key is ${person.key}`]) {
+      const c = await openConsent(h.url);
+      const res = await decide(h.url, c.requestToken, "create", { origin: PUBLIC }, { name });
+      assert.equal(res.status, 400, name);
+      assert.equal(res.headers.get("set-cookie"), null);
+      const html = await res.text();
+      assert.match(html, /role="alert">That looks like an account key, not a name\. To sign in with it, use “I have an account key” below\./);
+      assert.match(html, /<details class="havekey" open>/, "the key form is open");
+      assert.equal(html.includes(person.key.slice(4, 24)), false, "the key is not echoed");
+    }
+    const records = readdirSync(path.join(accountsDir, "a")).map((f) => readFileSync(path.join(accountsDir, "a", f), "utf8"));
+    assert.equal(records.length, 1, "no account was created");
+    assert.equal(records.some((t) => t.includes(person.key)), false);
+    assert.equal(h.logs.some((e) => JSON.stringify(e).includes(person.key.slice(4))), false);
+  } finally {
+    await h.close();
+  }
+});
+
 test("accounts: survive a restart (same state directory): the cookie still signs in, the key still works, same acct", async () => {
   const stateDir = tempDir("restart");
   const first = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_STATE_DIR: stateDir });

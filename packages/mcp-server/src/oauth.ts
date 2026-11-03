@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
-import { AccountStore, AccountUnavailableError, cleanAccountName, DEFAULT_MAX_ACCOUNTS, type Account } from "./accounts.js";
+import { AccountStore, AccountUnavailableError, cleanAccountName, DEFAULT_MAX_ACCOUNTS, looksLikeAccountKey, type Account } from "./accounts.js";
 import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
 import { isAcctId, mintToken } from "./token.js";
@@ -965,6 +965,15 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     }
 
     if (decision === "create") {
+      if (looksLikeAccountKey(form!.get("name"))) {
+        // A returning person pasted their key into the name box: point them at the key form, keep nothing.
+        sendConsent(res, request, requestToken, {
+          status: 400,
+          error: "That looks like an account key, not a name. To sign in with it, use “I have an account key” below.",
+          keyOpen: true,
+        });
+        return;
+      }
       const name = cleanAccountName(form!.get("name"));
       if (!name) {
         sendConsent(res, request, requestToken, { status: 400, error: "Choose an account name of 1 to 40 characters." });
