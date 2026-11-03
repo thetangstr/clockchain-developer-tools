@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -1454,6 +1454,57 @@ test("account keys are refused on /mcp in every credential slot and never reach 
     }
   } finally {
     await new Promise((r) => gateway.close(r));
+  }
+});
+
+test("accounts: an unreadable record answers 503, keeps the cookie and is quarantined once; a missing one means signed out (p9)", async () => {
+  const accountsDir = path.join(tempDir("corrupt"), "accounts");
+  const first = await harness({ accountsDir });
+  let person;
+  try {
+    person = await signUp(first.url, "Corrupt Carol");
+  } finally {
+    await first.close();
+  }
+  const dir = path.join(accountsDir, "a");
+  const file = path.join(dir, `${person.acct}.json`);
+  const good = readFileSync(file);
+  writeFileSync(file, "{not json", { mode: 0o600 });
+  const h = await harness({ accountsDir }); // a fresh process: nothing cached
+  try {
+    for (let i = 0; i < 21; i++) {
+      const c = await openConsent(h.url, { cookie: person.cookie });
+      assertErrorPage(c.page, c.html, { status: 503, code: "temporarily_unavailable" });
+      assert.equal(c.page.headers.get("set-cookie"), null, "the cookie is kept");
+    }
+    assert.equal(readdirSync(dir).filter((n) => n.includes(".corrupt-")).length, 1, "one quarantine copy for 21 requests");
+    const fresh = await openConsent(h.url);
+    const approve = await decide(h.url, fresh.requestToken, "approve", { origin: PUBLIC, cookie: person.cookie }, { grant: "cc_grant_x.y" });
+    assertErrorPage(approve, await approve.text(), { status: 503 });
+    assert.equal(approve.headers.get("set-cookie"), null);
+    const signin = await decide(h.url, fresh.requestToken, "signin", { origin: PUBLIC }, { key: person.key });
+    const signinHtml = await signin.text();
+    assertErrorPage(signin, signinHtml, { status: 503 });
+    assert.equal(signinHtml.includes("wasn’t recognized"), false, "not 'key not recognized'");
+    // Someone else can still make an account meanwhile.
+    assert.equal((await decide(h.url, fresh.requestToken, "create", { origin: PUBLIC, cookie: person.cookie }, { name: "Dana" })).status, 200);
+    // The operator restores the file: the next request signs in again, without a restart.
+    writeFileSync(file, good, { mode: 0o600 });
+    utimesSync(file, new Date(), new Date(Date.now() + 5_000));
+    assert.match((await openConsent(h.url, { cookie: person.cookie })).html, /Signed in as <strong>Corrupt Carol<\/strong>/);
+  } finally {
+    await h.close();
+  }
+  // A missing record is "not found": the cookie is cleared and sign-up is offered.
+  rmSync(file);
+  const later = await harness({ accountsDir });
+  try {
+    const c = await openConsent(later.url, { cookie: person.cookie });
+    assert.equal(c.page.status, 200);
+    assert.match(c.html, /Create your Clockchain account/);
+    assert.equal(c.page.headers.get("set-cookie"), SECURE_CLEAR);
+  } finally {
+    await later.close();
   }
 });
 

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { cleanStaleFiles, createDurableJsonFile } from "./handshake-core/durable-store.js";
 import { isAcctId, newAcctId } from "./token.js";
@@ -57,10 +57,23 @@ function validateKeyEntry(value: unknown): { acct: string } {
 
 export type CreateResult = { ok: true; account: Account; key: string } | { ok: false; reason: "full" };
 
+/**
+ * A record exists but cannot be read (corrupt, with no valid backup). Distinct from "not found": the person's cookie
+ * must survive it, and the page answers 503 until an operator restores the file.
+ */
+export class AccountUnavailableError extends Error {
+  constructor() {
+    super("account record unreadable");
+    this.name = "AccountUnavailableError";
+  }
+}
+
 export class AccountStore {
   private readonly accountsDir: string;
   private readonly keysDir: string;
   private readonly cache = new Map<string, Account>();
+  /** Unreadable record files -> their mtime when they failed: re-read (and re-quarantined) only once they change. */
+  private readonly unreadable = new Map<string, number>();
   private total: number;
 
   /** Opens (creating if needed) the store at `root`; throws when the directory cannot be made private. */
@@ -101,17 +114,35 @@ export class AccountStore {
     });
   }
 
-  /** The account for a well-formed acct id, or undefined (unknown, or unreadable: the durable writer logs that). */
+  /**
+   * Loads a record file. A missing file is undefined; an unreadable one throws AccountUnavailableError, and is not
+   * read again (so its quarantine copy is written once) until its mtime changes, as when an operator restores it.
+   */
+  private loadRecord<T>(path: string, load: () => T | undefined): T | undefined {
+    const failedAt = this.unreadable.get(path);
+    if (failedAt !== undefined) {
+      if (!existsSync(path)) {
+        this.unreadable.delete(path);
+        return undefined;
+      }
+      if (statSync(path).mtimeMs === failedAt) throw new AccountUnavailableError();
+      this.unreadable.delete(path);
+    }
+    try {
+      return load();
+    } catch {
+      // The durable writer has logged it and copied the bad file aside (handshake_state_corrupt).
+      this.unreadable.set(path, existsSync(path) ? statSync(path).mtimeMs : -1);
+      throw new AccountUnavailableError();
+    }
+  }
+
+  /** The account for a well-formed acct id, or undefined when there is none. Throws AccountUnavailableError when its record cannot be read. */
   get(acct: string): Account | undefined {
     if (!isAcctId(acct)) return undefined;
     const cached = this.cache.get(acct);
     if (cached) return cached;
-    let account: Account | undefined;
-    try {
-      account = this.accountFile(acct).load();
-    } catch {
-      return undefined;
-    }
+    const account = this.loadRecord(join(this.accountsDir, `${acct}.json`), () => this.accountFile(acct).load());
     if (!account || account.acct !== acct) return undefined;
     this.cache.set(acct, account);
     return account;
@@ -134,16 +165,11 @@ export class AccountStore {
     return { ok: true, account, key };
   }
 
-  /** The account an account key belongs to, or undefined. */
+  /** The account an account key belongs to, or undefined. Throws AccountUnavailableError when a record cannot be read. */
   findByKey(key: unknown): Account | undefined {
     if (typeof key !== "string" || !ACCOUNT_KEY_PATTERN.test(key)) return undefined;
     const keyHash = hashKey(key);
-    let entry: { acct: string } | undefined;
-    try {
-      entry = this.keyFile(keyHash).load();
-    } catch {
-      return undefined;
-    }
+    const entry = this.loadRecord(join(this.keysDir, `${keyHash}.json`), () => this.keyFile(keyHash).load());
     const account = entry ? this.get(entry.acct) : undefined;
     if (!account) return undefined;
     const stored = Buffer.from(account.keyHash, "hex");

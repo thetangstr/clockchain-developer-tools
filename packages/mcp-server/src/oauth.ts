@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
-import { AccountStore, cleanAccountName, DEFAULT_MAX_ACCOUNTS, type Account } from "./accounts.js";
+import { AccountStore, AccountUnavailableError, cleanAccountName, DEFAULT_MAX_ACCOUNTS, type Account } from "./accounts.js";
 import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
 import { isAcctId, mintToken } from "./token.js";
@@ -767,14 +767,23 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     `${COOKIE_NAME}=${seal({ t: "cookie", acct, iat: nowSec() })}; Max-Age=${COOKIE_MAX_AGE_S}; ${cookieAttributes}`;
   const clearAccountCookie = `${COOKIE_NAME}=; Max-Age=0; ${cookieAttributes}`;
 
-  /** The account the cookie selects. `stale` = a cookie of ours was sent but is invalid, expired or unknown. */
-  function cookieAccount(req: IncomingMessage): { account?: Account; stale: boolean } {
+  /**
+   * The account the cookie selects. `stale` = a cookie of ours was sent but is invalid, expired or names no account
+   * (it is cleared). `unavailable` = it names an account whose record cannot be read right now (it is kept).
+   */
+  function cookieAccount(req: IncomingMessage): { account?: Account; stale: boolean; unavailable?: boolean } {
     for (const part of firstHeader(req.headers.cookie).split(";")) {
       const eq = part.indexOf("=");
       if (eq < 0 || part.slice(0, eq).trim() !== COOKIE_NAME) continue;
       const blob = unseal<CookieBlob>("cookie", part.slice(eq + 1).trim());
-      const account = blob ? accounts?.get(blob.acct) : undefined;
-      return account ? { account, stale: false } : { stale: true };
+      if (!blob) return { stale: true };
+      try {
+        const account = accounts?.get(blob.acct);
+        return account ? { account, stale: false } : { stale: true };
+      } catch (e) {
+        if (e instanceof AccountUnavailableError) return { stale: false, unavailable: true };
+        throw e;
+      }
     }
     return { stale: false };
   }
@@ -801,6 +810,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   }
 
   const ACCOUNTS_UNAVAILABLE: [string, string] = ["Sign-in is unavailable", "Clockchain can’t open its account store right now. Try again in a few minutes."];
+  /** A record that exists but cannot be read: 503, and the cookie is kept (never cleared for this). */
+  const ACCOUNT_RECORD_UNAVAILABLE: [string, string] = ["Your account is temporarily unavailable", "Clockchain can’t read your account right now. You stay signed in; try again in a few minutes."];
+  const accountRecordUnavailable = (res: ServerResponse) => sendErrorPage(res, 503, ...ACCOUNT_RECORD_UNAVAILABLE, "temporarily_unavailable", { "retry-after": "60" });
 
   /** The outcome of an approving click: a code for this account, redirected to the app (with state and iss). */
   function issueCode(req: IncomingMessage, res: ServerResponse, request: RequestBlob, account: Account, extra: Record<string, string> = {}): void {
@@ -898,6 +910,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       exp: iat + REQUEST_TTL_S,
     };
     const fromCookie = cookieAccount(req);
+    if (fromCookie.unavailable) return accountRecordUnavailable(res);
     sendConsent(res, request, seal(request), {
       ...(fromCookie.account ? { account: fromCookie.account } : {}),
       ...(fromCookie.stale ? { headers: { "set-cookie": clearAccountCookie } } : {}),
@@ -934,6 +947,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     const staleCookie: Record<string, string> = fromCookie.stale ? { "set-cookie": clearAccountCookie } : {};
 
     if (decision === "approve") {
+      if (fromCookie.unavailable) return accountRecordUnavailable(res);
       // The account the page showed (bound in the grant) must still be the one the cookie selects.
       const grant = unseal<GrantBlob>("grant", form!.get("grant"));
       const account = fromCookie.account;
@@ -990,7 +1004,13 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     if (decision === "continue") {
       // After the key page: the grant (minted by the create click) names the new account, cookie or not.
       const grant = unseal<GrantBlob>("grant", form!.get("grant"));
-      const account = grant && grant.via === "create" && safeEqual(grant.rid, rid) ? accounts.get(grant.acct) : undefined;
+      let account: Account | undefined;
+      try {
+        account = grant && grant.via === "create" && safeEqual(grant.rid, rid) ? accounts.get(grant.acct) : undefined;
+      } catch (e) {
+        if (e instanceof AccountUnavailableError) return accountRecordUnavailable(res);
+        throw e;
+      }
       if (!account) {
         sendErrorPage(res, 400, "This step has expired", "Go back to the app and start connecting again. Your account still works: sign in with its key.");
         return;
@@ -1005,7 +1025,14 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         sendErrorPage(res, 429, "Too many sign-in attempts", "Too many account keys were tried from this network in the last hour. Wait a while, then try again.", "temporarily_unavailable", { "retry-after": "3600" });
         return;
       }
-      const account = accounts.findByKey((form!.get("key") ?? "").trim());
+      let account: Account | undefined;
+      try {
+        account = accounts.findByKey((form!.get("key") ?? "").trim());
+      } catch (e) {
+        // The key matched an index entry, but a record cannot be read: say so, not "key not recognized".
+        if (e instanceof AccountUnavailableError) return accountRecordUnavailable(res);
+        throw e;
+      }
       if (!account) {
         log({ event: "oauth_account_key_rejected" });
         sendConsent(res, request, requestToken, { status: 400, error: "That account key wasn’t recognized. Check it and try again.", keyOpen: true, headers: staleCookie });
