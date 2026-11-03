@@ -36,8 +36,12 @@ export interface Account {
   unnamed?: true;
 }
 
-/** What an unnamed account is called until it is named. */
+/** The placeholder stored as an unnamed account's name (older code shows it as is). */
 export const UNNAMED_ACCOUNT_NAME = "New account";
+/** How an unnamed account is shown, with its short id and creation day: never as if it were a name. */
+export const UNNAMED_ACCOUNT_LABEL = "an unnamed account";
+/** An unnamed account can be named from the chat only this soon after it was created (in-chat review L2). */
+export const NAMING_WINDOW_MS = 15 * 60_000;
 
 /** True for text holding (part of) an account key: cck_ and 16 or more key characters (follow-up finding 7). */
 export const looksLikeAccountKey = (raw: unknown): boolean => typeof raw === "string" && /cck_[A-Za-z0-9_-]{16,}/.test(raw);
@@ -82,10 +86,21 @@ export function cleanAccountName(raw: unknown): string | undefined {
   return length >= 1 && length <= ACCOUNT_NAME_MAX && hasLetterOrDigit(text) ? text : undefined;
 }
 
-/** The name to show for a stored account, re-cleaned on the way out (records made before a rule change included). */
+/**
+ * The name to show for a stored account, re-cleaned on the way out (records made before a rule change included). An
+ * unnamed account is "an unnamed account": show it with {@link accountCreatedDay} and its short id, never as a name.
+ */
 export function displayAccountName(account: Account): string {
+  if (account.unnamed) return UNNAMED_ACCOUNT_LABEL;
   const text = Array.from(cleanDisplayText(account.name)).slice(0, ACCOUNT_NAME_MAX).join("");
   return hasLetterOrDigit(text) ? text : "your account";
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** The UTC day an account was created, as "3 Nov" ("" for a record without a readable date). */
+export function accountCreatedDay(account: Account): string {
+  const d = new Date(account.createdAt);
+  return Number.isNaN(d.getTime()) ? "" : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
 }
 
 /** A short, non-secret account reference to show next to the name: the first 6 characters after acct_. */
@@ -224,19 +239,21 @@ export class AccountStore {
   }
 
   /**
-   * Names an unnamed account, once, with an already-cleaned name. An account that already has a name is returned
-   * unchanged (named: false): nothing is ever renamed. Undefined when there is no such account; throws
+   * Names an unnamed account, once, with an already-cleaned name, and only within {@link NAMING_WINDOW_MS} of its
+   * creation ("too_late" after that, and for a record whose date can't be read). An account that already has a name
+   * is returned unchanged ("already_named"): nothing is ever renamed. Undefined when there is no such account; throws
    * AccountUnavailableError when its record cannot be read, or when the new record cannot be persisted.
    */
-  nameOnce(acct: string, name: string): { account: Account; named: boolean } | undefined {
+  nameOnce(acct: string, name: string): { account: Account; outcome: "named" | "already_named" | "too_late" } | undefined {
     if (cleanAccountName(name) !== name) throw new Error("account name must be cleaned first");
     const account = this.get(acct);
     if (!account) return undefined;
-    if (!account.unnamed) return { account, named: false };
+    if (!account.unnamed) return { account, outcome: "already_named" };
+    if (!(this.now() - Date.parse(account.createdAt) <= NAMING_WINDOW_MS)) return { account, outcome: "too_late" };
     const named: Account = { acct: account.acct, name, createdAt: account.createdAt, keyHash: account.keyHash };
     this.accountFile(acct, named).save("now");
     this.cache.set(acct, named);
-    return { account: named, named: true };
+    return { account: named, outcome: "named" };
   }
 
   /** The account an account key belongs to, or undefined. Throws AccountUnavailableError when a record cannot be read. */

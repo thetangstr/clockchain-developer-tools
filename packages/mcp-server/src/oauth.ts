@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import {
-  AccountStore, AccountUnavailableError, cleanAccountName, cleanDisplayText, DEFAULT_MAX_ACCOUNTS, displayAccountName,
+  accountCreatedDay, AccountStore, AccountUnavailableError, cleanAccountName, cleanDisplayText, DEFAULT_MAX_ACCOUNTS, displayAccountName,
   hasLetterOrDigit, looksLikeAccountKey, shortAccountId, type Account,
 } from "./accounts.js";
 import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
@@ -465,7 +465,7 @@ interface ConsentView {
   redirectHost: string;
   requestToken: string;
   /** The signed-in account (name and short id) and the grant binding it to this request; absent = the create page. */
-  signedIn?: { name: string; shortId: string; grant: string };
+  signedIn?: { account: Account; grant: string };
   error?: string;
   /** Show the account-key form (after a rejected key). */
   keyOpen?: boolean;
@@ -474,6 +474,14 @@ interface ConsentView {
 }
 
 const requestField = (token: string): string => `<input type="hidden" name="request" value="${escapeHtml(token)}">`;
+
+/** "Signed in as" an account: its name in bold, or "an unnamed account" (not styled as a name) with its creation day. */
+function signedInAs(account: Account): string {
+  const id = escapeHtml(shortAccountId(account.acct));
+  return account.unnamed
+    ? `Signed in as ${escapeHtml(displayAccountName(account))} <span class="id">(${id}, created ${escapeHtml(accountCreatedDay(account))})</span>`
+    : `Signed in as <strong>${escapeHtml(displayAccountName(account))}</strong> <span class="id">(${id})</span>`;
+}
 
 /** The app and where Continue/Allow sends you, as plain text: the return host is the phishing check, always shown. */
 function appLine(app: string, redirectHost: string): string {
@@ -511,7 +519,7 @@ ${appLine(app, v.redirectHost)}${v.error ? `
 <p class="alert" role="alert">${escapeHtml(v.error)}</p>` : ""}`;
   if (v.signedIn) {
     return htmlDocument(title, `${head}
-<p class="who">Signed in as <strong>${escapeHtml(v.signedIn.name)}</strong> <span class="id">(${escapeHtml(v.signedIn.shortId)})</span></p>
+<p class="who">${signedInAs(v.signedIn.account)}</p>
 <form method="post" action="${action}" class="flow">
 ${requestField(v.requestToken)}
 <input type="hidden" name="grant" value="${escapeHtml(v.signedIn.grant)}">
@@ -554,8 +562,7 @@ interface KeyView {
   action: string;
   appName: string;
   redirectHost: string;
-  accountName: string;
-  shortId: string;
+  account: Account;
   key: string;
   requestToken: string;
   grant: string;
@@ -569,7 +576,7 @@ function accountKeyPage(v: KeyView): string {
   const file = [
     "Clockchain account key",
     "",
-    `Account: ${v.accountName} (${v.shortId})`,
+    `Account: ${displayAccountName(v.account)} (${shortAccountId(v.account.acct)})`,
     `Key: ${v.key}`,
     "",
     "Keep this key private: anyone who has it can use this Clockchain account.",
@@ -586,7 +593,7 @@ ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="continue" class="primary">Continue</button>
 </form>
 <footer class="foot">
-<p>Signed in as <strong>${escapeHtml(v.accountName)}</strong> <span class="id">(${escapeHtml(v.shortId)})</span></p>
+<p>${signedInAs(v.account)}</p>
 <p>Continue returns you to ${escapeHtml(v.appName || "the app")} at <code>${escapeHtml(v.redirectHost)}</code>.</p>
 </footer>`);
 }
@@ -966,8 +973,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     const iat = nowSec();
     const signedIn = o.account
       ? {
-          name: displayAccountName(o.account),
-          shortId: shortAccountId(o.account.acct),
+          account: o.account,
           grant: seal({ t: "grant", acct: o.account.acct, rid: sha256b64url(requestToken), via: "session", iat, exp: iat + REQUEST_TTL_S }),
         }
       : undefined;
@@ -1187,8 +1193,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         action: AUTHORIZE_ACTION,
         appName: request.n,
         redirectHost: new URL(request.ru).host,
-        accountName: displayAccountName(created.account),
-        shortId: shortAccountId(created.account.acct),
+        account: created.account,
         key: created.key,
         requestToken,
         grant,

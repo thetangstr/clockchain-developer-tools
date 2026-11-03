@@ -2182,23 +2182,29 @@ test("chat sign-in, as claude.ai does it: tools/list, create_account -> 401 -> o
     assert.equal(first.status, 401);
     assert.equal(first.headers.get("www-authenticate"), CHAT_CHALLENGE);
     const person = await chatSignIn(s.url, first);
-    // The one-click page: no name field, Create account, the key form and Cancel; the key page names the account "New account".
+    // The one-click page: no name field, Create account, the key form and Cancel; the key page shows "an unnamed account".
     assert.doesNotMatch(person.consent.html, /name="name"|Company or account name/);
     assert.match(person.consent.html, /value="create" class="primary">Create account<\/button>/);
     assert.match(person.consent.html, /<summary><span class="when-closed">I have an account key<\/span>/);
-    assert.match(person.keyHtml, /Signed in as <strong>New account<\/strong> <span class="id">\(/);
+    const day = `${new Date().getUTCDate()} ${new Date().toUTCString().slice(8, 11)}`;
+    const sid = person.acct.slice(5, 11).replace(/[-_]/g, "\\$&");
+    assert.match(person.keyHtml, new RegExp(`<p>Signed in as an unnamed account <span class="id">\\(${sid}, created ${day}\\)</span></p>`));
+    assert.doesNotMatch(person.keyHtml, /New account/);
     // The unnamed account, as the signed-in page shows it before the chat names it.
     const before = await openConsent(s.url, { cookie: person.cookie });
-    assert.match(before.html, new RegExp(`Signed in as <strong>New account</strong> <span class="id">\\(${person.acct.slice(5, 11).replace(/[-_]/g, "\\$&")}\\)</span>`));
+    assert.match(before.html, new RegExp(`<p class="who">Signed in as an unnamed account <span class="id">\\(${sid}, created ${day}\\)</span></p>`));
+    const unnamedWho = await chatTool(s.url, person.token, "clockchain_whoami", {}, seen);
+    assert.deepEqual(unnamedWho.value.account, { name: "an unnamed account", short_id: person.acct.slice(5, 11), named: false, created: day });
+    assert.match(unnamedWho.value.message, new RegExp(`uses an unnamed account \\(${sid}, created ${day}\\)`));
 
     // Claude retries the same call with the new token: the account gets the chat's name.
     const named = await chatTool(s.url, person.token, "clockchain_create_account", { name: "Acme Robotics" }, seen);
     assert.equal(named.isError, false);
-    assert.deepEqual(named.value.account, { name: "Acme Robotics", short_id: person.acct.slice(5, 11), named: true });
+    assert.deepEqual(named.value.account, { name: "Acme Robotics", short_id: person.acct.slice(5, 11), named: true, created: day });
     assert.equal(named.value.status, "created");
     assert.match(named.value.message, /shown once in the Clockchain sign-in window, not here/);
     const who = await chatTool(s.url, person.token, "clockchain_whoami", {}, seen);
-    assert.deepEqual(who.value.account, { name: "Acme Robotics", short_id: person.acct.slice(5, 11), named: true });
+    assert.deepEqual(who.value.account, { name: "Acme Robotics", short_id: person.acct.slice(5, 11), named: true, created: day });
     assert.match((await openConsent(s.url, { cookie: person.cookie })).html, /Signed in as <strong>Acme Robotics<\/strong>/);
     // A second create (a retry, or another name) renames nothing.
     const again = await chatTool(s.url, person.token, "clockchain_create_account", { name: "Someone Else" }, seen);
@@ -2280,6 +2286,49 @@ test("chat sign-in: an account with a name is never renamed, a nameless sign-in 
   } finally {
     await s.close();
   }
+});
+
+test("chat sign-in: an unnamed account can be named from the chat only within 15 minutes of its creation (in-chat review L2)", async () => {
+  // Two unnamed accounts made before the server starts, 16 and 14 minutes ago, each signed in with its key.
+  const state = tempDir("state");
+  const { AccountStore } = await import("../dist/accounts.js");
+  const made = (minutesAgo) => new AccountStore(path.join(state, "accounts"), 50_000, () => Date.now() - minutesAgo * 60_000).create(null);
+  const late = made(16);
+  const inTime = made(14);
+  const s = await boot(chatOn({ MCP_STATE_DIR: state }));
+  try {
+    const tokenFor = async (key) => {
+      const c = await openConsent(s.url, { resource: `${PUBLIC}${CHAT}` });
+      const res = await decide(s.url, c.requestToken, "signin", { origin: PUBLIC }, { key });
+      assert.equal(res.status, 303, await res.clone().text());
+      const issued = await exchangeCode(s.url, { ...c, code: new URL(res.headers.get("location")).searchParams.get("code") }, { resource: `${PUBLIC}${CHAT}` });
+      return issued.body.access_token;
+    };
+    const lateToken = await tokenFor(late.key);
+    const refused = await chatTool(s.url, lateToken, "clockchain_create_account", { name: "Too Late Ltd" });
+    assert.equal(refused.isError, true);
+    assert.equal(refused.value.error, "ACCOUNT_NAMING_CLOSED");
+    assert.match(refused.value.message, /created more than 15 minutes ago without a name, so it was not named/);
+    assert.match(refused.value.message, /from the chat within 15 minutes of signing up, or typed on the Clockchain sign-in page/);
+    const still = await chatTool(s.url, lateToken, "clockchain_whoami", {});
+    assert.equal(still.value.account.named, false);
+    assert.equal(still.value.account.name, "an unnamed account");
+    const ok = await chatTool(s.url, await tokenFor(inTime.key), "clockchain_create_account", { name: "On Time Ltd" });
+    assert.equal(ok.value.status, "created");
+    assert.equal(ok.value.account.name, "On Time Ltd");
+  } finally {
+    await s.close();
+  }
+  // The window itself, on the store's clock: 15:00 is in, 15:01 is out, and an unreadable date is out.
+  let t = Date.UTC(2026, 10, 3, 12, 0, 0);
+  const store = new AccountStore(path.join(tempDir("window"), "accounts"), 50_000, () => t);
+  const a = store.create(null).account;
+  const b = store.create(null).account;
+  t += 15 * 60_000;
+  assert.equal(store.nameOnce(a.acct, "A").outcome, "named");
+  t += 1_000;
+  assert.equal(store.nameOnce(b.acct, "B").outcome, "too_late");
+  assert.equal(store.get(b.acct).unnamed, true, "not named");
 });
 
 test("chat sign-in: rate limits hold (account creation per IP, anonymous discovery per client, tool calls per account)", async () => {

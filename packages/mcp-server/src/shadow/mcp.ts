@@ -10,7 +10,7 @@ import { z } from "zod";
 import { VERSION } from "./recorder.js";
 import { SUMMARY_CSP } from "./lib/summary.js";
 import { ShadowError, type ShadowService } from "./service.js";
-import { AccountUnavailableError, cleanAccountName, displayAccountName, looksLikeAccountKey, shortAccountId, type Account, type AccountStore } from "../accounts.js";
+import { accountCreatedDay, AccountUnavailableError, cleanAccountName, displayAccountName, looksLikeAccountKey, shortAccountId, type Account, type AccountStore } from "../accounts.js";
 
 export const SHADOW_INSTRUCTIONS = [
   "Shadow is a flight recorder for your work. It keeps a tamper-evident record of each step you take (tasks, prompts,",
@@ -263,7 +263,12 @@ export function buildShadowServer(service: ShadowService, ownerId: string | null
 
 const signInRequired = () => new ShadowError("SIGN_IN_REQUIRED", "Sign in to Clockchain first: connect this server with sign-in, then try again.");
 const accountError = (code: string, message: string) => toolError(new ShadowError(code, message));
-const accountView = (account: Account) => ({ name: displayAccountName(account), short_id: shortAccountId(account.acct), named: account.unnamed !== true });
+/** What the account tools say about an account: its name ("an unnamed account" until named), short id, creation day. */
+const accountView = (account: Account) => ({
+  name: displayAccountName(account), short_id: shortAccountId(account.acct), named: account.unnamed !== true, created: accountCreatedDay(account),
+});
+/** "an unnamed account (abc123, created 3 Nov)" or "Acme (abc123)", for status lines. */
+const accountLine = (v: ReturnType<typeof accountView>) => (v.named ? `${v.name} (${v.short_id})` : `${v.name} (${v.short_id}, created ${v.created})`);
 
 /**
  * clockchain_create_account, clockchain_whoami and clockchain_signup_help (chat sign-in endpoint only). They see the
@@ -300,11 +305,16 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
     if (name === undefined) throw new ShadowError("ACCOUNT_NAME_INVALID", "Choose a name of 1 to 40 characters with at least one letter or digit.");
     const result = accounts.nameOnce(acct, name);
     if (!result) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
-    if (result.named) console.log(JSON.stringify({ event: "shadow_account_named", acct })); // the id only, never the name
     const view = accountView(result.account);
-    return result.named
-      ? { status: "created", account: view, message: `The Clockchain account ${view.name} (${view.short_id}) is ready and this connection uses it. Its account key was shown once in the Clockchain sign-in window, not here.` }
-      : { status: "already_named", account: view, message: `This connection already uses the Clockchain account ${view.name} (${view.short_id}). It keeps that name; nothing was renamed.` };
+    if (result.outcome === "too_late") {
+      throw new ShadowError("ACCOUNT_NAMING_CLOSED",
+        `This connection uses ${accountLine(view)}, which was created more than 15 minutes ago without a name, so it was not named. ` +
+        "An account gets its name when it is created: from the chat within 15 minutes of signing up, or typed on the Clockchain sign-in page.");
+    }
+    if (result.outcome === "named") console.log(JSON.stringify({ event: "shadow_account_named", acct })); // the id only, never the name
+    return result.outcome === "named"
+      ? { status: "created", account: view, message: `The Clockchain account ${accountLine(view)} is ready and this connection uses it. Its account key was shown once in the Clockchain sign-in window, not here.` }
+      : { status: "already_named", account: view, message: `This connection already uses the Clockchain account ${accountLine(view)}. It keeps that name; nothing was renamed.` };
   }));
 
   server.registerTool("clockchain_whoami", {
@@ -320,8 +330,8 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
       status: "signed_in",
       account: view,
       message: view.named
-        ? `This connection uses the Clockchain account ${view.name} (${view.short_id}).`
-        : `This connection uses a new Clockchain account (${view.short_id}) that has no name yet. Ask the person for one and call clockchain_create_account {name}.`,
+        ? `This connection uses the Clockchain account ${accountLine(view)}.`
+        : `This connection uses ${accountLine(view)}. If it was created in the last 15 minutes, ask the person for a name and call clockchain_create_account {name}; after that it can no longer be named from the chat.`,
     };
   }));
 
