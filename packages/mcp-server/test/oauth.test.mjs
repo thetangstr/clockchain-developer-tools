@@ -149,7 +149,7 @@ async function signUp(base, name = "Test Person", o = {}) {
   const html = await res.text();
   assert.equal(res.status, 200, html);
   const cookie = cookieOf(res);
-  const key = /<code>(cck_[A-Za-z0-9_-]{32})<\/code>/.exec(html)?.[1];
+  const key = /class="keyfield" type="text" value="(cck_[A-Za-z0-9_-]{32})"/.exec(html)?.[1];
   const grant = /name="grant" value="([^"]+)"/.exec(html)?.[1];
   assert.ok(cookie && key && grant, "the key page sets the cookie and shows the key");
   return { consent, res, html, cookie, key, grant, acct: acctOfCookie(cookie), name };
@@ -289,6 +289,7 @@ const NEW_ROUTES = [
   ["GET", "/.well-known/oauth-authorization-server"],
   ["GET", "/.well-known/openid-configuration"],
   ["GET", "/oauth/authorize?client_id=x"],
+  ["GET", "/oauth/assets/inter-latin-v20.woff2"],
   ["POST", "/oauth/authorize"],
   ["POST", "/oauth/register"],
   ["POST", "/oauth/token"],
@@ -491,14 +492,16 @@ test("happy path: register → create-account page → create → key page → C
     assert.equal(consent.page.headers.get("access-control-allow-origin"), null);
     assert.doesNotMatch(consent.html, /<script/i);
     // No account cookie: the page is sign-up.
-    assert.match(consent.html, /<h1>Create your Clockchain account<\/h1>/);
-    assert.match(consent.html, /allow ChatGPT to record and anchor your agents’ work on Clockchain/);
+    assert.match(consent.html, /<h1>Connect ChatGPT to Clockchain<\/h1>/);
+    assert.match(consent.html, /<p class="app">ChatGPT · returns you to <code>chatgpt\.com<\/code><\/p>/);
+    assert.match(consent.html, /<label for="name">Company or account name<\/label>/);
     assert.match(consent.html, /<input id="name" name="name" type="text" maxlength="40" required/);
-    assert.match(consent.html, />Create account and allow ChatGPT<\/button>/);
+    assert.match(consent.html, /value="create" class="primary">Create account<\/button>/);
     assert.match(consent.html, /<summary><span class="when-closed">I have an account key<\/span>/);
     assert.match(consent.html, /name="key" type="password"/);
     assert.match(consent.html, /<code>chatgpt\.com<\/code>/);
-    assert.match(consent.html, /<h2>If you allow it<\/h2>/);
+    assert.match(consent.html, /<p>Free testnet · only fingerprints go on the Clockchain ledger<\/p>/);
+    assert.match(consent.html, /<details class="more">\n<summary>What this allows<\/summary>/);
     assert.match(consent.html, /<li>ChatGPT can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps\.<\/li>/);
     assert.match(consent.html, /<li>Its writes are paid from Clockchain’s free testnet pool, not by you\.<\/li>/);
     assert.match(consent.html, /30 days/);
@@ -520,8 +523,9 @@ test("happy path: register → create-account page → create → key page → C
     assert.equal(created.headers.get("cache-control"), "no-store");
     assert.equal(created.headers.get("x-frame-options"), "DENY");
     assert.match(keyHtml, /Signed in as <strong>Ada Lovelace<\/strong>/);
-    const key = /<code>(cck_[A-Za-z0-9_-]{32})<\/code>/.exec(keyHtml)[1];
-    assert.match(keyHtml, /Save this key to sign in on another device\. We can’t show it again\./);
+    const key = /class="keyfield" type="text" value="(cck_[A-Za-z0-9_-]{32})" readonly/.exec(keyHtml)[1];
+    assert.match(keyHtml, /<h1>Save your account key<\/h1>/);
+    assert.match(keyHtml, /You’ll need it to sign in on another device\. We can’t show it again\./);
     assert.match(keyHtml, /value="continue" class="primary">Continue<\/button>/);
     assert.doesNotMatch(keyHtml, /<script/i);
     const cookie = setCookie.split(";")[0];
@@ -1057,16 +1061,17 @@ test("accounts: a second app in the same browser, and a key sign-in from a new b
     const claude = await registerClient(s.url, { client_name: "Claude Code", redirect_uris: ["http://localhost:53111/callback"] });
     const shown = await openConsent(s.url, { client: claude, cookie: person.cookie, redirectUri: "http://localhost:60123/callback" });
     assert.match(shown.html, /Signed in as <strong>Grace<\/strong>/);
-    assert.match(shown.html, />Allow Claude Code<\/button>/);
-    assert.match(shown.html, /value="cancel">Cancel<\/button>/);
-    assert.match(shown.html, />Not you\? Use a different account<\/button>/);
+    assert.match(shown.html, /<h1>Connect Claude Code to Clockchain<\/h1>/);
+    assert.match(shown.html, /value="approve" class="primary">Allow<\/button>/);
+    assert.match(shown.html, /value="cancel" class="link">Cancel<\/button>/);
+    assert.match(shown.html, /value="switch" class="link">Not you\?<\/button>/);
     assert.match(shown.html, /<code>localhost:60123<\/code>/);
     assert.equal(shown.page.headers.get("location"), null, "a valid cookie never approves by itself");
     const a2 = await approve(s.url, { client: claude, account: person, redirectUri: "http://localhost:60123/callback" });
     const t2 = await exchangeCode(s.url, a2);
     // App 3 (another ChatGPT connector), a new browser with no cookie: sign in with the account key.
     const fresh = await openConsent(s.url, { meta: { client_name: "ChatGPT (work)" } });
-    assert.match(fresh.html, /Create your Clockchain account/);
+    assert.match(fresh.html, /value="create" class="primary">Create account<\/button>/);
     const signin = await decide(s.url, fresh.requestToken, "signin", { origin: PUBLIC }, { key: ` ${person.key} ` });
     assert.equal(signin.status, 303);
     assert.match(signin.headers.get("set-cookie"), /^__Host-cc_acct=cc_ac_[^;]+; Max-Age=31536000; Path=\/; Secure; HttpOnly; SameSite=Lax$/);
@@ -1099,13 +1104,13 @@ test("accounts: bad, tampered, foreign, unknown and expired cookies are signed o
     ]) {
       const c = await openConsent(h.url, { cookie });
       assert.equal(c.page.status, 200, label);
-      assert.match(c.html, /Create your Clockchain account/, label);
+      assert.match(c.html, /value="create" class="primary">Create account<\/button>/, label);
       assert.doesNotMatch(c.html, /Signed in as/, label);
       assert.equal(c.page.headers.get("set-cookie"), SECURE_CLEAR, `${label}: cleared`);
     }
     // Not our cookie name (the non-Secure loopback name, on an https issuer): ignored, not cleared.
     const misnamed = await openConsent(h.url, { cookie: `cc_acct=${value}` });
-    assert.match(misnamed.html, /Create your Clockchain account/);
+    assert.match(misnamed.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(misnamed.page.headers.get("set-cookie"), null);
     // Approve with a bad cookie: the page again (signed out), never a code.
     const c = await openConsent(h.url, { cookie: person.cookie });
@@ -1118,7 +1123,7 @@ test("accounts: bad, tampered, foreign, unknown and expired cookies are signed o
     assert.match((await openConsent(h.url, { cookie: person.cookie })).html, /Signed in as/);
     h.advance(60_000);
     const expired = await openConsent(h.url, { cookie: person.cookie });
-    assert.match(expired.html, /Create your Clockchain account/);
+    assert.match(expired.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(expired.page.headers.get("set-cookie"), SECURE_CLEAR);
   } finally {
     await h.close();
@@ -1127,7 +1132,7 @@ test("accounts: bad, tampered, foreign, unknown and expired cookies are signed o
   }
 });
 
-test("accounts: 'Not you? Use a different account' clears the cookie and the same request continues as someone new", async () => {
+test("accounts: 'Not you?' clears the cookie and the same request continues as someone new", async () => {
   const h = await harness();
   try {
     const person = await accountFor(h.url);
@@ -1137,7 +1142,8 @@ test("accounts: 'Not you? Use a different account' clears the cookie and the sam
     assert.equal(switched.status, 200);
     assert.equal(switched.headers.get("set-cookie"), SECURE_CLEAR);
     const html = await switched.text();
-    assert.match(html, /Create your Clockchain account/);
+    assert.match(html, /<h1>Connect ChatGPT to Clockchain<\/h1>/);
+    assert.match(html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(/name="request" value="([^"]+)"/.exec(html)[1], c.requestToken);
     const created = await decide(h.url, c.requestToken, "create", { origin: PUBLIC }, { name: "Someone New" });
     const grant = /name="grant" value="([^"]+)"/.exec(await created.text())[1];
@@ -1199,7 +1205,7 @@ test("accounts: names are cleaned, bounded to 40 characters and always escaped (
     const zalgo = await signUp(h.url, `A${"\u0336\u0337\u0338\u0316\u0317".repeat(8)}lice`);
     assert.match(zalgo.html, /Signed in as <strong>A\u0336\u0337lice<\/strong>/);
     const id = zalgo.acct.slice(5, 11).replace(/[-_]/g, "\\$&");
-    assert.match(zalgo.html, new RegExp(`Signed in as <strong>[^<]*</strong> <span class="muted">\\(account ${id}\\)</span>`));
+    assert.match(zalgo.html, new RegExp(`Signed in as <strong>[^<]*</strong> <span class="id">\\(${id}\\)</span>`));
     assert.equal(cleanAccountName("Alice\uD800"), "Alice", "a lone surrogate is dropped (forms already turn one into U+FFFD)");
     assert.match((await signUp(h.url, "\u3164Bob\u3164")).html, /Signed in as <strong>Bob<\/strong>/);
     for (const bad of ["", "   ", "\u0007", "x".repeat(41), "🙂".repeat(3), "\u3164", "\u2800\u2800", "\u3164\uFFA0\u115F", "!!! ...", "\u0301\u0301"]) {
@@ -1423,6 +1429,76 @@ test("accounts: every page states what the app may do, and every account page an
   }
 });
 
+test("sign-in pages: one hashed stylesheet, self-hosted fonts and an inline logo, nothing else loaded; the key page's only link is the key file", async () => {
+  const h = await harness();
+  try {
+    const person = await signUp(h.url, "Ada");
+    const fresh = await openConsent(h.url);
+    const signedIn = await openConsent(h.url, { cookie: person.cookie });
+    const err = await fetch(`${h.url}/oauth/authorize?client_id=cc_client_bogus`);
+    const pages = [["create", fresh.page, fresh.html], ["signed-in", signedIn.page, signedIn.html], ["key", person.res, person.html], ["error", err, await err.text()]];
+    for (const [label, res, html] of pages) {
+      const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]);
+      assert.equal(styles.length, 1, label);
+      const hash = createHash("sha256").update(styles[0], "utf8").digest("base64").replace(/[+/]/g, "\\$&");
+      const csp = res.headers.get("content-security-policy");
+      // The only addition to the old policy is font-src 'self': no img-src, script-src, connect-src or unsafe-inline.
+      assert.match(csp, new RegExp(`^default-src 'none'; style-src 'sha256-${hash}'; font-src 'self'; form-action [^;]+; frame-ancestors 'none'; base-uri 'none'$`), label);
+      assert.doesNotMatch(html, /\sstyle=|<img|<script|<link|<iframe/i, `${label}: inline style attributes would be blocked; nothing else is loaded`);
+      assert.deepEqual([...styles[0].matchAll(/url\(([^)]+)\)/g)].map((m) => m[1]), ["assets/inter-latin-v20.woff2", "assets/jetbrains-mono-latin-v24.woff2"], `${label}: fonts relative to /oauth/authorize, so a /staging mount finds them`);
+      assert.match(html, /<main>\n<svg class="logo" viewBox="0 0 1613 286" role="img" aria-label="Clockchain" fill="currentColor">/, label);
+    }
+    // The key page: the key in a read-only field, and the file as a data: link (nothing fetched, nothing to allow).
+    assert.match(person.html, new RegExp(`<input class="keyfield" type="text" value="${person.key}" readonly`));
+    assert.equal(person.html.match(/<a\b[^>]*>/g).length, 1);
+    const href = /<a class="download" href="(data:text\/plain;charset=utf-8,[^"]+)" download="clockchain-account-key\.txt">Download key file<\/a>/.exec(person.html)?.[1];
+    assert.ok(href, "the download link");
+    const file = decodeURIComponent(href.replace(/&#39;/g, "'").replace(/&amp;/g, "&").slice("data:text/plain;charset=utf-8,".length));
+    assert.match(file, /^Clockchain account key\n\nAccount: Ada \([A-Za-z0-9_-]{6}\)\n/);
+    assert.ok(file.includes(`\nKey: ${person.key}\n`));
+    // Only the create flow's key page carries the key: the signed-in and create pages have no link and no key.
+    for (const page of [fresh.html, signedIn.html]) {
+      assert.doesNotMatch(page, /<a\b|cck_|data:/);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("sign-in pages: the two self-hosted fonts are served from this origin, cacheable and same-origin only; nothing else under /oauth/assets", async () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const h = await harness();
+  try {
+    for (const name of ["inter-latin-v20.woff2", "jetbrains-mono-latin-v24.woff2"]) {
+      const res = await fetch(`${h.url}/oauth/assets/${name}`);
+      assert.equal(res.status, 200, name);
+      assert.equal(res.headers.get("content-type"), "font/woff2");
+      assert.equal(res.headers.get("cache-control"), "public, max-age=31536000, immutable");
+      assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(res.headers.get("cross-origin-resource-policy"), "same-origin");
+      assert.equal(res.headers.get("access-control-allow-origin"), null);
+      assert.equal(res.headers.get("set-cookie"), null);
+      const body = Buffer.from(await res.arrayBuffer());
+      assert.equal(body.subarray(0, 4).toString("latin1"), "wOF2");
+      assert.deepEqual(body, readFileSync(path.join(here, "..", "assets", "fonts", name)));
+      const head = await fetch(`${h.url}/oauth/assets/${name}`, { method: "HEAD" });
+      assert.equal(head.status, 200);
+      assert.equal((await head.arrayBuffer()).byteLength, 0);
+      const post = await fetch(`${h.url}/oauth/assets/${name}`, { method: "POST" });
+      assert.equal(post.status, 405);
+      assert.equal(post.headers.get("allow"), "GET, HEAD");
+    }
+    // Exactly those two names: no directory listing, no licence text, no path walking.
+    for (const p of ["/oauth/assets/", "/oauth/assets/Inter-OFL.txt", "/oauth/assets/inter-latin-v20.woff2/", "/oauth/assets/%2e%2e/oauth.js", "/oauth/assets/INTER-LATIN-V20.WOFF2"]) {
+      const r = await fetch(`${h.url}${p}`);
+      assert.equal(r.status, 404, p);
+      assert.equal(await r.text(), "fell through", p);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test("account keys are refused on /mcp in every credential slot and never reach the gateway (flag on or off)", async () => {
   // A fake gateway that records every request it gets.
   const seen = [];
@@ -1523,7 +1599,7 @@ test("accounts: an unreadable record answers 503, keeps the cookie and is quaran
   try {
     const c = await openConsent(later.url, { cookie: person.cookie });
     assert.equal(c.page.status, 200);
-    assert.match(c.html, /Create your Clockchain account/);
+    assert.match(c.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(c.page.headers.get("set-cookie"), SECURE_CLEAR);
   } finally {
     await later.close();
@@ -1551,7 +1627,7 @@ test("accounts: a key pasted as a name is refused and points to the key form; it
       assert.equal(res.status, 400, name);
       assert.equal(res.headers.get("set-cookie"), null);
       const html = await res.text();
-      assert.match(html, /role="alert">That looks like an account key, not a name\. To sign in with it, use “I have an account key” below\./);
+      assert.match(html, /role="alert">That looks like an account key, not a name\. To sign in with it, paste it below\./);
       assert.match(html, /<details class="havekey" open>/, "the key form is open");
       assert.equal(html.includes(person.key.slice(4, 24)), false, "the key is not echoed");
     }
@@ -1571,7 +1647,7 @@ test("app names get the same hygiene: marks capped, blank look-alikes blank, no 
     for (let c = 0x316; c <= 0x333; c++) below.push(String.fromCodePoint(c));
     const zalgo = await openConsent(h.url, { meta: { client_name: `ChatGPT${below.join("").repeat(3).slice(0, 53)}` } });
     assert.match(zalgo.client.client_name, /^ChatGPT\p{M}{2}$/u, "two marks after the last letter, no more (NFC orders them)");
-    assert.match(zalgo.html, new RegExp(`allow ${zalgo.client.client_name} to record`));
+    assert.match(zalgo.html, new RegExp(`<h1>Connect ${zalgo.client.client_name} to Clockchain</h1>`));
     for (const blank of ["ㅤ", "⠀⠀", "ㅤ ﾠ", "...", "́́"]) {
       const c = await openConsent(h.url, { meta: { client_name: blank } });
       assert.equal(c.client.client_name, undefined, JSON.stringify(blank));
@@ -1622,7 +1698,7 @@ test("prefixed base (staging): every emitted URL carries the path, and the cooki
     // A production cookie (another name) is neither read nor cleared; the staging cookie signs in.
     const prodCookie = `__Host-cc_acct=${cookie.slice(cookie.indexOf("=") + 1)}`;
     const withProd = await openConsent(h.url, { cookie: prodCookie, resource: `${STAGING}/mcp` });
-    assert.match(withProd.html, /Create your Clockchain account/);
+    assert.match(withProd.html, /value="create" class="primary">Create account<\/button>/);
     assert.equal(withProd.page.headers.get("set-cookie"), null, "production's cookie is not touched");
     assert.match((await openConsent(h.url, { cookie, resource: `${STAGING}/mcp` })).html, /Signed in as <strong>Stella<\/strong>/);
   } finally {
@@ -1684,10 +1760,13 @@ test("prefixed base behind a prefix-stripping proxy: the MCP SDK client and a Ch
     assert.equal(pending.searchParams.get("resource"), `${PROXY}/staging/mcp`);
     const page = await (await browse(pending.href)).text();
     assert.match(page, /action="\/staging\/oauth\/authorize"/);
+    const font = await browse(new URL("assets/inter-latin-v20.woff2", pending.href).href);
+    assert.equal(font.status, 200, "the page's relative font URL resolves under /staging");
+    assert.equal(font.headers.get("content-type"), "font/woff2");
     const request_ = /name="request" value="([^"]+)"/.exec(page)[1];
     const keyPage = await (await click({ request: request_, decision: "create", name: "Proxy Pat" })).text();
     assert.ok(jar.has("cc_acct_staging"), "loopback http: the non-__Host- staging name");
-    const key = /<code>(cck_[^<]+)<\/code>/.exec(keyPage)[1];
+    const key = /class="keyfield" type="text" value="(cck_[^"]+)"/.exec(keyPage)[1];
     const cont = await click({ request: request_, decision: "continue", grant: /name="grant" value="([^"]+)"/.exec(keyPage)[1] });
     const code = new URL(cont.headers.get("location")).searchParams.get("code");
     assert.equal(await auth(provider, { serverUrl: new URL(`${PROXY}/staging/mcp`), resourceMetadataUrl: new URL(prmUrl), authorizationCode: code }), "AUTHORIZED");
