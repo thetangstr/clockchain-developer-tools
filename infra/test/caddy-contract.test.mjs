@@ -24,6 +24,20 @@ test("the public hostname keeps production untouched outside the staging and pin
   assert.ok(staging, "handle_path /staging/* block exists");
   assert.match(staging[1], /reverse_proxy\s+mcp-staging:8080/);
   assert.match(staging[1], /header_up\s+X-Forwarded-Prefix\s+\/staging/);
+  // Staging's OAuth discovery: RFC 8414 / 9728 path-inserted well-known URLs for the /staging issuer, and only those,
+  // go to the staging container unchanged.
+  const discoveryMatcher = block.match(/^\s*@staging_oauth_discovery\s+path\s+(.+)$/m);
+  assert.ok(discoveryMatcher, "@staging_oauth_discovery matcher exists");
+  assert.deepEqual(discoveryMatcher[1].trim().split(/\s+/), [
+    "/.well-known/oauth-authorization-server/staging",
+    "/.well-known/openid-configuration/staging",
+    "/.well-known/oauth-protected-resource/staging",
+    "/.well-known/oauth-protected-resource/staging/*",
+  ]);
+  const discovery = block.match(/handle\s+@staging_oauth_discovery\s*\{([\s\S]*?)\n\t\}/);
+  assert.ok(discovery, "handle @staging_oauth_discovery block exists");
+  assert.match(discovery[1], /reverse_proxy\s+mcp-staging:8080/);
+  assert.doesNotMatch(discovery[1], /mcp:8080|uri\s|rewrite|strip_prefix/);
   // ACM4 routing: /handshake/mcp serves the current build (flipped from the
   // pinned mcp-acm4 instance for packet #13) while the pinned 2.1.6 instance
   // stays reachable at /acm4/* for rollback, and the current build's handshake
@@ -59,7 +73,7 @@ test("the public hostname keeps production untouched outside the staging and pin
   // Production only: no staging sink exists, so nothing routes to one.
   assert.doesNotMatch(source, /telemetry-sink-staging|\/staging\/telemetry/);
   // Everything outside those blocks must proxy unchanged to production.
-  const rest = block.replace(staging[0], "").replace(acm4[0], "").replace(handshake[0], "").replace(next[0], "")
+  const rest = block.replace(staging[0], "").replace(discoveryMatcher[0], "").replace(discovery[0], "").replace(acm4[0], "").replace(handshake[0], "").replace(next[0], "")
     .replace(sinkIngest[0], "").replace(sinkKeys[0], "").replace(sinkQuery[0], "")
     .split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
   assert.match(rest, /reverse_proxy\s+mcp:8080/);

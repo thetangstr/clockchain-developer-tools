@@ -71,19 +71,45 @@ export type OAuthConfig =
       keyAttemptsPerIpPerHour: number;
       accountsDir: string;
       replayDir: string;
+      /** The account cookie's name (see accountCookieName). */
+      cookieName: string;
       trustedProxy?: string;
     };
 
 /** An https origin (http only on loopback, for local runs) with no path, query or credentials. */
+/**
+ * An https base URL (http only on loopback, for local runs) with no query, fragment or credentials. It may carry a
+ * path for a prefixed mount (staging is https://mcp.clockchain.network/staging, behind Caddy's handle_path): every
+ * URL the OAuth pages and metadata emit then carries it. Returned without a trailing slash.
+ */
 export function normalizePublicUrl(raw: string): string | undefined {
   try {
     const url = new URL(raw.trim());
-    if (url.username || url.password || url.search || url.hash || url.pathname !== "/") return undefined;
-    if (url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) return url.origin;
+    if (url.username || url.password || url.search || url.hash || raw.includes("#") || raw.includes("?")) return undefined;
+    const path = url.pathname.replace(/\/+$/, "");
+    if (path !== "" && !/^(\/[A-Za-z0-9._~-]+)+$/.test(path)) return undefined;
+    if (url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))) return `${url.origin}${path}`;
   } catch {
     // fall through
   }
   return undefined;
+}
+
+/**
+ * The account cookie's name. Production (no path): __Host-cc_acct. A prefixed base gets its own name derived from
+ * the path (/staging -> __Host-cc_acct_staging), so a staging mount on the same host never reads or clears
+ * production's cookie; MCP_OAUTH_COOKIE_NAME overrides it. __Host- needs https, so loopback http drops the prefix.
+ */
+export function accountCookieName(publicUrl: string, override?: string): string | undefined {
+  const secure = publicUrl.startsWith("https:");
+  if (override !== undefined && override !== "") {
+    if (!/^(__Host-)?[A-Za-z0-9_]{1,64}$/.test(override)) return undefined;
+    if (secure && !override.startsWith("__Host-")) return undefined;
+    if (!secure && override.startsWith("__Host-")) return undefined;
+    return override;
+  }
+  const suffix = new URL(publicUrl).pathname.replace(/^\/+|\/+$/g, "").replace(/[^A-Za-z0-9]+/g, "_");
+  return `${secure ? "__Host-" : ""}cc_acct${suffix ? `_${suffix}` : ""}`;
 }
 
 /**
@@ -97,7 +123,9 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
   if (flag !== "1") return { kind: "misconfigured", reason: "MCP_OAUTH must be 1 or 0" };
   if (!signingSecret) return { kind: "misconfigured", reason: "MCP_OAUTH=1 needs MCP_TOKEN_SIGNING_SECRET" };
   const publicUrl = normalizePublicUrl(env.MCP_PUBLIC_URL || DEFAULT_PUBLIC_URL);
-  if (!publicUrl) return { kind: "misconfigured", reason: "MCP_PUBLIC_URL must be an https origin with no path" };
+  if (!publicUrl) return { kind: "misconfigured", reason: "MCP_PUBLIC_URL must be an https URL (an optional path, no query or fragment)" };
+  const cookieName = accountCookieName(publicUrl, (env.MCP_OAUTH_COOKIE_NAME ?? "").trim());
+  if (!cookieName) return { kind: "misconfigured", reason: "MCP_OAUTH_COOKIE_NAME must be letters, digits and _ (with __Host- on https, without it on http)" };
   // Per-hour limits: "" or unset = the default; anything but a whole number from 1 to 99999 is misconfigured.
   const counts: Record<string, number> = {};
   for (const [name, fallback] of [
@@ -121,14 +149,17 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     // Accounts and replay state live on the state volume, next to the handshake and Shadow state.
     accountsDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "accounts"),
     replayDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "oauth"),
+    cookieName,
     ...(trustedProxy ? { trustedProxy } : {}),
   };
 }
 
 export interface OAuthOptions {
   signingSecret: string;
-  /** Normalized public origin (see {@link normalizePublicUrl}); never derived from Host. */
+  /** Normalized public base URL, possibly with a path (see {@link normalizePublicUrl}); never derived from Host. */
   publicUrl: string;
+  /** The account cookie's name; default from {@link accountCookieName}. */
+  cookieName?: string;
   /** Access-token lifetime, the same as POST /token's. */
   tokenTtlSeconds: number;
   trustedProxy?: string;
@@ -354,6 +385,8 @@ function sendErrorPage(res: ServerResponse, status: number, title: string, messa
 }
 
 interface ConsentView {
+  /** Where every form posts: <base path>/oauth/authorize, so a prefixed mount (/staging) posts to itself. */
+  action: string;
   appName: string;
   redirectHost: string;
   requestToken: string;
@@ -391,7 +424,7 @@ function consentPage(v: ConsentView): string {
 <h1>Allow ${app} to record and anchor your agents’ work on Clockchain?</h1>
 <p class="sub">Signed in as <strong>${escapeHtml(v.signedIn.name)}</strong> <span class="muted">(account ${escapeHtml(v.signedIn.shortId)})</span>. Free testnet credits.</p>
 ${alert}${appFacts(app, v.redirectHost)}
-<form method="post" action="/oauth/authorize">
+<form method="post" action="${escapeHtml(v.action)}">
 ${requestField(v.requestToken)}
 <input type="hidden" name="grant" value="${escapeHtml(v.signedIn.grant)}">
 <div class="actions">
@@ -399,7 +432,7 @@ ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="approve" class="primary">Allow ${app}</button>
 </div>
 </form>
-<form method="post" action="/oauth/authorize" class="switch">
+<form method="post" action="${escapeHtml(v.action)}" class="switch">
 ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="switch" class="link">Not you? Use a different account</button>
 </form>
@@ -412,14 +445,14 @@ ${alert}${appFacts(app, v.redirectHost)}
 <div class="choice">
 <details class="havekey"${v.keyOpen ? " open" : ""}>
 <summary><span class="when-closed">I have an account key</span><span class="when-open">Create a new account instead</span></summary>
-<form method="post" action="/oauth/authorize" class="stack">
+<form method="post" action="${escapeHtml(v.action)}" class="stack">
 ${requestField(v.requestToken)}
 <label for="key">Account key</label>
 <input id="key" name="key" type="password" required autocomplete="current-password" spellcheck="false">
 <button type="submit" name="decision" value="signin" class="primary">Sign in and allow ${app}</button>
 </form>
 </details>
-<form method="post" action="/oauth/authorize" class="stack create">
+<form method="post" action="${escapeHtml(v.action)}" class="stack create">
 ${requestField(v.requestToken)}
 <label for="name">Account name</label>
 <input id="name" name="name" type="text" maxlength="40" required autocomplete="nickname" spellcheck="false">
@@ -427,7 +460,7 @@ ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="create" class="primary">Create account and allow ${app}</button>
 </form>
 </div>
-<form method="post" action="/oauth/authorize" class="switch">
+<form method="post" action="${escapeHtml(v.action)}" class="switch">
 ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="cancel" class="link">Cancel</button>
 </form>
@@ -435,14 +468,15 @@ ${requestField(v.requestToken)}
 }
 
 /** Shown once, right after the create click: the account key, then Continue on to the app. */
-function accountKeyPage(appName: string, accountName: string, shortId: string, key: string, requestToken: string, grant: string): string {
+function accountKeyPage(action: string, appName: string, accountName: string, shortId: string, key: string, requestToken: string, grant: string): string {
+  const v = { action };
   return htmlDocument("Save your Clockchain account key", `<p class="eyebrow">Clockchain sign-in</p>
 <h1>Your Clockchain account is ready</h1>
 <p class="sub">Signed in as <strong>${escapeHtml(accountName)}</strong> <span class="muted">(account ${escapeHtml(shortId)})</span>.</p>
 <p class="label">Your account key</p>
 <p class="key"><code>${escapeHtml(key)}</code></p>
 <p class="note">Save this key to sign in on another device. We can’t show it again.</p>
-<form method="post" action="/oauth/authorize" class="stack">
+<form method="post" action="${escapeHtml(v.action)}" class="stack">
 ${requestField(requestToken)}
 <input type="hidden" name="grant" value="${escapeHtml(grant)}">
 <button type="submit" name="decision" value="continue" class="primary">Continue</button>
@@ -527,6 +561,10 @@ const CORS_HEADERS: Record<string, string> = {
 export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   const base = options.publicUrl;
   const origin = new URL(base).origin;
+  // A prefixed mount (/staging): Caddy strips the prefix before the request reaches us, so our routes stay at the
+  // root, but every URL the browser or a client is given must carry it.
+  const basePath = new URL(base).pathname.replace(/\/+$/, "");
+  const AUTHORIZE_ACTION = `${basePath}/oauth/authorize`;
   const now = options.now ?? Date.now;
   const nowSec = () => Math.floor(now() / 1000);
   const log = options.log ?? ((event) => console.error(JSON.stringify(event)));
@@ -697,6 +735,17 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     ...MCP_PATHS.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${p}`, protectedResource(`${base}${p}`)]),
     ["/.well-known/oauth-authorization-server", serverMetadata],
     ["/.well-known/openid-configuration", serverMetadata],
+    // An issuer with a path: RFC 8414 and RFC 9728 insert it after /.well-known/<name>. Behind a prefix-stripping proxy
+    // those URLs reach this server only if the proxy routes them here (see the follow-up report's Caddy note); the
+    // path-appended forms above (<base>/.well-known/...) always do, and the 401 names the resource metadata URL.
+    ...(basePath
+      ? [
+          [`/.well-known/oauth-authorization-server${basePath}`, serverMetadata],
+          [`/.well-known/openid-configuration${basePath}`, serverMetadata],
+          [`/.well-known/oauth-protected-resource${basePath}`, protectedResource(base)],
+          ...MCP_PATHS.map((p): [string, unknown] => [`/.well-known/oauth-protected-resource${basePath}${p}`, protectedResource(`${base}${p}`)]),
+        ] as [string, unknown][]
+      : []),
   ]);
 
   // ---- registration (RFC 7591) ------------------------------------------------
@@ -769,7 +818,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
 
   // __Host- requires Secure; only a loopback http public URL (local runs and tests) drops both.
   const secureCookie = base.startsWith("https:");
-  const COOKIE_NAME = secureCookie ? "__Host-cc_acct" : "cc_acct";
+  const COOKIE_NAME = options.cookieName ?? accountCookieName(base) ?? (secureCookie ? "__Host-cc_acct" : "cc_acct");
   const cookieAttributes = `Path=/;${secureCookie ? " Secure;" : ""} HttpOnly; SameSite=Lax`;
   const setAccountCookie = (acct: string): string =>
     `${COOKIE_NAME}=${seal({ t: "cookie", acct, iat: nowSec() })}; Max-Age=${COOKIE_MAX_AGE_S}; ${cookieAttributes}`;
@@ -812,6 +861,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       : undefined;
     res.writeHead(o.status ?? 200, { ...pageHeaders(formActionSources(request.ru)), ...o.headers });
     res.end(consentPage({
+      action: AUTHORIZE_ACTION,
       appName: request.n,
       redirectHost: new URL(request.ru).host,
       requestToken,
@@ -1018,7 +1068,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       const iat = nowSec();
       const grant = seal({ t: "grant", acct: created.account.acct, rid, via: "create", iat, exp: iat + REQUEST_TTL_S });
       res.writeHead(200, { ...pageHeaders(formActionSources(request.ru)), "set-cookie": setAccountCookie(created.account.acct) });
-      res.end(accountKeyPage(request.n, displayAccountName(created.account), shortAccountId(created.account.acct), created.key, requestToken, grant));
+      res.end(accountKeyPage(AUTHORIZE_ACTION, request.n, displayAccountName(created.account), shortAccountId(created.account.acct), created.key, requestToken, grant));
       return;
     }
 

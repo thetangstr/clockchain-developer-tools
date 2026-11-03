@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -262,16 +262,23 @@ test("config: off unless MCP_OAUTH=1 with a signing secret; bad values are misco
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1" }, "").kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "true" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "http://mcp.clockchain.network" }, SECRET).kind, "misconfigured");
-  assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/mcp" }, SECRET).kind, "misconfigured");
+  for (const bad of ["https://mcp.clockchain.network/staging?x=1", "https://mcp.clockchain.network/#x", "https://mcp.clockchain.network/a b", "http://mcp.clockchain.network/staging"]) {
+    assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: bad }, SECRET).kind, "misconfigured", bad);
+  }
+  assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_OAUTH_COOKIE_NAME: "no-host-prefix" }, SECRET).kind, "misconfigured");
+  const staging = loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/staging/" }, SECRET);
+  assert.equal(staging.publicUrl, "https://mcp.clockchain.network/staging");
+  assert.equal(staging.cookieName, "__Host-cc_acct_staging");
+  assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/staging", MCP_OAUTH_COOKIE_NAME: "__Host-cc_stg" }, SECRET).cookieName, "__Host-cc_stg");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_OAUTH_APPROVALS_PER_HOUR: "lots" }, SECRET).kind, "misconfigured");
   for (const name of ["MCP_OAUTH_ACCOUNTS_PER_HOUR", "MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR", "MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR"]) {
     assert.match(loadOAuthConfig({ MCP_OAUTH: "1", [name]: "0" }, SECRET).reason, new RegExp(name));
     assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", [name]: "" }, SECRET).kind, "ready", `${name}: "" means the default`);
   }
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsPerHour: 200, accountsPerIpPerHour: 10, keyAttemptsPerIpPerHour: 20, accountsDir: "/app/state/accounts", replayDir: "/app/state/oauth" });
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsPerHour: 200, accountsPerIpPerHour: 10, keyAttemptsPerIpPerHour: 20, accountsDir: "/app/state/accounts", replayDir: "/app/state/oauth", cookieName: "__Host-cc_acct" });
   assert.deepEqual(
     loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/", MCP_OAUTH_APPROVALS_PER_HOUR: "40", MCP_OAUTH_ACCOUNTS_PER_HOUR: "500", MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR: "60", MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR: "100", MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3", MCP_STATE_DIR: "/srv/state" }, SECRET),
-    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsPerHour: 500, accountsPerIpPerHour: 60, keyAttemptsPerIpPerHour: 100, accountsDir: "/srv/state/accounts", replayDir: "/srv/state/oauth", trustedProxy: "172.30.0.3" },
+    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsPerHour: 500, accountsPerIpPerHour: 60, keyAttemptsPerIpPerHour: 100, accountsDir: "/srv/state/accounts", replayDir: "/srv/state/oauth", cookieName: "__Host-cc_acct", trustedProxy: "172.30.0.3" },
   );
 });
 
@@ -1572,6 +1579,145 @@ test("app names get the same hygiene: marks capped, blank look-alikes blank, no 
     }
   } finally {
     await h.close();
+  }
+});
+
+test("prefixed base (staging): every emitted URL carries the path, and the cookie never collides with production's", async () => {
+  const STAGING = "https://mcp.example.test/staging";
+  const h = await harness({ publicUrl: STAGING });
+  try {
+    const as = await (await fetch(`${h.url}/.well-known/oauth-authorization-server`)).json();
+    assert.equal(as.issuer, STAGING);
+    assert.equal(as.authorization_endpoint, `${STAGING}/oauth/authorize`);
+    assert.equal(as.token_endpoint, `${STAGING}/oauth/token`);
+    assert.equal(as.registration_endpoint, `${STAGING}/oauth/register`);
+    // RFC 8414 / 9728 path-inserted forms are served too (for a proxy that routes them here).
+    assert.deepEqual(await (await fetch(`${h.url}/.well-known/oauth-authorization-server/staging`)).json(), as);
+    assert.deepEqual(await (await fetch(`${h.url}/.well-known/openid-configuration/staging`)).json(), as);
+    const prm = await (await fetch(`${h.url}/.well-known/oauth-protected-resource/mcp`)).json();
+    assert.deepEqual(prm.authorization_servers, [STAGING]);
+    assert.equal(prm.resource, `${STAGING}/mcp`);
+    assert.equal((await (await fetch(`${h.url}/.well-known/oauth-protected-resource/staging/shadow/mcp`)).json()).resource, `${STAGING}/shadow/mcp`);
+    assert.equal(h.handler.challenge("/mcp", false)["www-authenticate"], `Bearer resource_metadata="${STAGING}/.well-known/oauth-protected-resource/mcp"`);
+
+    // Pages: every form posts under /staging; the cookie is __Host-cc_acct_staging.
+    const c = await openConsent(h.url, { resource: `${STAGING}/mcp` });
+    assert.equal(c.page.status, 200, c.html);
+    const actions = [...c.html.matchAll(/<form [^>]*action="([^"]+)"/g)].map((m) => m[1]);
+    assert.ok(actions.length >= 3);
+    assert.deepEqual([...new Set(actions)], ["/staging/oauth/authorize"]);
+    const created = await decide(h.url, c.requestToken, "create", { origin: "https://mcp.example.test" }, { name: "Stella" });
+    const setCookie = created.headers.get("set-cookie");
+    assert.match(setCookie, /^__Host-cc_acct_staging=cc_ac_[^;]+; Max-Age=31536000; Path=\/; Secure; HttpOnly; SameSite=Lax$/);
+    const keyHtml = await created.text();
+    assert.match(keyHtml, /<form method="post" action="\/staging\/oauth\/authorize"/);
+    const cookie = setCookie.split(";")[0];
+    const cont = await decide(h.url, c.requestToken, "continue", { origin: "https://mcp.example.test" }, { grant: /name="grant" value="([^"]+)"/.exec(keyHtml)[1] });
+    assert.equal(cont.status, 303);
+    assert.equal(new URL(cont.headers.get("location")).searchParams.get("iss"), STAGING);
+    const issued = await tokenCall(h.url, { grant_type: "authorization_code", code: codeOf(cont), redirect_uri: c.redirectUri, client_id: c.client.client_id, code_verifier: c.verifier, resource: `${STAGING}/mcp` });
+    assert.equal(issued.status, 200);
+    // Production's resource is not this server's.
+    assert.equal((await openConsent(h.url, { resource: "https://mcp.example.test/mcp" })).page.status, 400);
+    // A production cookie (another name) is neither read nor cleared; the staging cookie signs in.
+    const prodCookie = `__Host-cc_acct=${cookie.slice(cookie.indexOf("=") + 1)}`;
+    const withProd = await openConsent(h.url, { cookie: prodCookie, resource: `${STAGING}/mcp` });
+    assert.match(withProd.html, /Create your Clockchain account/);
+    assert.equal(withProd.page.headers.get("set-cookie"), null, "production's cookie is not touched");
+    assert.match((await openConsent(h.url, { cookie, resource: `${STAGING}/mcp` })).html, /Signed in as <strong>Stella<\/strong>/);
+  } finally {
+    await h.close();
+  }
+});
+
+test("prefixed base behind a prefix-stripping proxy: the MCP SDK client and a ChatGPT-style client complete the flow", async () => {
+  // "Production" answers everything that is not under /staging (as Caddy would send it to the production container).
+  const production = createServer((req, res) => { res.writeHead(401, { "content-type": "application/json" }); res.end('{"error":"unauthorized"}'); }).listen(0, "127.0.0.1");
+  await once(production, "listening");
+  let stagingPort;
+  // The proxy, as infra/clockchain-mcp/Caddyfile routes: /staging/* -> strip the prefix, add X-Forwarded-Prefix
+  // (handle_path); the staging issuer's RFC 8414 / 9728 path-inserted discovery URLs -> staging unchanged
+  // (@staging_oauth_discovery); everything else -> production.
+  const discovery = /^\/\.well-known\/(oauth-authorization-server\/staging|openid-configuration\/staging|oauth-protected-resource\/staging(\/.*)?)$/;
+  const proxy = createServer((req, res) => {
+    const staged = req.url.startsWith("/staging/");
+    const toStaging = staged || discovery.test(req.url.split("?")[0]);
+    const upstream = (port) => ({ host: "127.0.0.1", port, method: req.method, path: staged ? req.url.slice("/staging".length) : req.url, headers: { ...req.headers, ...(toStaging ? { "x-forwarded-prefix": "/staging" } : {}) } });
+    const out = request(upstream(toStaging ? stagingPort : production.address().port), (up) => { res.writeHead(up.statusCode, up.headers); up.pipe(res); });
+    out.on("error", () => { res.writeHead(502); res.end(); });
+    req.pipe(out);
+  }).listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  const PROXY = `http://127.0.0.1:${proxy.address().port}`;
+  const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: `${PROXY}/staging` });
+  stagingPort = Number(new URL(s.url).port);
+  try {
+    // A browser at the proxy: its cookie jar and its clicks (Origin = the proxy's origin).
+    const jar = new Map();
+    const browse = async (url, init = {}) => {
+      const res = await fetch(url, { redirect: "manual", ...init, headers: { ...(init.headers ?? {}), ...(jar.size ? { cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; ") } : {}) } });
+      const sc = res.headers.get("set-cookie");
+      if (sc) { const pair = sc.split(";")[0]; jar.set(pair.slice(0, pair.indexOf("=")), pair.slice(pair.indexOf("=") + 1)); }
+      return res;
+    };
+    const click = (fields) => browse(`${PROXY}/staging/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", origin: PROXY }, body: new URLSearchParams(fields) });
+
+    // 1. The real MCP SDK client (Claude Code's): discovery from the 401, DCR, PKCE, then sign-up in the browser.
+    const { auth } = await import("@modelcontextprotocol/sdk/client/auth.js");
+    const store = {};
+    let pending;
+    const provider = {
+      redirectUrl: "http://localhost:54321/callback",
+      clientMetadata: { client_name: "Claude Code", redirect_uris: ["http://localhost:54321/callback"], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
+      clientInformation: () => store.client, saveClientInformation: (c) => { store.client = c; },
+      tokens: () => store.tokens, saveTokens: (t) => { store.tokens = t; },
+      redirectToAuthorization: (u) => { pending = u; },
+      saveCodeVerifier: (v) => { store.v = v; }, codeVerifier: () => store.v,
+    };
+    const unauth = await fetch(`${PROXY}/staging/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(INIT) });
+    const prmUrl = /resource_metadata="([^"]+)"/.exec(unauth.headers.get("www-authenticate"))[1];
+    assert.equal(prmUrl, `${PROXY}/staging/.well-known/oauth-protected-resource/mcp`);
+    assert.equal(await auth(provider, { serverUrl: new URL(`${PROXY}/staging/mcp`), resourceMetadataUrl: new URL(prmUrl) }), "REDIRECT");
+    assert.equal(pending.origin + pending.pathname, `${PROXY}/staging/oauth/authorize`);
+    assert.equal(pending.searchParams.get("resource"), `${PROXY}/staging/mcp`);
+    const page = await (await browse(pending.href)).text();
+    assert.match(page, /action="\/staging\/oauth\/authorize"/);
+    const request_ = /name="request" value="([^"]+)"/.exec(page)[1];
+    const keyPage = await (await click({ request: request_, decision: "create", name: "Proxy Pat" })).text();
+    assert.ok(jar.has("cc_acct_staging"), "loopback http: the non-__Host- staging name");
+    const key = /<code>(cck_[^<]+)<\/code>/.exec(keyPage)[1];
+    const cont = await click({ request: request_, decision: "continue", grant: /name="grant" value="([^"]+)"/.exec(keyPage)[1] });
+    const code = new URL(cont.headers.get("location")).searchParams.get("code");
+    assert.equal(await auth(provider, { serverUrl: new URL(`${PROXY}/staging/mcp`), resourceMetadataUrl: new URL(prmUrl), authorizationCode: code }), "AUTHORIZED");
+    const acct = verifyToken(SECRET, store.tokens.access_token).payload.acct;
+    assert.match(acct, ACCT_PATTERN);
+    assert.equal((await fetch(`${PROXY}/staging/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${store.tokens.access_token}` }, body: JSON.stringify(INIT) })).status, 200);
+
+    // 2. A ChatGPT-style client: path-appended discovery, the same browser (signed in), Allow.
+    const issuer = (await (await fetch(prmUrl)).json()).authorization_servers[0];
+    assert.equal(issuer, `${PROXY}/staging`);
+    const meta = await (await fetch(`${issuer}/.well-known/oauth-authorization-server`)).json();
+    assert.equal(meta.issuer, issuer);
+    const client = await (await fetch(meta.registration_endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "ChatGPT", redirect_uris: [CHATGPT_CB] }) })).json();
+    const { verifier, challenge } = pkce();
+    const authz = `${meta.authorization_endpoint}?${new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: CHATGPT_CB, code_challenge: challenge, code_challenge_method: "S256", state: "s", resource: `${issuer}/mcp` })}`;
+    const signedIn = await (await browse(authz)).text();
+    assert.match(signedIn, /Signed in as <strong>Proxy Pat<\/strong>/);
+    const allowed = await click({ request: /name="request" value="([^"]+)"/.exec(signedIn)[1], decision: "approve", grant: /name="grant" value="([^"]+)"/.exec(signedIn)[1] });
+    const back = new URL(allowed.headers.get("location"));
+    assert.equal(back.searchParams.get("iss"), issuer);
+    const tok = await (await fetch(meta.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: back.searchParams.get("code"), redirect_uri: CHATGPT_CB, client_id: client.client_id, code_verifier: verifier, resource: `${issuer}/mcp` }) })).json();
+    assert.equal(verifyToken(SECRET, tok.access_token).payload.acct, acct, "same account across both apps, through the prefix");
+    // 3. The account key from a new browser, through the prefix.
+    jar.clear();
+    const fresh = await (await browse(authz)).text();
+    const viaKey = await click({ request: /name="request" value="([^"]+)"/.exec(fresh)[1], decision: "signin", key });
+    assert.equal(viaKey.status, 303);
+  } finally {
+    await s.close();
+    proxy.closeAllConnections?.();
+    await new Promise((r) => proxy.close(r));
+    await new Promise((r) => production.close(r));
   }
 });
 

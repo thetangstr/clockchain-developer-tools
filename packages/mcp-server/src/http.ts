@@ -624,6 +624,7 @@ export async function runHttp(): Promise<Server> {
         accountCreationsPerHour: oauthConfig.accountsPerIpPerHour,
         keyAttemptsPerHour: oauthConfig.keyAttemptsPerIpPerHour,
         accountsDir: oauthConfig.accountsDir,
+        cookieName: oauthConfig.cookieName,
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
