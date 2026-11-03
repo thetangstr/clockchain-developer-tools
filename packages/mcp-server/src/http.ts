@@ -263,6 +263,15 @@ export function callerKey(
 }
 
 /**
+ * The per-caller subject of a verified signed token: its OAuth account (`acct:<acct>`) when it carries one, so every
+ * token of one account (however many refreshes minted them) shares one rate-limit bucket; else the token's own jti.
+ * Passed where callerKey/callerPrincipalId take the verified jti (an `acct:` value can never equal a UUID jti).
+ */
+export function signedTokenSubject(claims: { jti?: string; acct?: string }): string | undefined {
+  return typeof claims.acct === "string" && claims.acct.length > 0 ? `acct:${claims.acct}` : claims.jti;
+}
+
+/**
  * Stable caller-state key without retaining an MCP token or Clockchain API key.
  * The raw credential-derived caller key remains confined to the current request.
  */
@@ -1029,10 +1038,10 @@ export async function runHttp(): Promise<Server> {
   const shadowAuthenticate = (req: IncomingMessage): ShadowAuth => {
     const ip = clientIp(req.headers, req.socket.remoteAddress);
     const presented = presentedApiKey(req.headers);
-    const signed = (claims: { jti?: string }): ShadowAuth => ({
+    const signed = (claims: { jti?: string; acct?: string }): ShadowAuth => ({
       ok: true,
       ownerId: shadowOwnerFromClaims(claims, presented),
-      rateKey: callerPrincipalId(req.headers, ip, claims.jti),
+      rateKey: callerPrincipalId(req.headers, ip, signedTokenSubject(claims)),
     });
     const auth = checkAuth(req);
     if (!auth.ok || "scope" in auth) return { ok: false };
@@ -1669,7 +1678,7 @@ export async function runHttp(): Promise<Server> {
     const selfServeJti = byo || !auth.ok
       ? undefined
       : "payload" in auth
-        ? auth.payload.jti
+        ? signedTokenSubject(auth.payload) // an OAuth token's account, else its jti
         : "trial" in auth
           ? auth.trial.jti
           : "scope" in auth

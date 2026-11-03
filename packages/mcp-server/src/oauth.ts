@@ -116,6 +116,10 @@ export interface OAuthOptions {
   accountCreationsPerHour?: number;
   /** Per-IP account-key sign-in attempts per hour (default 20). */
   keyAttemptsPerHour?: number;
+  /** Refresh grants per refresh-token family per hour (default 30). */
+  refreshesPerFamilyPerHour?: number;
+  /** Refresh grants per IP per hour (default 30). */
+  refreshesPerIpPerHour?: number;
   /** Milliseconds clock, injectable for tests. */
   now?: () => number;
   log?: (event: Record<string, unknown>) => void;
@@ -491,6 +495,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   const allowTokenCall = limiter(options.tokenCallsPerMinute ?? 120, 60_000, now);
   const allowAccountCreate = limiter(options.accountCreationsPerHour ?? 10, 60 * 60_000, now);
   const allowKeyAttempt = limiter(options.keyAttemptsPerHour ?? 20, 60 * 60_000, now);
+  // Every refresh mints a fresh access token, so refreshes are capped per family (one approval's chain) and per IP.
+  const allowFamilyRefresh = limiter(options.refreshesPerFamilyPerHour ?? 30, 60 * 60_000, now);
+  const allowIpRefresh = limiter(options.refreshesPerIpPerHour ?? 30, 60 * 60_000, now);
 
   // Accounts (src/accounts.ts). Opened once at boot; if that fails the approval page answers 503 and the rest of
   // OAuth (discovery, registration, refresh) keeps working.
@@ -1110,6 +1117,12 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         revokedFamilies.add(refresh.fam, nowSec() + REFRESH_TTL_S);
         log({ event: "oauth_refresh_reuse", acct: refresh.acct });
         sendOAuthError(res, 400, "invalid_grant", "The refresh token was already used.");
+        return;
+      }
+      // Checked before the token is spent, so a limited refresh can be retried later with the same token.
+      if (!allowIpRefresh(`refresh:${ipOf(req)}`) || !allowFamilyRefresh(`family:${refresh.fam}`)) {
+        rateLimited("refresh");
+        sendOAuthError(res, 429, "temporarily_unavailable", "Too many token refreshes. Try again later; this refresh token stays valid.", { "retry-after": "3600" });
         return;
       }
       usedRefreshTokens.add(refresh.jti, refresh.exp);

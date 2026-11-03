@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFile
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { runHttp } from "../dist/http.js";
+import { runHttp, signedTokenSubject } from "../dist/http.js";
 import { createOAuthHandler, loadOAuthConfig } from "../dist/oauth.js";
 import { ACCT_PATTERN, mintToken, verifyToken } from "../dist/token.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
@@ -1329,6 +1329,94 @@ test("accounts: survive a restart (same state directory): the cookie still signs
     assert.equal(tokenAcct(await exchangeCode(second.url, { ...fresh, code: codeOf(signin) })), person.acct);
   } finally {
     await second.close();
+  }
+});
+
+// ===========================================================================
+// Refresh amplification (security review, MEDIUM)
+// ===========================================================================
+
+const refreshOnce = (base, clientId, refreshToken) =>
+  tokenCall(base, { grant_type: "refresh_token", refresh_token: refreshToken, client_id: clientId });
+
+test("refresh: capped per refresh family and per IP; a limited refresh keeps its token for later", async () => {
+  const h = await harness({ refreshesPerFamilyPerHour: 3, refreshesPerIpPerHour: 5 });
+  try {
+    const a = await approve(h.url);
+    let rt = (await exchangeCode(h.url, a)).body.refresh_token;
+    for (let i = 0; i < 3; i++) {
+      const r = await refreshOnce(h.url, a.client.client_id, rt);
+      assert.equal(r.status, 200, `refresh ${i + 1}`);
+      rt = r.body.refresh_token;
+    }
+    const limited = await refreshOnce(h.url, a.client.client_id, rt);
+    assert.equal(limited.status, 429);
+    assert.equal(limited.body.error, "temporarily_unavailable");
+    assert.equal(limited.headers.get("retry-after"), "3600");
+    assert.equal(limited.headers.get("cache-control"), "no-store");
+    // Another family from the same IP still has room until the IP cap (5) is reached.
+    const b = await approve(h.url, { client: a.client });
+    let rt2 = (await exchangeCode(h.url, b)).body.refresh_token;
+    for (let i = 0; i < 1; i++) { const r = await refreshOnce(h.url, a.client.client_id, rt2); assert.equal(r.status, 200); rt2 = r.body.refresh_token; }
+    assert.equal((await refreshOnce(h.url, a.client.client_id, rt2)).status, 429, "the IP cap: 3 + 1 + this one");
+    // An hour later the limited token (never spent) works, and reuse detection still applies to the spent ones.
+    h.advance(60 * 60_000);
+    const later = await refreshOnce(h.url, a.client.client_id, rt);
+    assert.equal(later.status, 200);
+    assert.equal(tokenAcct(later), a.account.acct);
+    assert.ok(h.logs.some((e) => e.event === "oauth_rate_limited" && e.surface === "refresh"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("refresh: the default cap stops the review's 100-refresh chain at 30 per hour", async () => {
+  const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
+  try {
+    const a = await approve(s.url);
+    let rt = (await exchangeCode(s.url, a)).body.refresh_token;
+    const statuses = [];
+    for (let i = 0; i < 31; i++) {
+      const r = await refreshOnce(s.url, a.client.client_id, rt);
+      statuses.push(r.status);
+      if (r.status === 200) rt = r.body.refresh_token;
+    }
+    assert.deepEqual(statuses, [...Array(30).fill(200), 429]);
+  } finally {
+    await s.close();
+  }
+});
+
+test("per-caller rate limit: all tokens of one account share one bucket on /mcp and /shadow/mcp; /token tokens stay per jti", async () => {
+  assert.equal(signedTokenSubject({ jti: "j-1", acct: "acct_AAAAAAAAAAAAAAAAAAAAAA" }), "acct:acct_AAAAAAAAAAAAAAAAAAAAAA");
+  assert.equal(signedTokenSubject({ jti: "j-1" }), "j-1");
+  __setShadowLedgerForTests(new FakeLedger());
+  const s = await boot({ ...shadowOn(), MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_RATE_PER_MIN: "2" });
+  try {
+    const a = await approve(s.url);
+    const issued = await exchangeCode(s.url, a);
+    const refreshed = await refreshOnce(s.url, a.client.client_id, issued.body.refresh_token);
+    const [t1, t2] = [issued.body.access_token, refreshed.body.access_token];
+    assert.notEqual(verifyToken(SECRET, t1).payload.jti, verifyToken(SECRET, t2).payload.jti);
+    const call = (token, p = "/mcp", name = "no_such_tool") =>
+      mcpPost(s.url, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {} } }, { authorization: `Bearer ${token}` }, p).then(async (r) => { await r.text(); return r.status; });
+    // /mcp: two calls on the first token, then the refreshed token is already out of budget.
+    assert.deepEqual([await call(t1), await call(t1), await call(t2), await call(t1)], [200, 200, 429, 429]);
+    // Another account has its own bucket; so does each anonymous POST /token token.
+    const other = await approve(s.url, { client: a.client, account: await signUp(s.url, "Other Owner") });
+    const t3 = (await exchangeCode(s.url, other)).body.access_token;
+    assert.equal(await call(t3), 200);
+    for (let i = 0; i < 2; i++) {
+      const demo = (await (await fetch(`${s.url}/token`, { method: "POST" })).json()).token;
+      assert.equal(await call(demo), 200, "a /token token is its own bucket");
+    }
+    // /shadow/mcp shares the account's bucket too (MCP_RATE_PER_MIN is per caller across both).
+    const t4 = (await refreshOnce(s.url, a.client.client_id, refreshed.body.refresh_token)).body.access_token;
+    assert.equal(await call(t4, "/shadow/mcp", "shadow_list_sessions"), 429);
+    assert.equal(await call(t3, "/shadow/mcp", "shadow_list_sessions"), 200);
+  } finally {
+    await s.close();
+    __setShadowLedgerForTests(undefined);
   }
 });
 
