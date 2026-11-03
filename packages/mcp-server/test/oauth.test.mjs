@@ -263,10 +263,10 @@ test("config: off unless MCP_OAUTH=1 with a signing secret; bad values are misco
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "http://mcp.clockchain.network" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/mcp" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_OAUTH_APPROVALS_PER_HOUR: "lots" }, SECRET).kind, "misconfigured");
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsDir: "/app/state/accounts", replayDir: "/app/state/oauth" });
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsPerHour: 200, accountsDir: "/app/state/accounts", replayDir: "/app/state/oauth" });
   assert.deepEqual(
     loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/", MCP_OAUTH_APPROVALS_PER_HOUR: "40", MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3", MCP_STATE_DIR: "/srv/state" }, SECRET),
-    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsDir: "/srv/state/accounts", replayDir: "/srv/state/oauth", trustedProxy: "172.30.0.3" },
+    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsPerHour: 200, accountsDir: "/srv/state/accounts", replayDir: "/srv/state/oauth", trustedProxy: "172.30.0.3" },
   );
 });
 
@@ -1234,6 +1234,24 @@ test("accounts: per-IP limits on creation and key attempts, and the global accou
     assert.ok(capped.logs.some((e) => e.event === "oauth_accounts_full"));
   } finally {
     await capped.close();
+  }
+});
+
+test("accounts: a global hourly creation budget holds across addresses (follow-up finding 2)", async () => {
+  const h = await harness({ trustedProxy: "127.0.0.1", accountCreationsPerHourGlobal: 2 });
+  try {
+    let c = await openConsent(h.url);
+    const create = (ip) => decide(h.url, c.requestToken, "create", { origin: PUBLIC, "x-forwarded-for": ip }, { name: `From ${ip}` });
+    assert.equal((await create("198.51.100.1")).status, 200);
+    assert.equal((await create("198.51.100.2")).status, 200);
+    const third = await create("198.51.100.3");
+    assertErrorPage(third, await third.text(), { status: 429, code: "temporarily_unavailable" });
+    assert.ok(h.logs.some((e) => e.event === "oauth_rate_limited" && e.surface === "account_create_global"));
+    h.advance(60 * 60_000);
+    c = await openConsent(h.url); // the old request token expired with the hour
+    assert.equal((await create("198.51.100.4")).status, 200, "the budget refills hourly");
+  } finally {
+    await h.close();
   }
 });
 

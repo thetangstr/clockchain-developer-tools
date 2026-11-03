@@ -131,6 +131,7 @@ test("finding 1 (slowread): stalled link readers are capped per client and globa
   const app = await boot({
     SHADOW_ENABLED: "1", SHADOW_STATE_DIR: dir, MCP_OAUTH_TRUSTED_PROXY: "127.0.0.1",
     SHADOW_LINK_IDLE_MS: "800", SHADOW_LINKS_PER_MINUTE: "1000",
+    SHADOW_LINK_CONCURRENCY: "4", // this test exercises the cap itself (production default: 32, follow-up finding 2)
   });
   const socks = [];
   try {

@@ -56,7 +56,16 @@ const COOKIE_MAX_AGE_S = 365 * 24 * 60 * 60;
 export type OAuthConfig =
   | { kind: "disabled" }
   | { kind: "misconfigured"; reason: string }
-  | { kind: "ready"; publicUrl: string; approvalsPerHour: number; accountsDir: string; replayDir: string; trustedProxy?: string };
+  | {
+      kind: "ready";
+      publicUrl: string;
+      approvalsPerHour: number;
+      /** All account creations per hour, across every address (MCP_OAUTH_ACCOUNTS_PER_HOUR, default 200). */
+      accountsPerHour: number;
+      accountsDir: string;
+      replayDir: string;
+      trustedProxy?: string;
+    };
 
 /** An https origin (http only on loopback, for local runs) with no path, query or credentials. */
 export function normalizePublicUrl(raw: string): string | undefined {
@@ -82,15 +91,19 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
   if (!signingSecret) return { kind: "misconfigured", reason: "MCP_OAUTH=1 needs MCP_TOKEN_SIGNING_SECRET" };
   const publicUrl = normalizePublicUrl(env.MCP_PUBLIC_URL || DEFAULT_PUBLIC_URL);
   if (!publicUrl) return { kind: "misconfigured", reason: "MCP_PUBLIC_URL must be an https origin with no path" };
-  const rawApprovals = (env.MCP_OAUTH_APPROVALS_PER_HOUR ?? "").trim();
-  if (rawApprovals !== "" && !/^[1-9][0-9]{0,4}$/.test(rawApprovals)) {
-    return { kind: "misconfigured", reason: "MCP_OAUTH_APPROVALS_PER_HOUR must be a whole number from 1 to 99999" };
+  // Per-hour limits: "" or unset = the default; anything but a whole number from 1 to 99999 is misconfigured.
+  const counts: Record<string, number> = {};
+  for (const [name, fallback] of [["MCP_OAUTH_APPROVALS_PER_HOUR", 10], ["MCP_OAUTH_ACCOUNTS_PER_HOUR", 200]] as const) {
+    const raw = (env[name] ?? "").trim();
+    if (raw !== "" && !/^[1-9][0-9]{0,4}$/.test(raw)) return { kind: "misconfigured", reason: `${name} must be a whole number from 1 to 99999` };
+    counts[name] = raw === "" ? fallback : Number(raw);
   }
   const trustedProxy = (env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim();
   return {
     kind: "ready",
     publicUrl,
-    approvalsPerHour: rawApprovals === "" ? 10 : Number(rawApprovals),
+    approvalsPerHour: counts.MCP_OAUTH_APPROVALS_PER_HOUR,
+    accountsPerHour: counts.MCP_OAUTH_ACCOUNTS_PER_HOUR,
     // Accounts and replay state live on the state volume, next to the handshake and Shadow state.
     accountsDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "accounts"),
     replayDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "oauth"),
@@ -117,6 +130,8 @@ export interface OAuthOptions {
   maxAccounts?: number;
   /** Per-IP account creations per hour (default 10). */
   accountCreationsPerHour?: number;
+  /** Account creations per hour across every address (default 200): a brake on free accounts filling storage. */
+  accountCreationsPerHourGlobal?: number;
   /** Per-IP account-key sign-in attempts per hour (default 20). */
   keyAttemptsPerHour?: number;
   /**
@@ -503,6 +518,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   const allowRegistration = limiter(options.registrationsPerMinute ?? 30, 60_000, now);
   const allowTokenCall = limiter(options.tokenCallsPerMinute ?? 120, 60_000, now);
   const allowAccountCreate = limiter(options.accountCreationsPerHour ?? 10, 60 * 60_000, now);
+  const allowAccountCreateGlobal = limiter(options.accountCreationsPerHourGlobal ?? 200, 60 * 60_000, now);
   const allowKeyAttempt = limiter(options.keyAttemptsPerHour ?? 20, 60 * 60_000, now);
   // Every refresh mints a fresh access token, so refreshes are capped per family (one approval's chain) and per IP.
   const allowFamilyRefresh = limiter(options.refreshesPerFamilyPerHour ?? 30, 60 * 60_000, now);
@@ -931,6 +947,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       if (!allowAccountCreate(`create:${ipOf(req)}`)) {
         rateLimited("account_create");
         sendErrorPage(res, 429, "Too many new accounts", "Too many Clockchain accounts were created from this network in the last hour. Wait a while, or sign in with an account key.", "temporarily_unavailable", { "retry-after": "3600" });
+        return;
+      }
+      if (!allowAccountCreateGlobal("create:all")) {
+        rateLimited("account_create_global");
+        sendErrorPage(res, 429, "Clockchain isn’t taking new accounts right now", "Many Clockchain accounts were created in the last hour. Try again later, or sign in with an account key you already have.", "temporarily_unavailable", { "retry-after": "3600" });
         return;
       }
       let created: ReturnType<AccountStore["create"]>;

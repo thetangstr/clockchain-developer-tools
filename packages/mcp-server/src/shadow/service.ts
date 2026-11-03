@@ -6,6 +6,8 @@
 // session's events are ever in memory (the `heavy` gate), and they are read only when a checkpoint, packet, view or
 // verification needs them. Logs carry counts and session ids only: never content, keys, link capabilities or tokens.
 import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, statfsSync } from "node:fs";
+import { dirname } from "node:path";
 import { getSharedLogBudget, type LogBudget } from "../budget.js";
 import { clip, parseStrict } from "./lib/profile.js";
 import { verifyPacket } from "./lib/verify.js";
@@ -86,16 +88,75 @@ const LINKS_NOTE = "Anyone with these links can read the whole record until it i
 /** How long one call may spend anchoring before it reports what is still pending. */
 const ANCHOR_BUDGET_MS = 25_000;
 
-export type ShadowConfig = { enabled: false } | { enabled: true; stateDir: string; network: Network };
+export type ShadowConfig =
+  | { enabled: false }
+  | {
+      enabled: true;
+      stateDir: string;
+      network: Network;
+      /** The env-tunable caps (security review follow-up, finding 2); the rest keep DEFAULT_SHADOW_LIMITS. */
+      limits: Pick<ShadowLimits, "maxStateBytes" | "maxBytesPerOwner" | "maxSessionStartsPerOwnerPerDay">;
+      linkConcurrency: number;
+      /** Set when a cap setting is malformed: Shadow then refuses to start (every /shadow path answers 503). */
+      problem?: string;
+    };
 
-/** SHADOW_ENABLED=1 turns hosted Shadow on; SHADOW_STATE_DIR (default /app/state/shadow) is where it keeps records. */
+/**
+ * Production defaults for the caps an operator can set through the environment. A free account is cheap to make, so
+ * one account may keep only 10 MB, and all of Shadow 1 GB (and never more than half the state filesystem's free space,
+ * checked at boot by {@link diskBudgetProblem}).
+ */
+export const SHADOW_ENV_DEFAULTS = {
+  maxStateBytes: 1024 * 1024 * 1024, // SHADOW_MAX_BYTES
+  maxBytesPerOwner: 10 * 1024 * 1024, // SHADOW_ACCOUNT_MAX_BYTES
+  maxSessionStartsPerOwnerPerDay: 30, // SHADOW_SESSION_STARTS_PER_DAY
+  linkConcurrency: 32, // SHADOW_LINK_CONCURRENCY
+} as const;
+
+/**
+ * SHADOW_ENABLED=1 turns hosted Shadow on; SHADOW_STATE_DIR (default /app/state/shadow) is where it keeps records.
+ * SHADOW_MAX_BYTES, SHADOW_ACCOUNT_MAX_BYTES, SHADOW_SESSION_STARTS_PER_DAY and SHADOW_LINK_CONCURRENCY set the caps
+ * ("" or unset = SHADOW_ENV_DEFAULTS); anything but a positive whole number is a `problem`.
+ */
 export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
   if ((env.SHADOW_ENABLED ?? "").trim() !== "1") return { enabled: false };
+  const problems: string[] = [];
+  const whole = (name: string, fallback: number): number => {
+    const raw = (env[name] ?? "").trim();
+    if (raw === "") return fallback;
+    if (!/^[1-9][0-9]{0,15}$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      problems.push(`${name} must be a positive whole number`);
+      return fallback;
+    }
+    return Number(raw);
+  };
   return {
     enabled: true,
     stateDir: (env.SHADOW_STATE_DIR ?? "").trim() || "/app/state/shadow",
     network: (env.SHADOW_NETWORK ?? "").trim() === "mainnet" ? "clockchain-mainnet" : "clockchain-testnet",
+    limits: {
+      maxStateBytes: whole("SHADOW_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxStateBytes),
+      maxBytesPerOwner: whole("SHADOW_ACCOUNT_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxBytesPerOwner),
+      maxSessionStartsPerOwnerPerDay: whole("SHADOW_SESSION_STARTS_PER_DAY", SHADOW_ENV_DEFAULTS.maxSessionStartsPerOwnerPerDay),
+    },
+    linkConcurrency: whole("SHADOW_LINK_CONCURRENCY", SHADOW_ENV_DEFAULTS.linkConcurrency),
+    ...(problems.length ? { problem: problems.join("; ") } : {}),
   };
+}
+
+/**
+ * At boot: refuses a global cap larger than half the free space on the state directory's filesystem, so a full
+ * Shadow can never fill the disk the rest of the server (handshake state, accounts) lives on. Undefined when fine.
+ */
+export function diskBudgetProblem(stateDir: string, maxStateBytes: number, statfs: (p: string) => { bavail: number | bigint; bsize: number | bigint } = statfsSync): string | undefined {
+  // The state directory may not exist yet on a fresh volume: measure the filesystem it will be created on.
+  let probe = stateDir;
+  while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
+  const s = statfs(probe);
+  const free = Number(s.bavail) * Number(s.bsize);
+  return maxStateBytes > free / 2
+    ? `SHADOW_MAX_BYTES (${maxStateBytes} bytes) is more than half the ${free} bytes free on the state directory's filesystem`
+    : undefined;
 }
 
 // ---- small concurrency helpers --------------------------------------------------------------------------------------

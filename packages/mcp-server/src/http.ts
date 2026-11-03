@@ -79,7 +79,7 @@ import {
   SERVER_CARD_PATH,
 } from "./agent-contract/server-card.js";
 import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
-import { loadShadowConfig, ShadowService } from "./shadow/service.js";
+import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/service.js";
 import { createShadowHttpHandler, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
@@ -602,6 +602,7 @@ export async function runHttp(): Promise<Server> {
         publicUrl: oauthConfig.publicUrl,
         tokenTtlSeconds: tokenTtlDays * 24 * 60 * 60,
         approvalsPerHour: oauthConfig.approvalsPerHour,
+        accountCreationsPerHourGlobal: oauthConfig.accountsPerHour,
         accountsDir: oauthConfig.accountsDir,
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
@@ -1147,11 +1148,19 @@ export async function runHttp(): Promise<Server> {
   };
   if (shadowConfig.enabled) {
     try {
-      shadowService = new ShadowService({
+      // Caps from the environment (SHADOW_MAX_BYTES, SHADOW_ACCOUNT_MAX_BYTES, SHADOW_SESSION_STARTS_PER_DAY,
+      // SHADOW_LINK_CONCURRENCY). A malformed one, or a global cap above half the state filesystem's free space,
+      // keeps Shadow from starting: every /shadow path then answers 503 and the reason is logged.
+      if (shadowConfig.problem) throw Object.assign(new Error(shadowConfig.problem), { name: "ShadowConfigError" });
+      const service = new ShadowService({
         stateDir: shadowConfig.stateDir,
         network: shadowConfig.network,
         ledger: () => runtimeShadowLedger(process.env),
+        limits: shadowConfig.limits,
       });
+      const disk = diskBudgetProblem(shadowConfig.stateDir, shadowConfig.limits.maxStateBytes);
+      if (disk) throw Object.assign(new Error(disk), { name: "ShadowConfigError" });
+      shadowService = service;
       shadowService.start(); // retention sweep now, then hourly
       shadowHandler = createShadowHttpHandler({
         service: shadowService,
@@ -1174,14 +1183,15 @@ export async function runHttp(): Promise<Server> {
         linkClient: shadowLinkClient,
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
         links: {
-          concurrent: Number(process.env.SHADOW_LINK_CONCURRENCY || "4"),
+          concurrent: shadowConfig.linkConcurrency,
           perClient: Number(process.env.SHADOW_LINK_PER_CLIENT || "1"),
           idleMs: Number(process.env.SHADOW_LINK_IDLE_MS || "20000"),
           maxMs: Number(process.env.SHADOW_LINK_MAX_MS || "120000"),
         },
       });
     } catch (e) {
-      console.error(JSON.stringify({ event: "shadow_unavailable", error: (e as Error)?.name ?? "error" }));
+      const error = (e as Error)?.name ?? "error";
+      console.error(JSON.stringify({ event: "shadow_unavailable", error, ...(error === "ShadowConfigError" ? { reason: (e as Error).message } : {}) }));
     }
   }
 
