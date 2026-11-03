@@ -538,6 +538,10 @@ read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM /clockchain/mcp/HANDSHAKE_
 read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL
 read_optional_env HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN
 read_optional_env HANDSHAKE_V2_RECEIPTS_FILE /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE
+# OAuth 2.1 connector sign-in (off unless MCP_OAUTH=1; needs MCP_TOKEN_SIGNING_SECRET, read above).
+# MCP_OAUTH_APPROVALS_PER_HOUR is the per-IP approval ceiling (default 10, like POST /token).
+read_optional_env MCP_OAUTH /clockchain/mcp/MCP_OAUTH
+read_optional_env MCP_OAUTH_APPROVALS_PER_HOUR /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR
 # H-REQ-01 relay binding (host): optional reads; absent = binding off and no key ring
 # (validate_v2_host_relay_binding). The key ring is public JSON.
 read_optional_env AGENT_HANDSHAKE_V2_RELAY_BINDING "$AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM"

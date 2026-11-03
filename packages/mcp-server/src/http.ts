@@ -78,6 +78,7 @@ import {
   SERVER_CARD_PATH,
 } from "./agent-contract/server-card.js";
 import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
+import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -477,6 +478,24 @@ export async function runHttp(): Promise<Server> {
   );
   const tokenTtlDays = Number(process.env.MCP_TOKEN_TTL_DAYS ?? "7");
 
+  // OAuth 2.1 sign-in for MCP clients (src/oauth.ts). Off unless MCP_OAUTH=1 and
+  // the signing secret is set: off, none of its routes exist and the 401 is
+  // unchanged. It issues the same v:1 demo tokens as /token, plus an `acct`.
+  const oauthConfig = loadOAuthConfig(process.env, signingSecret);
+  if (oauthConfig.kind === "misconfigured") {
+    console.error(`[clockchain-mcp] OAuth misconfigured (routes off): ${oauthConfig.reason}`);
+  }
+  const oauth: OAuthHandler | undefined = oauthConfig.kind === "ready"
+    ? createOAuthHandler({
+        signingSecret,
+        publicUrl: oauthConfig.publicUrl,
+        tokenTtlSeconds: tokenTtlDays * 24 * 60 * 60,
+        approvalsPerHour: oauthConfig.approvalsPerHour,
+        ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
+        onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
+      })
+    : undefined;
+
   // Session + entitlement layer (LLD §4.1 A1/A8). The store is process-wide (each
   // request builds a fresh MCP server, so a per-request store would never
   // accumulate). Claim tokens use a DISTINCT secret (LLD §16); fall back to the
@@ -631,7 +650,7 @@ export async function runHttp(): Promise<Server> {
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
     "llms", "manifest", "handshake_manifest", "standalone_manifest", "connect_verify",
     "connect_mcp", "handshake_mcp", "contract_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
-    "landing", "asset", "mcp_rpc", "keeper", "other",
+    "landing", "asset", "mcp_rpc", "keeper", "oauth", "other",
   ] as const;
   const STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
   const RESULT_KINDS = ["ok", "fail_closed", "error", "rate_limited"] as const;
@@ -647,7 +666,7 @@ export async function runHttp(): Promise<Server> {
     "sign_evidence", "evidence_submitted", "certificate_available",
   ] as const;
   const DEP_NAMES = ["relay_discovery", "relay_result", "gateway_pool", "evm_rpc"] as const;
-  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call"] as const;
+  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call", "oauth"] as const;
 
   const httpRequests = metrics.counter("clockchain_http_requests_total", "HTTP requests by route class and status class.");
   const httpDuration = metrics.histogram("clockchain_http_request_duration_seconds", "HTTP request duration by route class.");
@@ -687,6 +706,7 @@ export async function runHttp(): Promise<Server> {
     if (method === "POST" && p === "/token") return "token";
     if (method === "POST" && p === "/promote") return "promote";
     if (p === "/keeper" || p.startsWith("/keeper/")) return "keeper";
+    if (oauth && (p.startsWith("/oauth/") || p.startsWith("/.well-known/oauth-") || p === "/.well-known/openid-configuration")) return "oauth";
     if (method === "GET" && accept.includes("text/html")) return "landing";
     if (p === "/mcp") return "mcp_rpc";
     return "other";
@@ -1287,6 +1307,10 @@ export async function runHttp(): Promise<Server> {
       return;
     }
 
+    // OAuth discovery, registration, consent and token routes (public, before
+    // the landing page and auth). Absent when the flag is off.
+    if (oauth && (await oauth.handle(req, res))) return;
+
     // Self-serve token minting (public, before auth). Mints a signed testnet
     // token that grants the shared delegated key, so a brand-new user can connect
     // without their own Clockchain key. Off if no signing secret.
@@ -1462,7 +1486,9 @@ export async function runHttp(): Promise<Server> {
         byo = clockchainOverridesFromKey(presented, req.headers);
       } else {
         // No credential presented — return actionable guidance, not a dead end.
-        res.writeHead(401, { "content-type": "application/json" });
+        // With OAuth on, /mcp and /shadow/mcp also point at the OAuth metadata
+        // (RFC 9728 WWW-Authenticate); status and body stay exactly the same.
+        res.writeHead(401, { "content-type": "application/json", ...oauth?.challenge(pathOf(req.url), presented !== "") });
       res.end(
         JSON.stringify({
           error: "unauthorized",
@@ -1642,6 +1668,9 @@ export async function runHttp(): Promise<Server> {
             : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
         }`,
       );
+      if (oauthConfig.kind === "ready") {
+        console.error(`[clockchain-mcp] OAuth sign-in: ENABLED (issuer ${oauthConfig.publicUrl}, ${oauthConfig.approvalsPerHour} approvals/hour/IP)`);
+      }
       resolve();
     });
   });
