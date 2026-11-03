@@ -2303,7 +2303,7 @@ test("chat sign-in: an account with a name is never renamed, a nameless sign-in 
       assert.equal(r.value.error, "ACCOUNT_NAME_IS_A_KEY", JSON.stringify(name));
       assert.equal(JSON.stringify(r.value).includes("cck_"), false);
     }
-    for (const name of disguised.slice(0, 5)) {
+    for (const name of [...disguised.slice(0, 5), split("\uFFFD"), split("\u00AD")]) {
       const c = await openConsent(s.url, { resource: `${PUBLIC}/shadow/mcp` });
       const res = await decide(s.url, c.requestToken, "create", { origin: PUBLIC }, { name });
       assert.equal(res.status, 400, JSON.stringify(name));

@@ -46,10 +46,11 @@ export const NAMING_WINDOW_MS = 15 * 60_000;
 const KEYISH = /cck_[A-Za-z0-9_-]{16,}/;
 /**
  * True for text holding (part of) an account key: cck_ and 16 or more key characters (follow-up finding 7), also once
- * the display hygiene has removed invisible, control and space characters, so a key split by them is still a key.
+ * the display hygiene has removed invisible, control and space characters, so a key split by them is still a key. A
+ * U+FFFD is ignored too: a browser sends one for a lone surrogate typed into the name box.
  */
 export const looksLikeAccountKey = (raw: unknown): boolean =>
-  typeof raw === "string" && (KEYISH.test(raw) || (raw.length <= 1000 && KEYISH.test(cleanDisplayText(raw).replace(/\s+/g, ""))));
+  typeof raw === "string" && (KEYISH.test(raw) || (raw.length <= 1000 && KEYISH.test(cleanDisplayText(raw).replace(/[\s\uFFFD]+/g, ""))));
 
 /** Characters that render as nothing (removed) and characters that render blank but count as letters (made spaces). */
 const INVISIBLE_MARKS = /[\u034F\u17B4\u17B5]/gu;
