@@ -2268,11 +2268,22 @@ test("chat sign-in: an account with a name is never renamed, a nameless sign-in 
     // An unnamed account: hygiene on the name, a key-looking name refused and never echoed, then named once.
     const first = await mcpPost(s.url, callTool("clockchain_create_account", { name: "x" }), {}, CHAT);
     const person = await chatSignIn(s.url, first);
-    for (const name of [person.key, `my key is ${person.key}`, "cck_" + "B".repeat(20)]) {
+    // A key split by invisible, control or space characters (removed or blanked by the name hygiene) is still a key:
+    // the normal refusal, never a stored key or an internal error (in-chat review, informational).
+    const split = (sep) => `${person.key.slice(0, 12)}${sep}${person.key.slice(12)}`;
+    const disguised = [split("\u034F"), split("\u17B4"), split("\u0000"), split(" "), split("\u200B"), split("\uD800")];
+    for (const name of [person.key, `my key is ${person.key}`, "cck_" + "B".repeat(20), ...disguised]) {
       const r = await chatTool(s.url, person.token, "clockchain_create_account", { name });
-      assert.equal(r.isError, true);
-      assert.equal(r.value.error, "ACCOUNT_NAME_IS_A_KEY");
+      assert.equal(r.isError, true, JSON.stringify(name));
+      assert.equal(r.value.error, "ACCOUNT_NAME_IS_A_KEY", JSON.stringify(name));
       assert.equal(JSON.stringify(r.value).includes("cck_"), false);
+    }
+    for (const name of disguised.slice(0, 5)) {
+      const c = await openConsent(s.url, { resource: `${PUBLIC}/shadow/mcp` });
+      const res = await decide(s.url, c.requestToken, "create", { origin: PUBLIC }, { name });
+      assert.equal(res.status, 400, JSON.stringify(name));
+      assert.match(await res.text(), /role="alert">That looks like an account key, not a name\./);
+      assert.equal(cleanAccountName(name), undefined);
     }
     for (const name of ["", "   ", "ㅤ", "...", "x".repeat(41)]) {
       const r = await chatTool(s.url, person.token, "clockchain_create_account", { name });

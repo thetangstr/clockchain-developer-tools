@@ -43,8 +43,13 @@ export const UNNAMED_ACCOUNT_LABEL = "an unnamed account";
 /** An unnamed account can be named from the chat only this soon after it was created (in-chat review L2). */
 export const NAMING_WINDOW_MS = 15 * 60_000;
 
-/** True for text holding (part of) an account key: cck_ and 16 or more key characters (follow-up finding 7). */
-export const looksLikeAccountKey = (raw: unknown): boolean => typeof raw === "string" && /cck_[A-Za-z0-9_-]{16,}/.test(raw);
+const KEYISH = /cck_[A-Za-z0-9_-]{16,}/;
+/**
+ * True for text holding (part of) an account key: cck_ and 16 or more key characters (follow-up finding 7), also once
+ * the display hygiene has removed invisible, control and space characters, so a key split by them is still a key.
+ */
+export const looksLikeAccountKey = (raw: unknown): boolean =>
+  typeof raw === "string" && (KEYISH.test(raw) || (raw.length <= 1000 && KEYISH.test(cleanDisplayText(raw).replace(/\s+/g, ""))));
 
 /** Characters that render as nothing (removed) and characters that render blank but count as letters (made spaces). */
 const INVISIBLE_MARKS = /[\u034F\u17B4\u17B5]/gu;
@@ -82,6 +87,7 @@ export const hasLetterOrDigit = (text: string): boolean => /[\p{L}\p{N}]/u.test(
 export function cleanAccountName(raw: unknown): string | undefined {
   if (typeof raw !== "string" || raw.length > 1000 || looksLikeAccountKey(raw)) return undefined;
   const text = cleanDisplayText(raw);
+  if (looksLikeAccountKey(text)) return undefined;
   const length = Array.from(text).length;
   return length >= 1 && length <= ACCOUNT_NAME_MAX && hasLetterOrDigit(text) ? text : undefined;
 }
