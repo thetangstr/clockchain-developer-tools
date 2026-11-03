@@ -33,6 +33,7 @@ import {
   mintClaim,
   looksLikeSelfServe,
   verifyHandshakeSessionToken,
+  ACCT_PATTERN,
   type HandshakeSessionTokenPayload,
   type TokenPayload,
   type TrialTokenPayload,
@@ -62,7 +63,7 @@ import {
 import { createRuntimeV2Coordinator, runtimeRelay as runtimeV2Relay, __runtimeV2KeyConfig } from "./agent-handshake/v2/coordinator.js";
 import { handshakeStateDir } from "./handshake-core/durable-store.js";
 import { createHandshakeReceiptRecorder, loadHandshakeReceiptsConfig, type HandshakeReceiptRecorder } from "./agent-handshake/v2/receipts.js";
-import { buildStandaloneDiscovery, createStandaloneHttpHandler, limiter as keyedWindowLimiter } from "./standalone-handshake/public-server.js";
+import { buildStandaloneDiscovery, clientBucket, createStandaloneHttpHandler, limiter as keyedWindowLimiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
 import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 import { normalizeRelayBaseUrl } from "./handshake/relay.js";
 import { MetricsRegistry, bounded } from "./metrics.js";
@@ -79,7 +80,7 @@ import {
 } from "./agent-contract/server-card.js";
 import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
 import { loadShadowConfig, ShadowService } from "./shadow/service.js";
-import { createShadowHttpHandler, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
+import { createShadowHttpHandler, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
 
@@ -358,7 +359,8 @@ export function createRateLimiter(perMin: number, windowMs = 60_000) {
     size(): number {
       return hits.size;
     },
-    allow(key: string, now: number = Date.now()): RateLimitResult {
+    /** Charges `cost` units (one per JSON-RPC message; default 1). A cost the window cannot hold is refused whole. */
+    allow(key: string, now: number = Date.now(), cost = 1): RateLimitResult {
       if (perMin <= 0) {
         return { allowed: true, limit: 0, remaining: 0, resetAt: now };
       }
@@ -367,14 +369,15 @@ export function createRateLimiter(perMin: number, windowMs = 60_000) {
       }
       let e = hits.get(key);
       if (!e || now >= e.resetAt) {
-        e = { count: 1, resetAt: now + windowMs };
+        if (cost > perMin) return { allowed: false, limit: perMin, remaining: perMin, resetAt: now + windowMs };
+        e = { count: cost, resetAt: now + windowMs };
         hits.set(key, e);
-        return { allowed: true, limit: perMin, remaining: perMin - 1, resetAt: e.resetAt };
+        return { allowed: true, limit: perMin, remaining: perMin - cost, resetAt: e.resetAt };
       }
-      if (e.count >= perMin) {
-        return { allowed: false, limit: perMin, remaining: 0, resetAt: e.resetAt };
+      if (e.count + cost > perMin) {
+        return { allowed: false, limit: perMin, remaining: Math.max(0, perMin - e.count), resetAt: e.resetAt };
       }
-      e.count++;
+      e.count += cost;
       return { allowed: true, limit: perMin, remaining: perMin - e.count, resetAt: e.resetAt };
     },
   };
@@ -433,6 +436,17 @@ export function isRateLimitExempt(body: unknown): boolean {
     (m) => !!m && typeof m === "object" && typeof (m as { method?: unknown }).method === "string" &&
       RATE_LIMIT_EXEMPT_METHODS.has((m as { method: string }).method),
   );
+}
+
+/**
+ * Rate-limit units a request costs: one per JSON-RPC message that is not lifecycle/discovery, so a batch costs what
+ * its messages would cost sent one by one (security review finding 4). A body with no message (a GET, an empty
+ * batch) costs 1, as before.
+ */
+export function rateLimitCost(body: unknown): number {
+  if (!Array.isArray(body)) return isRateLimitExempt(body) ? 0 : 1;
+  const counted = body.filter((m) => !isRateLimitExempt(m)).length;
+  return body.length === 0 ? 1 : counted;
 }
 
 export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
@@ -719,6 +733,8 @@ export async function runHttp(): Promise<Server> {
   // so a surprise value collapses to "other" instead of minting a series.
   // Session ids, role-access handles, keys, addresses, digests, statements,
   // and raw error text are never labels.
+  // Hosted Shadow's switch, read once at start-up (the /shadow/* mount is set up further down).
+  const shadowConfig = loadShadowConfig(process.env);
   const metrics = new MetricsRegistry();
   const ROUTE_CLASSES = [
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
@@ -775,7 +791,7 @@ export async function runHttp(): Promise<Server> {
     if (p === "/connect/mcp") return "connect_mcp";
     if (p === "/handshake/mcp") return "handshake_mcp";
     if (p === "/contract/mcp") return "contract_mcp";
-    if (p === "/shadow" || p.startsWith("/shadow/")) return "shadow";
+    if (shadowConfig.enabled && (p === "/shadow" || p.startsWith("/shadow/"))) return "shadow";
     if (p.startsWith("/handshake/local-action")) return "handshake_local_action";
     if (p === "/handshake/invitations/exchange") return "invitation_exchange";
     if (method === "POST" && p === "/token") return "token";
@@ -1032,11 +1048,47 @@ export async function runHttp(): Promise<Server> {
   // `acct` claim, else `jti:<jti>`, else a hash of the static token — never the
   // unauthenticated `sub`. Bring-your-own Clockchain keys are not owners here,
   // and a handshake session token (scoped to one handshake) is refused.
-  const shadowConfig = loadShadowConfig(process.env);
   let shadowHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined;
   let shadowService: ShadowService | undefined;
   const shadowLinkLimit = keyedWindowLimiter(Number(process.env.SHADOW_LINKS_PER_MINUTE || "60"), 60_000, Date.now);
+  // Link clients are bucketed like OAuth's: the real client behind Caddy (MCP_OAUTH_TRUSTED_PROXY), IPv6 by /64.
+  const shadowTrustedProxy = (process.env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim() || undefined;
+  const shadowLinkClient = (req: IncomingMessage): string =>
+    clientBucket(standaloneClientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy));
+  // Hosted Shadow belongs to signed-in accounts (an `acct` claim from the OAuth token endpoint). POST /token
+  // tokens and static MCP_AUTH_TOKENS get a 403 pointing at sign-in. SHADOW_ALLOW_NON_ACCT=1 lifts that for tests
+  // and local use only: it is ignored whenever MCP_REQUIRE_AUTH is set, as production always sets it, and
+  // production compose never passes it.
+  const shadowAllowNonAcct = (process.env.SHADOW_ALLOW_NON_ACCT ?? "").trim() === "1" &&
+    !/^(1|true|yes)$/i.test(process.env.MCP_REQUIRE_AUTH ?? "");
+  if (shadowConfig.enabled && (process.env.SHADOW_ALLOW_NON_ACCT ?? "").trim() === "1" && !shadowAllowNonAcct) {
+    console.warn(JSON.stringify({ event: "shadow_allow_non_acct_ignored", note: "SHADOW_ALLOW_NON_ACCT has no effect when MCP_REQUIRE_AUTH is set" }));
+  }
+  if (shadowConfig.enabled && !oauth && !shadowAllowNonAcct) {
+    console.warn(JSON.stringify({ event: "shadow_needs_oauth", note: "hosted Shadow accepts only signed-in accounts; with MCP_OAUTH off nobody can use it" }));
+  }
+  const shadowAccountRequired = (res: ServerResponse, req: IncomingMessage): void => {
+    const base = publicBaseUrl(req.headers);
+    const headers: Record<string, string> = { "content-type": "application/json", "cache-control": "no-store" };
+    const challenge = oauth?.challenge("/shadow/mcp", false)?.["www-authenticate"];
+    if (challenge) headers["www-authenticate"] = `${challenge}, error="insufficient_scope", error_description="sign in with a Clockchain account"`;
+    res.writeHead(403, headers);
+    res.end(JSON.stringify({
+      error: "account_required",
+      message:
+        "Hosted Shadow keeps records for signed-in accounts only. Connect " + `${base}/shadow/mcp` + " with sign-in " +
+        "(OAuth): add it as a connector or remote MCP server in your client and approve the Clockchain sign-in page. " +
+        "A token from POST /token or a static MCP token is not accepted here.",
+      sign_in_available: oauth !== undefined,
+      instructions: `${base}/shadow/connect`,
+    }));
+  };
   const shadowAuthenticate = (req: IncomingMessage): ShadowAuth => {
+    const auth = shadowResolveOwner(req);
+    if (!auth.ok || shadowAllowNonAcct || ACCT_PATTERN.test(auth.ownerId)) return auth;
+    return { ok: false, accountRequired: true };
+  };
+  const shadowResolveOwner = (req: IncomingMessage): ShadowAuth => {
     const ip = clientIp(req.headers, req.socket.remoteAddress);
     const presented = presentedApiKey(req.headers);
     const signed = (claims: { jti?: string; acct?: string }): ShadowAuth => ({
@@ -1080,6 +1132,7 @@ export async function runHttp(): Promise<Server> {
         service: shadowService,
         authenticate: shadowAuthenticate,
         unauthorized: mcpUnauthorized,
+        accountRequired: shadowAccountRequired,
         readJsonBody,
         allowCall: (rateKey, body, res) => {
           const rl = limiter.enabled && !(body !== undefined && isRateLimitExempt(body)) ? limiter.allow(rateKey) : null;
@@ -1093,7 +1146,14 @@ export async function runHttp(): Promise<Server> {
           if (rl) for (const [k, v] of Object.entries(rateLimitHeaders(rl))) res.setHeader(k, v);
           return true;
         },
-        allowLink: (req) => shadowLinkLimit(`shadowlink:${clientIp(req.headers, req.socket.remoteAddress)}`),
+        linkClient: shadowLinkClient,
+        allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
+        links: {
+          concurrent: Number(process.env.SHADOW_LINK_CONCURRENCY || "4"),
+          perClient: Number(process.env.SHADOW_LINK_PER_CLIENT || "1"),
+          idleMs: Number(process.env.SHADOW_LINK_IDLE_MS || "20000"),
+          maxMs: Number(process.env.SHADOW_LINK_MAX_MS || "120000"),
+        },
       });
     } catch (e) {
       console.error(JSON.stringify({ event: "shadow_unavailable", error: (e as Error)?.name ?? "error" }));
@@ -1410,14 +1470,10 @@ export async function runHttp(): Promise<Server> {
       return;
     }
 
-    // Hosted Shadow (/shadow/mcp and its capability links). 404 when off;
-    // enabled but unable to open its state directory: 503.
-    if (pathOf(req.url) === "/shadow" || pathOf(req.url).startsWith("/shadow/")) {
-      if (!shadowConfig.enabled) {
-        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: "not_found" }));
-        return;
-      }
+    // Hosted Shadow (/shadow/mcp, /shadow/connect and the capability links). Off: not matched at all, so
+    // /shadow/* falls through to exactly the handling it had before Shadow existed (landing page, /mcp, 401).
+    // Enabled but unable to open its state directory: 503.
+    if (shadowConfig.enabled && (pathOf(req.url) === "/shadow" || pathOf(req.url).startsWith("/shadow/"))) {
       try {
         if (!shadowHandler) throw new Error("shadow unavailable");
         await shadowHandler(req, res);
@@ -1703,9 +1759,13 @@ export async function runHttp(): Promise<Server> {
         return;
       }
     }
-    const rl = limiter.enabled && !(parsedBody !== undefined && isRateLimitExempt(parsedBody))
+    // One unit per counted message: a JSON-RPC batch cannot spend more than the caller's per-minute allowance.
+    const rlCost = parsedBody === undefined ? 1 : rateLimitCost(parsedBody);
+    const rl = limiter.enabled && rlCost > 0
       ? limiter.allow(
           effectiveCallerId,
+          Date.now(),
+          rlCost,
         )
       : null;
     if (rl && !rl.allowed) {

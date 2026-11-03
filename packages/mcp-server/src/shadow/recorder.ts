@@ -101,10 +101,13 @@ function refuseReasoning(fn: () => void): void {
   try {
     fn();
   } catch (e) {
-    const where = /\((.*)\)$/.exec((e as Error).message)?.[1] ?? "content";
+    const where = (/\((.*)\)$/.exec((e as Error).message)?.[1] ?? "content").replace(/ has a <think> section$/, "");
     throw new RecordError(
       "SHADOW_REASONING_REFUSED",
-      `Hidden reasoning is never recorded (${where}). Record what you showed or did, not private thinking; nothing was recorded.`,
+      `Nothing was recorded: ${where} looks like hidden model reasoning, which Shadow never records. Shadow refuses a ` +
+        "<think>, <thinking> or <reasoning> tag, a thinking or reasoning block, and any field whose name starts with " +
+        "reasoning, thinking or thought, in every kind of step. Record what you showed or did; if this is ordinary " +
+        "visible content, remove the tag or rename the field.",
     );
   }
 }
@@ -253,6 +256,9 @@ const without = (o: Record<string, unknown>, keys: string[]) => Object.fromEntri
  *   agent.tool.call, tool_result -> agent.tool.result, file -> artifact.created, note -> agent.message {note: true}.
  */
 export function stepFor(kind: RecordKind, content: unknown): StepSpec {
+  // Hosted policy, stricter than the library's (which lets tool arguments and file contents through): every field of
+  // every kind is checked, inline <think> sections included, before anything is mapped (security review finding 6).
+  refuseReasoning(() => rejectReasoning(asRecorded(content), "content", true));
   switch (kind) {
     case "task": {
       const recorded = asRecorded(content);

@@ -149,6 +149,9 @@ test("hosted Shadow: the mcp service carries SHADOW_* (empty default = off) and 
   }
   // Only the mcp service sees it, and its state stays on the mcp_state volume.
   assert.equal(source.match(/^\s+SHADOW_ENABLED:/gm)?.length, 1);
+  // The test-only override that lets non-account tokens use /shadow/mcp never reaches production.
+  assert.doesNotMatch(source, /SHADOW_ALLOW_NON_ACCT/);
+  assert.doesNotMatch(up, /SHADOW_ALLOW_NON_ACCT/);
   assert.match(mcpBlock, /- mcp_state:\/app\/state/);
 });
 

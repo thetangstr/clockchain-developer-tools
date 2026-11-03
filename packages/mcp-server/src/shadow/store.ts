@@ -2,7 +2,7 @@
 // the /app/state volume and needs no native module:
 //
 //   owners/<ownerKey>/key.json                      operator id + Ed25519 private key (0600, written once)
-//   owners/<ownerKey>/usage.json                    anchors used today (the per-owner daily limit)
+//   owners/<ownerKey>/usage.json                    anchors and session starts today (the per-owner daily limits)
 //   owners/<ownerKey>/sessions/<sessionId>/meta.json      small durable JSON: state, head, checkpoint, outbox, anchors
 //   owners/<ownerKey>/sessions/<sessionId>/events.jsonl   append-only, fsync'd, one event per line
 //   caps/<sha256(cap)>.json                         link capability -> (ownerKey, sessionId)
@@ -89,7 +89,8 @@ export type SessionMeta = {
 export type Operator = { operatorId: string; keys: KeyProvider };
 
 type KeyFile = { operatorId: string; privateKeyPem: string; createdAt: string };
-type UsageFile = { day: string; anchors: number };
+type UsageFile = { day: string; anchors: number; starts?: number };
+export type DailyCounter = "anchors" | "starts";
 type CapFile = { ownerKey: string; sessionId: string };
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -186,7 +187,8 @@ export class ShadowStore {
       schema: "shadow-usage-v1",
       snapshot: current,
       validate: (v) => {
-        if (!isObj(v) || typeof v.day !== "string" || !Number.isSafeInteger(v.anchors)) throw new Error("bad usage file");
+        if (!isObj(v) || typeof v.day !== "string" || !Number.isSafeInteger(v.anchors) || (v.starts !== undefined && !Number.isSafeInteger(v.starts)))
+          throw new Error("bad usage file");
         return v as unknown as UsageFile;
       },
       maxBytes: SMALL_MAX_BYTES,
@@ -194,20 +196,43 @@ export class ShadowStore {
   }
 
   /** Adds `delta` to today's count and returns the new count; refuses (returns null) past `max` when delta > 0. */
-  bumpAnchors(ownerKey: string, day: string, delta: number, max: number): number | null {
-    let value: UsageFile = { day, anchors: 0 };
+  bump(ownerKey: string, counter: DailyCounter, day: string, delta: number, max: number): number | null {
+    let value: UsageFile = { day, anchors: 0, starts: 0 };
     const file = this.usageFile(ownerKey, () => value);
     const stored = file.load();
-    if (stored && stored.day === day) value = { ...stored };
-    if (delta > 0 && value.anchors + delta > max) return null;
-    value = { day, anchors: Math.max(0, value.anchors + delta) };
+    if (stored && stored.day === day) value = { day, anchors: stored.anchors, starts: stored.starts ?? 0 };
+    const current = value[counter] ?? 0;
+    if (delta > 0 && current + delta > max) return null;
+    value = { ...value, [counter]: Math.max(0, current + delta) };
     file.save("now");
-    return value.anchors;
+    return value[counter] ?? 0;
+  }
+
+  bumpAnchors(ownerKey: string, day: string, delta: number, max: number): number | null {
+    return this.bump(ownerKey, "anchors", day, delta, max);
+  }
+
+  today(ownerKey: string, counter: DailyCounter, day: string): number {
+    const stored = this.usageFile(ownerKey, () => ({ day, anchors: 0 })).load();
+    return stored && stored.day === day ? stored[counter] ?? 0 : 0;
   }
 
   anchorsToday(ownerKey: string, day: string): number {
-    const stored = this.usageFile(ownerKey, () => ({ day, anchors: 0 })).load();
-    return stored && stored.day === day ? stored.anchors : 0;
+    return this.today(ownerKey, "anchors", day);
+  }
+
+  /** Bytes an owner's sessions hold on disk (event logs plus a metadata estimate per session). */
+  ownerBytes(ownerKey: string): number {
+    let total = 0;
+    for (const id of this.sessionIds(ownerKey)) {
+      try {
+        const m = this.readMeta(ownerKey, id);
+        total += (m?.eventsBytes ?? 0) + 4096;
+      } catch {
+        total += 4096;
+      }
+    }
+    return total;
   }
 
   // ---- sessions -----------------------------------------------------------------------------------------------
