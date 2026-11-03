@@ -334,10 +334,10 @@ test("finding 4 (batch, batch-amp): /shadow/mcp refuses JSON-RPC batches; nothin
   }
 });
 
-test("finding 4: on /mcp a batch is charged one rate-limit unit per message (lifecycle methods still free)", async () => {
+test("finding 4: on /mcp a batch is charged one rate-limit unit per message (lifecycle included, follow-up finding 1)", async () => {
   assert.equal(rateLimitCost({ jsonrpc: "2.0", id: 1, method: "tools/call" }), 1);
-  assert.equal(rateLimitCost({ jsonrpc: "2.0", id: 1, method: "tools/list" }), 0);
-  assert.equal(rateLimitCost([{ method: "tools/list" }, { method: "tools/call" }, { method: "tools/call" }, { method: "ping" }]), 2);
+  assert.equal(rateLimitCost({ jsonrpc: "2.0", id: 1, method: "tools/list" }), 0, "a single discovery call stays free");
+  assert.equal(rateLimitCost([{ method: "tools/list" }, { method: "tools/call" }, { method: "tools/call" }, { method: "ping" }]), 4);
   assert.equal(rateLimitCost([]), 1);
   const rl = createRateLimiter(3);
   assert.equal(rl.allow("k", 0, 4).allowed, false, "more than the window holds is refused whole");
@@ -352,8 +352,9 @@ test("finding 4: on /mcp a batch is charged one rate-limit unit per message (lif
     const msg = (i) => ({ jsonrpc: "2.0", id: i, method: "resources/read", params: { uri: "x://y" } });
     const big = await post(`${app.url}/mcp`, [msg(1), msg(2), msg(3), msg(4)], auth);
     assert.equal(big.status, 429, "a batch of four does not fit three per minute");
-    const free = await post(`${app.url}/mcp`, Array.from({ length: 10 }, (_, i) => ({ jsonrpc: "2.0", id: i, method: "tools/list" })), auth);
-    assert.equal(free.status, 200, "discovery stays free");
+    const discovery = await post(`${app.url}/mcp`, Array.from({ length: 10 }, (_, i) => ({ jsonrpc: "2.0", id: i, method: "tools/list" })), auth);
+    assert.equal(discovery.status, 429, "discovery messages in a batch are charged too (follow-up finding 1)");
+    assert.equal((await post(`${app.url}/mcp`, { jsonrpc: "2.0", id: 99, method: "tools/list" }, auth)).status, 200, "a single discovery call stays free");
     assert.equal((await post(`${app.url}/mcp`, [msg(5), msg(6)], auth)).status, 200);
     assert.equal((await post(`${app.url}/mcp`, msg(7), auth)).status, 200);
     assert.equal((await post(`${app.url}/mcp`, msg(8), auth)).status, 429, "two + one used the three");

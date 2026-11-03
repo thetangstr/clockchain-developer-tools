@@ -6,6 +6,8 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isJsonContentType } from "@modelcontextprotocol/sdk/shared/mediaType.js";
+import { isOversizedBatch, writeBatchTooLarge, writeJsonRpcError } from "../jsonrpc-limits.js";
 
 import { standaloneRequestContext } from "./long-poll.js";
 import { StandaloneAdmissionError } from "./session-store.js";
@@ -65,6 +67,29 @@ export function buildStandaloneDiscovery(endpoint: string = STANDALONE_ENDPOINT)
 
 function firstHeader(value: string | string[] | undefined): string {
   return (Array.isArray(value) ? value[0] : value) ?? "";
+}
+
+/** Every value of a request header joined with ", ", as the Fetch Headers the MCP transport sees would return it. */
+function joinedHeader(req: IncomingMessage, name: string): string | null {
+  const values: string[] = [];
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) values.push(req.rawHeaders[i + 1]);
+  return values.length ? values.join(", ") : null;
+}
+
+/** The MCP transport's own POST checks (Accept lists both types; Content-Type is JSON), before it reads a body. */
+function transportReadsBody(req: IncomingMessage): boolean {
+  const accept = joinedHeader(req, "accept");
+  return !!accept && accept.includes("application/json") && accept.includes("text/event-stream") && isJsonContentType(joinedHeader(req, "content-type"));
+}
+
+/** The whole request body, unbounded, as the transport itself reads it. */
+function readWholeBody(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
 }
 
 // A listener bound to `::` (Node's default for listen(port)) reports IPv4 peers
@@ -265,6 +290,25 @@ export function createStandaloneHttpHandler(options: {
       res.end(JSON.stringify({ error: "rate_limited" }));
       return;
     }
+    // The one change to this surface for the security review follow-up (finding 1): a JSON-RPC batch of more than
+    // 10 messages is refused before the transport runs any of it. To see the batch, the body is read here instead of
+    // in the transport, but only for a POST the transport would itself read (its Accept and Content-Type checks pass,
+    // compared exactly as it compares them); every other request reaches the transport untouched. Invalid JSON gets
+    // the transport's own answer, byte for byte.
+    let parsedBody: unknown;
+    if (req.method === "POST" && transportReadsBody(req)) {
+      const raw = await readWholeBody(req);
+      try {
+        parsedBody = JSON.parse(new TextDecoder().decode(raw));
+      } catch {
+        writeJsonRpcError(res, 400, -32700, "Parse error: Invalid JSON");
+        return;
+      }
+      if (isOversizedBatch(parsedBody)) {
+        writeBatchTooLarge(res);
+        return;
+      }
+    }
     const server = buildStandalonePublicServer({
       invoke: async (name, args) => {
         if (name === "handshake_invite" && !allowInvite(`invite:${ip}`)) throw new Error("rate_limited");
@@ -283,7 +327,7 @@ export function createStandaloneHttpHandler(options: {
     try {
       await standaloneRequestContext.run({ signal: requestGone.signal, clientKey: ip, endpoint: standalonePublicEndpoint(req.headers, env) }, async () => {
         await server.connect(transport);
-        await transport.handleRequest(req, res);
+        await transport.handleRequest(req, res, parsedBody);
       });
     } catch {
       if (!res.headersSent) {

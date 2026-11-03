@@ -83,6 +83,7 @@ import { loadShadowConfig, ShadowService } from "./shadow/service.js";
 import { createShadowHttpHandler, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
+import { guardResponseBuffer, isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -439,15 +440,17 @@ export function isRateLimitExempt(body: unknown): boolean {
 }
 
 /**
- * Rate-limit units a request costs: one per JSON-RPC message that is not lifecycle/discovery, so a batch costs what
- * its messages would cost sent one by one (security review finding 4). A body with no message (a GET, an empty
- * batch) costs 1, as before.
+ * Rate-limit units a request costs. A single lifecycle/discovery message is free (RATE_LIMIT_EXEMPT_METHODS); any
+ * other single message costs 1. A batch costs one unit per message, lifecycle and discovery included, so cheap calls
+ * cannot be multiplied for free (security review finding 4 and its follow-up). An empty batch costs 1.
  */
 export function rateLimitCost(body: unknown): number {
   if (!Array.isArray(body)) return isRateLimitExempt(body) ? 0 : 1;
-  const counted = body.filter((m) => !isRateLimitExempt(m)).length;
-  return body.length === 0 ? 1 : counted;
+  return Math.max(1, body.length);
 }
+
+/** Logged when a response is dropped because its client stopped reading (no request detail, just the surface). */
+const logUnreadResponse = (surface: string) => () => console.warn(JSON.stringify({ event: "response_dropped_unread", surface }));
 
 export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -1419,6 +1422,7 @@ export async function runHttp(): Promise<Server> {
     }
 
     if (pathOf(req.url) === "/connect/mcp") {
+      guardResponseBuffer(res, logUnreadResponse("connect_mcp"));
       try {
         await getStandaloneHandshakeHandler()(req, res);
       } catch {
@@ -1496,6 +1500,8 @@ export async function runHttp(): Promise<Server> {
     // /shadow/* falls through to exactly the handling it had before Shadow existed (landing page, /mcp, 401).
     // Enabled but unable to open its state directory: 503.
     if (shadowConfig.enabled && (pathOf(req.url) === "/shadow" || pathOf(req.url).startsWith("/shadow/"))) {
+      // The capability links carry their own bounds; the MCP endpoint gets the unsent-bytes guard.
+      if (pathOf(req.url) === "/shadow/mcp") guardResponseBuffer(res, logUnreadResponse("shadow_mcp"));
       try {
         if (!shadowHandler) throw new Error("shadow unavailable");
         await shadowHandler(req, res);
@@ -1789,6 +1795,11 @@ export async function runHttp(): Promise<Server> {
         res.end(JSON.stringify({ error: "invalid_json_body" }));
         return;
       }
+      // Batches of more than 10 messages are refused before the transport runs any of them (see jsonrpc-limits.ts).
+      if (isOversizedBatch(parsedBody)) {
+        writeBatchTooLarge(res);
+        return;
+      }
     }
     // One unit per counted message: a JSON-RPC batch cannot spend more than the caller's per-minute allowance.
     const rlCost = parsedBody === undefined ? 1 : rateLimitCost(parsedBody);
@@ -1877,6 +1888,7 @@ export async function runHttp(): Promise<Server> {
         void server.close();
       });
       await server.connect(transport);
+      guardResponseBuffer(res, logUnreadResponse("mcp"));
       await transport.handleRequest(req, res, parsedBody);
     } catch (err) {
       console.error("[clockchain-mcp] http request error:", err);
