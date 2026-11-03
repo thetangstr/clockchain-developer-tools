@@ -603,6 +603,8 @@ export async function runHttp(): Promise<Server> {
         tokenTtlSeconds: tokenTtlDays * 24 * 60 * 60,
         approvalsPerHour: oauthConfig.approvalsPerHour,
         accountCreationsPerHourGlobal: oauthConfig.accountsPerHour,
+        accountCreationsPerHour: oauthConfig.accountsPerIpPerHour,
+        keyAttemptsPerHour: oauthConfig.keyAttemptsPerIpPerHour,
         accountsDir: oauthConfig.accountsDir,
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),

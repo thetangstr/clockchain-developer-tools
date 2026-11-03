@@ -80,12 +80,21 @@ services:
       # under SHADOW_STATE_DIR, default /app/state/shadow on the mcp_state volume.
       SHADOW_ENABLED: "${SHADOW_ENABLED:-}"
       SHADOW_STATE_DIR: "${SHADOW_STATE_DIR:-}"
+      # Shadow caps ("" = defaults: 1 GB in all, never above half the free disk; 10 MB per account; 30 starts a day; 32 link readers).
+      SHADOW_MAX_BYTES: "${SHADOW_MAX_BYTES:-}"
+      SHADOW_ACCOUNT_MAX_BYTES: "${SHADOW_ACCOUNT_MAX_BYTES:-}"
+      SHADOW_SESSION_STARTS_PER_DAY: "${SHADOW_SESSION_STARTS_PER_DAY:-}"
+      SHADOW_LINK_CONCURRENCY: "${SHADOW_LINK_CONCURRENCY:-}"
       # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
       # MCP_OAUTH=1 exists in SSM ("" == absent == off: no OAuth routes, 401 unchanged).
       # The issuer is MCP_PUBLIC_URL, default https://mcp.clockchain.network (never the Host
       # header). Approval rate limits key on X-Forwarded-For only from Caddy's address.
       MCP_OAUTH: "${MCP_OAUTH:-}"
       MCP_OAUTH_APPROVALS_PER_HOUR: "${MCP_OAUTH_APPROVALS_PER_HOUR:-}"
+      # Account limits ("" = defaults: 200 creations an hour in all, 10 per IP; 20 key sign-in attempts per IP).
+      MCP_OAUTH_ACCOUNTS_PER_HOUR: "${MCP_OAUTH_ACCOUNTS_PER_HOUR:-}"
+      MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR: "${MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR:-}"
+      MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR: "${MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR:-}"
       MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3"
       TELEMETRY_CLOSE_URL: "${TELEMETRY_CLOSE_URL:-}"
       TELEMETRY_CLOSE_BACKOFF_MS: "${TELEMETRY_CLOSE_BACKOFF_MS:-}"

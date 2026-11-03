@@ -142,7 +142,7 @@ test("hosted Shadow: the mcp service carries SHADOW_* (empty default = off) and 
   const source = await readFile(composeFile, "utf8");
   const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
   const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
-  for (const name of ["SHADOW_ENABLED", "SHADOW_STATE_DIR"]) {
+  for (const name of ["SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_MAX_BYTES", "SHADOW_ACCOUNT_MAX_BYTES", "SHADOW_SESSION_STARTS_PER_DAY", "SHADOW_LINK_CONCURRENCY"]) {
     assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
     assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
     assert.doesNotMatch(up, new RegExp(`^read_(secret|optional_secret|required_env) ${name} `, "m"), name);
@@ -159,7 +159,7 @@ test("OAuth sign-in: the mcp service carries MCP_OAUTH* and compose-up reads eac
   const source = await readFile(composeFile, "utf8");
   const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
   const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
-  for (const name of ["MCP_OAUTH", "MCP_OAUTH_APPROVALS_PER_HOUR"]) {
+  for (const name of ["MCP_OAUTH", "MCP_OAUTH_APPROVALS_PER_HOUR", "MCP_OAUTH_ACCOUNTS_PER_HOUR", "MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR", "MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR"]) {
     assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
     assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
     assert.doesNotMatch(up, new RegExp(`^(export ${name}=|read_(secret|optional_secret|required_env) ${name} )`, "m"), name);

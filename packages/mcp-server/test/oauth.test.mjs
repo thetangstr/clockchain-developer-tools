@@ -263,10 +263,14 @@ test("config: off unless MCP_OAUTH=1 with a signing secret; bad values are misco
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "http://mcp.clockchain.network" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/mcp" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_OAUTH_APPROVALS_PER_HOUR: "lots" }, SECRET).kind, "misconfigured");
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsPerHour: 200, accountsDir: "/app/state/accounts", replayDir: "/app/state/oauth" });
+  for (const name of ["MCP_OAUTH_ACCOUNTS_PER_HOUR", "MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR", "MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR"]) {
+    assert.match(loadOAuthConfig({ MCP_OAUTH: "1", [name]: "0" }, SECRET).reason, new RegExp(name));
+    assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", [name]: "" }, SECRET).kind, "ready", `${name}: "" means the default`);
+  }
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsPerHour: 200, accountsPerIpPerHour: 10, keyAttemptsPerIpPerHour: 20, accountsDir: "/app/state/accounts", replayDir: "/app/state/oauth" });
   assert.deepEqual(
-    loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/", MCP_OAUTH_APPROVALS_PER_HOUR: "40", MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3", MCP_STATE_DIR: "/srv/state" }, SECRET),
-    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsPerHour: 200, accountsDir: "/srv/state/accounts", replayDir: "/srv/state/oauth", trustedProxy: "172.30.0.3" },
+    loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/", MCP_OAUTH_APPROVALS_PER_HOUR: "40", MCP_OAUTH_ACCOUNTS_PER_HOUR: "500", MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR: "60", MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR: "100", MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3", MCP_STATE_DIR: "/srv/state" }, SECRET),
+    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsPerHour: 500, accountsPerIpPerHour: 60, keyAttemptsPerIpPerHour: 100, accountsDir: "/srv/state/accounts", replayDir: "/srv/state/oauth", trustedProxy: "172.30.0.3" },
   );
 });
 

@@ -62,6 +62,10 @@ export type OAuthConfig =
       approvalsPerHour: number;
       /** All account creations per hour, across every address (MCP_OAUTH_ACCOUNTS_PER_HOUR, default 200). */
       accountsPerHour: number;
+      /** Account creations per IP per hour (MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR, default 10). */
+      accountsPerIpPerHour: number;
+      /** Account-key sign-in attempts per IP per hour (MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR, default 20). */
+      keyAttemptsPerIpPerHour: number;
       accountsDir: string;
       replayDir: string;
       trustedProxy?: string;
@@ -93,7 +97,12 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
   if (!publicUrl) return { kind: "misconfigured", reason: "MCP_PUBLIC_URL must be an https origin with no path" };
   // Per-hour limits: "" or unset = the default; anything but a whole number from 1 to 99999 is misconfigured.
   const counts: Record<string, number> = {};
-  for (const [name, fallback] of [["MCP_OAUTH_APPROVALS_PER_HOUR", 10], ["MCP_OAUTH_ACCOUNTS_PER_HOUR", 200]] as const) {
+  for (const [name, fallback] of [
+    ["MCP_OAUTH_APPROVALS_PER_HOUR", 10],
+    ["MCP_OAUTH_ACCOUNTS_PER_HOUR", 200],
+    ["MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR", 10],
+    ["MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR", 20],
+  ] as const) {
     const raw = (env[name] ?? "").trim();
     if (raw !== "" && !/^[1-9][0-9]{0,4}$/.test(raw)) return { kind: "misconfigured", reason: `${name} must be a whole number from 1 to 99999` };
     counts[name] = raw === "" ? fallback : Number(raw);
@@ -104,6 +113,8 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     publicUrl,
     approvalsPerHour: counts.MCP_OAUTH_APPROVALS_PER_HOUR,
     accountsPerHour: counts.MCP_OAUTH_ACCOUNTS_PER_HOUR,
+    accountsPerIpPerHour: counts.MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR,
+    keyAttemptsPerIpPerHour: counts.MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR,
     // Accounts and replay state live on the state volume, next to the handshake and Shadow state.
     accountsDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "accounts"),
     replayDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "oauth"),
