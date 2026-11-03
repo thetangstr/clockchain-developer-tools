@@ -141,7 +141,7 @@ test("purge script: owner keys match the store; dry run by default; --apply dele
   assert.equal(purgeLib.parseDuration("7 days"), undefined);
 
   const dir = tmp("purge");
-  let clock = Date.UTC(2026, 10, 2, 12, 0, 0);
+  let clock = Math.floor(Date.now() / 1000) * 1000; // real time: the sweep compares with real file mtimes
   const svc = new ShadowService({ stateDir: dir, ledger: () => new FakeLedger(), log: () => {}, sleep: async () => {}, now: () => new Date(clock) });
   svc.sweep();
   const A = "acct_aaaaaaaaaaaaaaaaaaaaaa";

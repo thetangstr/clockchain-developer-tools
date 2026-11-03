@@ -25,7 +25,8 @@ const DAY = 24 * 60 * 60_000;
 function setup(o = {}) {
   const dir = o.dir ?? mkdtempSync(path.join(tmpdir(), "shadow-hosted-"));
   const fake = o.fake ?? new FakeLedger();
-  const clock = o.clock ?? { t: Date.UTC(2026, 10, 2, 12, 0, 0) };
+  // Start the fake clock at the real time: the retention sweep compares it with real file mtimes (key.json).
+  const clock = o.clock ?? { t: Math.floor(Date.now() / 1000) * 1000 };
   const logs = o.logs ?? [];
   const budget = o.budget ?? createLogBudget({});
   const svc = new ShadowService({

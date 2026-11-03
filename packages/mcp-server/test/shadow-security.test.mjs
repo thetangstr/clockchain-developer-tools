@@ -270,7 +270,7 @@ test("finding 3: SHADOW_ALLOW_NON_ACCT is ignored when MCP_REQUIRE_AUTH is set, 
 });
 
 test("finding 3 (fill): each account has a byte quota and a daily limit on session starts; the global caps still hold", async () => {
-  const clock = { t: Date.UTC(2026, 10, 3, 12) };
+  const clock = { t: Math.floor(Date.now() / 1000) * 1000 }; // real time: the sweep compares with real file mtimes
   const svc = new ShadowService({
     stateDir: mkdtempSync(path.join(tmpdir(), "sec-quota-")), ledger: () => new FakeLedger(), log: () => {}, sleep: async () => {},
     now: () => new Date(clock.t), limits: { maxBytesPerOwner: 200 * 1024, maxSessionStartsPerOwnerPerDay: 3 },
