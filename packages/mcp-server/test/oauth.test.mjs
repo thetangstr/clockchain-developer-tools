@@ -16,6 +16,7 @@ import { runHttp, signedTokenSubject, presentsAccountKey } from "../dist/http.js
 import { createOAuthHandler, loadOAuthConfig } from "../dist/oauth.js";
 import { durableExpiringSet } from "../dist/oauth-replay.js";
 import { ACCT_PATTERN, mintToken, verifyToken } from "../dist/token.js";
+import { cleanAccountName } from "../dist/accounts.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { ownerKeyOf } from "../dist/shadow/store.js";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
@@ -1185,8 +1186,16 @@ test("accounts: names are cleaned, bounded to 40 characters and always escaped (
     assert.doesNotMatch(page.page.headers.get("content-security-policy"), /script-src|unsafe-inline/);
     // Control and bidi characters are dropped and whitespace collapsed; 40 characters is the limit.
     assert.match((await signUp(h.url, " a\u0000b‮c  d ")).html, /Signed in as <strong>a b c d<\/strong>/);
-    assert.match((await signUp(h.url, "🙂".repeat(40))).html, /Signed in as <strong>(🙂){40}<\/strong>/);
-    for (const bad of ["", "   ", "\u0007", "x".repeat(41), "🙂".repeat(41)]) {
+    assert.match((await signUp(h.url, "Ada 🙂")).html, /Signed in as <strong>Ada 🙂<\/strong>/);
+    // Follow-up finding 8: at most 2 combining marks per character; blank look-alikes are blank; a name needs a
+    // visible letter or digit; lone surrogates are dropped; the page shows a short account id next to the name.
+    const zalgo = await signUp(h.url, `A${"\u0336\u0337\u0338\u0316\u0317".repeat(8)}lice`);
+    assert.match(zalgo.html, /Signed in as <strong>A\u0336\u0337lice<\/strong>/);
+    const id = zalgo.acct.slice(5, 11).replace(/[-_]/g, "\\$&");
+    assert.match(zalgo.html, new RegExp(`Signed in as <strong>[^<]*</strong> <span class="muted">\\(account ${id}\\)</span>`));
+    assert.equal(cleanAccountName("Alice\uD800"), "Alice", "a lone surrogate is dropped (forms already turn one into U+FFFD)");
+    assert.match((await signUp(h.url, "\u3164Bob\u3164")).html, /Signed in as <strong>Bob<\/strong>/);
+    for (const bad of ["", "   ", "\u0007", "x".repeat(41), "🙂".repeat(3), "\u3164", "\u2800\u2800", "\u3164\uFFA0\u115F", "!!! ...", "\u0301\u0301"]) {
       const c = await openConsent(h.url);
       const res = await decide(h.url, c.requestToken, "create", { origin: PUBLIC }, { name: bad });
       assert.equal(res.status, 400, JSON.stringify(bad));
@@ -1543,6 +1552,24 @@ test("accounts: a key pasted as a name is refused and points to the key form; it
     assert.equal(records.length, 1, "no account was created");
     assert.equal(records.some((t) => t.includes(person.key)), false);
     assert.equal(h.logs.some((e) => JSON.stringify(e).includes(person.key.slice(4))), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test("app names get the same hygiene: marks capped, blank look-alikes blank, no letter or digit = unnamed (p4)", async () => {
+  const h = await harness();
+  try {
+    const below = [];
+    for (let c = 0x316; c <= 0x333; c++) below.push(String.fromCodePoint(c));
+    const zalgo = await openConsent(h.url, { meta: { client_name: `ChatGPT${below.join("").repeat(3).slice(0, 53)}` } });
+    assert.match(zalgo.client.client_name, /^ChatGPT\p{M}{2}$/u, "two marks after the last letter, no more (NFC orders them)");
+    assert.match(zalgo.html, new RegExp(`allow ${zalgo.client.client_name} to record`));
+    for (const blank of ["ㅤ", "⠀⠀", "ㅤ ﾠ", "...", "́́"]) {
+      const c = await openConsent(h.url, { meta: { client_name: blank } });
+      assert.equal(c.client.client_name, undefined, JSON.stringify(blank));
+      assert.match(c.html, /An unnamed app/);
+    }
   } finally {
     await h.close();
   }

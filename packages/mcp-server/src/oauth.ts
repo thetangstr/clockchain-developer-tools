@@ -1,7 +1,10 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
-import { AccountStore, AccountUnavailableError, cleanAccountName, DEFAULT_MAX_ACCOUNTS, looksLikeAccountKey, type Account } from "./accounts.js";
+import {
+  AccountStore, AccountUnavailableError, cleanAccountName, cleanDisplayText, DEFAULT_MAX_ACCOUNTS, displayAccountName,
+  hasLetterOrDigit, looksLikeAccountKey, shortAccountId, type Account,
+} from "./accounts.js";
 import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
 import { isAcctId, mintToken } from "./token.js";
@@ -240,10 +243,15 @@ function redirectUriMatches(registered: readonly string[], requested: string): b
 }
 
 /** Display-safe client name: control and format characters dropped, whitespace collapsed, 60 characters. */
+/**
+ * Display-safe app name: the same hygiene as account names (cleanDisplayText: no control or invisible characters,
+ * blank look-alikes as spaces, at most 2 combining marks per character), cut to 60 characters. A name with no visible
+ * letter or digit is no name ("An unnamed app" on the page).
+ */
 function cleanClientName(raw: unknown): string {
-  if (typeof raw !== "string") return "";
-  const text = raw.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
-  return Array.from(text).slice(0, CLIENT_NAME_MAX).join("");
+  if (typeof raw !== "string" || raw.length > 2000) return "";
+  const text = Array.from(cleanDisplayText(raw)).slice(0, CLIENT_NAME_MAX).join("").trim();
+  return hasLetterOrDigit(text) ? text : "";
 }
 
 const escapeHtml = (s: string): string =>
@@ -349,8 +357,8 @@ interface ConsentView {
   appName: string;
   redirectHost: string;
   requestToken: string;
-  /** The signed-in account and the grant binding it to this request; absent = the create-account page. */
-  signedIn?: { name: string; grant: string };
+  /** The signed-in account (name and short id) and the grant binding it to this request; absent = the create page. */
+  signedIn?: { name: string; shortId: string; grant: string };
   error?: string;
   /** Show the account-key form (after a rejected key). */
   keyOpen?: boolean;
@@ -381,7 +389,7 @@ function consentPage(v: ConsentView): string {
   if (v.signedIn) {
     return htmlDocument(`Connect ${v.appName || "an app"} to Clockchain`, `<p class="eyebrow">Clockchain sign-in</p>
 <h1>Allow ${app} to record and anchor your agents’ work on Clockchain?</h1>
-<p class="sub">Signed in as <strong>${escapeHtml(v.signedIn.name)}</strong>. Free testnet credits.</p>
+<p class="sub">Signed in as <strong>${escapeHtml(v.signedIn.name)}</strong> <span class="muted">(account ${escapeHtml(v.signedIn.shortId)})</span>. Free testnet credits.</p>
 ${alert}${appFacts(app, v.redirectHost)}
 <form method="post" action="/oauth/authorize">
 ${requestField(v.requestToken)}
@@ -427,10 +435,10 @@ ${requestField(v.requestToken)}
 }
 
 /** Shown once, right after the create click: the account key, then Continue on to the app. */
-function accountKeyPage(appName: string, accountName: string, key: string, requestToken: string, grant: string): string {
+function accountKeyPage(appName: string, accountName: string, shortId: string, key: string, requestToken: string, grant: string): string {
   return htmlDocument("Save your Clockchain account key", `<p class="eyebrow">Clockchain sign-in</p>
 <h1>Your Clockchain account is ready</h1>
-<p class="sub">Signed in as <strong>${escapeHtml(accountName)}</strong>.</p>
+<p class="sub">Signed in as <strong>${escapeHtml(accountName)}</strong> <span class="muted">(account ${escapeHtml(shortId)})</span>.</p>
 <p class="label">Your account key</p>
 <p class="key"><code>${escapeHtml(key)}</code></p>
 <p class="note">Save this key to sign in on another device. We can’t show it again.</p>
@@ -796,7 +804,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   ): void {
     const iat = nowSec();
     const signedIn = o.account
-      ? { name: o.account.name, grant: seal({ t: "grant", acct: o.account.acct, rid: sha256b64url(requestToken), via: "session", iat, exp: iat + REQUEST_TTL_S }) }
+      ? {
+          name: displayAccountName(o.account),
+          shortId: shortAccountId(o.account.acct),
+          grant: seal({ t: "grant", acct: o.account.acct, rid: sha256b64url(requestToken), via: "session", iat, exp: iat + REQUEST_TTL_S }),
+        }
       : undefined;
     res.writeHead(o.status ?? 200, { ...pageHeaders(formActionSources(request.ru)), ...o.headers });
     res.end(consentPage({
@@ -1006,7 +1018,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       const iat = nowSec();
       const grant = seal({ t: "grant", acct: created.account.acct, rid, via: "create", iat, exp: iat + REQUEST_TTL_S });
       res.writeHead(200, { ...pageHeaders(formActionSources(request.ru)), "set-cookie": setAccountCookie(created.account.acct) });
-      res.end(accountKeyPage(request.n, created.account.name, created.key, requestToken, grant));
+      res.end(accountKeyPage(request.n, displayAccountName(created.account), shortAccountId(created.account.acct), created.key, requestToken, grant));
       return;
     }
 

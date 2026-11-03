@@ -34,23 +34,62 @@ export interface Account {
 /** True for text holding (part of) an account key: cck_ and 16 or more key characters (follow-up finding 7). */
 export const looksLikeAccountKey = (raw: unknown): boolean => typeof raw === "string" && /cck_[A-Za-z0-9_-]{16,}/.test(raw);
 
+/** Characters that render as nothing (removed) and characters that render blank but count as letters (made spaces). */
+const INVISIBLE_MARKS = /[\u034F\u17B4\u17B5]/gu;
+const BLANK_LOOKALIKES = /[\u115F\u1160\u3164\uFFA0\u2800]/gu;
+const MAX_MARKS_PER_BASE = 2;
+
 /**
- * A display name: control and format characters dropped, whitespace collapsed and trimmed, 1 to 40 characters.
- * Never something that looks like an account key, so a key pasted into the name box is never stored as a name.
+ * Display hygiene shared by account names and app (client) names (follow-up finding 8): control, format and
+ * separator characters become spaces, invisible marks are removed, blank look-alikes (U+3164 HANGUL FILLER, U+2800
+ * BRAILLE BLANK and kin) become spaces, the text is NFC-normalized, at most 2 combining marks follow each base
+ * character (so no "Zalgo" text can spill over the lines around it), and whitespace is collapsed and trimmed.
+ */
+export function cleanDisplayText(raw: string): string {
+  const spaced = raw.replace(/\p{Cs}/gu, "").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(INVISIBLE_MARKS, "").replace(BLANK_LOOKALIKES, " ").normalize("NFC");
+  let out = "";
+  let marks = 0;
+  for (const ch of spaced) {
+    if (/\p{M}/u.test(ch)) {
+      if (marks++ < MAX_MARKS_PER_BASE) out += ch;
+    } else {
+      marks = 0;
+      out += ch;
+    }
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/** At least one visible letter or digit: a name of only blanks, marks, punctuation or emoji is not a name. */
+export const hasLetterOrDigit = (text: string): boolean => /[\p{L}\p{N}]/u.test(text);
+
+/**
+ * An account display name: cleaned by {@link cleanDisplayText}, 1 to 40 characters, with a letter or digit. Never
+ * something that looks like an account key, so a key pasted into the name box is never stored as a name.
  */
 export function cleanAccountName(raw: unknown): string | undefined {
   if (typeof raw !== "string" || raw.length > 1000 || looksLikeAccountKey(raw)) return undefined;
-  const text = raw.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+  const text = cleanDisplayText(raw);
   const length = Array.from(text).length;
-  return length >= 1 && length <= ACCOUNT_NAME_MAX ? text : undefined;
+  return length >= 1 && length <= ACCOUNT_NAME_MAX && hasLetterOrDigit(text) ? text : undefined;
 }
+
+/** The name to show for a stored account, re-cleaned on the way out (records made before a rule change included). */
+export function displayAccountName(account: Account): string {
+  const text = Array.from(cleanDisplayText(account.name)).slice(0, ACCOUNT_NAME_MAX).join("");
+  return hasLetterOrDigit(text) ? text : "your account";
+}
+
+/** A short, non-secret account reference to show next to the name: the first 6 characters after acct_. */
+export const shortAccountId = (acct: string): string => acct.slice(5, 11);
 
 const hashKey = (key: string): string => createHash("sha256").update(key, "utf8").digest("hex");
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
 function validateAccount(value: unknown): Account {
+  // Structural only: a record written under older display rules must stay readable (it is re-cleaned for display).
   if (
-    !isObject(value) || !isAcctId(value.acct) || typeof value.name !== "string" || cleanAccountName(value.name) !== value.name ||
+    !isObject(value) || !isAcctId(value.acct) || typeof value.name !== "string" || value.name.length === 0 || value.name.length > 1000 ||
     typeof value.createdAt !== "string" || typeof value.keyHash !== "string" || !KEY_HASH.test(value.keyHash)
   ) throw new Error("bad account record");
   return { acct: value.acct, name: value.name, createdAt: value.createdAt, keyHash: value.keyHash };
