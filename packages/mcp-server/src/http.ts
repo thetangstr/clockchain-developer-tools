@@ -474,6 +474,28 @@ export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promis
 }
 
 /**
+ * True for a Clockchain account key (`cck_`, src/accounts.ts). Account keys only sign a person in on the OAuth
+ * approval page; they are never MCP tokens and never Clockchain API keys.
+ */
+export const isAccountKey = (value: string): boolean => value.startsWith("cck_");
+
+/**
+ * The 401 for an account key presented as an MCP or Clockchain credential. It is refused before the bring-your-own
+ * fallback, so an account key can never be forwarded to the gateway.
+ */
+export function writeAccountKeyRefused(res: ServerResponse, challenge?: Record<string, string>): void {
+  res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store", ...challenge });
+  res.end(JSON.stringify({
+    error: "account_key_not_accepted",
+    message:
+      "That is a Clockchain account key (cck_...). Account keys only work on the Clockchain sign-in page, where " +
+      "they sign you in to approve an app; they are not MCP tokens or Clockchain API keys, and this server never " +
+      "sends them anywhere. Connect with sign-in (OAuth), or use an MCP token (x-api-key) or your own Clockchain " +
+      "API key (x-clockchain-api-key).",
+  }));
+}
+
+/**
  * The self-documenting JSON 401 for an MCP request with no usable credential. /mcp and /shadow/mcp both answer
  * with exactly this. `challenge` adds headers only (the OAuth WWW-Authenticate when MCP_OAUTH is on); without it
  * the response is byte-for-byte the original.
@@ -1706,6 +1728,15 @@ export async function runHttp(): Promise<Server> {
     //      Clockchain key pasted into x-api-key — now just works; the gateway is
     //      the real gate and rejects a bad key on the first tool call).
     //   4. No credential at all -> self-documenting 401.
+    // An account key (cck_) in any credential slot is refused first: it must never be taken as a BYO
+    // Clockchain key and forwarded to the gateway.
+    {
+      const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization))?.[1].trim() ?? "";
+      if ([firstHeader(req.headers["x-api-key"]).trim(), bearer, firstHeader(req.headers["x-clockchain-api-key"]).trim()].some(isAccountKey)) {
+        writeAccountKeyRefused(res, oauth?.challenge(pathOf(req.url), true));
+        return;
+      }
+    }
     let byo = clockchainOverrides(req.headers);
     // Verify auth ONCE here; reuse the verified self-serve payload below for the
     // rate-limit key so we don't HMAC-verify the token twice per request.

@@ -37,7 +37,7 @@ const pkce = () => {
 const ENV_KEYS = [
   "PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_APPROVALS_PER_HOUR", "MCP_OAUTH_TRUSTED_PROXY",
   "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS", "MCP_REQUIRE_AUTH", "MCP_RATE_PER_MIN", "MCP_TOKEN_MINT_PER_HOUR",
-  "MCP_TOKEN_TTL_DAYS", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "MCP_STATE_DIR",
+  "MCP_TOKEN_TTL_DAYS", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "MCP_STATE_DIR", "CLOCKCHAIN_ENDPOINT",
 ];
 const tempDir = (label) => mkdtempSync(path.join(tmpdir(), `oauth-${label}-`));
 
@@ -1380,6 +1380,56 @@ test("accounts: every page states what the app may do, and every account page an
     assert.equal(h.logs.filter((e) => e.event === "oauth_approved").length, 0, "nothing was approved");
   } finally {
     await h.close();
+  }
+});
+
+test("account keys are refused on /mcp in every credential slot and never reach the gateway (flag on or off)", async () => {
+  // A fake gateway that records every request it gets.
+  const seen = [];
+  const gateway = createServer((req, res) => {
+    seen.push(JSON.stringify(req.headers));
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ timestamp: new Date().toISOString(), totalNodes: 1, "nodeParticipation%": 100 }));
+  }).listen(0, "127.0.0.1");
+  await once(gateway, "listening");
+  const endpoint = `http://127.0.0.1:${gateway.address().port}`;
+  const accountKey = `cck_${"Q".repeat(32)}`;
+  const getTimestamp = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_timestamp", arguments: {} } };
+  try {
+    for (const env of [{ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC }, {}]) {
+      const s = await boot({ ...env, CLOCKCHAIN_ENDPOINT: endpoint });
+      try {
+        // Control: an ordinary non-token key in x-api-key is a BYO Clockchain key and does reach the gateway.
+        const control = await mcpPost(s.url, getTimestamp, { "x-api-key": "some-clockchain-api-key-123" });
+        assert.equal(control.status, 200);
+        await control.text();
+        assert.ok(seen.some((h) => h.includes("some-clockchain-api-key-123")), "the fake gateway sees BYO keys");
+        for (const headers of [
+          { "x-api-key": accountKey },
+          { authorization: `Bearer ${accountKey}` },
+          { "x-clockchain-api-key": accountKey },
+          { "x-api-key": STATIC_TOKEN, "x-clockchain-api-key": accountKey },
+          { "x-api-key": "cck_short" },
+        ]) {
+          const res = await mcpPost(s.url, getTimestamp, headers);
+          assert.equal(res.status, 401, JSON.stringify(headers));
+          assert.equal(res.headers.get("cache-control"), "no-store");
+          const body = await res.json();
+          assert.equal(body.error, "account_key_not_accepted");
+          assert.match(body.message, /Account keys only work on the Clockchain sign-in page/);
+          assert.equal(JSON.stringify(body).includes(accountKey), false);
+          if (env.MCP_OAUTH) assert.equal(res.headers.get("www-authenticate"), `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`);
+          else assert.equal(res.headers.get("www-authenticate"), null);
+        }
+        assert.equal(seen.some((h) => h.includes("cck_")), false, "no account key ever reached the gateway");
+        // Valid credentials are untouched.
+        assert.equal((await mcpPost(s.url, INIT, { "x-api-key": STATIC_TOKEN })).status, 200);
+      } finally {
+        await s.close();
+      }
+    }
+  } finally {
+    await new Promise((r) => gateway.close(r));
   }
 });
 
