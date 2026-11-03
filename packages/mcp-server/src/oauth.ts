@@ -1,7 +1,9 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
+import { AccountStore, cleanAccountName, DEFAULT_MAX_ACCOUNTS, type Account } from "./accounts.js";
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
-import { mintToken, newAcctId } from "./token.js";
+import { isAcctId, mintToken } from "./token.js";
 
 /**
  * OAuth 2.1 sign-in for MCP clients (ChatGPT custom connectors, Claude Code).
@@ -16,6 +18,11 @@ import { mintToken, newAcctId } from "./token.js";
  *   authorize     code flow, PKCE S256 required. Every error is a page, never a
  *                 redirect: only the person's own Approve (code) or Cancel
  *                 (access_denied) sends them to the redirect URI, with state + iss.
+ *   accounts      the approval page doubles as sign-up / sign-in (src/accounts.ts):
+ *                 a person names an account once, no email, and every app they
+ *                 approve gets that account's `acct`. An HttpOnly __Host- cookie
+ *                 only selects the account; each app still needs its own click.
+ *                 An account key (shown once) signs in on other devices.
  *   token         authorization_code + refresh_token (rotating, reuse-detected)
  *
  * Every artifact is `<prefix><b64url(json)>.<b64url(hmac)>`, keyed by a key
@@ -42,11 +49,12 @@ const MAX_ARTIFACT_LENGTH = 8192;
 const CLIENT_NAME_MAX = 60;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const MCP_PATHS = ["/mcp", "/shadow/mcp"] as const;
+const COOKIE_MAX_AGE_S = 365 * 24 * 60 * 60;
 
 export type OAuthConfig =
   | { kind: "disabled" }
   | { kind: "misconfigured"; reason: string }
-  | { kind: "ready"; publicUrl: string; approvalsPerHour: number; trustedProxy?: string };
+  | { kind: "ready"; publicUrl: string; approvalsPerHour: number; accountsDir: string; trustedProxy?: string };
 
 /** An https origin (http only on loopback, for local runs) with no path, query or credentials. */
 export function normalizePublicUrl(raw: string): string | undefined {
@@ -81,6 +89,8 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     kind: "ready",
     publicUrl,
     approvalsPerHour: rawApprovals === "" ? 10 : Number(rawApprovals),
+    // Accounts live on the state volume, next to the handshake and Shadow state.
+    accountsDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "accounts"),
     ...(trustedProxy ? { trustedProxy } : {}),
   };
 }
@@ -98,6 +108,14 @@ export interface OAuthOptions {
   registrationsPerMinute?: number;
   /** Per-IP token-endpoint calls per minute (default 120). */
   tokenCallsPerMinute?: number;
+  /** Where accounts are stored (src/accounts.ts). Unset or unusable: the approval page answers 503. */
+  accountsDir?: string;
+  /** Global account cap (default 50,000); creation is refused past it. */
+  maxAccounts?: number;
+  /** Per-IP account creations per hour (default 10). */
+  accountCreationsPerHour?: number;
+  /** Per-IP account-key sign-in attempts per hour (default 20). */
+  keyAttemptsPerHour?: number;
   /** Milliseconds clock, injectable for tests. */
   now?: () => number;
   log?: (event: Record<string, unknown>) => void;
@@ -114,19 +132,28 @@ export interface OAuthHandler {
   challenge(path: string, tokenPresented: boolean): Record<string, string> | undefined;
 }
 
-type ArtifactKind = "client" | "request" | "code" | "refresh";
+type ArtifactKind = "client" | "request" | "code" | "refresh" | "grant" | "cookie";
 const PREFIXES: Record<ArtifactKind, string> = {
   client: "cc_client_",
   request: "cc_req_",
   code: "cc_code_",
   refresh: "cc_rt_",
+  grant: "cc_grant_",
+  cookie: "cc_ac_",
 };
 
 interface ClientBlob { t: "client"; ru: string[]; n: string; iat: number }
 interface RequestBlob { t: "request"; cid: string; n: string; ru: string; rx: 0 | 1; cc: string; st?: string; rs?: string; iat: number; exp: number }
 interface CodeBlob { t: "code"; cid: string; n: string; ru: string; rx: 0 | 1; cc: string; rs?: string; acct: string; iat: number; exp: number; jti: string }
 interface RefreshBlob { t: "refresh"; cid: string; n: string; acct: string; rs?: string; fam: string; iat: number; exp: number; jti: string }
-type Blob = ClientBlob | RequestBlob | CodeBlob | RefreshBlob;
+/**
+ * Binds one account to one request token (`rid` = its hash) for one click: "session" on the signed-in page (the
+ * cookie must still name the same account when Approve arrives), "create" on the key page's Continue.
+ */
+interface GrantBlob { t: "grant"; acct: string; rid: string; via: "session" | "create"; iat: number; exp: number }
+/** The account cookie's value: it selects an account and nothing else. */
+interface CookieBlob { t: "cookie"; acct: string; iat: number }
+type Blob = ClientBlob | RequestBlob | CodeBlob | RefreshBlob | GrantBlob | CookieBlob;
 
 const firstHeader = (h: string | string[] | undefined): string => (Array.isArray(h) ? h[0] : h) ?? "";
 const pathOf = (url: string | undefined): string => (url ?? "").split("?")[0];
@@ -209,7 +236,22 @@ button{flex:1;padding:11px 16px;border-radius:10px;font:inherit;font-weight:600;
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
-.foot{margin:18px 0 0;font-size:12px;color:var(--muted)}`;
+.foot{margin:18px 0 0;font-size:12px;color:var(--muted)}
+label,.label{display:block;margin:0 0 6px;font-size:14px;font-weight:600}
+input[type=text],input[type=password]{display:block;width:100%;padding:10px 12px;margin:0 0 8px;border:1px solid var(--line);border-radius:10px;font:inherit;background:var(--bg);color:var(--text)}
+input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.hint{margin:0 0 14px;font-size:13px;color:var(--muted)}
+.stack button{width:100%}
+.choice{display:flex;flex-direction:column}
+.choice .create{order:1}
+.havekey{order:2;margin:14px 0 0}
+.havekey[open]~.create{display:none}
+summary{cursor:pointer;color:var(--accent);font-size:14px;margin:0 0 12px}
+.havekey:not([open]) .when-open,.havekey[open] .when-closed{display:none}
+button.link{flex:none;width:auto;padding:0;border:0;background:none;color:var(--accent);font-weight:500;font-size:14px;text-decoration:underline}
+.switch{margin:14px 0 0}
+.key{margin:0 0 14px;padding:12px 14px;border:1px dashed var(--muted);border-radius:10px;overflow-wrap:anywhere;user-select:all}
+.key code{font-size:15px}`;
 const STYLE_HASH = createHash("sha256").update(STYLE, "utf8").digest("base64");
 
 function htmlDocument(title: string, body: string): string {
@@ -265,12 +307,21 @@ function sendErrorPage(res: ServerResponse, status: number, title: string, messa
 <p class="muted">Error code: ${escapeHtml(code)}</p>` : ""}`));
 }
 
-function approvalPage(appName: string, redirectHost: string, requestToken: string): string {
-  const app = escapeHtml(appName || "An unnamed app");
-  return htmlDocument(`Connect ${appName || "an app"} to Clockchain`, `<p class="eyebrow">Clockchain sign-in</p>
-<h1>Allow ${app} to record and anchor your agents’ work on Clockchain?</h1>
-<p class="sub">Free testnet credits. No account or payment needed.</p>
-<dl>
+interface ConsentView {
+  appName: string;
+  redirectHost: string;
+  requestToken: string;
+  /** The signed-in account and the grant binding it to this request; absent = the create-account page. */
+  signedIn?: { name: string; grant: string };
+  error?: string;
+  /** Show the account-key form (after a rejected key). */
+  keyOpen?: boolean;
+}
+
+const requestField = (token: string): string => `<input type="hidden" name="request" value="${escapeHtml(token)}">`;
+
+function appFacts(app: string, redirectHost: string): string {
+  return `<dl>
 <div><dt>App</dt><dd>${app}<br><span class="muted">Name supplied by the app, not verified by Clockchain</span></dd></div>
 <div><dt>Sends you back to</dt><dd><code>${escapeHtml(redirectHost)}</code></dd></div>
 </dl>
@@ -280,15 +331,75 @@ function approvalPage(appName: string, redirectHost: string, requestToken: strin
 <li>Shadow keeps the records of your agents’ work for 30 days.</li>
 <li>Only fingerprints go on the Clockchain ledger, never the content itself.</li>
 </ul>
-<p class="note">Only approve if you just started connecting from this app and the address above is where you expect to return.</p>
+<p class="note">Only continue if you just started connecting from this app and the address above is where you expect to return.</p>`;
+}
+
+/** The approval page: sign-up (no account cookie) or "Signed in as" (a valid one). No script; plain forms. */
+function consentPage(v: ConsentView): string {
+  const app = escapeHtml(v.appName || "An unnamed app");
+  const alert = v.error ? `<p class="note" role="alert">${escapeHtml(v.error)}</p>\n` : "";
+  if (v.signedIn) {
+    return htmlDocument(`Connect ${v.appName || "an app"} to Clockchain`, `<p class="eyebrow">Clockchain sign-in</p>
+<h1>Allow ${app} to record and anchor your agents’ work on Clockchain?</h1>
+<p class="sub">Signed in as <strong>${escapeHtml(v.signedIn.name)}</strong>. Free testnet credits.</p>
+${alert}${appFacts(app, v.redirectHost)}
 <form method="post" action="/oauth/authorize">
-<input type="hidden" name="request" value="${escapeHtml(requestToken)}">
+${requestField(v.requestToken)}
+<input type="hidden" name="grant" value="${escapeHtml(v.signedIn.grant)}">
 <div class="actions">
 <button type="submit" name="decision" value="cancel">Cancel</button>
-<button type="submit" name="decision" value="approve" class="primary">Approve</button>
+<button type="submit" name="decision" value="approve" class="primary">Allow ${app}</button>
 </div>
 </form>
+<form method="post" action="/oauth/authorize" class="switch">
+${requestField(v.requestToken)}
+<button type="submit" name="decision" value="switch" class="link">Not you? Use a different account</button>
+</form>
 <p class="foot">Clockchain testnet</p>`);
+  }
+  return htmlDocument("Create your Clockchain account", `<p class="eyebrow">Clockchain sign-in</p>
+<h1>Create your Clockchain account</h1>
+<p class="sub">Then allow ${app} to record and anchor your agents’ work on Clockchain. Free testnet credits, no email needed.</p>
+${alert}${appFacts(app, v.redirectHost)}
+<div class="choice">
+<details class="havekey"${v.keyOpen ? " open" : ""}>
+<summary><span class="when-closed">I have an account key</span><span class="when-open">Create a new account instead</span></summary>
+<form method="post" action="/oauth/authorize" class="stack">
+${requestField(v.requestToken)}
+<label for="key">Account key</label>
+<input id="key" name="key" type="password" required autocomplete="current-password" spellcheck="false">
+<button type="submit" name="decision" value="signin" class="primary">Sign in and allow ${app}</button>
+</form>
+</details>
+<form method="post" action="/oauth/authorize" class="stack create">
+${requestField(v.requestToken)}
+<label for="name">Account name</label>
+<input id="name" name="name" type="text" maxlength="40" required autocomplete="nickname" spellcheck="false">
+<p class="hint">Shown to you when you sign in. Any name works.</p>
+<button type="submit" name="decision" value="create" class="primary">Create account and allow ${app}</button>
+</form>
+</div>
+<form method="post" action="/oauth/authorize" class="switch">
+${requestField(v.requestToken)}
+<button type="submit" name="decision" value="cancel" class="link">Cancel</button>
+</form>
+<p class="foot">Clockchain testnet</p>`);
+}
+
+/** Shown once, right after the create click: the account key, then Continue on to the app. */
+function accountKeyPage(appName: string, accountName: string, key: string, requestToken: string, grant: string): string {
+  return htmlDocument("Save your Clockchain account key", `<p class="eyebrow">Clockchain sign-in</p>
+<h1>Your Clockchain account is ready</h1>
+<p class="sub">Signed in as <strong>${escapeHtml(accountName)}</strong>.</p>
+<p class="label">Your account key</p>
+<p class="key"><code>${escapeHtml(key)}</code></p>
+<p class="note">Save this key to sign in on another device. We can’t show it again.</p>
+<form method="post" action="/oauth/authorize" class="stack">
+${requestField(requestToken)}
+<input type="hidden" name="grant" value="${escapeHtml(grant)}">
+<button type="submit" name="decision" value="continue" class="primary">Continue</button>
+</form>
+<p class="foot">Continue sends you back to ${escapeHtml(appName || "the app")}.</p>`);
 }
 
 // ---- request plumbing ---------------------------------------------------------
@@ -378,6 +489,20 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   const allowApproval = limiter(options.approvalsPerHour ?? 10, 60 * 60_000, now);
   const allowRegistration = limiter(options.registrationsPerMinute ?? 30, 60_000, now);
   const allowTokenCall = limiter(options.tokenCallsPerMinute ?? 120, 60_000, now);
+  const allowAccountCreate = limiter(options.accountCreationsPerHour ?? 10, 60 * 60_000, now);
+  const allowKeyAttempt = limiter(options.keyAttemptsPerHour ?? 20, 60 * 60_000, now);
+
+  // Accounts (src/accounts.ts). Opened once at boot; if that fails the approval page answers 503 and the rest of
+  // OAuth (discovery, registration, refresh) keeps working.
+  let accounts: AccountStore | undefined;
+  if (options.accountsDir) {
+    try {
+      accounts = new AccountStore(options.accountsDir, options.maxAccounts ?? DEFAULT_MAX_ACCOUNTS, now);
+      log({ event: "oauth_accounts_ready", accounts: accounts.count() });
+    } catch (e) {
+      log({ event: "oauth_accounts_unavailable", error: (e as Error)?.name ?? "error" });
+    }
+  }
 
   // One key per artifact kind, each derived from the signing secret under its own label.
   const keys = Object.fromEntries(
@@ -409,7 +534,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       return undefined;
     }
     if (blob === null || typeof blob !== "object" || (blob as { t?: unknown }).t !== kind) return undefined;
-    if (kind !== "client") {
+    if (kind === "cookie") {
+      // {acct, iat}: valid for a year from iat (Max-Age is only advice to the browser).
+      const { acct, iat } = blob as { acct?: unknown; iat?: unknown };
+      if (!isAcctId(acct) || typeof iat !== "number" || !Number.isSafeInteger(iat) || iat > nowSec() + 300 || nowSec() >= iat + COOKIE_MAX_AGE_S) return undefined;
+    } else if (kind !== "client") {
       const exp = (blob as { exp?: unknown }).exp;
       if (typeof exp !== "number" || !Number.isSafeInteger(exp) || nowSec() >= exp) return undefined;
     }
@@ -478,12 +607,12 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
    * preserving its query. Used ONLY for the outcome of the person's own click on
    * the approval page: Approve (code) or Cancel (access_denied).
    */
-  function redirectToClient(res: ServerResponse, redirectUri: string, params: Record<string, string | undefined>): void {
+  function redirectToClient(res: ServerResponse, redirectUri: string, params: Record<string, string | undefined>, extra: Record<string, string> = {}): void {
     const query = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v !== undefined) query.set(k, v);
     query.set("iss", base);
     const sep = redirectUri.endsWith("?") ? "" : redirectUri.includes("?") ? "&" : "?";
-    res.writeHead(303, { location: `${redirectUri}${sep}${query.toString()}`, "cache-control": "no-store", "referrer-policy": "no-referrer" });
+    res.writeHead(303, { location: `${redirectUri}${sep}${query.toString()}`, "cache-control": "no-store", "referrer-policy": "no-referrer", ...extra });
     res.end();
   }
 
@@ -594,6 +723,77 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     }, { "cache-control": "no-store", pragma: "no-cache" });
   }
 
+  // ---- accounts: cookie, consent page, code issuance ---------------------------
+
+  // __Host- requires Secure; only a loopback http public URL (local runs and tests) drops both.
+  const secureCookie = base.startsWith("https:");
+  const COOKIE_NAME = secureCookie ? "__Host-cc_acct" : "cc_acct";
+  const cookieAttributes = `Path=/;${secureCookie ? " Secure;" : ""} HttpOnly; SameSite=Lax`;
+  const setAccountCookie = (acct: string): string =>
+    `${COOKIE_NAME}=${seal({ t: "cookie", acct, iat: nowSec() })}; Max-Age=${COOKIE_MAX_AGE_S}; ${cookieAttributes}`;
+  const clearAccountCookie = `${COOKIE_NAME}=; Max-Age=0; ${cookieAttributes}`;
+
+  /** The account the cookie selects. `stale` = a cookie of ours was sent but is invalid, expired or unknown. */
+  function cookieAccount(req: IncomingMessage): { account?: Account; stale: boolean } {
+    for (const part of firstHeader(req.headers.cookie).split(";")) {
+      const eq = part.indexOf("=");
+      if (eq < 0 || part.slice(0, eq).trim() !== COOKIE_NAME) continue;
+      const blob = unseal<CookieBlob>("cookie", part.slice(eq + 1).trim());
+      const account = blob ? accounts?.get(blob.acct) : undefined;
+      return account ? { account, stale: false } : { stale: true };
+    }
+    return { stale: false };
+  }
+
+  function sendConsent(
+    res: ServerResponse,
+    request: RequestBlob,
+    requestToken: string,
+    o: { account?: Account; status?: number; error?: string; keyOpen?: boolean; headers?: Record<string, string> } = {},
+  ): void {
+    const iat = nowSec();
+    const signedIn = o.account
+      ? { name: o.account.name, grant: seal({ t: "grant", acct: o.account.acct, rid: sha256b64url(requestToken), via: "session", iat, exp: iat + REQUEST_TTL_S }) }
+      : undefined;
+    res.writeHead(o.status ?? 200, { ...pageHeaders(formActionSources(request.ru)), ...o.headers });
+    res.end(consentPage({
+      appName: request.n,
+      redirectHost: new URL(request.ru).host,
+      requestToken,
+      ...(signedIn ? { signedIn } : {}),
+      ...(o.error ? { error: o.error } : {}),
+      ...(o.keyOpen ? { keyOpen: true } : {}),
+    }));
+  }
+
+  const ACCOUNTS_UNAVAILABLE: [string, string] = ["Sign-in is unavailable", "Clockchain can’t open its account store right now. Try again in a few minutes."];
+
+  /** The outcome of an approving click: a code for this account, redirected to the app (with state and iss). */
+  function issueCode(req: IncomingMessage, res: ServerResponse, request: RequestBlob, account: Account, extra: Record<string, string> = {}): void {
+    if (!allowApproval(`approve:${ipOf(req)}`)) {
+      rateLimited("approve");
+      // A page, not a redirect: only a code or access_denied ever goes to the app.
+      sendErrorPage(res, 429, "Too many approvals", "Too many apps were approved from this network in the last hour. Wait a while, then go back to the app and try connecting again.", "temporarily_unavailable", { "retry-after": "3600", ...extra });
+      return;
+    }
+    const iat = nowSec();
+    const code = seal({
+      t: "code",
+      cid: request.cid,
+      n: request.n,
+      ru: request.ru,
+      rx: request.rx,
+      cc: request.cc,
+      ...(request.rs !== undefined ? { rs: request.rs } : {}),
+      acct: account.acct,
+      iat,
+      exp: iat + CODE_TTL_S,
+      jti: randomUUID(),
+    });
+    log({ event: "oauth_approved", client_name: request.n, acct: account.acct });
+    redirectToClient(res, request.ru, { code, state: request.st }, extra);
+  }
+
   // ---- authorize: the consent page (GET) --------------------------------------
 
   const INVALID_LINK_TITLE = "This sign-in link isn’t valid";
@@ -648,8 +848,10 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     const resource = resourceParam(q.getAll("resource"));
     if (resource === null) return fail("invalid_target", "The sign-in link asks for access to a server other than this Clockchain MCP endpoint.");
 
+    if (!accounts) return sendErrorPage(res, 503, ...ACCOUNTS_UNAVAILABLE, "temporarily_unavailable");
+
     const iat = nowSec();
-    const requestToken = seal({
+    const request: RequestBlob = {
       t: "request",
       cid: sha256b64url(q.get("client_id") as string),
       n: client.n,
@@ -660,9 +862,12 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       ...(resource !== undefined ? { rs: resource } : {}),
       iat,
       exp: iat + REQUEST_TTL_S,
+    };
+    const fromCookie = cookieAccount(req);
+    sendConsent(res, request, seal(request), {
+      ...(fromCookie.account ? { account: fromCookie.account } : {}),
+      ...(fromCookie.stale ? { headers: { "set-cookie": clearAccountCookie } } : {}),
     });
-    res.writeHead(200, pageHeaders(formActionSources(redirectUri)));
-    res.end(approvalPage(client.n, new URL(redirectUri).host, requestToken));
   }
 
   // ---- authorize: the decision (POST) -----------------------------------------
@@ -688,33 +893,96 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       redirectToClient(res, request.ru, { error: "access_denied", error_description: "The request was cancelled.", state: request.st });
       return;
     }
-    if (decision !== "approve") {
-      sendErrorPage(res, 400, "Approval not understood", "Choose Approve or Cancel on the sign-in page.");
+    if (!accounts) return sendErrorPage(res, 503, ...ACCOUNTS_UNAVAILABLE, "temporarily_unavailable");
+    const requestToken = form!.get("request") as string;
+    const rid = sha256b64url(requestToken);
+    const fromCookie = cookieAccount(req);
+    const staleCookie: Record<string, string> = fromCookie.stale ? { "set-cookie": clearAccountCookie } : {};
+
+    if (decision === "approve") {
+      // The account the page showed (bound in the grant) must still be the one the cookie selects.
+      const grant = unseal<GrantBlob>("grant", form!.get("grant"));
+      const account = fromCookie.account;
+      if (!grant || grant.via !== "session" || !safeEqual(grant.rid, rid) || !account || account.acct !== grant.acct) {
+        sendConsent(res, request, requestToken, {
+          ...(account ? { account } : {}),
+          status: 409,
+          error: "Your sign-in changed since this page loaded. Check the account below and try again.",
+          headers: staleCookie,
+        });
+        return;
+      }
+      issueCode(req, res, request, account);
       return;
     }
-    if (!allowApproval(`approve:${ipOf(req)}`)) {
-      rateLimited("approve");
-      // A page, not a redirect: only a code or access_denied ever goes to the app.
-      sendErrorPage(res, 429, "Too many approvals", "Too many apps were approved from this network in the last hour. Wait a while, then go back to the app and try connecting again.", "temporarily_unavailable", { "retry-after": "3600" });
+
+    if (decision === "create") {
+      const name = cleanAccountName(form!.get("name"));
+      if (!name) {
+        sendConsent(res, request, requestToken, { status: 400, error: "Choose an account name of 1 to 40 characters." });
+        return;
+      }
+      if (!allowAccountCreate(`create:${ipOf(req)}`)) {
+        rateLimited("account_create");
+        sendErrorPage(res, 429, "Too many new accounts", "Too many Clockchain accounts were created from this network in the last hour. Wait a while, or sign in with an account key.", "temporarily_unavailable", { "retry-after": "3600" });
+        return;
+      }
+      let created: ReturnType<AccountStore["create"]>;
+      try {
+        created = accounts.create(name);
+      } catch {
+        log({ event: "oauth_account_create_failed" });
+        sendErrorPage(res, 503, ...ACCOUNTS_UNAVAILABLE, "temporarily_unavailable");
+        return;
+      }
+      if (!created.ok) {
+        log({ event: "oauth_accounts_full", accounts: accounts.count() });
+        sendErrorPage(res, 503, "Clockchain isn’t taking new accounts right now", "Try again later, or sign in with an account key you already have.", "temporarily_unavailable");
+        return;
+      }
+      log({ event: "oauth_account_created", acct: created.account.acct, accounts: accounts.count() });
+      const iat = nowSec();
+      const grant = seal({ t: "grant", acct: created.account.acct, rid, via: "create", iat, exp: iat + REQUEST_TTL_S });
+      res.writeHead(200, { ...pageHeaders(formActionSources(request.ru)), "set-cookie": setAccountCookie(created.account.acct) });
+      res.end(accountKeyPage(request.n, created.account.name, created.key, requestToken, grant));
       return;
     }
-    const acct = newAcctId();
-    const iat = nowSec();
-    const code = seal({
-      t: "code",
-      cid: request.cid,
-      n: request.n,
-      ru: request.ru,
-      rx: request.rx,
-      cc: request.cc,
-      ...(request.rs !== undefined ? { rs: request.rs } : {}),
-      acct,
-      iat,
-      exp: iat + CODE_TTL_S,
-      jti: randomUUID(),
-    });
-    log({ event: "oauth_approved", client_name: request.n, acct });
-    redirectToClient(res, request.ru, { code, state: request.st });
+
+    if (decision === "continue") {
+      // After the key page: the grant (minted by the create click) names the new account, cookie or not.
+      const grant = unseal<GrantBlob>("grant", form!.get("grant"));
+      const account = grant && grant.via === "create" && safeEqual(grant.rid, rid) ? accounts.get(grant.acct) : undefined;
+      if (!account) {
+        sendErrorPage(res, 400, "This step has expired", "Go back to the app and start connecting again. Your account still works: sign in with its key.");
+        return;
+      }
+      issueCode(req, res, request, account);
+      return;
+    }
+
+    if (decision === "signin") {
+      if (!allowKeyAttempt(`key:${ipOf(req)}`)) {
+        rateLimited("account_key");
+        sendErrorPage(res, 429, "Too many sign-in attempts", "Too many account keys were tried from this network in the last hour. Wait a while, then try again.", "temporarily_unavailable", { "retry-after": "3600" });
+        return;
+      }
+      const account = accounts.findByKey((form!.get("key") ?? "").trim());
+      if (!account) {
+        log({ event: "oauth_account_key_rejected" });
+        sendConsent(res, request, requestToken, { status: 400, error: "That account key wasn’t recognized. Check it and try again.", keyOpen: true, headers: staleCookie });
+        return;
+      }
+      log({ event: "oauth_account_signin", acct: account.acct });
+      issueCode(req, res, request, account, { "set-cookie": setAccountCookie(account.acct) });
+      return;
+    }
+
+    if (decision === "switch") {
+      sendConsent(res, request, requestToken, { headers: { "set-cookie": clearAccountCookie } });
+      return;
+    }
+
+    sendErrorPage(res, 400, "Approval not understood", "Choose an option on the sign-in page.");
   }
 
   // ---- token ------------------------------------------------------------------

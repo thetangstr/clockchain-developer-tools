@@ -541,7 +541,9 @@ export async function runHttp(): Promise<Server> {
 
   // OAuth 2.1 sign-in for MCP clients (src/oauth.ts). Off unless MCP_OAUTH=1 and
   // the signing secret is set: off, none of its routes exist and the 401 is
-  // unchanged. It issues the same v:1 demo tokens as /token, plus an `acct`.
+  // unchanged. It issues the same v:1 demo tokens as /token, plus the `acct` of
+  // the Clockchain account the person signed up or signed in with (accounts live
+  // under ${MCP_STATE_DIR:-/app/state}/accounts).
   const oauthConfig = loadOAuthConfig(process.env, signingSecret);
   if (oauthConfig.kind === "misconfigured") {
     console.error(`[clockchain-mcp] OAuth misconfigured (routes off): ${oauthConfig.reason}`);
@@ -552,6 +554,7 @@ export async function runHttp(): Promise<Server> {
         publicUrl: oauthConfig.publicUrl,
         tokenTtlSeconds: tokenTtlDays * 24 * 60 * 60,
         approvalsPerHour: oauthConfig.approvalsPerHour,
+        accountsDir: oauthConfig.accountsDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
       })

@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -36,8 +36,9 @@ const pkce = () => {
 const ENV_KEYS = [
   "PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_APPROVALS_PER_HOUR", "MCP_OAUTH_TRUSTED_PROXY",
   "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS", "MCP_REQUIRE_AUTH", "MCP_RATE_PER_MIN", "MCP_TOKEN_MINT_PER_HOUR",
-  "MCP_TOKEN_TTL_DAYS", "SHADOW_ENABLED", "SHADOW_STATE_DIR",
+  "MCP_TOKEN_TTL_DAYS", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "MCP_STATE_DIR",
 ];
+const tempDir = (label) => mkdtempSync(path.join(tmpdir(), `oauth-${label}-`));
 
 /** Hosted Shadow on, in a fresh state directory, so /shadow/mcp exists and answers /mcp's 401. */
 const shadowOn = () => ({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "oauth-shadow-")) });
@@ -46,13 +47,15 @@ const shadowOn = () => ({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(pat
 async function boot(env) {
   const saved = {};
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
-  Object.assign(process.env, { MCP_PORT: "0", MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_TOKEN_SIGNING_SECRET: SECRET }, env);
+  Object.assign(process.env, { MCP_PORT: "0", MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: tempDir("state") }, env);
   for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k];
   const server = await runHttp();
   if (!server.listening) await once(server, "listening");
+  const url = `http://127.0.0.1:${server.address().port}`;
   return {
-    url: `http://127.0.0.1:${server.address().port}`,
+    url,
     async close() {
+      accountsByBase.delete(url);
       server.closeAllConnections?.();
       await new Promise((r) => server.close(r));
       for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
@@ -66,6 +69,7 @@ async function harness(opts = {}) {
   const logs = [];
   const handler = createOAuthHandler({
     signingSecret: SECRET, publicUrl: PUBLIC, tokenTtlSeconds: 7 * 24 * 3600,
+    accountsDir: path.join(tempDir("accounts"), "accounts"),
     now: () => clock, log: (e) => logs.push(e), ...opts,
   });
   const server = createServer(async (req, res) => {
@@ -76,12 +80,13 @@ async function harness(opts = {}) {
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
+  const url = `http://127.0.0.1:${server.address().port}`;
   return {
-    url: `http://127.0.0.1:${server.address().port}`,
+    url,
     handler, logs,
     nowSec: () => Math.floor(clock / 1000),
     advance(ms) { clock += ms; },
-    async close() { server.closeAllConnections?.(); await new Promise((r) => server.close(r)); },
+    async close() { accountsByBase.delete(url); server.closeAllConnections?.(); await new Promise((r) => server.close(r)); },
   };
 }
 
@@ -112,19 +117,48 @@ async function openConsent(base, o = {}) {
     ...o.params,
   });
   for (const k of o.drop ?? []) params.delete(k);
-  const page = await fetch(`${base}/oauth/authorize?${params}`, { redirect: "manual", headers: { accept: "text/html" } });
+  const page = await fetch(`${base}/oauth/authorize?${params}`, { redirect: "manual", headers: { accept: "text/html", ...(o.cookie ? { cookie: o.cookie } : {}) } });
   const html = await page.text();
   const requestToken = /name="request" value="([^"]+)"/.exec(html)?.[1];
-  return { client, verifier, challenge, redirectUri, page, html, requestToken };
+  const grant = /name="grant" value="([^"]+)"/.exec(html)?.[1];
+  return { client, verifier, challenge, redirectUri, page, html, requestToken, grant };
 }
 
-const decide = (base, requestToken, decision = "approve", headers = { origin: PUBLIC }) =>
+/** POST the approval form: `decision` plus any other form fields (grant, name, key). */
+const decide = (base, requestToken, decision = "approve", headers = { origin: PUBLIC }, fields = {}) =>
   fetch(`${base}/oauth/authorize`, {
     method: "POST",
     redirect: "manual",
     headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
-    body: new URLSearchParams({ request: requestToken, decision }),
+    body: new URLSearchParams({ request: requestToken, decision, ...fields }),
   });
+
+/** "name=value" of the response's Set-Cookie (empty when none). */
+const cookieOf = (res) => (res.headers.get("set-cookie") ?? "").split(";")[0];
+/** The acct an account cookie selects (its payload is plain base64url JSON; the MAC is what protects it). */
+const acctOfCookie = (cookie) =>
+  JSON.parse(Buffer.from(cookie.slice(cookie.indexOf("=") + 1).slice("cc_ac_".length).split(".")[0], "base64url").toString()).acct;
+
+/** Sign up through a consent page's create form, stopping at the key page (no approval is spent). */
+async function signUp(base, name = "Test Person", o = {}) {
+  const consent = await openConsent(base, o);
+  assert.equal(consent.page.status, 200, consent.html);
+  const res = await decide(base, consent.requestToken, "create", { origin: PUBLIC }, { name });
+  const html = await res.text();
+  assert.equal(res.status, 200, html);
+  const cookie = cookieOf(res);
+  const key = /<code>(cck_[A-Za-z0-9_-]{32})<\/code>/.exec(html)?.[1];
+  const grant = /name="grant" value="([^"]+)"/.exec(html)?.[1];
+  assert.ok(cookie && key && grant, "the key page sets the cookie and shows the key");
+  return { consent, res, html, cookie, key, grant, acct: acctOfCookie(cookie), name };
+}
+
+const accountsByBase = new Map();
+/** One account per server, made on first use: most tests just need "a signed-in person". */
+async function accountFor(base) {
+  if (!accountsByBase.has(base)) accountsByBase.set(base, await signUp(base));
+  return accountsByBase.get(base);
+}
 
 async function tokenCall(base, params, type = "form", headers = {}) {
   const res = await fetch(`${base}/oauth/token`, {
@@ -135,14 +169,24 @@ async function tokenCall(base, params, type = "form", headers = {}) {
   return { status: res.status, headers: res.headers, body: await res.json() };
 }
 
-/** Consent → approve → code, returning everything needed to exchange it. */
+/** Open the signed-in consent page and press Allow, sending `headers` (Origin, X-Forwarded-For...) with the click. */
+async function allow(base, o = {}, headers = { origin: PUBLIC }) {
+  const account = o.account ?? (await accountFor(base));
+  const consent = await openConsent(base, { ...o, cookie: account.cookie });
+  assert.ok(consent.grant, consent.html);
+  return { consent, res: await decide(base, consent.requestToken, "approve", { ...headers, cookie: account.cookie }, { grant: consent.grant }) };
+}
+
+/** Signed-in consent page → Allow → code, returning everything needed to exchange it. */
 async function approve(base, o = {}) {
-  const consent = await openConsent(base, o);
+  const account = o.account ?? (await accountFor(base));
+  const consent = await openConsent(base, { ...o, cookie: account.cookie });
   assert.equal(consent.page.status, 200, consent.html);
-  const res = await decide(base, consent.requestToken);
-  assert.equal(res.status, 303);
+  assert.ok(consent.grant, "the signed-in page carries a grant");
+  const res = await decide(base, consent.requestToken, "approve", { origin: PUBLIC, cookie: account.cookie }, { grant: consent.grant });
+  assert.equal(res.status, 303, await res.clone().text());
   const location = new URL(res.headers.get("location"));
-  return { ...consent, location, code: location.searchParams.get("code") };
+  return { ...consent, account, location, code: location.searchParams.get("code") };
 }
 
 const exchangeCode = (base, a, extra = {}) =>
@@ -218,10 +262,10 @@ test("config: off unless MCP_OAUTH=1 with a signing secret; bad values are misco
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "http://mcp.clockchain.network" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/mcp" }, SECRET).kind, "misconfigured");
   assert.equal(loadOAuthConfig({ MCP_OAUTH: "1", MCP_OAUTH_APPROVALS_PER_HOUR: "lots" }, SECRET).kind, "misconfigured");
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10 });
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET), { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 10, accountsDir: "/app/state/accounts" });
   assert.deepEqual(
-    loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/", MCP_OAUTH_APPROVALS_PER_HOUR: "40", MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3" }, SECRET),
-    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, trustedProxy: "172.30.0.3" },
+    loadOAuthConfig({ MCP_OAUTH: "1", MCP_PUBLIC_URL: "https://mcp.clockchain.network/", MCP_OAUTH_APPROVALS_PER_HOUR: "40", MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3", MCP_STATE_DIR: "/srv/state" }, SECRET),
+    { kind: "ready", publicUrl: "https://mcp.clockchain.network", approvalsPerHour: 40, accountsDir: "/srv/state/accounts", trustedProxy: "172.30.0.3" },
   );
 });
 
@@ -347,8 +391,8 @@ test("OAuth on /shadow/mcp: the session owner is the token's acct, unchanged acr
     const listed = (await shadowCall(s.url, "shadow_list_sessions", {}, refreshed.body.access_token)).value.sessions.map((x) => x.session_id).sort();
     assert.deepEqual(listed, [started.session_id, again.session_id].sort());
 
-    // A second approval is a different account: it can neither read nor write the first account's sessions.
-    const b = await approve(s.url, { client: a.client });
+    // A second account: it can neither read nor write the first account's sessions.
+    const b = await approve(s.url, { client: a.client, account: await signUp(s.url, "Second Person") });
     const other = await exchangeCode(s.url, b);
     assert.notEqual(verifyToken(SECRET, other.body.access_token).payload.acct, first.acct);
     for (const [name, args] of [
@@ -418,7 +462,7 @@ test("default public URL is https://mcp.clockchain.network", async () => {
 // The full happy path, through runHttp
 // ===========================================================================
 
-test("happy path: register → consent page → approve → code → token → /mcp → refresh → old refresh rejected", async () => {
+test("happy path: register → create-account page → create → key page → Continue → code → token → /mcp → refresh → old refresh rejected", async () => {
   const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
   try {
     const consent = await openConsent(s.url, { meta: { client_name: "ChatGPT", token_endpoint_auth_method: "client_secret_post" } });
@@ -433,16 +477,46 @@ test("happy path: register → consent page → approve → code → token → /
     assert.equal(consent.page.headers.get("cache-control"), "no-store");
     assert.equal(consent.page.headers.get("access-control-allow-origin"), null);
     assert.doesNotMatch(consent.html, /<script/i);
-    assert.match(consent.html, /Allow ChatGPT to record and anchor your agents’ work on Clockchain/);
+    // No account cookie: the page is sign-up.
+    assert.match(consent.html, /<h1>Create your Clockchain account<\/h1>/);
+    assert.match(consent.html, /allow ChatGPT to record and anchor your agents’ work on Clockchain/);
+    assert.match(consent.html, /<input id="name" name="name" type="text" maxlength="40" required/);
+    assert.match(consent.html, />Create account and allow ChatGPT<\/button>/);
+    assert.match(consent.html, /<summary><span class="when-closed">I have an account key<\/span>/);
+    assert.match(consent.html, /name="key" type="password"/);
     assert.match(consent.html, /<code>chatgpt\.com<\/code>/);
     assert.match(consent.html, /testnet credits from a shared pool/);
     assert.match(consent.html, /30 days/);
     assert.match(consent.html, /Only fingerprints go on the Clockchain ledger/);
-    assert.match(consent.html, /value="approve"/);
+    assert.match(consent.html, /value="create"/);
+    assert.match(consent.html, /value="signin"/);
     assert.match(consent.html, /value="cancel"/);
+    assert.doesNotMatch(consent.html, /value="approve"|Signed in as/);
+    assert.equal(consent.page.headers.get("set-cookie"), null);
     assert.ok(consent.requestToken.startsWith("cc_req_"));
 
-    const decision = await decide(s.url, consent.requestToken);
+    // Create: the cookie (right attributes) and the key, shown once, on the key page.
+    const created = await decide(s.url, consent.requestToken, "create", { origin: PUBLIC }, { name: "  Ada  Lovelace " });
+    assert.equal(created.status, 200);
+    const keyHtml = await created.text();
+    const setCookie = created.headers.get("set-cookie");
+    assert.match(setCookie, /^__Host-cc_acct=cc_ac_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}; Max-Age=31536000; Path=\/; Secure; HttpOnly; SameSite=Lax$/);
+    assert.match(created.headers.get("content-security-policy"), /form-action 'self' https:\/\/chatgpt\.com/);
+    assert.equal(created.headers.get("cache-control"), "no-store");
+    assert.equal(created.headers.get("x-frame-options"), "DENY");
+    assert.match(keyHtml, /Signed in as <strong>Ada Lovelace<\/strong>/);
+    const key = /<code>(cck_[A-Za-z0-9_-]{32})<\/code>/.exec(keyHtml)[1];
+    assert.match(keyHtml, /Save this key to sign in on another device\. We can’t show it again\./);
+    assert.match(keyHtml, /value="continue" class="primary">Continue<\/button>/);
+    assert.doesNotMatch(keyHtml, /<script/i);
+    const cookie = setCookie.split(";")[0];
+    // The key is never shown again: not on the signed-in page, not after another create attempt's page loads.
+    const again = await openConsent(s.url, { client: consent.client, cookie });
+    assert.match(again.html, /Signed in as <strong>Ada Lovelace<\/strong>/);
+    assert.equal(again.html.includes(key), false);
+    assert.equal(again.html.includes("cck_"), false);
+
+    const decision = await decide(s.url, consent.requestToken, "continue", { origin: PUBLIC }, { grant: /name="grant" value="([^"]+)"/.exec(keyHtml)[1] });
     assert.equal(decision.status, 303);
     const location = new URL(decision.headers.get("location"));
     assert.equal(`${location.origin}${location.pathname}`, CHATGPT_CB);
@@ -462,6 +536,7 @@ test("happy path: register → consent page → approve → code → token → /
     assert.equal(v.valid, true);
     assert.equal(v.payload.tier, "demo");
     assert.match(v.payload.acct, ACCT_PATTERN);
+    assert.equal(v.payload.acct, acctOfCookie(cookie), "the token's acct is the new account's");
     assert.equal(v.payload.sub, undefined);
 
     // The OAuth token works on /mcp exactly like a /token token.
@@ -491,7 +566,7 @@ test("happy path: register → consent page → approve → code → token → /
     assert.equal(family.body.error, "invalid_grant", "reuse revokes the newer refresh token too");
 
     // Codes, refresh tokens and client ids are never accepted as MCP credentials.
-    for (const credential of [code, issued.body.refresh_token, consent.client.client_id, consent.requestToken]) {
+    for (const credential of [code, issued.body.refresh_token, consent.client.client_id, consent.requestToken, cookie.slice(cookie.indexOf("=") + 1)]) {
       assert.equal((await mcpPost(s.url, INIT, { authorization: `Bearer ${credential}` })).status, 401);
     }
   } finally {
@@ -746,7 +821,7 @@ test("open redirect closed: a client registered with https://evil.example/cb get
     assert.equal(cancelled.searchParams.get("error"), "access_denied");
     assert.equal(cancelled.searchParams.get("state"), "state-123");
     assert.equal(cancelled.searchParams.get("iss"), PUBLIC);
-    const approve = await decide(h.url, ok.requestToken, "approve");
+    const { res: approve } = await allow(h.url, { client });
     assert.equal(approve.status, 303);
     const approved = new URL(approve.headers.get("location"));
     assert.equal(`${approved.origin}${approved.pathname}`, EVIL);
@@ -805,7 +880,7 @@ test("CSRF: the approval POST must come from our own origin", async () => {
       assert.equal(res.status, 403, JSON.stringify(headers));
       assert.equal(res.headers.get("location"), null);
     }
-    const viaReferer = await decide(h.url, c.requestToken, "approve", { referer: `${PUBLIC}/oauth/authorize?client_id=x` });
+    const { res: viaReferer } = await allow(h.url, {}, { referer: `${PUBLIC}/oauth/authorize?client_id=x` });
     assert.equal(viaReferer.status, 303);
   } finally {
     await h.close();
@@ -817,8 +892,7 @@ test("rate limits: 10 approvals per IP per hour; registrations and token calls a
   try {
     const client = await registerClient(h.url);
     for (let i = 0; i < 10; i++) assert.ok((await approve(h.url, { client })).code, `approval ${i + 1}`);
-    const c = await openConsent(h.url, { client });
-    const blocked = await decide(h.url, c.requestToken);
+    const { consent: c, res: blocked } = await allow(h.url, { client });
     assertErrorPage(blocked, await blocked.text(), { status: 429, code: "temporarily_unavailable", mustNotMention: ["chatgpt.com"] });
     assert.equal(blocked.headers.get("retry-after"), "3600");
     assert.equal((await decide(h.url, c.requestToken, "cancel")).status, 303, "cancel is never limited");
@@ -845,11 +919,7 @@ test("rate-limit buckets use X-Forwarded-For only from the trusted proxy", async
   const trusted = await harness({ trustedProxy: "127.0.0.1", approvalsPerHour: 1 });
   try {
     const client = await registerClient(trusted.url);
-    const send = async (xff) => {
-      const c = await openConsent(trusted.url, { client });
-      const res = await decide(trusted.url, c.requestToken, "approve", { origin: PUBLIC, "x-forwarded-for": xff });
-      return res.status;
-    };
+    const send = async (xff) => (await allow(trusted.url, { client }, { origin: PUBLIC, "x-forwarded-for": xff })).res.status;
     assert.equal(await send("198.51.100.1"), 303);
     assert.equal(await send("198.51.100.1"), 429);
     assert.equal(await send("198.51.100.2"), 303, "a different client behind the proxy has its own bucket");
@@ -859,10 +929,8 @@ test("rate-limit buckets use X-Forwarded-For only from the trusted proxy", async
   const untrusted = await harness({ approvalsPerHour: 1 });
   try {
     const client = await registerClient(untrusted.url);
-    const c1 = await openConsent(untrusted.url, { client });
-    await decide(untrusted.url, c1.requestToken, "approve", { origin: PUBLIC, "x-forwarded-for": "198.51.100.1" });
-    const c2 = await openConsent(untrusted.url, { client });
-    const res = await decide(untrusted.url, c2.requestToken, "approve", { origin: PUBLIC, "x-forwarded-for": "198.51.100.9" });
+    await allow(untrusted.url, { client }, { origin: PUBLIC, "x-forwarded-for": "198.51.100.1" });
+    const { res } = await allow(untrusted.url, { client }, { origin: PUBLIC, "x-forwarded-for": "198.51.100.9" });
     assert.equal(res.status, 429, "a spoofed XFF does not rotate the bucket");
   } finally {
     await untrusted.close();
@@ -954,19 +1022,333 @@ test("CORS: * without credentials on metadata, register and token only; never on
 });
 
 // ===========================================================================
+// Accounts: sign-up / sign-in on the approval page
+// ===========================================================================
+
+const SECURE_CLEAR = "__Host-cc_acct=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax";
+const keyHashOf = (key) => createHash("sha256").update(key).digest("hex");
+const codeOf = (res) => new URL(res.headers.get("location")).searchParams.get("code");
+const tokenAcct = (issued) => verifyToken(SECRET, issued.body.access_token).payload.acct;
+
+test("accounts: a second app in the same browser, and a key sign-in from a new browser, get the same acct", async () => {
+  const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
+  try {
+    // App 1 (ChatGPT): a brand-new person creates the account, then Continue.
+    const person = await signUp(s.url, "Grace");
+    const cont = await decide(s.url, person.consent.requestToken, "continue", { origin: PUBLIC }, { grant: person.grant });
+    assert.equal(cont.status, 303);
+    const t1 = await exchangeCode(s.url, { ...person.consent, code: codeOf(cont) });
+    // App 2 (Claude Code), same browser: the cookie selects the account; the person still clicks Allow.
+    const claude = await registerClient(s.url, { client_name: "Claude Code", redirect_uris: ["http://localhost:53111/callback"] });
+    const shown = await openConsent(s.url, { client: claude, cookie: person.cookie, redirectUri: "http://localhost:60123/callback" });
+    assert.match(shown.html, /Signed in as <strong>Grace<\/strong>/);
+    assert.match(shown.html, />Allow Claude Code<\/button>/);
+    assert.match(shown.html, /value="cancel">Cancel<\/button>/);
+    assert.match(shown.html, />Not you\? Use a different account<\/button>/);
+    assert.match(shown.html, /<code>localhost:60123<\/code>/);
+    assert.equal(shown.page.headers.get("location"), null, "a valid cookie never approves by itself");
+    const a2 = await approve(s.url, { client: claude, account: person, redirectUri: "http://localhost:60123/callback" });
+    const t2 = await exchangeCode(s.url, a2);
+    // App 3 (another ChatGPT connector), a new browser with no cookie: sign in with the account key.
+    const fresh = await openConsent(s.url, { meta: { client_name: "ChatGPT (work)" } });
+    assert.match(fresh.html, /Create your Clockchain account/);
+    const signin = await decide(s.url, fresh.requestToken, "signin", { origin: PUBLIC }, { key: ` ${person.key} ` });
+    assert.equal(signin.status, 303);
+    assert.match(signin.headers.get("set-cookie"), /^__Host-cc_acct=cc_ac_[^;]+; Max-Age=31536000; Path=\/; Secure; HttpOnly; SameSite=Lax$/);
+    const t3 = await exchangeCode(s.url, { ...fresh, code: codeOf(signin) });
+    assert.deepEqual([t1, t2, t3].map(tokenAcct), [person.acct, person.acct, person.acct]);
+    // That browser is signed in now too; refresh keeps the acct.
+    assert.match((await openConsent(s.url, { client: fresh.client, cookie: cookieOf(signin) })).html, /Signed in as <strong>Grace<\/strong>/);
+    const refreshed = await tokenCall(s.url, { grant_type: "refresh_token", refresh_token: t2.body.refresh_token, client_id: claude.client_id });
+    assert.equal(tokenAcct(refreshed), person.acct);
+  } finally {
+    await s.close();
+  }
+});
+
+test("accounts: bad, tampered, foreign, unknown and expired cookies are signed out (and cleared); other names are ignored", async () => {
+  const h = await harness();
+  const other = await harness(); // same signing secret, different account store
+  const alien = await harness({ signingSecret: "another-secret" });
+  try {
+    const person = await accountFor(h.url);
+    assert.match((await openConsent(h.url, { cookie: person.cookie })).html, /Signed in as/);
+    const value = person.cookie.slice(person.cookie.indexOf("=") + 1);
+    for (const [label, cookie] of [
+      ["garbage", "__Host-cc_acct=nonsense"],
+      ["tampered acct", `__Host-cc_acct=${tamper(value, "cc_ac_", (b) => { b.acct = `acct_${"Z".repeat(22)}`; })}`],
+      ["tampered iat", `__Host-cc_acct=${tamper(value, "cc_ac_", (b) => { b.iat += 1; })}`],
+      ["flipped MAC", `__Host-cc_acct=${value.slice(0, -1)}${value.endsWith("A") ? "B" : "A"}`],
+      ["another store's account", (await accountFor(other.url)).cookie],
+      ["another secret", (await accountFor(alien.url)).cookie],
+    ]) {
+      const c = await openConsent(h.url, { cookie });
+      assert.equal(c.page.status, 200, label);
+      assert.match(c.html, /Create your Clockchain account/, label);
+      assert.doesNotMatch(c.html, /Signed in as/, label);
+      assert.equal(c.page.headers.get("set-cookie"), SECURE_CLEAR, `${label}: cleared`);
+    }
+    // Not our cookie name (the non-Secure loopback name, on an https issuer): ignored, not cleared.
+    const misnamed = await openConsent(h.url, { cookie: `cc_acct=${value}` });
+    assert.match(misnamed.html, /Create your Clockchain account/);
+    assert.equal(misnamed.page.headers.get("set-cookie"), null);
+    // Approve with a bad cookie: the page again (signed out), never a code.
+    const c = await openConsent(h.url, { cookie: person.cookie });
+    const bad = await decide(h.url, c.requestToken, "approve", { origin: PUBLIC, cookie: "__Host-cc_acct=nonsense" }, { grant: c.grant });
+    assert.equal(bad.status, 409);
+    assert.equal(bad.headers.get("location"), null);
+    assert.equal(bad.headers.get("set-cookie"), SECURE_CLEAR);
+    // A year after it was set, the cookie no longer signs in, whatever the browser does with Max-Age.
+    h.advance(365 * 24 * 3600_000 - 60_000);
+    assert.match((await openConsent(h.url, { cookie: person.cookie })).html, /Signed in as/);
+    h.advance(60_000);
+    const expired = await openConsent(h.url, { cookie: person.cookie });
+    assert.match(expired.html, /Create your Clockchain account/);
+    assert.equal(expired.page.headers.get("set-cookie"), SECURE_CLEAR);
+  } finally {
+    await h.close();
+    await other.close();
+    await alien.close();
+  }
+});
+
+test("accounts: 'Not you? Use a different account' clears the cookie and the same request continues as someone new", async () => {
+  const h = await harness();
+  try {
+    const person = await accountFor(h.url);
+    const c = await openConsent(h.url, { cookie: person.cookie });
+    assert.equal((await decide(h.url, c.requestToken, "switch", { cookie: person.cookie })).status, 403, "CSRF-checked too");
+    const switched = await decide(h.url, c.requestToken, "switch", { origin: PUBLIC, cookie: person.cookie });
+    assert.equal(switched.status, 200);
+    assert.equal(switched.headers.get("set-cookie"), SECURE_CLEAR);
+    const html = await switched.text();
+    assert.match(html, /Create your Clockchain account/);
+    assert.equal(/name="request" value="([^"]+)"/.exec(html)[1], c.requestToken);
+    const created = await decide(h.url, c.requestToken, "create", { origin: PUBLIC }, { name: "Someone New" });
+    const grant = /name="grant" value="([^"]+)"/.exec(await created.text())[1];
+    const cont = await decide(h.url, c.requestToken, "continue", { origin: PUBLIC }, { grant });
+    const issued = await exchangeCode(h.url, { ...c, code: codeOf(cont) });
+    assert.notEqual(tokenAcct(issued), person.acct);
+    assert.equal(tokenAcct(issued), acctOfCookie(cookieOf(created)));
+  } finally {
+    await h.close();
+  }
+});
+
+test("accounts: CSRF — create, sign-in, continue, approve and switch POSTs need our Origin (or Referer)", async () => {
+  const accountsDir = path.join(tempDir("csrf"), "accounts");
+  const h = await harness({ accountsDir });
+  try {
+    const person = await accountFor(h.url);
+    const before = readdirSync(path.join(accountsDir, "a")).length;
+    const c = await openConsent(h.url, { cookie: person.cookie });
+    const fresh = await openConsent(h.url);
+    for (const [decision, requestToken, fields, cookie] of [
+      ["create", fresh.requestToken, { name: "Mallory" }, undefined],
+      ["signin", fresh.requestToken, { key: person.key }, undefined],
+      ["continue", person.consent.requestToken, { grant: person.grant }, undefined],
+      ["approve", c.requestToken, { grant: c.grant }, person.cookie],
+      ["switch", c.requestToken, {}, person.cookie],
+    ]) {
+      for (const headers of [{}, { origin: "https://evil.example" }, { origin: "null" }, { referer: "https://evil.example/x" }, { origin: "https://evil.example", referer: `${PUBLIC}/oauth/authorize` }]) {
+        const res = await decide(h.url, requestToken, decision, { ...headers, ...(cookie ? { cookie } : {}) }, fields);
+        assert.equal(res.status, 403, `${decision} ${JSON.stringify(headers)}`);
+        assert.equal(res.headers.get("location"), null);
+        assert.equal(res.headers.get("set-cookie"), null);
+        assert.equal((await res.text()).includes("cck_"), false);
+      }
+    }
+    assert.equal(readdirSync(path.join(accountsDir, "a")).length, before, "no account was created");
+    assert.equal(h.logs.filter((e) => e.event === "oauth_approved").length, 0, "nothing was approved");
+  } finally {
+    await h.close();
+  }
+});
+
+test("accounts: names are cleaned, bounded to 40 characters and always escaped (XSS attempt)", async () => {
+  const h = await harness();
+  try {
+    const xss = `<script>alert(1)</script>"'&`;
+    const person = await signUp(h.url, xss);
+    assert.doesNotMatch(person.html, /<script>alert/);
+    assert.match(person.html, /Signed in as <strong>&lt;script&gt;alert\(1\)&lt;\/script&gt;&quot;&#39;&amp;<\/strong>/);
+    const page = await openConsent(h.url, { cookie: person.cookie });
+    assert.doesNotMatch(page.html, /<script>alert/);
+    assert.match(page.html, /Signed in as <strong>&lt;script&gt;alert\(1\)&lt;\/script&gt;&quot;&#39;&amp;<\/strong>/);
+    assert.doesNotMatch(page.page.headers.get("content-security-policy"), /script-src|unsafe-inline/);
+    // Control and bidi characters are dropped and whitespace collapsed; 40 characters is the limit.
+    assert.match((await signUp(h.url, " a\u0000b‮c  d ")).html, /Signed in as <strong>a b c d<\/strong>/);
+    assert.match((await signUp(h.url, "🙂".repeat(40))).html, /Signed in as <strong>(🙂){40}<\/strong>/);
+    for (const bad of ["", "   ", "\u0007", "x".repeat(41), "🙂".repeat(41)]) {
+      const c = await openConsent(h.url);
+      const res = await decide(h.url, c.requestToken, "create", { origin: PUBLIC }, { name: bad });
+      assert.equal(res.status, 400, JSON.stringify(bad));
+      assert.equal(res.headers.get("set-cookie"), null);
+      const html = await res.text();
+      assert.match(html, /role="alert">Choose an account name of 1 to 40 characters\./);
+      assert.equal(/name="request" value="([^"]+)"/.exec(html)[1], c.requestToken, "the same request, still valid");
+      assert.equal(html.includes("cck_"), false);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("accounts: per-IP limits on creation and key attempts, and the global account cap", async () => {
+  const accountsDir = path.join(tempDir("limits"), "accounts");
+  const h = await harness({ accountsDir, accountCreationsPerHour: 2, keyAttemptsPerHour: 3 });
+  try {
+    const first = await signUp(h.url, "One");
+    await signUp(h.url, "Two");
+    const c = await openConsent(h.url);
+    const limited = await decide(h.url, c.requestToken, "create", { origin: PUBLIC }, { name: "Three" });
+    assertErrorPage(limited, await limited.text(), { status: 429, code: "temporarily_unavailable" });
+    assert.equal(limited.headers.get("set-cookie"), null);
+    assert.equal(readdirSync(path.join(accountsDir, "a")).length, 2);
+
+    for (let i = 0; i < 3; i++) {
+      const res = await decide(h.url, c.requestToken, "signin", { origin: PUBLIC }, { key: `cck_${String(i).repeat(32)}` });
+      assert.equal(res.status, 400);
+      assert.match(await res.text(), /role="alert">That account key wasn’t recognized\./);
+    }
+    const blocked = await decide(h.url, c.requestToken, "signin", { origin: PUBLIC }, { key: first.key });
+    assertErrorPage(blocked, await blocked.text(), { status: 429, code: "temporarily_unavailable" });
+    assert.equal(blocked.headers.get("set-cookie"), null, "even the right key waits out the limit");
+    assert.equal(h.logs.filter((e) => e.event === "oauth_account_key_rejected").length, 3);
+    h.advance(60 * 60_000);
+    const later = await openConsent(h.url);
+    assert.equal((await decide(h.url, later.requestToken, "signin", { origin: PUBLIC }, { key: first.key })).status, 303);
+  } finally {
+    await h.close();
+  }
+
+  const capped = await harness({ maxAccounts: 1 });
+  try {
+    await signUp(capped.url, "Only");
+    const c = await openConsent(capped.url);
+    const full = await decide(capped.url, c.requestToken, "create", { origin: PUBLIC }, { name: "One too many" });
+    assertErrorPage(full, await full.text(), { status: 503, code: "temporarily_unavailable" });
+    assert.ok(capped.logs.some((e) => e.event === "oauth_accounts_full"));
+  } finally {
+    await capped.close();
+  }
+});
+
+test("accounts: a click approves only the account its page showed", async () => {
+  const h = await harness();
+  try {
+    const alice = await signUp(h.url, "Alice");
+    const bob = await signUp(h.url, "Bob");
+    const page = await openConsent(h.url, { cookie: alice.cookie });
+    const otherPage = await openConsent(h.url, { client: page.client, cookie: alice.cookie });
+    for (const [label, cookie, fields] of [
+      ["the cookie switched to Bob after the page loaded", bob.cookie, { grant: page.grant }],
+      ["no grant", alice.cookie, {}],
+      ["a grant for another request", alice.cookie, { grant: otherPage.grant }],
+      ["the key page's grant", alice.cookie, { grant: alice.grant }],
+      ["signed out", undefined, { grant: page.grant }],
+    ]) {
+      const res = await decide(h.url, page.requestToken, "approve", { origin: PUBLIC, ...(cookie ? { cookie } : {}) }, fields);
+      assert.equal(res.status, 409, label);
+      assert.equal(res.headers.get("location"), null, label);
+      assert.match(await res.text(), /Your sign-in changed since this page loaded/, label);
+    }
+    // Continue only takes the key page's own grant.
+    const cont = await decide(h.url, page.requestToken, "continue", { origin: PUBLIC }, { grant: page.grant });
+    assertErrorPage(cont, await cont.text(), { status: 400 });
+    // The grant expires with the request token (10 minutes).
+    h.advance(10 * 60_000);
+    assert.equal((await decide(h.url, page.requestToken, "approve", { origin: PUBLIC, cookie: alice.cookie }, { grant: page.grant })).status, 400);
+    assert.equal(h.logs.filter((e) => e.event === "oauth_approved").length, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("accounts: files are private, keep only the key's hash, and an unusable store answers 503 (Cancel still works)", async () => {
+  const accountsDir = path.join(tempDir("files"), "accounts");
+  const h = await harness({ accountsDir });
+  try {
+    const person = await signUp(h.url, "Files");
+    const accountFile = path.join(accountsDir, "a", `${person.acct}.json`);
+    const keyFile = path.join(accountsDir, "k", `${keyHashOf(person.key)}.json`);
+    for (const dir of [accountsDir, path.join(accountsDir, "a"), path.join(accountsDir, "k")]) assert.equal(statSync(dir).mode & 0o777, 0o700);
+    for (const file of [accountFile, keyFile]) assert.equal(statSync(file).mode & 0o777, 0o600);
+    const record = JSON.parse(readFileSync(accountFile, "utf8")).value;
+    assert.deepEqual(Object.keys(record).sort(), ["acct", "createdAt", "keyHash", "name"]);
+    assert.equal(record.keyHash, keyHashOf(person.key));
+    assert.equal(record.name, "Files");
+    for (const name of [...readdirSync(path.join(accountsDir, "a")), ...readdirSync(path.join(accountsDir, "k"))]) {
+      const dir = name.startsWith("acct_") ? "a" : "k";
+      assert.equal(readFileSync(path.join(accountsDir, dir, name), "utf8").includes(person.key), false, "the key itself is never stored");
+    }
+  } finally {
+    await h.close();
+  }
+  const blocker = path.join(tempDir("blocked"), "not-a-directory");
+  writeFileSync(blocker, "x");
+  const working = await harness(); // a working page, for a request token valid under the same secret
+  try {
+    const ok = await openConsent(working.url);
+    for (const opts of [{ accountsDir: path.join(blocker, "accounts") }, { accountsDir: undefined }]) {
+      const broken = await harness(opts);
+      try {
+        const c = await openConsent(broken.url);
+        assertErrorPage(c.page, c.html, { status: 503, code: "temporarily_unavailable" });
+        const res = await decide(broken.url, ok.requestToken, "create", { origin: PUBLIC }, { name: "x" });
+        assertErrorPage(res, await res.text(), { status: 503 });
+        assert.equal((await decide(broken.url, ok.requestToken, "cancel")).status, 303, "Cancel never needs the store");
+        if (opts.accountsDir) assert.ok(broken.logs.some((e) => e.event === "oauth_accounts_unavailable"));
+      } finally {
+        await broken.close();
+      }
+    }
+  } finally {
+    await working.close();
+  }
+});
+
+test("accounts: survive a restart (same state directory): the cookie still signs in, the key still works, same acct", async () => {
+  const stateDir = tempDir("restart");
+  const first = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_STATE_DIR: stateDir });
+  let person;
+  try {
+    person = await signUp(first.url, "Durable Dana");
+  } finally {
+    await first.close();
+  }
+  const second = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_STATE_DIR: stateDir });
+  try {
+    const page = await openConsent(second.url, { cookie: person.cookie });
+    assert.match(page.html, /Signed in as <strong>Durable Dana<\/strong>/);
+    const a = await approve(second.url, { client: page.client, account: person });
+    assert.equal(tokenAcct(await exchangeCode(second.url, a)), person.acct);
+    const fresh = await openConsent(second.url);
+    const signin = await decide(second.url, fresh.requestToken, "signin", { origin: PUBLIC }, { key: person.key });
+    assert.equal(signin.status, 303);
+    assert.equal(tokenAcct(await exchangeCode(second.url, { ...fresh, code: codeOf(signin) })), person.acct);
+  } finally {
+    await second.close();
+  }
+});
+
+// ===========================================================================
 // acct
 // ===========================================================================
 
-test("acct: every OAuth token has one, fixed per approval; POST /token can never set it", async () => {
+test("acct: every OAuth token carries its account's acct; POST /token can never set it", async () => {
   const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
   try {
     const a = await approve(s.url);
     const b = await approve(s.url, { client: a.client });
+    const other = await approve(s.url, { client: a.client, account: await signUp(s.url, "Someone Else") });
     const ta = verifyToken(SECRET, (await exchangeCode(s.url, a)).body.access_token).payload;
     const tb = verifyToken(SECRET, (await exchangeCode(s.url, b)).body.access_token).payload;
+    const tc = verifyToken(SECRET, (await exchangeCode(s.url, other)).body.access_token).payload;
     assert.match(ta.acct, ACCT_PATTERN);
-    assert.match(tb.acct, ACCT_PATTERN);
-    assert.notEqual(ta.acct, tb.acct, "each approval is a new account");
+    assert.equal(ta.acct, a.account.acct);
+    assert.equal(tb.acct, ta.acct, "the same account approving again keeps its acct");
+    assert.notEqual(tc.acct, ta.acct, "another account has its own acct");
 
     for (const [query, headers] of [
       ["", {}],
@@ -1011,7 +1393,7 @@ test("no code, token, refresh token, verifier, request token or client_id reache
   const port = probe.address().port;
   await new Promise((r) => probe.close(r));
   const proc = spawn(process.execPath, [path.join(here, "..", "dist", "index.js")], {
-    env: { ...process.env, MCP_TRANSPORT: "http", PORT: String(port), MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_REQUIRE_AUTH: "1", MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC },
+    env: { ...process.env, MCP_TRANSPORT: "http", PORT: String(port), MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_REQUIRE_AUTH: "1", MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_STATE_DIR: tempDir("logs") },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -1032,12 +1414,21 @@ test("no code, token, refresh token, verifier, request token or client_id reache
     await tokenCall(base, { grant_type: "refresh_token", refresh_token: issued.body.refresh_token, client_id: a.client.client_id });
     await exchangeCode(base, a);
     await mcpPost(base, INIT, { authorization: `Bearer ${refreshed.body.access_token}` });
+    // A key sign-in from a browser with no cookie, and a wrong key.
+    const fresh = await openConsent(base, { client: a.client });
+    const signedIn = await decide(base, fresh.requestToken, "signin", { origin: PUBLIC }, { key: a.account.key });
+    assert.equal(signedIn.status, 303);
+    const wrong = await openConsent(base, { client: a.client });
+    assert.equal((await decide(base, wrong.requestToken, "signin", { origin: PUBLIC }, { key: `cck_${"x".repeat(32)}` })).status, 400);
     await new Promise((r) => setTimeout(r, 200));
 
     const secrets = {
       code: a.code, verifier: a.verifier, requestToken: a.requestToken, clientId: a.client.client_id,
       access: issued.body.access_token, refresh: issued.body.refresh_token,
       access2: refreshed.body.access_token, refresh2: refreshed.body.refresh_token,
+      signinCookie: cookieOf(signedIn).slice(cookieOf(signedIn).indexOf("=") + 1),
+      accountKey: a.account.key, accountCookie: a.account.cookie.slice(a.account.cookie.indexOf("=") + 1),
+      grant: a.grant, keyPageGrant: a.account.grant,
     };
     for (const [name, value] of Object.entries(secrets)) {
       assert.equal(out.includes(value), false, `${name} leaked into the logs`);
@@ -1051,7 +1442,7 @@ test("no code, token, refresh token, verifier, request token or client_id reache
     assert.ok(events.some((e) => e.event === "oauth_refresh_reuse" && e.acct === acct));
     assert.ok(events.some((e) => e.event === "oauth_code_reuse" && e.acct === acct));
     for (const e of events.filter((x) => String(x.event).startsWith("oauth_"))) {
-      assert.deepEqual(Object.keys(e).filter((k) => !["event", "client_name", "acct", "grant", "surface"].includes(k)), [], JSON.stringify(e));
+      assert.deepEqual(Object.keys(e).filter((k) => !["event", "client_name", "acct", "grant", "surface", "accounts"].includes(k)), [], JSON.stringify(e));
     }
   } finally {
     proc.kill();
