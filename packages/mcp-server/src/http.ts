@@ -78,6 +78,9 @@ import {
   SERVER_CARD_PATH,
 } from "./agent-contract/server-card.js";
 import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
+import { loadShadowConfig, ShadowService } from "./shadow/service.js";
+import { createShadowHttpHandler, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
+import { runtimeShadowLedger } from "./shadow/ledger.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -159,10 +162,21 @@ export function isAuthorized(
   tokens: string[],
 ): boolean {
   if (tokens.length === 0) return true;
+  return matchStaticToken(headers, tokens) !== undefined;
+}
+
+/**
+ * The configured MCP_AUTH_TOKENS entry the request presented (Bearer first, then x-api-key), or undefined. Unlike
+ * {@link isAuthorized} it never matches in open mode (no tokens configured).
+ */
+export function matchStaticToken(
+  headers: { authorization?: string | string[]; "x-api-key"?: string | string[] },
+  tokens: string[],
+): string | undefined {
   const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
-  if (bearer && tokens.includes(bearer[1].trim())) return true;
+  if (bearer && tokens.includes(bearer[1].trim())) return bearer[1].trim();
   const apiKey = firstHeader(headers["x-api-key"]).trim();
-  return apiKey.length > 0 && tokens.includes(apiKey);
+  return apiKey.length > 0 && tokens.includes(apiKey) ? apiKey : undefined;
 }
 
 /**
@@ -435,6 +449,52 @@ export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promis
   });
 }
 
+/**
+ * The self-documenting JSON 401 for an MCP request with no usable credential. /mcp and /shadow/mcp both answer
+ * with exactly this.
+ */
+export function writeMcpUnauthorized(res: ServerResponse): void {
+  res.writeHead(401, { "content-type": "application/json" });
+  res.end(
+    JSON.stringify({
+      error: "unauthorized",
+      message:
+        "Clockchain MCP — a hosted MCP server (no package to install). " +
+        "Authenticate with EITHER an MCP token (header x-api-key) OR your " +
+        "own Clockchain API key (header x-clockchain-api-key + client/wallet " +
+        "id), then point an MCP client at the endpoint below.",
+      endpoint: "https://mcp.clockchain.network/mcp",
+      transport: "http",
+      auth: {
+        // Two co-equal credential types — using the wrong header is the #1
+        // cause of a 401 here (a Clockchain key sent as x-api-key is rejected).
+        mcpToken: {
+          header: "x-api-key",
+          getToken: "POST https://mcp.clockchain.network/token",
+          note: "instant self-serve testnet token (shared pool) — POST /token to mint one",
+        },
+        bringYourOwnKey: {
+          headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
+          note:
+            "your own Clockchain API key (writes spend your credits) — " +
+            "RECOMMENDED for production / per-user usage: each user gets their " +
+            "own identity, credit budget, and rate-limit bucket",
+        },
+      },
+      // For production or per-user usage, bring your own Clockchain key so
+      // each user is isolated. The self-serve MCP token is a shared testnet
+      // pool for quick trials. (per-user auth medium-term: a `sub`-scoped delegated
+      // sub-key/credit bucket will give /token per-user isolation too.)
+      recommendation:
+        "For production or per-user usage, bring your own Clockchain key " +
+        "(x-clockchain-api-key). The self-serve MCP token is a shared testnet pool.",
+      manifest: "https://mcp.clockchain.network/.well-known/mcp.json",
+      install: "https://mcp.clockchain.network/llms.txt",
+      docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
+    }),
+  );
+}
+
 export async function runHttp(): Promise<Server> {
   // PORT is injected by Cloud Run / most PaaS hosts (8080); MCP_PORT is our own
   // override; 3000 is the local default. Honor them in that order.
@@ -630,7 +690,7 @@ export async function runHttp(): Promise<Server> {
   const ROUTE_CLASSES = [
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
     "llms", "manifest", "handshake_manifest", "standalone_manifest", "connect_verify",
-    "connect_mcp", "handshake_mcp", "contract_mcp", "handshake_local_action", "invitation_exchange", "token", "promote",
+    "connect_mcp", "handshake_mcp", "contract_mcp", "shadow", "handshake_local_action", "invitation_exchange", "token", "promote",
     "landing", "asset", "mcp_rpc", "keeper", "other",
   ] as const;
   const STATUS_CLASSES = ["2xx", "3xx", "4xx", "5xx"] as const;
@@ -682,6 +742,7 @@ export async function runHttp(): Promise<Server> {
     if (p === "/connect/mcp") return "connect_mcp";
     if (p === "/handshake/mcp") return "handshake_mcp";
     if (p === "/contract/mcp") return "contract_mcp";
+    if (p === "/shadow" || p.startsWith("/shadow/")) return "shadow";
     if (p.startsWith("/handshake/local-action")) return "handshake_local_action";
     if (p === "/handshake/invitations/exchange") return "invitation_exchange";
     if (method === "POST" && p === "/token") return "token";
@@ -923,6 +984,81 @@ export async function runHttp(): Promise<Server> {
     if (v3.valid) return { ok: true, scope: v3.payload };
     return { ok: false };
   };
+
+  // ---- /shadow/* (hosted Shadow) -------------------------------------------
+  // Off unless SHADOW_ENABLED=1: then every /shadow path answers 404 and nothing
+  // is created on disk. Authentication is /mcp's (checkAuth): static
+  // MCP_AUTH_TOKENS and signed cc_ tokens; the owner is the token's verified
+  // `acct` claim, else `jti:<jti>`, else a hash of the static token — never the
+  // unauthenticated `sub`. Bring-your-own Clockchain keys are not owners here,
+  // and a handshake session token (scoped to one handshake) is refused.
+  const shadowConfig = loadShadowConfig(process.env);
+  let shadowHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined;
+  let shadowService: ShadowService | undefined;
+  const shadowLinkLimit = keyedWindowLimiter(Number(process.env.SHADOW_LINKS_PER_MINUTE || "60"), 60_000, Date.now);
+  const shadowAuthenticate = (req: IncomingMessage): ShadowAuth => {
+    const ip = clientIp(req.headers, req.socket.remoteAddress);
+    const presented = presentedApiKey(req.headers);
+    const signed = (claims: { jti?: string }): ShadowAuth => ({
+      ok: true,
+      ownerId: shadowOwnerFromClaims(claims, presented),
+      rateKey: callerPrincipalId(req.headers, ip, claims.jti),
+    });
+    const auth = checkAuth(req);
+    if (!auth.ok || "scope" in auth) return { ok: false };
+    if ("payload" in auth) return signed(auth.payload);
+    if ("trial" in auth) return signed(auth.trial);
+    const matched = matchStaticToken(req.headers, tokens);
+    if (matched) {
+      return { ok: true, ownerId: `tok:${createHash("sha256").update(matched).digest("hex")}`, rateKey: callerPrincipalId(req.headers, ip) };
+    }
+    // Any other outcome (including a kind checkAuth may gain later) is not a
+    // Shadow owner until it is mapped above: refuse it.
+    if (tokens.length > 0) return { ok: false };
+    // Open mode (no MCP_AUTH_TOKENS; local use only): checkAuth passed without
+    // looking at the credential, so a signed token is verified here, and any
+    // other presented credential owns its own sessions.
+    if (!presented) return { ok: false };
+    if (looksLikeSelfServe(presented)) {
+      const v1 = verifyToken(signingSecret, presented);
+      if (v1.valid) return signed(v1.payload);
+      const v2 = verifyTrialToken(signingSecret, presented);
+      if (v2.valid) return signed(v2.payload);
+      return { ok: false };
+    }
+    return { ok: true, ownerId: `open:${createHash("sha256").update(presented).digest("hex")}`, rateKey: callerPrincipalId(req.headers, ip) };
+  };
+  if (shadowConfig.enabled) {
+    try {
+      shadowService = new ShadowService({
+        stateDir: shadowConfig.stateDir,
+        network: shadowConfig.network,
+        ledger: () => runtimeShadowLedger(process.env),
+      });
+      shadowService.start(); // retention sweep now, then hourly
+      shadowHandler = createShadowHttpHandler({
+        service: shadowService,
+        authenticate: shadowAuthenticate,
+        unauthorized: writeMcpUnauthorized,
+        readJsonBody,
+        allowCall: (rateKey, body, res) => {
+          const rl = limiter.enabled && !(body !== undefined && isRateLimitExempt(body)) ? limiter.allow(rateKey) : null;
+          if (rl && !rl.allowed) {
+            rlEvents.inc({ surface: bounded("mcp_call", RL_SURFACES) });
+            const headers = rateLimitHeaders(rl);
+            res.writeHead(429, { "content-type": "application/json", ...headers });
+            res.end(JSON.stringify({ error: "rate_limited", retry_after_seconds: Number(headers["Retry-After"]) }));
+            return false;
+          }
+          if (rl) for (const [k, v] of Object.entries(rateLimitHeaders(rl))) res.setHeader(k, v);
+          return true;
+        },
+        allowLink: (req) => shadowLinkLimit(`shadowlink:${clientIp(req.headers, req.socket.remoteAddress)}`),
+      });
+    } catch (e) {
+      console.error(JSON.stringify({ event: "shadow_unavailable", error: (e as Error)?.name ?? "error" }));
+    }
+  }
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestStarted = Date.now();
@@ -1234,6 +1370,26 @@ export async function runHttp(): Promise<Server> {
       return;
     }
 
+    // Hosted Shadow (/shadow/mcp and its capability links). 404 when off;
+    // enabled but unable to open its state directory: 503.
+    if (pathOf(req.url) === "/shadow" || pathOf(req.url).startsWith("/shadow/")) {
+      if (!shadowConfig.enabled) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      try {
+        if (!shadowHandler) throw new Error("shadow unavailable");
+        await shadowHandler(req, res);
+      } catch {
+        if (!res.headersSent) {
+          res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "shadow_unavailable" }));
+        }
+      }
+      return;
+    }
+
     // M3: public key discovery — the server card and the standalone key
     // document carry the receipt/envelope signing key(s) with rotation
     // metadata so agents can pin a keyId+publicKey before any run. Public
@@ -1462,45 +1618,7 @@ export async function runHttp(): Promise<Server> {
         byo = clockchainOverridesFromKey(presented, req.headers);
       } else {
         // No credential presented — return actionable guidance, not a dead end.
-        res.writeHead(401, { "content-type": "application/json" });
-      res.end(
-        JSON.stringify({
-          error: "unauthorized",
-          message:
-            "Clockchain MCP — a hosted MCP server (no package to install). " +
-            "Authenticate with EITHER an MCP token (header x-api-key) OR your " +
-            "own Clockchain API key (header x-clockchain-api-key + client/wallet " +
-            "id), then point an MCP client at the endpoint below.",
-          endpoint: "https://mcp.clockchain.network/mcp",
-          transport: "http",
-          auth: {
-            // Two co-equal credential types — using the wrong header is the #1
-            // cause of a 401 here (a Clockchain key sent as x-api-key is rejected).
-            mcpToken: {
-              header: "x-api-key",
-              getToken: "POST https://mcp.clockchain.network/token",
-              note: "instant self-serve testnet token (shared pool) — POST /token to mint one",
-            },
-            bringYourOwnKey: {
-              headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
-              note:
-                "your own Clockchain API key (writes spend your credits) — " +
-                "RECOMMENDED for production / per-user usage: each user gets their " +
-                "own identity, credit budget, and rate-limit bucket",
-            },
-          },
-          // For production or per-user usage, bring your own Clockchain key so
-          // each user is isolated. The self-serve MCP token is a shared testnet
-          // pool for quick trials. (per-user auth medium-term: a `sub`-scoped delegated
-          // sub-key/credit bucket will give /token per-user isolation too.)
-          recommendation:
-            "For production or per-user usage, bring your own Clockchain key " +
-            "(x-clockchain-api-key). The self-serve MCP token is a shared testnet pool.",
-          manifest: "https://mcp.clockchain.network/.well-known/mcp.json",
-          install: "https://mcp.clockchain.network/llms.txt",
-          docs: "https://github.com/thetangstr/clockchain-developer-tools/blob/main/INSTALL.md",
-        }),
-        );
+        writeMcpUnauthorized(res);
         return;
       }
     }
@@ -1632,6 +1750,7 @@ export async function runHttp(): Promise<Server> {
     }
   });
 
+  httpServer.on("close", () => shadowService?.stop());
   await new Promise<void>((resolve) => {
     httpServer.listen(port, () => {
       console.error(`[clockchain-mcp] http server listening on :${port}`);

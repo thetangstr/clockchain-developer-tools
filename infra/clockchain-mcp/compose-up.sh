@@ -538,6 +538,10 @@ read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM /clockchain/mcp/HANDSHAKE_
 read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL
 read_optional_env HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN
 read_optional_env HANDSHAKE_V2_RECEIPTS_FILE /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE
+# Hosted Shadow (opt-in, off unless SHADOW_ENABLED=1; state defaults to /app/state/shadow). Optional reads, like the
+# contract block above: an absent parameter leaves the variable unset and every /shadow path answers 404.
+read_optional_env SHADOW_ENABLED /clockchain/mcp/SHADOW_ENABLED
+read_optional_env SHADOW_STATE_DIR /clockchain/mcp/SHADOW_STATE_DIR
 # H-REQ-01 relay binding (host): optional reads; absent = binding off and no key ring
 # (validate_v2_host_relay_binding). The key ring is public JSON.
 read_optional_env AGENT_HANDSHAKE_V2_RELAY_BINDING "$AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM"

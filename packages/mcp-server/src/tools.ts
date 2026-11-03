@@ -254,8 +254,8 @@ function okWrite(result: object): Record<string, unknown> {
  * if pool health cannot be read, we fail OPEN (allow the write) rather than
  * block on a transient time-endpoint hiccup.
  */
-async function ensurePoolHealthy(
-  client: ClockchainClient,
+export async function ensurePoolHealthy(
+  client: Pick<ClockchainClient, "getPoolHealth">,
   allowDegraded: boolean | undefined,
 ): Promise<PoolHealth | null> {
   let health: PoolHealth | null = null;

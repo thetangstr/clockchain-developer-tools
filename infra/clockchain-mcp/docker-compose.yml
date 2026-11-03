@@ -75,6 +75,11 @@ services:
       HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL: "${HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL:-}"
       HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN: "${HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN:-}"
       HANDSHAKE_V2_RECEIPTS_FILE: "${HANDSHAKE_V2_RECEIPTS_FILE:-}"
+      # Hosted Shadow (/shadow/mcp and its links): off unless SHADOW_ENABLED=1
+      # exists in SSM ("" == absent == every /shadow path 404s). Records live
+      # under SHADOW_STATE_DIR, default /app/state/shadow on the mcp_state volume.
+      SHADOW_ENABLED: "${SHADOW_ENABLED:-}"
+      SHADOW_STATE_DIR: "${SHADOW_STATE_DIR:-}"
       TELEMETRY_CLOSE_URL: "${TELEMETRY_CLOSE_URL:-}"
       TELEMETRY_CLOSE_BACKOFF_MS: "${TELEMETRY_CLOSE_BACKOFF_MS:-}"
       TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS: "${TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS:-}"

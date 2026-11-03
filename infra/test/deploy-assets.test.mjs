@@ -160,6 +160,8 @@ const expectedContractEnv = {
   HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL: "2027-10-01T00:00:00.000Z\n",
   HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN: "handshake-receipt-feed-token\n",
   HANDSHAKE_V2_RECEIPTS_FILE: "/app/state/handshake-v2-receipts.jsonl\n",
+  SHADOW_ENABLED: "shadow-on\n",
+  SHADOW_STATE_DIR: "/app/state/shadow-fixture\n",
 };
 const expectedContractParamNames = Object.keys(expectedContractEnv).map(
   (name) => `/clockchain/mcp/${name}`,
@@ -448,6 +450,8 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL) value=$'2027-10-01T00:00:00.000Z\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN) value=$'handshake-receipt-feed-token\\n' ;;
   /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE) value=$'/app/state/handshake-v2-receipts.jsonl\\n' ;;
+  /clockchain/mcp/SHADOW_ENABLED) value=$'shadow-on\\n' ;;
+  /clockchain/mcp/SHADOW_STATE_DIR) value=$'/app/state/shadow-fixture\\n' ;;
   /clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=="}\\n' ;;
   /clockchain/mcp/SHORT_ACCEPTANCE_HMAC) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw="}\\n' ;;
   /clockchain/mcp/NEWLINE_KID_HMAC) value=$'{"kid":"accept-fresh\\n","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU="}\\n' ;;
