@@ -1131,7 +1131,7 @@ export async function runHttp(): Promise<Server> {
     res.end(JSON.stringify({
       error: "account_required",
       message:
-        "Hosted Shadow keeps records for signed-in accounts only. Connect " + `${base}/shadow/mcp` + " with sign-in " +
+        "Hosted Shadow keeps records for signed-in accounts only. Connect " + `${base}${pathOf(req.url) === shadowChatPath ? shadowChatPath : "/shadow/mcp"}` + " with sign-in " +
         "(OAuth): add it as a connector or remote MCP server in your client and approve the Clockchain sign-in page. " +
         "A token from POST /token or a static MCP token is not accepted here.",
       sign_in_available: oauth !== undefined,

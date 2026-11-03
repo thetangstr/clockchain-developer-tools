@@ -2342,6 +2342,27 @@ test("chat sign-in: an unnamed account can be named from the chat only within 15
   assert.equal(store.get(b.acct).unnamed, true, "not named");
 });
 
+test("chat sign-in: the 403 and the batch refusal name the path that was asked for", async () => {
+  const s = await boot(chatOn());
+  try {
+    const free = (await (await fetch(`${s.url}/token`, { method: "POST" })).json()).token;
+    for (const p of [CHAT, "/shadow/mcp"]) {
+      const r = await mcpPost(s.url, INIT, { authorization: `Bearer ${free}` }, p);
+      assert.equal(r.status, 403);
+      const body = await r.json();
+      assert.ok(body.message.includes(`Connect http://${new URL(s.url).host}${p} with sign-in`), body.message);
+    }
+    const person = await chatSignIn(s.url, await mcpPost(s.url, callTool("clockchain_whoami"), {}, CHAT));
+    for (const p of [CHAT, "/shadow/mcp"]) {
+      const r = await mcpPost(s.url, [rpc("tools/list")], { authorization: `Bearer ${person.token}` }, p);
+      assert.equal(r.status, 400);
+      assert.equal((await r.json()).error.message, `JSON-RPC batches are not supported on ${p}. Send one message per request.`);
+    }
+  } finally {
+    await s.close();
+  }
+});
+
 test("chat sign-in: rate limits hold (account creation per IP, anonymous discovery per client, tool calls per account)", async () => {
   const s = await boot(chatOn({ MCP_RATE_PER_MIN: "3", SHADOW_ANON_PER_MINUTE: "4" }));
   try {

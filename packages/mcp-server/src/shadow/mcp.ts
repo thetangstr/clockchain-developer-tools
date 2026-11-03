@@ -468,7 +468,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
         res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({
           jsonrpc: "2.0", id: null,
-          error: { code: -32600, message: "JSON-RPC batches are not supported on /shadow/mcp. Send one message per request." },
+          error: { code: -32600, message: `JSON-RPC batches are not supported on ${chat ? chat.path : "/shadow/mcp"}. Send one message per request.` },
         }));
         return;
       }
