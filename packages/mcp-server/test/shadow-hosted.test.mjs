@@ -10,7 +10,7 @@ import test from "node:test";
 import { ShadowService, ShadowError } from "../dist/shadow/service.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
-import { parseStrict } from "../dist/shadow/lib/profile.js";
+import { parseStrict, parseTime } from "../dist/shadow/lib/profile.js";
 import { fingerprint } from "../dist/shadow/lib/keys.js";
 import { createLogBudget } from "../dist/budget.js";
 import { ownerKeyOf } from "../dist/shadow/store.js";
@@ -137,6 +137,30 @@ test("happy path: a hosted packet passes the vendored verifier with its pin, off
     assert.ok(["shadow session opened", "shadow checkpoint"].includes(w.additionalInfo));
   }
   assert.doesNotMatch(JSON.stringify(fake.records), /Lisbon|TAP|planner|booker/);
+});
+
+test("receipt times are recorded in the canonical UTC form, whatever form the gateway returns, and still bound steps", async () => {
+  const fake = new FakeLedger();
+  fake.gatewayTimes = true;
+  const { svc } = setup({ fake });
+  const { id, closed } = await fullSession(svc);
+  assert.match(fake.records[0].createdTimestamp, /^\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}:\d{3} UTC$/, "the fake speaks the gateway's old form");
+  const { packet } = await packetOf(svc, closed.links);
+  const receipts = packet.events.flatMap((e) => (e.body.kind === "session.opened" ? [e.body.payload.receipt] : e.body.kind === "clockchain.anchored" ? [e.body.payload] : []));
+  assert.equal(receipts.length, 3);
+  for (const r of receipts) {
+    assert.match(r.submittedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}Z$/);
+    assert.match(r.blockTime, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,9}Z$/);
+    assert.ok(parseTime(r.submittedAt) && parseTime(r.blockTime));
+  }
+  // Same instant as the gateway reported (submission is one second before the block).
+  assert.equal(Date.parse(receipts[0].blockTime) - Date.parse(receipts[0].submittedAt), 1000);
+  const report = await verifyPacket(packet, { pin: strict(closed.pin) });
+  assert.equal(report.result, "pass", JSON.stringify(report.checks, null, 1));
+  assert.ok(report.windows.some((w) => w.lower && w.upper), "lower and upper bounds survive the gateway's formats");
+  // Online, the witness reads the ledger the same way, so the times match.
+  const v = await svc.verify(A, { session_id: id }, BASE);
+  assert.equal(v.checks.find((c) => c.name === "witness").status, "pass", v.checks.find((c) => c.name === "witness").reason);
 });
 
 test("the pin and fingerprint are the owner's: stable across sessions, distinct per owner", async () => {

@@ -1,4 +1,4 @@
-// Vendored from clockchain-shadow/ts/src/windows.ts (source sha256 896c532d80fc70a88c883b35b72a85bc6fc3933f832f33c601267044aaada378) by scripts/sync-shadow-lib.mjs.
+// Vendored from clockchain-shadow/ts/src/windows.ts (source sha256 c72031465c5ccd0caf4b8279206f884cde976bc12e3707bcd3ac2217c0eb504f) by scripts/sync-shadow-lib.mjs.
 // Do not edit here: change the library, then re-run the script.
 // Time windows (spec §7). Order comes from the hash chain; time comes only from Clockchain receipts in the chain, and
 // only from receipts that pass the anchors check (v1.1 correction C8).
@@ -9,7 +9,7 @@
 // steps covered are the anchor's verified count, and only checkpoint anchors give upper bounds.
 //
 // Times are compared with the one strict grammar of parseTime (v1.1 correction C11); a receipt time that does not
-// parse gives no bound. The sweep is O(n log n) (v1.1 correction C16 notes the cost limit).
+// parse gives no bound. The sweep is O(n log n) (v1.1 correction C21).
 import { compareTime, merklePrefixRoots, parseTime } from './profile.js';
 import { checkReceipts, scopeOf, type ReceiptCheck } from './anchors.js';
 import type { ShadowEvent } from './types.js';

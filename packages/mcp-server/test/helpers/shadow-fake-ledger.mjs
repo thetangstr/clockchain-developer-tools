@@ -1,5 +1,7 @@
 // An in-process stand-in for @clockchain/core's ClockchainClient, covering the calls hosted Shadow makes. It keeps
-// every write so tests can check exactly what reached the ledger. Times are ISO 8601 (block time = submission + 1 s).
+// every write so tests can check exactly what reached the ledger. Times are ISO 8601 (block time = submission + 1 s),
+// or, with gatewayTimes, the forms the gateway has used: createdTimestamp as "DD-MM-YYYY HH:MM:SS:mmm UTC" and the
+// block time with a +00:00 offset.
 import { randomUUID, createHash } from "node:crypto";
 import { ApiError } from "@clockchain/core";
 
@@ -12,10 +14,19 @@ export class FakeLedger {
   degraded = false;
   failNextLog = null; // an Error thrown by the next log()
   failBlockReads = false;
+  gatewayTimes = false;
   base = Date.UTC(2026, 10, 2, 12, 0, 0);
 
   time(h) {
-    return new Date(this.base + Number(h) * 2000).toISOString();
+    const iso = new Date(this.base + Number(h) * 2000).toISOString();
+    return this.gatewayTimes ? iso.replace("Z", "+00:00") : iso;
+  }
+
+  created(h) {
+    const d = new Date(this.base + h * 2000 - 1000);
+    if (!this.gatewayTimes) return d.toISOString();
+    const p = (n, w = 2) => String(n).padStart(w, "0");
+    return `${p(d.getUTCDate())}-${p(d.getUTCMonth() + 1)}-${d.getUTCFullYear()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}:${p(d.getUTCMilliseconds(), 3)} UTC`;
   }
 
   #gate() {
@@ -40,7 +51,7 @@ export class FakeLedger {
       ledgerId: randomUUID(), clientId: "client-1", walletId: "wallet-1",
       assetReferenceId: entry.assetReferenceId, assetHash: entry.assetHash, hashType: entry.hashType ?? "SHA-256",
       versionNumber: 1, additionalInfo: entry.additionalInfo ?? "", blockHeight: this.confirm ? String(h) : null,
-      createdTimestamp: new Date(this.base + h * 2000 - 1000).toISOString(), updatedTimestamp: null, assetName: null, type: null,
+      createdTimestamp: this.created(h), updatedTimestamp: null, assetName: null, type: null,
       _height: h,
     };
     this.records.push(r);

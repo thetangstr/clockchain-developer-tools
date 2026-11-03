@@ -53,7 +53,8 @@ let warnedAcct = false;
 
 /**
  * The owner of a session, from a signed cc_ token's verified claims: the OAuth account (`acct`) when present, else
- * the token's own id. The `sub` label is supplied unauthenticated at POST /token and is never used.
+ * the token's own id. The `sub` label is supplied unauthenticated at POST /token and is never used. verifyToken already
+ * refuses a token whose `acct` is malformed; the check here is defence in depth.
  */
 export function shadowOwnerFromClaims(claims: { jti?: unknown; acct?: unknown }, rawToken: string): string {
   const acct = claims.acct;

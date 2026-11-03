@@ -4,21 +4,23 @@
 //
 //   node scripts/sync-shadow-lib.mjs [--from <clockchain-shadow/ts/src>] [--check]
 //
-// The source defaults to ../clockchain-shadow/ts/src next to this repository (override with --from or
-// SHADOW_LIB_SRC). Each file is copied byte for byte apart from a provenance header and its relative `.ts` import
+// The source defaults to ../clockchain-shadow/ts/src next to this repository, or next to its main checkout when run
+// from a git worktree (override with --from or SHADOW_LIB_SRC). Each file is copied byte for byte apart from a provenance header and its relative `.ts` import
 // extensions, which become `.js` for tsc's NodeNext resolution. --check compares instead of writing and exits 1 on
 // any difference.
 //
-// Not vendored: store.ts (node:sqlite, newer than the production image's Node 20) and clockchain.ts (the library's
-// HTTP client; hosted Shadow anchors in-process). lib/clockchain.ts is a hand-written shim with only the error
-// class and the read interface verify.ts needs; this script never touches it.
+// Not vendored: store.ts (node:sqlite, newer than the production image's Node 20), clockchain.ts (the library's HTTP
+// client; hosted Shadow anchors in-process, src/shadow/ledger.ts) and recorder.ts (imports store.ts; mirrored by
+// src/shadow/recorder.ts, which this script checks against). A vendored file that starts importing one of them fails
+// the sync, so the change is looked at rather than copied.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const FILES = ["profile.ts", "types.ts", "kinds.ts", "keys.ts", "identity.ts", "anchors.ts", "windows.ts", "verify.ts", "summary.ts"];
-const SHIMS = ["clockchain.ts"];
+const SHIMS = [];
 // Files to mark @ts-nocheck (type-checked upstream only), each with its reason, for a library typing that does not hold
 // under this repo's @types/node 20. Empty: every vendored file type-checks here.
 const NOCHECK = {};
@@ -34,7 +36,18 @@ const value = (name) => {
 };
 
 const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const from = path.resolve(value("--from") ?? process.env.SHADOW_LIB_SRC ?? path.join(repoRoot, "..", "clockchain-shadow", "ts", "src"));
+// Default: ../clockchain-shadow next to this checkout or, from a git worktree, next to the main checkout.
+function defaultSource() {
+  const beside = (root) => path.join(root, "..", "clockchain-shadow", "ts", "src");
+  if (existsSync(beside(repoRoot))) return beside(repoRoot);
+  try {
+    const common = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: repoRoot, encoding: "utf8" }).trim();
+    return beside(path.dirname(common));
+  } catch {
+    return beside(repoRoot);
+  }
+}
+const from = path.resolve(value("--from") ?? process.env.SHADOW_LIB_SRC ?? defaultSource());
 const to = path.join(repoRoot, "packages", "mcp-server", "src", "shadow", "lib");
 const check = flag("--check");
 

@@ -1,7 +1,9 @@
 // Anchoring for hosted Shadow, through the server's own in-process Clockchain client: the same write path log_action
 // takes (pool-health guard, MCP_LOG_BUDGET check, client.log, budget.record, waitForConfirmation) with the delegated
 // key, and the library's anchoring scheme (reference `shadow:v1:<sessionId>`, a 64-hex asset hash, fixed labels).
-// Nothing but hashes, the reference id and a fixed label reaches Clockchain.
+// Nothing but hashes, the reference id and a fixed label reaches Clockchain. Receipt times are read as the library's
+// own client reads them (clockchain-shadow/ts/src/clockchain.ts receipt()): normalizeGatewayTime turns the gateway's
+// DD-MM-YYYY form or an offset time into the one canonical UTC form (spec §2.6, v1.1 correction C11).
 import {
   ApiError,
   AuthError,
@@ -19,7 +21,7 @@ import {
 } from "@clockchain/core";
 import { BudgetExceededError, type LogBudget } from "../budget.js";
 import { ensurePoolHealthy } from "../tools.js";
-import type { ErrorKind } from "./lib/clockchain.js";
+import { normalizeGatewayTime } from "./lib/profile.js";
 import type { OnlineClient } from "./lib/verify.js";
 import type { WriteReceipt } from "./recorder.js";
 
@@ -49,6 +51,9 @@ export function runtimeShadowLedger(env: NodeJS.ProcessEnv = process.env): Shado
   runtimeLedger ??= new ClockchainClient(readConfigFromEnv(env));
   return runtimeLedger;
 }
+
+/** The library's error kinds (clockchain-shadow/ts/src/clockchain.ts). */
+export type ErrorKind = "Auth" | "Credits" | "RateLimited" | "PoolDegraded" | "Transient" | "Permanent";
 
 /** The per-owner daily anchor limit, raised before a write is attempted. */
 export class AnchorLimitError extends Error {
@@ -113,7 +118,7 @@ export type AnchorRequest = {
 async function settle(ledger: ShadowLedger, rec: LedgerRecord, hash: string): Promise<AnchorOutcome> {
   if (rec.assetHash && rec.assetHash !== hash) throw new HashMismatchError("Clockchain record does not carry the anchored hash");
   const ledgerId = String(rec.ledgerId);
-  const submittedAt = str(rec.createdTimestamp);
+  const submittedAt = normalizeGatewayTime(rec.createdTimestamp);
   const blockHeight = str(rec.blockHeight);
   if (!blockHeight) return { kind: "pending", ledgerId, submittedAt };
   let block: BlockResponse;
@@ -123,7 +128,7 @@ async function settle(ledger: ShadowLedger, rec: LedgerRecord, hash: string): Pr
     // Written and in a block, but its block time is not readable yet: keep the ledger id, never write again.
     return { kind: "pending", ledgerId, submittedAt };
   }
-  return { kind: "anchored", receipt: { ledgerId, blockHeight, blockTime: str(block.blockTime), submittedAt } };
+  return { kind: "anchored", receipt: { ledgerId, blockHeight, blockTime: normalizeGatewayTime(block.blockTime), submittedAt } };
 }
 
 /**
@@ -198,8 +203,8 @@ export async function prefetchOnline(ledger: ShadowLedger, o: { network: string;
     try {
       const rec = await withDeadline(ledger.getLedgerEntry(id), deadline);
       const blockHeight = str(rec.blockHeight);
-      const blockTime = blockHeight ? str((await withDeadline(ledger.getBlock(blockHeight), deadline)).blockTime) : null;
-      entries.set(id, { assetHash: str(rec.assetHash), blockHeight, blockTime, submittedAt: str(rec.createdTimestamp) });
+      const blockTime = blockHeight ? normalizeGatewayTime((await withDeadline(ledger.getBlock(blockHeight), deadline)).blockTime) : null;
+      entries.set(id, { assetHash: str(rec.assetHash), blockHeight, blockTime, submittedAt: normalizeGatewayTime(rec.createdTimestamp) });
     } catch {
       // Unreachable for this receipt.
     }

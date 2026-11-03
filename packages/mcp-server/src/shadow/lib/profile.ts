@@ -1,4 +1,4 @@
-// Vendored from clockchain-shadow/ts/src/profile.ts (source sha256 23feb670070882a8672ae88e3f33bb58d85c91da8e126374538bb843f1104569) by scripts/sync-shadow-lib.mjs.
+// Vendored from clockchain-shadow/ts/src/profile.ts (source sha256 51ddcd2c6c49621eb8892de15248047b236930457baa5ee155d5bf6d0f25ccc1) by scripts/sync-shadow-lib.mjs.
 // Do not edit here: change the library, then re-run the script.
 // Canonical profile shadow-json-safeint-v1 (spec/SPEC.md §2). Every hash in a Shadow record goes through here, and the
 // Python library must produce byte-identical output on spec/vectors.
@@ -185,7 +185,7 @@ export function parseStrict(input: string | Uint8Array): Json {
 }
 
 // Merkle roots of every prefix of a tree, in O(log n) each after O(n) set-up, so a verifier can check many checkpoint
-// anchors without rebuilding a tree per anchor (v1.1 correction C16). prefix(n) equals merkleRoot(hashes.slice(0, n)).
+// anchors without rebuilding a tree per anchor (v1.1 correction C21). prefix(n) equals merkleRoot(hashes.slice(0, n)).
 // Nodes that cover 2^k real leaves are the same in every prefix that contains them; only the right edge differs.
 export function merklePrefixRoots(hashes: readonly string[]): (n: number) => string {
   const levels: string[][] = [hashes.map((h) => hash(DOMAIN.leaf, h))];
@@ -208,10 +208,11 @@ export function merklePrefixRoots(hashes: readonly string[]): (n: number) => str
   };
 }
 
-// One timestamp grammar for every time a verifier compares (v1.1 correction C11): RFC 3339 with upper-case T and Z,
-// seconds required, up to nine fraction digits, and Z or a ±HH:MM offset. Anything else is not a time. Returns
+// One timestamp grammar for every time a verifier compares (v1.1 correction C11): ISO 8601 / RFC 3339 in UTC, with
+// upper-case T and Z, seconds required and up to nine fraction digits. Anything else is not a time. Clients normalize
+// what Clockchain returns into this form before it is recorded (normalizeGatewayTime). Returns
 // [seconds since 1970-01-01T00:00:00Z, nanoseconds], or null.
-const TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+const TIME = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(Z|([+-])([0-9]{2}):([0-9]{2}))$/;
 function daysFromCivil(y: number, m: number, d: number): number {
   y -= m <= 2 ? 1 : 0;
   const era = Math.floor(y / 400), yoe = y - era * 400;
@@ -219,22 +220,56 @@ function daysFromCivil(y: number, m: number, d: number): number {
   const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
   return era * 146097 + doe - 719468;
 }
-export function parseTime(s: unknown): [number, number] | null {
+function civilFromDays(z: number): [number, number, number] {
+  z += 719468;
+  const era = Math.floor(z / 146097), doe = z - era * 146097;
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+  const mp = Math.floor((5 * doy + 2) / 153), d = doy - Math.floor((153 * mp + 2) / 5) + 1, m = mp + (mp < 10 ? 3 : -9);
+  return [yoe + era * 400 + (m <= 2 ? 1 : 0), m, d];
+}
+function parseTimeIn(s: unknown, offsets: boolean): [number, number] | null {
   if (typeof s !== 'string') return null;
   const m = TIME.exec(s);
-  if (!m) return null;
+  if (!m || (!offsets && m[8] !== 'Z')) return null;
   const [y, mo, d, h, mi, sec] = m.slice(1, 7).map(Number);
   const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
   const dim = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
   if (mo < 1 || mo > 12 || d < 1 || d > dim || h > 23 || mi > 59 || sec > 59) return null;
   let offset = 0;
-  if (m[8]) {
-    const oh = Number(m[9]), om = Number(m[10]);
+  if (m[9]) {
+    const oh = Number(m[10]), om = Number(m[11]);
     if (oh > 23 || om > 59) return null;
-    offset = (m[8] === '+' ? 1 : -1) * (oh * 3600 + om * 60);
+    offset = (m[9] === '+' ? 1 : -1) * (oh * 3600 + om * 60);
   }
   const nanos = m[7] ? Number(m[7].padEnd(9, '0')) : 0;
   return [daysFromCivil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec - offset, nanos];
+}
+export const parseTime = (s: unknown): [number, number] | null => parseTimeIn(s, false);
+
+// The canonical form of a time: YYYY-MM-DDTHH:MM:SS.fffZ, with at least three fraction digits and no trailing zeros
+// beyond them, so no precision is lost. null outside years 0000-9999.
+export function formatTime(t: [number, number]): string | null {
+  const days = Math.floor(t[0] / 86400), rem = t[0] - days * 86400;
+  const [y, m, d] = civilFromDays(days);
+  if (y < 0 || y > 9999) return null;
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  let frac = p(t[1], 9);
+  while (frac.length > 3 && frac.endsWith('0')) frac = frac.slice(0, -1);
+  return `${p(y, 4)}-${p(m)}-${p(d)}T${p(Math.floor(rem / 3600))}:${p(Math.floor((rem % 3600) / 60))}:${p(rem % 60)}.${frac}Z`;
+}
+
+// Clockchain's gateway wrote times as DD-MM-YYYY until 2026-08 ("11-06-2026 16:10:48:544 UTC" for createdTimestamp,
+// "24-06-2026_22:49:40:092" for consensus time; day first, see clock-sdk/src/time.ts) and as ISO 8601 since 2026-09.
+// Both become the canonical UTC form; an ISO time with an offset is moved to UTC. Anything else is kept as it is, and
+// a verifier then takes no time bound from it.
+const GATEWAY_TIME = /^([0-9]{2})-([0-9]{2})-([0-9]{4})[_ ]([0-9]{2}):([0-9]{2}):([0-9]{2}):([0-9]{3})(?: UTC)?$/;
+export function normalizeGatewayTime(v: unknown): string | null {
+  if (v == null || v === '') return null;
+  const s = String(v);
+  const g = GATEWAY_TIME.exec(s);
+  const t = g ? parseTimeIn(`${g[3]}-${g[2]}-${g[1]}T${g[4]}:${g[5]}:${g[6]}.${g[7]}Z`, false) : parseTimeIn(s, true);
+  return (t && formatTime(t)) ?? s;
 }
 // Orders two parsed times: negative, zero or positive.
 export const compareTime = (a: [number, number], b: [number, number]) => (a[0] - b[0]) || (a[1] - b[1]);

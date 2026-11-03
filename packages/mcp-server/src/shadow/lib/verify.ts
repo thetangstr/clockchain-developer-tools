@@ -1,4 +1,4 @@
-// Vendored from clockchain-shadow/ts/src/verify.ts (source sha256 71eeae4d38729fc3eff2d91d3be4deadc12b95be32472a10eb897b8e0e5593ec) by scripts/sync-shadow-lib.mjs.
+// Vendored from clockchain-shadow/ts/src/verify.ts (source sha256 cc0204eb2bb6d9cb0326647a5760873f99db88487441c1e7ce212f44bb6c0417) by scripts/sync-shadow-lib.mjs.
 // Do not edit here: change the library, then re-run the script.
 // Verifier (spec §8). pass = no check failed and every decisive check passed; indeterminate = nothing failed but a
 // decisive check is not established; fail = any check failed. Exit codes 0, 2, 1.
@@ -8,7 +8,6 @@ import { fingerprint, verifySignature } from './keys.js';
 import { windows, type Window } from './windows.js';
 import { checkReceipts, pendingCheckpointOk, type ReceiptCheck } from './anchors.js';
 import { identityDid, IDENTITY_SCHEMA, SALT } from './identity.js';
-import { ClockchainError } from './clockchain.js';
 import type { CheckpointBody, ShadowEvent } from './types.js';
 
 export type Status = 'pass' | 'fail' | 'indeterminate' | 'not-applicable';
@@ -49,7 +48,9 @@ async function patient<T>(fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
     } catch (e) {
-      const wait = e instanceof ClockchainError && e.kind === 'RateLimited' ? e.retryAfterSeconds ?? 30 : null;
+      // A ClockchainError of kind RateLimited (duck-typed, so this module needs no client code).
+      const err = e as { kind?: unknown; retryAfterSeconds?: number | null } | null;
+      const wait = err?.kind === 'RateLimited' ? err.retryAfterSeconds ?? 30 : null;
       if (wait == null || wait > 60 || attempt >= 2) throw e;
       await new Promise((r) => setTimeout(r, wait * 1000 + 250));
     }
@@ -160,7 +161,7 @@ export async function verifyPacket(packet: any, o: VerifyOptions = {}): Promise<
       });
       add('identity', badIds.length ? 'fail' : 'pass', badIds.length
         ? `Identities at position ${list(badIds)} do not derive from this operator, agent and salt, or do not name this record's signing key.`
-        : `${identities.length} agent identit${identities.length === 1 ? 'y derives' : 'ies derive'} from this operator and name this record's signing key.`);
+        : `${identities.length} agent identit${identities.length === 1 ? 'y derives from this operator and names' : 'ies derive from this operator and name'} this record's signing key.`);
     }
 
     const recomputed = coverage(events, agents);
@@ -185,7 +186,7 @@ export async function verifyPacket(packet: any, o: VerifyOptions = {}): Promise<
       : 'The session closed, every run succeeded, every expected deliverable was written and no workflow error was recorded.');
 
     // Offline proof that each receipt commits to what it claims (v1.1 correction C8), with Merkle prefix roots computed
-    // once (v1.1 correction C16).
+    // once (v1.1 correction C21).
     const scope = { operatorId: b.operatorId, sessionId: b.sessionId, network: b.network };
     const prefixRoot = merklePrefixRoots(hashes);
     const receipts: ReceiptCheck[] = checkReceipts(events, scope, prefixRoot);
