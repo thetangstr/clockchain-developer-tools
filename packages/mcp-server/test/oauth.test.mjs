@@ -46,14 +46,39 @@ const tempDir = (label) => mkdtempSync(path.join(tmpdir(), `oauth-${label}-`));
 /** Hosted Shadow on, in a fresh state directory, so /shadow/mcp exists and answers /mcp's 401. */
 const shadowOn = () => ({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "oauth-shadow-")) });
 
-/** The REAL runHttp wiring with the given env (static token set, so auth is not open). */
+/** A port nothing is listening on at 127.0.0.1 right now (the kernel's pick for a bind to exactly that address). */
+async function freeLoopbackPort() {
+  const probe = createServer().listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const { port } = probe.address();
+  await new Promise((r) => probe.close(r));
+  return port;
+}
+
+/**
+ * The REAL runHttp wiring with the given env (static token set, so auth is not open). runHttp listens on every
+ * interface, and the kernel may give that wildcard bind a port another program holds on 127.0.0.1 alone (once,
+ * Tailscale's): so the port is picked free on 127.0.0.1 first, and a probe must reach this server, else it retries.
+ */
 async function boot(env) {
   const saved = {};
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
-  Object.assign(process.env, { MCP_PORT: "0", MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: tempDir("state") }, env);
-  for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k];
-  const server = await runHttp();
-  if (!server.listening) await once(server, "listening");
+  let server;
+  for (let attempt = 1; ; attempt++) {
+    Object.assign(process.env, { MCP_PORT: String(await freeLoopbackPort()), MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: tempDir("state") }, env);
+    for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k];
+    server = await runHttp();
+    if (!server.listening) await once(server, "listening");
+    let reached = false;
+    const mark = () => { reached = true; };
+    server.prependListener("request", mark);
+    await fetch(`http://127.0.0.1:${server.address().port}/health`).then((r) => r.arrayBuffer()).catch(() => {});
+    server.removeListener("request", mark);
+    if (reached) break;
+    server.closeAllConnections?.();
+    await new Promise((r) => server.close(r));
+    assert.ok(attempt < 5, "no 127.0.0.1 port reached this server in 5 tries");
+  }
   const url = `http://127.0.0.1:${server.address().port}`;
   return {
     url,
