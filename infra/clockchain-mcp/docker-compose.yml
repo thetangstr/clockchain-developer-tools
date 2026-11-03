@@ -88,6 +88,8 @@ services:
       # Sign-up from the chat (claude.ai "Sign in when needed"): SHADOW_LAZY_AUTH=1 adds /shadow/chat/mcp, which
       # connects and lists tools before sign-in. "" = off (no such path; /shadow/mcp is unchanged either way).
       SHADOW_LAZY_AUTH: "${SHADOW_LAZY_AUTH:-}"
+      # Requests per minute per client to /shadow/chat/mcp before sign-in ("" = 600).
+      SHADOW_ANON_PER_MINUTE: "${SHADOW_ANON_PER_MINUTE:-}"
       # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
       # MCP_OAUTH=1 exists in SSM ("" == absent == off: no OAuth routes, 401 unchanged).
       # The issuer is MCP_PUBLIC_URL, default https://mcp.clockchain.network (never the Host

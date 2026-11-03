@@ -549,6 +549,7 @@ read_optional_env SHADOW_SESSION_STARTS_PER_DAY /clockchain/mcp/SHADOW_SESSION_S
 read_optional_env SHADOW_LINK_CONCURRENCY /clockchain/mcp/SHADOW_LINK_CONCURRENCY
 # Sign-up from the chat (absent = off: no /shadow/chat/mcp).
 read_optional_env SHADOW_LAZY_AUTH /clockchain/mcp/SHADOW_LAZY_AUTH
+read_optional_env SHADOW_ANON_PER_MINUTE /clockchain/mcp/SHADOW_ANON_PER_MINUTE
 # OAuth 2.1 connector sign-in (off unless MCP_OAUTH=1; needs MCP_TOKEN_SIGNING_SECRET, read above).
 # MCP_OAUTH_APPROVALS_PER_HOUR is the per-IP approval ceiling (default 10, like POST /token).
 read_optional_env MCP_OAUTH /clockchain/mcp/MCP_OAUTH
