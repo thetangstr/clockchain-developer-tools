@@ -337,9 +337,10 @@ function appFacts(app: string, redirectHost: string): string {
 <div><dt>App</dt><dd>${app}<br><span class="muted">Name supplied by the app, not verified by Clockchain</span></dd></div>
 <div><dt>Sends you back to</dt><dd><code>${escapeHtml(redirectHost)}</code></dd></div>
 </dl>
-<h2>If you approve</h2>
+<h2>If you allow it</h2>
 <ul>
-<li>The app gets free Clockchain testnet credits from a shared pool.</li>
+<li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
+<li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>
 <li>Shadow keeps the records of your agents’ work for 30 days.</li>
 <li>Only fingerprints go on the Clockchain ledger, never the content itself.</li>
 </ul>

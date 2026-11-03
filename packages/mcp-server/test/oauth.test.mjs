@@ -486,7 +486,9 @@ test("happy path: register → create-account page → create → key page → C
     assert.match(consent.html, /<summary><span class="when-closed">I have an account key<\/span>/);
     assert.match(consent.html, /name="key" type="password"/);
     assert.match(consent.html, /<code>chatgpt\.com<\/code>/);
-    assert.match(consent.html, /testnet credits from a shared pool/);
+    assert.match(consent.html, /<h2>If you allow it<\/h2>/);
+    assert.match(consent.html, /<li>ChatGPT can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps\.<\/li>/);
+    assert.match(consent.html, /<li>Its writes are paid from Clockchain’s free testnet pool, not by you\.<\/li>/);
     assert.match(consent.html, /30 days/);
     assert.match(consent.html, /Only fingerprints go on the Clockchain ledger/);
     assert.match(consent.html, /value="create"/);
@@ -1306,6 +1308,78 @@ test("accounts: files are private, keep only the key's hash, and an unusable sto
     }
   } finally {
     await working.close();
+  }
+});
+
+test("accounts: every page states what the app may do, and every account page and POST keeps the frame, token and Origin protections", async () => {
+  const accountsDir = path.join(tempDir("protect"), "accounts");
+  const h = await harness({ accountsDir });
+  try {
+    const person = await accountFor(h.url);
+    const fresh = await openConsent(h.url);
+    const signedIn = await openConsent(h.url, { cookie: person.cookie });
+    const tools = /can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps\./;
+    const pool = /Its writes are paid from Clockchain’s free testnet pool, not by you\./;
+    // The create page (with the key sign-in form) and the signed-in Approve page both say it plainly.
+    for (const page of [fresh, signedIn]) {
+      assert.match(page.html, tools);
+      assert.match(page.html, pool);
+    }
+    assert.match(fresh.html, /name="key" type="password"/, "the sign-in form is on the same page");
+    // Every page the account flow renders: no-store, no framing, no script, form-action limited to us and the app.
+    const pages = [
+      ["create page", fresh.page, fresh.html],
+      ["signed-in page", signedIn.page, signedIn.html],
+      ["key page", person.res, person.html],
+    ];
+    for (const [decision, fields, cookie] of [
+      ["create", { name: "" }, undefined],
+      ["signin", { key: "cck_wrong" }, undefined],
+      ["switch", {}, person.cookie],
+      ["approve", { grant: "cc_grant_x.y" }, person.cookie],
+    ]) {
+      const res = await decide(h.url, signedIn.requestToken, decision, { origin: PUBLIC, ...(cookie ? { cookie } : {}) }, fields);
+      pages.push([`${decision} re-render`, res, await res.text()]);
+    }
+    for (const [label, res, html] of pages) {
+      assert.equal(res.headers.get("x-frame-options"), "DENY", label);
+      const csp = res.headers.get("content-security-policy");
+      assert.match(csp, /default-src 'none'/, label);
+      assert.match(csp, /frame-ancestors 'none'/, label);
+      assert.match(csp, /form-action 'self' https:\/\/chatgpt\.com(;|$)/, label);
+      assert.doesNotMatch(csp, /script-src|unsafe-inline/, label);
+      assert.equal(res.headers.get("cache-control"), "no-store", label);
+      assert.equal(res.headers.get("referrer-policy"), "same-origin", label);
+      assert.doesNotMatch(html, /<script|<iframe|http-equiv/i, label);
+      for (const form of html.match(/<form[^>]*>/g) ?? []) assert.match(form, /^<form method="post" action="\/oauth\/authorize"/, `${label}: ${form}`);
+      assert.equal((html.match(/<form/g) ?? []).length, (html.match(/name="request" value="cc_req_/g) ?? []).length, `${label}: every form carries the signed request`);
+    }
+    // Every account POST needs a valid signed request token: missing, tampered or expired -> a page, nothing else.
+    const before = readdirSync(path.join(accountsDir, "a")).length;
+    const tampered = tamper(signedIn.requestToken, "cc_req_", (b) => { b.ru = "https://evil.example/cb"; });
+    for (const [decision, fields, cookie] of [
+      ["create", { name: "Mallory" }, undefined],
+      ["signin", { key: person.key }, undefined],
+      ["continue", { grant: person.grant }, undefined],
+      ["approve", { grant: signedIn.grant }, person.cookie],
+      ["switch", {}, person.cookie],
+    ]) {
+      for (const requestToken of ["", tampered, `${signedIn.requestToken}x`]) {
+        const res = await decide(h.url, requestToken, decision, { origin: PUBLIC, ...(cookie ? { cookie } : {}) }, fields);
+        assertErrorPage(res, await res.text(), { status: 400, mustNotMention: ["evil.example"] });
+        assert.equal(res.headers.get("set-cookie"), null, `${decision}: no cookie`);
+      }
+    }
+    h.advance(10 * 60_000);
+    for (const [decision, fields, cookie] of [["create", { name: "Late" }], ["signin", { key: person.key }], ["approve", { grant: signedIn.grant }, person.cookie]]) {
+      const res = await decide(h.url, fresh.requestToken, decision, { origin: PUBLIC, ...(cookie ? { cookie } : {}) }, fields);
+      assert.equal(res.status, 400, `${decision} after the request token expired`);
+      assert.equal(res.headers.get("set-cookie"), null);
+    }
+    assert.equal(readdirSync(path.join(accountsDir, "a")).length, before, "no account was created");
+    assert.equal(h.logs.filter((e) => e.event === "oauth_approved").length, 0, "nothing was approved");
+  } finally {
+    await h.close();
   }
 });
 
