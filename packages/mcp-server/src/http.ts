@@ -482,6 +482,24 @@ export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promis
  */
 export const isAccountKey = (value: string): boolean => value.startsWith("cck_");
 
+/** An account key anywhere in a value: quoted, in brackets, or joined with another value (follow-up finding 6). */
+const ACCOUNT_KEY_INSIDE = /cck_[A-Za-z0-9_-]{32}/;
+const CREDENTIAL_HEADERS = new Set(["authorization", "x-api-key", "x-clockchain-api-key"]);
+
+/**
+ * True when any credential header line (every occurrence, read from the raw headers) carries an account key: a value
+ * or Bearer token that starts with cck_, or cck_ followed by 32 key characters anywhere in it.
+ */
+export function presentsAccountKey(rawHeaders: readonly string[]): boolean {
+  for (let i = 0; i + 1 < rawHeaders.length; i += 2) {
+    if (!CREDENTIAL_HEADERS.has(rawHeaders[i].toLowerCase())) continue;
+    const value = rawHeaders[i + 1].trim();
+    const bearer = /^Bearer\s+(.+)$/i.exec(value)?.[1].trim() ?? "";
+    if (isAccountKey(value) || isAccountKey(bearer) || ACCOUNT_KEY_INSIDE.test(value)) return true;
+  }
+  return false;
+}
+
 /**
  * The 401 for an account key presented as an MCP or Clockchain credential. It is refused before the bring-your-own
  * fallback, so an account key can never be forwarded to the gateway.
@@ -1746,14 +1764,11 @@ export async function runHttp(): Promise<Server> {
     //      Clockchain key pasted into x-api-key — now just works; the gateway is
     //      the real gate and rejects a bad key on the first tool call).
     //   4. No credential at all -> self-documenting 401.
-    // An account key (cck_) in any credential slot is refused first: it must never be taken as a BYO
-    // Clockchain key and forwarded to the gateway.
-    {
-      const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(req.headers.authorization))?.[1].trim() ?? "";
-      if ([firstHeader(req.headers["x-api-key"]).trim(), bearer, firstHeader(req.headers["x-clockchain-api-key"]).trim()].some(isAccountKey)) {
-        writeAccountKeyRefused(res, oauth?.challenge(pathOf(req.url), true));
-        return;
-      }
+    // An account key (cck_) in any credential header, however it is wrapped, is refused first: it must never be
+    // taken as a BYO Clockchain key and forwarded to the gateway.
+    if (presentsAccountKey(req.rawHeaders)) {
+      writeAccountKeyRefused(res, oauth?.challenge(pathOf(req.url), true));
+      return;
     }
     let byo = clockchainOverrides(req.headers);
     // Verify auth ONCE here; reuse the verified self-serve payload below for the

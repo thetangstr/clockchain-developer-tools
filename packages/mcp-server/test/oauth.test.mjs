@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, u
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { runHttp, signedTokenSubject } from "../dist/http.js";
+import { runHttp, signedTokenSubject, presentsAccountKey } from "../dist/http.js";
 import { createOAuthHandler, loadOAuthConfig } from "../dist/oauth.js";
 import { durableExpiringSet } from "../dist/oauth-replay.js";
 import { ACCT_PATTERN, mintToken, verifyToken } from "../dist/token.js";
@@ -1434,6 +1434,12 @@ test("account keys are refused on /mcp in every credential slot and never reach 
           { "x-clockchain-api-key": accountKey },
           { "x-api-key": STATIC_TOKEN, "x-clockchain-api-key": accountKey },
           { "x-api-key": "cck_short" },
+          // Wrapped (follow-up finding 6, the review's p2): quotes, brackets, joined with another value.
+          { "x-api-key": `"${accountKey}"` },
+          { "x-api-key": `<${accountKey}>` },
+          { "x-clockchain-api-key": `'${accountKey}'` },
+          { authorization: `Bearer "${accountKey}"` },
+          { "x-api-key": `junk, ${accountKey}` },
         ]) {
           const res = await mcpPost(s.url, getTimestamp, headers);
           assert.equal(res.status, 401, JSON.stringify(headers));
@@ -1506,6 +1512,16 @@ test("accounts: an unreadable record answers 503, keeps the cookie and is quaran
   } finally {
     await later.close();
   }
+});
+
+test("presentsAccountKey reads every credential header line, so a repeated header cannot hide a key", () => {
+  const key = `cck_${"Z".repeat(32)}`;
+  assert.equal(presentsAccountKey(["x-api-key", "junk", "X-Api-Key", key]), true);
+  assert.equal(presentsAccountKey(["Authorization", `Bearer ${key}`]), true);
+  assert.equal(presentsAccountKey(["authorization", "Bearer cck_short"]), true, "a Bearer token starting cck_");
+  assert.equal(presentsAccountKey(["x-clockchain-api-key", `prefix-${key}-suffix`]), true);
+  assert.equal(presentsAccountKey(["x-other", key, "x-api-key", "fine"]), false, "only credential headers count");
+  assert.equal(presentsAccountKey(["x-api-key", "my-cck_-like-but-short"]), false);
 });
 
 test("accounts: survive a restart (same state directory): the cookie still signs in, the key still works, same acct", async () => {
