@@ -83,7 +83,7 @@ import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/ser
 import { createShadowHttpHandler, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
-import { guardResponseBuffer, isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
+import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
 
 /**
  * HTTP entry point (secondary; stdio is primary).
@@ -450,7 +450,6 @@ export function rateLimitCost(body: unknown): number {
 }
 
 /** Logged when a response is dropped because its client stopped reading (no request detail, just the surface). */
-const logUnreadResponse = (surface: string) => () => console.warn(JSON.stringify({ event: "response_dropped_unread", surface }));
 
 export function readJsonBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -1453,7 +1452,6 @@ export async function runHttp(): Promise<Server> {
     }
 
     if (pathOf(req.url) === "/connect/mcp") {
-      guardResponseBuffer(res, logUnreadResponse("connect_mcp"));
       try {
         await getStandaloneHandshakeHandler()(req, res);
       } catch {
@@ -1531,8 +1529,6 @@ export async function runHttp(): Promise<Server> {
     // /shadow/* falls through to exactly the handling it had before Shadow existed (landing page, /mcp, 401).
     // Enabled but unable to open its state directory: 503.
     if (shadowConfig.enabled && (pathOf(req.url) === "/shadow" || pathOf(req.url).startsWith("/shadow/"))) {
-      // The capability links carry their own bounds; the MCP endpoint gets the unsent-bytes guard.
-      if (pathOf(req.url) === "/shadow/mcp") guardResponseBuffer(res, logUnreadResponse("shadow_mcp"));
       try {
         if (!shadowHandler) throw new Error("shadow unavailable");
         await shadowHandler(req, res);
@@ -1916,7 +1912,6 @@ export async function runHttp(): Promise<Server> {
         void server.close();
       });
       await server.connect(transport);
-      guardResponseBuffer(res, logUnreadResponse("mcp"));
       await transport.handleRequest(req, res, parsedBody);
     } catch (err) {
       console.error("[clockchain-mcp] http request error:", err);

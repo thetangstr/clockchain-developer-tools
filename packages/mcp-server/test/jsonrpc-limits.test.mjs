@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { runHttp, rateLimitCost } from "../dist/http.js";
-import { MAX_BATCH_MESSAGES, guardResponseBuffer } from "../dist/jsonrpc-limits.js";
+import { MAX_BATCH_MESSAGES } from "../dist/jsonrpc-limits.js";
 
 const STATIC = "static-batch-token";
 const KEYS = ["PORT", "MCP_PORT", "MCP_AUTH_TOKENS", "MCP_TOKEN_SIGNING_SECRET", "MCP_RATE_PER_MIN", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_STATE_DIR", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "HANDSHAKE_STATE_DIR"];
@@ -163,33 +163,5 @@ test("p6/p6b: non-reading clients sending huge batches get a small 400 and the s
     sockets.forEach((x) => x.destroy());
   } finally {
     await s.close();
-  }
-});
-
-test("the unsent-bytes guard drops a connection whose client stops reading, and leaves readers alone", async () => {
-  let dropped = 0;
-  let serverSideClosed;
-  const big = new Promise((r) => { serverSideClosed = r; });
-  const server = createServer((req, res) => {
-    guardResponseBuffer(res, () => { dropped++; }, 256 * 1024);
-    if (req.url === "/big") req.socket.on("close", () => serverSideClosed(true));
-    res.writeHead(200, { "content-type": "application/octet-stream" });
-    res.end(Buffer.alloc(req.url === "/small" ? 64 * 1024 : 4 * 1024 * 1024, 120));
-  }).listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const sock = net.connect(server.address().port, "127.0.0.1");
-  try {
-    const small = await fetch(`http://127.0.0.1:${server.address().port}/small`);
-    assert.equal((await small.arrayBuffer()).byteLength, 64 * 1024, "a reader gets the whole response");
-    sock.pause(); // never reads
-    sock.on("error", () => {});
-    sock.write("GET /big HTTP/1.1\r\nHost: x\r\n\r\n");
-    const closed = await Promise.race([big, new Promise((r) => setTimeout(() => r(false), 3000))]);
-    assert.equal(closed, true, "the server dropped its side of the non-reading client's connection");
-    assert.equal(dropped, 1);
-  } finally {
-    sock.destroy();
-    server.closeAllConnections?.();
-    await new Promise((r) => server.close(r));
   }
 });
