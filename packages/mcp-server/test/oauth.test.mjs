@@ -1338,10 +1338,12 @@ test("accounts: every page states what the app may do, and every account page an
     const signedIn = await openConsent(h.url, { cookie: person.cookie });
     const tools = /can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps\./;
     const pool = /Its writes are paid from Clockchain’s free testnet pool, not by you\./;
+    const shadow = /<li>ChatGPT can read and add to every Shadow record in this account, including records made from other apps\.<\/li>/;
     // The create page (with the key sign-in form) and the signed-in Approve page both say it plainly.
     for (const page of [fresh, signedIn]) {
       assert.match(page.html, tools);
       assert.match(page.html, pool);
+      assert.match(page.html, shadow, "follow-up finding 3: every Shadow record, from every app");
     }
     assert.match(fresh.html, /name="key" type="password"/, "the sign-in form is on the same page");
     // Every page the account flow renders: no-store, no framing, no script, form-action limited to us and the app.

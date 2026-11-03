@@ -355,6 +355,7 @@ function appFacts(app: string, redirectHost: string): string {
 <h2>If you allow it</h2>
 <ul>
 <li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
+<li>${app} can read and add to every Shadow record in this account, including records made from other apps.</li>
 <li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>
 <li>Shadow keeps the records of your agents’ work for 30 days.</li>
 <li>Only fingerprints go on the Clockchain ledger, never the content itself.</li>
