@@ -164,10 +164,10 @@ for (const [label, env] of [["with no logging flag", {}], ["with SHADOW_PREVIEW_
       // The sign-in pages for a listed endpoint say what happens there.
       for (const p of [PLAIN, CHAT]) {
         const page = await openPage(s.url, `${PUBLIC}${p}`);
-        assert.doesNotMatch(page.html, /logs its chats/, p);
+        assert.doesNotMatch(page.html, /told to log its chats/, p);
         assert.match(page.html, /Shadow records a task only when you ask for it, in that chat\./, p);
       }
-      assert.doesNotMatch(a.keyHtml, /logs its chats/);
+      assert.doesNotMatch(a.keyHtml, /told to log its chats/);
 
       // Discovery: the same, and it never names a preview endpoint.
       for (const [name, text] of Object.entries(await pagesOf(s.url))) {
@@ -225,10 +225,10 @@ test("preview endpoints: logging on by default, said on their own sign-in pages,
   const s = await boot({ SHADOW_PREVIEW_AUTO_LOG: "1" });
   try {
     const a = await signUp(s.url, PREVIEW);
-    assert.match(a.consentHtml, /Once connected, Claude logs its chats and tool activity to Clockchain Shadow by default/);
-    assert.match(a.keyHtml, /Once connected, Claude logs its chats/);
+    assert.match(a.consentHtml, /Once connected, Claude is told to log its chats and tool activity to Clockchain Shadow by default/);
+    assert.match(a.keyHtml, /Once connected, Claude is told to log its chats/);
     const chatPage = await openPage(s.url, `${PUBLIC}${PREVIEW_CHAT}`);
-    assert.match(chatPage.html, /Once connected, Claude logs its chats/);
+    assert.match(chatPage.html, /Once connected, Claude is told to log its chats/);
     assert.doesNotMatch(chatPage.html, /name="name"/, "the chat preview has the one-click create page");
 
     for (const [p, tok, tools] of [
@@ -333,9 +333,9 @@ test("SHADOW_AUTO_LOG=1: the two main paths log by default as before, and a sign
   const s = await boot({ SHADOW_AUTO_LOG: "1" });
   try {
     const a = await signUp(s.url);
-    assert.match(a.consentHtml, /Once connected, Claude logs its chats/);
+    assert.match(a.consentHtml, /Once connected, Claude is told to log its chats/);
     assert.doesNotMatch(a.consentHtml, /only when you ask/);
-    assert.match((await openPage(s.url)).html, /Once connected, Claude logs its chats/);
+    assert.match((await openPage(s.url)).html, /Once connected, Claude is told to log its chats/);
     for (const p of [PLAIN, CHAT]) {
       assert.ok((await instructionsOf(s.url, p, a.token)).startsWith(AUTO_LOG_INSTRUCTIONS), p);
       assert.ok((await toolsOf(s.url, p, a.token)).some((t) => t.name === "shadow_log_step"), p);
@@ -346,10 +346,31 @@ test("SHADOW_AUTO_LOG=1: the two main paths log by default as before, and a sign
   }
 });
 
+test("the consent line is only on a sign-in for an endpoint that logs by default, says the app may not start unasked, and never says it does log", async () => {
+  const LINE = /told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off\. Some apps only start when you ask\./;
+  for (const [env, logging, asked] of [
+    [{ SHADOW_AUTO_LOG: "1" }, [PLAIN, CHAT], ["/mcp"]],
+    [{ SHADOW_PREVIEW_AUTO_LOG: "1" }, [PREVIEW, PREVIEW_CHAT], ["/mcp", PLAIN, CHAT]],
+    [{}, [], ["/mcp", PLAIN, CHAT]],
+  ]) {
+    const s = await boot(env);
+    try {
+      for (const p of logging) {
+        const { html } = await openPage(s.url, `${PUBLIC}${p}`);
+        assert.match(html, LINE, p);
+        assert.doesNotMatch(html, /Claude logs its/, p);
+      }
+      for (const p of asked) assert.doesNotMatch((await openPage(s.url, `${PUBLIC}${p}`)).html, /told to log|logs its chats/, `${p} with ${JSON.stringify(env)}`);
+    } finally {
+      await s.close();
+    }
+  }
+});
+
 test("a sign-in with no resource isn't told logging is on unless every endpoint logs", async () => {
   const s = await boot({ SHADOW_PREVIEW_AUTO_LOG: "1" });
   try {
-    assert.doesNotMatch((await openPage(s.url)).html, /logs its chats/);
+    assert.doesNotMatch((await openPage(s.url)).html, /told to log its chats/);
   } finally {
     await s.close();
   }

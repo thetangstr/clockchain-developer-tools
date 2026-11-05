@@ -192,9 +192,9 @@ test("flag off (unset, 0 or true): no logging tools, the person asks, and the li
       assert.ok((await init(CHAT)).startsWith(`${ASKED_INSTRUCTIONS}\n`));
       // The sign-in page: no logging line, and the same stylesheet hash.
       const page = await openPage(s.url);
-      assert.doesNotMatch(page.html, /logs its chats/);
+      assert.doesNotMatch(page.html, /told to log its chats/);
       assert.match(page.page.headers.get("content-security-policy"), new RegExp(PINNED.createPageStyleHash.replace(/[+/]/g, "\\$&")));
-      assert.doesNotMatch(a.keyHtml, /logs its chats/);
+      assert.doesNotMatch(a.keyHtml, /told to log its chats/);
       // The new tools aren't there, shadow_record ignores any setting, and the limits are the old ones.
       assert.match(await (await post(s.url, PLAIN, rpcBody("tools/call", { name: "shadow_log_step", arguments: { kind: "note", content: "x" } }), a.token)).text(), /Tool shadow_log_step not found/);
       const started = await tool(s.url, PLAIN, a.token, "shadow_start_session", { title: "t" });
@@ -752,7 +752,7 @@ test("owner isolation: a session_id from another account is SHADOW_NOT_FOUND, an
 });
 
 test("consent: with the flag on, every sign-in page says it in the open and in What this allows; the style hash holds", async () => {
-  const LINE = /<strong>Once connected, Claude logs its chats and tool activity to Clockchain Shadow by default, until you turn it off\.<\/strong> Records are kept 30 days, and anyone holding a record’s link can read them\./;
+  const LINE = /<strong>Once connected, Claude is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off\. Some apps only start when you ask\.<\/strong> Records are kept 30 days, and anyone holding a record’s link can read them\./;
   const s = await boot(on());
   try {
     const visible = (html) => html.slice(0, html.indexOf('<details class="more">'));
@@ -767,7 +767,7 @@ test("consent: with the flag on, every sign-in page says it in the open and in W
     assert.ok(signedIn.grant, "the signed-in page");
     for (const [label, page] of [["create", create], ["one-click", oneClick], ["signed in", signedIn]]) {
       assert.match(visible(page.html), LINE, `${label}: visible without opening anything`);
-      assert.match(page.html, /<li>Once connected, Claude logs its chats and tool activity to Clockchain Shadow by default, until you turn it off\. Records are kept 30 days, and anyone holding a record’s link can read them\.<\/li>/, `${label}: in What this allows`);
+      assert.match(page.html, /<li>Once connected, Claude is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off\. Some apps only start when you ask\. Records are kept 30 days, and anyone holding a record’s link can read them\.<\/li>/, `${label}: in What this allows`);
       styleOk(page.page, page.html);
     }
     assert.doesNotMatch(oneClick.html, /<details[^>]*>[\s\S]*<strong>Once connected/, "the visible line isn't inside a fold");
@@ -777,7 +777,7 @@ test("consent: with the flag on, every sign-in page says it in the open and in W
     const c = await evil.json();
     const q = new URLSearchParams({ response_type: "code", client_id: c.client_id, redirect_uri: CLAUDE_CB, code_challenge: "a".repeat(43), code_challenge_method: "S256" });
     const html = await (await fetch(`${s.url}/oauth/authorize?${q}`)).text();
-    assert.ok(html.includes("Once connected, &lt;b&gt;Evil&lt;/b&gt; logs its chats"));
+    assert.ok(html.includes("Once connected, &lt;b&gt;Evil&lt;/b&gt; is told to log its chats"));
     assert.equal(html.includes("<b>Evil"), false);
   } finally {
     await s.close();

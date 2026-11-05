@@ -647,7 +647,10 @@ export async function runHttp(): Promise<Server> {
         ...(shadowPreview ? { extraPaths: [PREVIEW_PATH] } : {}),
         // Every sign-in page says plainly how logging works for the endpoint it signs in to.
         ...(shadowAutoLog ? { autoLog: true } : {}),
-        ...(shadowPreview ? { autoLogPaths: shadowPreviewChatPath ? [PREVIEW_PATH, shadowPreviewChatPath] : [PREVIEW_PATH] } : {}),
+        autoLogPaths: [
+          ...(shadowAutoLog ? ["/shadow/mcp", ...(shadowChatPath ? [shadowChatPath] : [])] : []),
+          ...(shadowPreview ? [PREVIEW_PATH, ...(shadowPreviewChatPath ? [shadowPreviewChatPath] : [])] : []),
+        ],
         ...(shadowAtStart.enabled ? { shadowAsked: true } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
       })

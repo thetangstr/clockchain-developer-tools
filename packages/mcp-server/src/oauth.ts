@@ -187,9 +187,9 @@ export interface OAuthOptions {
   chatPaths?: readonly string[];
   /** More MCP paths, served and challenged like /mcp and /shadow/mcp (SHADOW_PREVIEW_AUTO_LOG: the preview endpoint). */
   extraPaths?: readonly string[];
-  /** SHADOW_AUTO_LOG=1: the sign-in pages say that the app logs its chats and tool activity by default once connected. */
+  /** SHADOW_AUTO_LOG=1: a sign-in with no resource says the app is told to log by default, as it may be for any endpoint. */
   autoLog?: boolean;
-  /** SHADOW_PREVIEW_AUTO_LOG=1: the same, but only on a sign-in for one of these MCP paths (its `resource`). */
+  /** The MCP paths that log by default: a sign-in for one of them (its `resource`) says so, and one for any other path doesn't. */
   autoLogPaths?: readonly string[];
   /** Hosted Shadow is on: where logging isn't on by default, the small print says Shadow records only when asked. */
   shadowAsked?: boolean;
@@ -502,7 +502,7 @@ function appLine(app: string, redirectHost: string): string {
 
 /** The most important thing a person agrees to when logging is on by default: never folded away. */
 function loggingConsent(app: string, tag: "p class=\"who\"" | "p"): string {
-  return `<${tag}><strong>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off.</strong> Records are kept 30 days, and anyone holding a record’s link can read them.</p>`;
+  return `<${tag}><strong>Once connected, ${app} is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off. Some apps only start when you ask.</strong> Records are kept 30 days, and anyone holding a record’s link can read them.</p>`;
 }
 
 /** The small print: testnet, then what allowing means (the reviewed wording, unchanged), folded. */
@@ -512,7 +512,7 @@ function smallPrint(app: string, redirectHost: string, autoLog?: boolean, shadow
 <details class="more">
 <summary>What this allows</summary>
 <ul>${autoLog ? `
-<li>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}${!autoLog && shadowAsked ? `
+<li>Once connected, ${app} is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off. Some apps only start when you ask. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}${!autoLog && shadowAsked ? `
 <li>Shadow records a task only when you ask for it, in that chat.</li>` : ""}
 <li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
 <li>${app} can read and add to every Shadow record in this account, including records made from other apps.</li>
@@ -792,8 +792,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   /** A sign-in started by a chat endpoint's 401 (its resource): the create page needs no name. */
   const fromChat = (request: RequestBlob): boolean => request.rs !== undefined && chatResources.has(request.rs);
   const autoLogResources = new Set((options.autoLogPaths ?? []).map((p) => `${base}${p}`));
-  /** Whether the endpoint this sign-in is for logs by default. No `resource`: only if every endpoint does (SHADOW_AUTO_LOG). */
-  const logsByDefault = (request: RequestBlob): boolean => options.autoLog === true || (request.rs !== undefined && autoLogResources.has(request.rs));
+  /** Whether the endpoint this sign-in is for logs by default. No endpoint named: only with SHADOW_AUTO_LOG, as it may be one that does. */
+  const logsByDefault = (request: RequestBlob): boolean =>
+    request.rs === undefined || request.rs === `${base}/` ? options.autoLog === true : autoLogResources.has(request.rs);
   const resourceHrefs = new Set([`${base}/`, ...mcpPaths.map((p) => `${base}${p}`)]);
   /** undefined = absent; null = not one of ours; else the normalized href. */
   function resourceParam(values: string[]): string | undefined | null {
