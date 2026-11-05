@@ -583,7 +583,7 @@ fi
 export PORT=8080
 export MCP_TRANSPORT=http
 export MCP_REQUIRE_AUTH=1
-export MCP_RATE_PER_MIN=30
+export MCP_RATE_PER_MIN=120
 export MCP_LOG_BUDGET=5000
 export MCP_TOKEN_MINT_PER_HOUR=10
 export CLOCKCHAIN_CLIENT_ID=thetangstr@gmail.com
