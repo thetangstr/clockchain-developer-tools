@@ -277,7 +277,9 @@ class ByteLru {
 }
 
 /** What a link body depends on: the steps (append-only, so the count), the checkpoint, and the queued checkpoints. */
-function linkKey(kind: "packet" | "summary", meta: SessionMeta): string {
+type LinkKind = "packet" | "summary" | "log" | "log-json";
+
+function linkKey(kind: LinkKind, meta: SessionMeta): string {
   const cp = meta.checkpoint;
   const queued = meta.outbox.filter((r) => r.kind === "checkpoint").map((r) => r.hash).join(",");
   return `${kind}:${meta.sessionId}:${meta.seq}:${cp?.hash ?? "-"}:${cp?.body.count ?? -1}:${queued}`;
@@ -330,8 +332,110 @@ function stepSummary(kind: RecordKind, content: unknown): string {
   return (chars.length > 80 ? chars.slice(0, 79).join("") + "…" : text).toWellFormed();
 }
 
+/** One step as the tables and summaries show it: its kind and a short title, never its content. */
+type StepRow = { seq: number; kind: string; title: string; hash: string };
+
+const MAX_TURN_ROWS = 30;
+const MAX_SUMMARY_ROWS = 100;
+const LEDGER_HASH_NOTE = "The ledger hash is the anchored checkpoint's hash, which is what a ledger lookup returns. It covers every step up to and including that one.";
+
+/** A name safe to show: secrets were redacted before the step was recorded, and these characters can't break a table. */
+const shownName = (v: unknown, otherwise: string) => (typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,63}$/.test(v) ? v : otherwise);
+
+function stepRow(e: ShadowEvent): StepRow {
+  const p = (e.body.payload ?? {}) as { tool?: unknown; path?: unknown; isError?: unknown; note?: unknown };
+  const [kind, title] =
+    e.body.kind === "task.assigned" ? ["task", "the person's request"]
+      : e.body.kind === "agent.prompt" ? ["prompt", "the person's message"]
+        : e.body.kind === "agent.message" ? (p.note === true ? ["note", "agent's note"] : ["message", "message shown"])
+          : e.body.kind === "agent.tool.call" ? ["tool_call", shownName(p.tool, "a tool")]
+            : e.body.kind === "agent.tool.result" ? ["tool_result", `${shownName(p.tool, "a tool")}${p.isError === true ? " (error)" : ""}`]
+              : ["file", shownName(typeof p.path === "string" ? p.path.split(/[\\/]/).pop() : undefined, "a file")];
+  return { seq: e.body.seq, kind, title, hash: e.hash };
+}
+
+/** The steps since the latest prompt or task, that step included: at most the last MAX_TURN_ROWS, and how many came before. */
+function turnRows(events: ShadowEvent[]): { rows: StepRow[]; earlier: number } {
+  const steps = events.filter((e) => AGENT_KINDS.has(e.body.kind));
+  let from = steps.length - 1;
+  while (from > 0 && steps[from].body.kind !== "agent.prompt" && steps[from].body.kind !== "task.assigned") from--;
+  const turn = steps.slice(Math.max(from, 0));
+  return { rows: turn.slice(-MAX_TURN_ROWS).map(stepRow), earlier: Math.max(0, turn.length - MAX_TURN_ROWS) };
+}
+
+/** For rows in order: the first anchored checkpoint covering each one. A step with none has none, whatever is queued. */
+function coverage(meta: SessionMeta): (seq: number) => SessionMeta["anchors"][number] | undefined {
+  const anchors = meta.anchors.filter((a) => a.marker === "checkpoint" && a.count !== null).sort((a, b) => a.count! - b.count!);
+  let i = 0;
+  return (seq) => {
+    while (i < anchors.length && anchors[i].count! < seq) i++;
+    return anchors[i];
+  };
+}
+
+const bareHash = (h: string) => h.replace(/^sha256:/, "");
+/** A value from the ledger, in a table cell or inline code: what it says, without anything that would break the markup. */
+const cell = (v: unknown) => String(v).replace(/[\u0000-\u001f`|]/g, "");
+
+function turnTable(meta: SessionMeta, turn: { rows: StepRow[]; earlier: number }): string {
+  const cover = coverage(meta);
+  const rows = turn.rows.map((r) => {
+    const a = cover(r.seq);
+    const anchored = a ? `\`${cell(bareHash(a.hash).slice(0, 12))}\` | ${cell(a.blockHeight)} | \`${cell(a.ledgerId)}\`` : "pending | pending | pending";
+    return `| ${r.kind}: ${r.title} | \`${bareHash(r.hash).slice(0, 12)}\` | ${anchored} |`;
+  });
+  const n = turn.earlier;
+  return [
+    ...(n ? [`${n} earlier ${n === 1 ? "step" : "steps"} in this turn ${n === 1 ? "is" : "are"} at the viewer link below.`, ""] : []),
+    "| What happened | Step hash | Ledger hash | Block | Ledger ID |", "|---|---|---|---|---|", ...rows,
+    "", LEDGER_HASH_NOTE,
+  ].join("\n");
+}
+
+/** The whole session as hashes and metadata, from its own record. No step content, and nothing a caller can supply. */
+function sessionLog(meta: SessionMeta, events: ShadowEvent[]) {
+  const cover = coverage(meta);
+  const steps = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map(stepRow).map((r) => {
+    const a = cover(r.seq);
+    return { seq: r.seq, kind: r.kind, title: r.title, step_hash: r.hash, status: a ? "anchored" as const : "pending" as const, ledger_hash: a?.hash ?? null, block: a?.blockHeight ?? null, ledger_id: a?.ledgerId ?? null };
+  });
+  const anchored = steps.filter((s) => s.status === "anchored");
+  // Every record this session has on the ledger, as the footer counts them: its start and closing anchors too.
+  const onLedger = meta.anchors.filter((a) => a.blockHeight);
+  return {
+    session_id: meta.sessionId,
+    status: meta.state,
+    expires_at: meta.expiresAt,
+    totals: {
+      steps: steps.length, anchored: anchored.length, pending: steps.length - anchored.length,
+      ledger_records: onLedger.length,
+      first_block: onLedger[0]?.blockHeight ?? null, last_block: onLedger.at(-1)?.blockHeight ?? null,
+    },
+    steps,
+    ledger_hash_note: LEDGER_HASH_NOTE,
+  };
+}
+
+/** The log as text: a list of steps in order, with totals. `max` and `rest` cap the list in a tool result. */
+function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number; rest: string }): string {
+  const t = log.totals;
+  const shown = cap ? log.steps.slice(0, cap.max) : log.steps;
+  const lines = shown.map((s, i) => {
+    const ledger = s.status === "anchored" ? `Ledger hash \`${cell(s.ledger_hash)}\`. Block ${cell(s.block)}. Ledger ID \`${cell(s.ledger_id)}\`.` : "Ledger hash pending. Block pending. Ledger ID pending.";
+    return `${i + 1}. ${s.kind}: ${s.title}. Step hash \`${s.step_hash}\`. ${ledger}`;
+  });
+  const blocks = t.first_block === null ? "Nothing on Clockchain yet." : `On Clockchain: first block ${cell(t.first_block)}, last block ${cell(t.last_block)}, ${t.ledger_records} ledger ${t.ledger_records === 1 ? "record" : "records"}, counting any start or closing anchor.`;
+  return [
+    "**Clockchain Shadow: everything logged in this session**",
+    `Session \`${log.session_id}\`, ${log.status}. ${t.steps} ${t.steps === 1 ? "step" : "steps"}: ${t.anchored} anchored, ${t.pending} pending. ${blocks}`,
+    lines.join("\n"),
+    ...(cap && log.steps.length > shown.length ? [`Showing the first ${shown.length} of ${log.steps.length} steps. The rest are at ${cap.rest}`] : []),
+    LEDGER_HASH_NOTE,
+  ].filter(Boolean).join("\n\n") + "\n";
+}
+
 /** The footer to end a reply with: only what the record really holds, in server-made values (no step content). */
-function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[] }, anchor: LogAnchor, viewer: string, turnSteps?: number): string {
+function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[] }, anchor: LogAnchor, viewer: string, table: string, turnSteps?: number): string {
   const count = (n: number) => `${n} ${n === 1 ? "step" : "steps"}`;
   const heights = meta.anchors.filter((a) => a.blockHeight);
   const latest = meta.anchors.at(-1);
@@ -345,7 +449,7 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
     if (latest) parts.push(`Latest ledger ID: \`${latest.ledgerId}\`.`);
   }
   parts.push(`Viewer: ${viewer}`);
-  const lines = ["---", parts.join(" ")];
+  const lines = ["---", table, parts.join(" ")];
   if (anchor.anchor_status !== "anchored") {
     const one = turnSteps === undefined;
     const said = {
@@ -393,15 +497,15 @@ const escHtml = (s: unknown) => String(s ?? "").replace(/[&<>"'`]/g, (c) => `&#$
  * The viewer's per-step table, added to the library's summary page (which is vendored, and lists receipts only by the
  * step that carries them): each step's own hash, and the block and ledger id of the first anchor that covers it.
  */
-function withStepAnchors(html: string, events: ShadowEvent[]): string {
+function withStepAnchors(html: string, events: ShadowEvent[], cap: string): string {
   const anchors = events.filter((e) => e.body.kind === "clockchain.anchored" && (e.body.payload as any)?.marker === "checkpoint");
   let i = 0;
   const rows = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map((e) => {
     while (i < anchors.length && Number((anchors[i].body.payload as any).checkpoint?.count) < e.body.seq) i++;
     const p = anchors[i]?.body.payload as any;
-    return `<tr><td>${escHtml(e.body.seq)}</td><td>${escHtml(e.body.kind)}</td><td><code>${escHtml(e.hash)}</code></td><td>${p ? escHtml(p.blockHeight) : "not anchored yet"}</td><td>${p ? `<code>${escHtml(p.ledgerId)}</code>` : "none"}</td></tr>`;
+    return `<tr><td>${escHtml(e.body.seq)}</td><td>${escHtml(e.body.kind)}</td><td><code>${escHtml(e.hash)}</code></td><td>${p ? `<code>${escHtml(p.checkpointHash)}</code>` : "not anchored yet"}</td><td>${p ? escHtml(p.blockHeight) : "not anchored yet"}</td><td>${p ? `<code>${escHtml(p.ledgerId)}</code>` : "none"}</td></tr>`;
   }).join("");
-  const table = `<h2>Steps and their anchors</h2><p class="meta">Each anchor is a checkpoint over every step up to it. Steps with the same ledger ID were logged in one call and share that anchor.</p><div class="scroll"><table><tr><th>#</th><th>Step</th><th>Hash</th><th>Block</th><th>Ledger ID</th></tr>${rows}</table></div>\n`;
+  const table = `<h2>Steps and their anchors</h2><p class="meta">Each anchor is a checkpoint over every step up to it. Steps with the same ledger ID were logged in one call and share that anchor. A ledger lookup returns the ledger hash, not the step's own. <a href="${cap}/summary">Summary of every step</a> (<a href="${cap}/summary?format=json">JSON</a>).</p><div class="scroll"><table><tr><th>#</th><th>Step</th><th>Hash</th><th>Ledger hash</th><th>Block</th><th>Ledger ID</th></tr>${rows}</table></div>\n`;
   // Step content is escaped on the page, so this heading can only be the library's own.
   const at = html.indexOf("<h2>Clockchain receipts");
   return at < 0 ? html : html.slice(0, at) + table + html.slice(at);
@@ -422,7 +526,7 @@ export type ServiceOptions = {
   autoLog?: boolean;
 };
 
-type Links = { viewer: string; packet: string };
+type Links = { viewer: string; packet: string; summary?: string };
 
 export class ShadowService {
   readonly store: ShadowStore;
@@ -631,7 +735,7 @@ export class ShadowService {
   }
 
   private links(meta: SessionMeta, base: string): Links {
-    return { viewer: `${base}/shadow/s/${meta.cap}`, packet: `${base}/shadow/p/${meta.cap}.json` };
+    return { viewer: `${base}/shadow/s/${meta.cap}`, packet: `${base}/shadow/p/${meta.cap}.json`, ...(this.autoLog ? { summary: `${base}/shadow/s/${meta.cap}/summary` } : {}) };
   }
 
   // ---- tools ---------------------------------------------------------------------------------------------------------
@@ -829,7 +933,7 @@ export class ShadowService {
       ...(step.runId ? { run_id: step.runId } : {}),
       ...r.anchor,
       viewer: r.viewer,
-      show_user: logFooter(r.meta, r.anchor, r.viewer),
+      show_user: logFooter(r.meta, r.anchor, r.viewer, r.table),
       ...(r.started ? { note: NEW_SESSION_NOTE } : {}),
     };
   }
@@ -847,7 +951,7 @@ export class ShadowService {
         ...r.anchor,
         viewer: r.viewer,
       },
-      show_user: logFooter(r.meta, r.anchor, r.viewer, r.steps.length),
+      show_user: logFooter(r.meta, r.anchor, r.viewer, r.table, r.steps.length),
       ...(r.started ? { note: NEW_SESSION_NOTE } : {}),
     };
   }
@@ -883,7 +987,7 @@ export class ShadowService {
     } else {
       sessionId = sessionIdOf(input.session_id);
     }
-    const made: { steps: LoggedStep[]; target: string | null; refused: { code: string; message: string } | null } = { steps: [], target: null, refused: null };
+    const made: { steps: LoggedStep[]; target: string | null; refused: { code: string; message: string } | null; turn: { rows: StepRow[]; earlier: number } } = { steps: [], target: null, refused: null, turn: { rows: [], earlier: 0 } };
     await this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", `This session is closed, so nothing was recorded. ${START_NEW}`);
       if (meta.agentSteps + steps.length > this.limits.maxStepsPerSession || meta.seq + steps.length + 3 > this.maxEvents)
@@ -910,13 +1014,18 @@ export class ShadowService {
           const runId = this.runFor(meta, s.kind, agent, input.runInput);
           const event = this.appendStep(meta, s.spec.kind, agent, s.spec.payload, { boundary: s.spec.boundary, agentRunId: runId }, true);
           made.steps.push({ seq: event.body.seq, hash: event.hash, kind: s.kind, runId, summary: s.summary });
+          // This call's own steps, in case the record can't be read back below.
+          made.turn.rows = [...made.turn.rows, stepRow(event)].slice(-MAX_TURN_ROWS);
         }
       } finally {
         if (made.steps.length) this.store.writeMeta(meta);
       }
       // From here on the steps are recorded: whatever happens to the anchor is reported, never an error.
       try {
-        const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
+        const cp = await this.withEvents(meta, (events) => {
+          made.turn = turnRows(events);
+          return checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now());
+        });
         meta.checkpoint = cp;
         made.target = cp.hash;
         made.refused = this.queueCheckpoint(meta, cp);
@@ -928,7 +1037,7 @@ export class ShadowService {
     await this.drain(ownerKey, sessionId, { deadline: Math.max(budgetEnd, Date.now() + 2_000), stopOnFailure: true });
     return this.session(ownerKey, sessionId, (meta) => {
       const anchor = this.logAnchor(meta, made.target, made.refused);
-      return { sessionId, started, steps: made.steps, anchor, viewer: this.links(meta, base).viewer, meta: { agentSteps: meta.agentSteps, anchors: meta.anchors.map((a) => ({ blockHeight: a.blockHeight, ledgerId: a.ledgerId })) } };
+      return { sessionId, started, steps: made.steps, anchor, table: turnTable(meta, made.turn), viewer: this.links(meta, base).viewer, meta: { agentSteps: meta.agentSteps, anchors: meta.anchors.map((a) => ({ blockHeight: a.blockHeight, ledgerId: a.ledgerId })) } };
     });
   }
 
@@ -1016,15 +1125,17 @@ export class ShadowService {
     });
     await this.drain(ownerKey, sessionId);
     return this.session(ownerKey, sessionId, async (meta) => {
-      const pin = await this.withEvents(meta, (events) => buildPin(meta, this.latest(meta, events)));
+      const links = this.links(meta, base);
+      const { pin, log } = await this.withEvents(meta, (events) => ({ pin: buildPin(meta, this.latest(meta, events)), log: this.autoLog ? sessionLog(meta, events) : null }));
       this.log("shadow_session_closed", { sessionId, steps: meta.seq, anchors: meta.anchors.length, pending: meta.outbox.length });
       return {
+        ...(log ? { summary: sessionLogText(log, { max: MAX_SUMMARY_ROWS, rest: links.summary ?? links.viewer }), summary_note: "Show this summary to the person in full, as it is." } : {}),
         session_id: sessionId,
         status: "closed",
         steps: meta.seq,
         final_checkpoint: this.anchorView(meta, made.target, made.refused),
         pin,
-        links: this.links(meta, base),
+        links,
         links_note: LINKS_NOTE,
         share: "Send the viewer or packet link to whoever should check this record, and the pin through a different channel.",
       };
@@ -1123,7 +1234,7 @@ export class ShadowService {
    * the same link gets the same Buffer, from a cache bounded in bytes, and concurrent first readers wait on one build.
    * So a crowd of readers costs one copy, not one per reader (security review: OOM from slow-reading link clients).
    */
-  async linkBody(cap: string, kind: "packet" | "summary"): Promise<Buffer | undefined> {
+  async linkBody(cap: string, kind: LinkKind): Promise<Buffer | undefined> {
     const target = this.store.resolveCap(cap);
     if (!target) return undefined;
     let meta: SessionMeta | undefined;
@@ -1143,12 +1254,19 @@ export class ShadowService {
     return build;
   }
 
-  private async buildLink(ownerKey: string, sessionId: string, kind: "packet" | "summary"): Promise<Buffer | undefined> {
+  private async buildLink(ownerKey: string, sessionId: string, kind: LinkKind): Promise<Buffer | undefined> {
     try {
       return await this.session(ownerKey, sessionId, (meta) => {
         const cached = this.linkCache.get(linkKey(kind, meta));
         if (cached) return cached;
         return this.withEvents(meta, async (events) => {
+          if (kind === "log" || kind === "log-json") {
+            const log = sessionLog(meta, events);
+            const body = Buffer.from(kind === "log" ? sessionLogText(log) : JSON.stringify(log, null, 1));
+            this.linkBuildCount++;
+            this.linkCache.set(linkKey(kind, meta), body);
+            return body;
+          }
           const cp = this.latest(meta, events);
           const packet = buildPacket(meta, cp, events, this.network, this.now());
           const pin = buildPin(meta, cp);
@@ -1161,7 +1279,7 @@ export class ShadowService {
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
             const html = hostedViewer(summarize(packet, ownPinReport(report), { packetFile: "packet.json", pinFile: "pin.json" }).html);
-            body = Buffer.from(this.autoLog ? withStepAnchors(html, events) : html);
+            body = Buffer.from(this.autoLog ? withStepAnchors(html, events, meta.cap) : html);
           }
           this.linkBuildCount++;
           this.linkCache.set(linkKey(kind, meta), body);
