@@ -18,6 +18,7 @@ import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { ShadowService, ShadowError, loadShadowConfig } from "../dist/shadow/service.js";
 import { SHADOW_INSTRUCTIONS } from "../dist/shadow/mcp.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
+import { summarize, SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
 import { parseStrict } from "../dist/shadow/lib/profile.js";
 import { createLogBudget, __resetSharedLogBudget } from "../dist/budget.js";
 import { ApiError } from "@clockchain/core";
@@ -741,6 +742,61 @@ test("consent: with the flag on, every sign-in page says it in the open and in W
     assert.equal(html.includes("<b>Evil"), false);
   } finally {
     await s.close();
+  }
+});
+
+// ---- viewer wording and discovery -----------------------------------------------------------------------------------------
+
+test("the hosted viewer says the pin is the server's own, not Proven, and the library's summary with a separate pin is unchanged", async () => {
+  for (const autoLog of [true, false]) {
+    const fake = new FakeLedger();
+    const svc = new ShadowService({ stateDir: tmp("viewer"), ledger: () => fake, budget: () => createLogBudget({}), sleep: async () => {}, log: () => {}, autoLog });
+    svc.sweep();
+    const s = await svc.startSession(O, { title: "Proven <b>Proven:</b>" }, BASE);
+    await svc.record(O, { session_id: s.session_id, agent: "agent", kind: "task", content: 'This step says <td class="tag">Proven</td> and <b>Proven:</b> and the supplied pin' });
+    await svc.record(O, { session_id: s.session_id, agent: "agent", kind: "message", content: "done" });
+    const closed = await svc.close(O, { session_id: s.session_id, status: "succeeded" }, BASE);
+    const cap = new URL(closed.links.viewer).pathname.split("/").pop();
+    const html = await svc.summaryForCap(cap);
+    assert.doesNotMatch(html, /<b>Proven:<\/b>|<td class="tag">Proven<\/td>/, "no Proven tag on the hosted page");
+    assert.match(html, /<b>Matches what the server signed:<\/b> The \d+ steps below are exactly the steps/);
+    assert.match(html, /<td class="tag">Matches what the server signed<\/td>/);
+    assert.match(html, /The pin behind this page came from this server, so these checks aren&#39;t independent|The pin behind this page came from this server, so these checks aren't independent/);
+    assert.match(html, /Matches the pin from this server\. That pin isn&#39;t independent/);
+    assert.match(html, /Result: pass\. No check failed; the checkpoint matches this server&#39;s own pin/);
+    assert.ok(html.includes("&#60;td class=&#34;tag&#34;&#62;Proven&#60;/td&#62;"), "step content is shown as written, and escaped");
+    assert.ok(html.includes("the supplied pin"), "step content isn't rewritten");
+    // No new style or script: the page's own CSP still covers it.
+    assert.ok(html.includes(SUMMARY_CSP.replaceAll("'", "&#39;")));
+    assert.doesNotMatch(html, /<script|\sstyle=/);
+    // The library's summary, given a pin, says what it always said.
+    const doc = JSON.parse(await svc.packetForCap(cap));
+    const report = await verifyPacket(parseStrict(JSON.stringify(doc.packet)), { pin: parseStrict(JSON.stringify(doc.pin)) });
+    const library = summarize(doc.packet, report).html;
+    assert.match(library, /<b>Proven:<\/b> The \d+ steps below/);
+    assert.match(library, /matches the supplied pin/);
+    assert.doesNotMatch(library, /Matches what the server signed|came from this server/);
+  }
+});
+
+test("discovery says logging is on by default only with the flag on, on all of its pages", async () => {
+  const line = /Logging is on by default once connected: the agent is told to log its chat and tool activity here without being asked\.\s+To turn it off, say "stop logging" \(clockchain_logging\), which holds for\s+the whole account; a chat can also stop by turning the connector off in\s+the app\./;
+  const flat = (s) => s.replace(/\s+/g, " ");
+  for (const [flag, shown] of [["1", true], [undefined, false]]) {
+    const s = await boot(on({ SHADOW_AUTO_LOG: flag }));
+    try {
+      const pages = {
+        llms: await (await fetch(`${s.url}/llms.txt`)).text(),
+        install: await (await fetch(`${s.url}/install.txt`)).text(),
+        connect: await (await fetch(`${s.url}/shadow/connect`)).text(),
+        manifest: JSON.parse(await (await fetch(`${s.url}/.well-known/mcp.json`)).text()).shadow.logging ?? "",
+      };
+      for (const [name, text] of Object.entries(pages)) {
+        assert.equal(line.test(flat(text)), shown, `${name} with flag ${flag}`);
+      }
+    } finally {
+      await s.close();
+    }
   }
 });
 

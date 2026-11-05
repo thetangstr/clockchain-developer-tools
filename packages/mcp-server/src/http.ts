@@ -1130,6 +1130,24 @@ export async function runHttp(): Promise<Server> {
   if (shadowConfig.enabled && !oauth && !shadowAllowNonAcct) {
     console.warn(JSON.stringify({ event: "shadow_needs_oauth", note: "hosted Shadow accepts only signed-in accounts; with MCP_OAUTH off nobody can use it" }));
   }
+  // A 401 on /shadow/*: the same status and challenge as /mcp's, but /mcp's body sends an agent to x-api-key and POST
+  // /token, whose key Shadow then refuses. With OAuth on, it says what works here. With OAuth off: /mcp's, unchanged.
+  const shadowUnauthorized = (res: ServerResponse, req?: IncomingMessage): void => {
+    if (!oauth || !req || oauthConfig.kind !== "ready") return mcpUnauthorized(res, req);
+    const base = oauthConfig.publicUrl;
+    res.writeHead(401, { "content-type": "application/json", ...oauth.challenge(pathOf(req.url), presentedApiKey(req.headers) !== "") });
+    res.end(JSON.stringify({
+      error: "unauthorized",
+      message:
+        "Hosted Shadow needs a signed-in Clockchain account (free, no email). Add this endpoint to your MCP client as a " +
+        "connector or remote MCP server with OAuth sign-in; the client starts sign-in from this response's " +
+        "WWW-Authenticate header. A key from POST /token or an MCP token does not work here.",
+      endpoint: `${base}${pathOf(req.url)}`,
+      transport: "http",
+      auth: "oauth",
+      instructions: `${base}/shadow/connect`,
+    }));
+  };
   const shadowAccountRequired = (res: ServerResponse, req: IncomingMessage): void => {
     const base = publicBaseUrl(req.headers);
     const headers: Record<string, string> = { "content-type": "application/json", "cache-control": "no-store" };
@@ -1203,7 +1221,7 @@ export async function runHttp(): Promise<Server> {
       shadowHandler = createShadowHttpHandler({
         service: shadowService,
         authenticate: shadowAuthenticate,
-        unauthorized: mcpUnauthorized,
+        unauthorized: shadowUnauthorized,
         accountRequired: shadowAccountRequired,
         readJsonBody,
         allowCall: (rateKey, body, res) => {
@@ -1250,8 +1268,8 @@ export async function runHttp(): Promise<Server> {
   // The discovery files name Shadow only where a person can use it: it started, and sign-in is on (it takes signed-in
   // accounts only). Anything else serves the plain files, byte for byte. URLs come from MCP_PUBLIC_URL, never the Host.
   const shadowPublicUrl = shadowHandler && oauthConfig.kind === "ready" ? oauthConfig.publicUrl : undefined;
-  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath) : INSTALL_TXT;
-  const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath) : MCP_MANIFEST, null, 2);
+  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : INSTALL_TXT;
+  const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : MCP_MANIFEST, null, 2);
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestStarted = Date.now();

@@ -23,8 +23,10 @@ const KEPT_ACCOUNT = "No email. A lost account key plus cleared cookies loses th
 const CHATGPT_NOTE = "Not yet confirmed in a real ChatGPT account. Some plans may block write tools.";
 const CLAUDE_CODE_NOTE = "Not yet confirmed with a real Claude Code sign-up.";
 
-/** The guide's lines. `base` has no trailing slash. */
-function guideLines(base: string, chatPath: string | undefined): string[] {
+const LOGGING_ON = "Logging is on by default once connected: the agent is told to log its chat and tool activity here without being asked. To turn it off, say \"stop logging\" (clockchain_logging), which holds for the whole account; a chat can also stop by turning the connector off in the app.";
+
+/** The guide's lines. `base` has no trailing slash. `autoLog` is SHADOW_AUTO_LOG=1. */
+function guideLines(base: string, chatPath: string | undefined, autoLog: boolean): string[] {
   const shadow = `${base}${SHADOW_PATH}`;
   const chat = chatPath ? `${base}${chatPath}` : undefined;
   return [
@@ -35,6 +37,7 @@ function guideLines(base: string, chatPath: string | undefined): string[] {
       ? [`  ${shadow}`, "    for ChatGPT and Claude Code", `  ${chat}`, "    for claude.ai: the same tools, plus sign-up from the chat"]
       : [`  ${shadow}`]),
     "",
+    ...(autoLog ? [...wrap(LOGGING_ON).map((l) => l.replace(/^ {2}/, "")), ""] : []),
     "An account is required. It is free, on testnet, and needs no email. The free",
     "key from the command below works on /mcp only. Shadow refuses it with 403",
     "account_required.",
@@ -88,13 +91,13 @@ function wrap(text: string): string[] {
 }
 
 /** GET /shadow/connect, as plain text. */
-export function connectInstructions(base: string, chatPath?: string): string {
-  return ["Hosted Shadow: connect with sign-in", "", ...guideLines(base, chatPath), ""].join("\n");
+export function connectInstructions(base: string, chatPath?: string, autoLog = false): string {
+  return ["Hosted Shadow: connect with sign-in", "", ...guideLines(base, chatPath, autoLog), ""].join("\n");
 }
 
 /** The section /llms.txt and /install.txt carry when Shadow is on. Ends with a blank line. */
-export function shadowInstallSection(base: string, chatPath?: string): string {
-  const body = guideLines(base, chatPath).map((l) => (l ? `  ${l}` : ""));
+export function shadowInstallSection(base: string, chatPath?: string, autoLog = false): string {
+  const body = guideLines(base, chatPath, autoLog).map((l) => (l ? `  ${l}` : ""));
   return [
     "SHADOW — a flight recorder for AI agents, on this same host:",
     ...body,
@@ -105,14 +108,14 @@ export function shadowInstallSection(base: string, chatPath?: string): string {
 }
 
 /** /llms.txt and /install.txt with Shadow: INSTALL_TXT, byte for byte, with one section added. */
-export function installTxtWithShadow(base: string, chatPath?: string): string {
+export function installTxtWithShadow(base: string, chatPath?: string, autoLog = false): string {
   const at = INSTALL_TXT.indexOf(INSERT_BEFORE);
-  const section = shadowInstallSection(base, chatPath);
+  const section = shadowInstallSection(base, chatPath, autoLog);
   return at < 0 ? `${INSTALL_TXT}\n${section}` : `${INSTALL_TXT.slice(0, at)}${section}${INSTALL_TXT.slice(at)}`;
 }
 
 /** /.well-known/mcp.json with Shadow: MCP_MANIFEST, unchanged, with one `shadow` block added at the end. */
-export function manifestWithShadow(base: string, chatPath?: string) {
+export function manifestWithShadow(base: string, chatPath?: string, autoLog = false) {
   const shadow = `${base}${SHADOW_PATH}`;
   const chat = chatPath ? `${base}${chatPath}` : undefined;
   return {
@@ -153,6 +156,7 @@ export function manifestWithShadow(base: string, chatPath?: string) {
         },
       },
       keptWhere: { record: KEPT_RECORD, ledger: KEPT_LEDGER, account: KEPT_ACCOUNT },
+      ...(autoLog ? { logging: LOGGING_ON } : {}),
     },
   };
 }

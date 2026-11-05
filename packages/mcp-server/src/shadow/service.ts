@@ -356,6 +356,30 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
   return lines.join("\n\n");
 }
 
+/**
+ * The hosted viewer checks a packet against the pin this same server made, so its checks aren't independent. The
+ * library's summary, which is vendored and unchanged, is written for a pin that reached the reader separately: here the
+ * report says whose pin it was, and {@link hostedViewer} replaces its "Proven" tag.
+ */
+function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T): T {
+  return {
+    ...report,
+    summary: report.summary.replace("the supplied pin", "this server's own pin"),
+    checks: report.checks.map((c) =>
+      c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." } : c),
+  };
+}
+
+const OWN_PIN_NOTE = `<p class="meta">The pin behind this page came from this server, so these checks aren't independent. For an independent check, run the command at the end of this page with a pin you received separately.</p>`;
+
+/** The summary page with "Proven" (which step content can't produce: it is escaped) saying what was really checked. */
+function hostedViewer(html: string): string {
+  return html
+    .replaceAll("<b>Proven:</b>", "<b>Matches what the server signed:</b>")
+    .replaceAll('<td class="tag">Proven</td>', '<td class="tag">Matches what the server signed</td>')
+    .replace("<h2>What this record shows</h2>", `<h2>What this record shows</h2>${OWN_PIN_NOTE}`);
+}
+
 const escHtml = (s: unknown) => String(s ?? "").replace(/[&<>"'`]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /**
@@ -1119,7 +1143,7 @@ export class ShadowService {
             }, null, 1));
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
-            const html = summarize(packet, report, { packetFile: "packet.json", pinFile: "pin.json" }).html;
+            const html = hostedViewer(summarize(packet, ownPinReport(report), { packetFile: "packet.json", pinFile: "pin.json" }).html);
             body = Buffer.from(this.autoLog ? withStepAnchors(html, events) : html);
           }
           this.linkBuildCount++;

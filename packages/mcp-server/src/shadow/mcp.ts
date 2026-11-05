@@ -542,7 +542,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     if (deps.chat && path === deps.chat.path) return mcp(req, res, deps.chat);
     if (path === "/shadow/connect" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
-      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path));
+      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog !== undefined));
       return;
     }
     const view = /^\/shadow\/s\/([A-Za-z0-9_-]{22})$/.exec(path);
