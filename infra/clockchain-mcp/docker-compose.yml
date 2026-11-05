@@ -97,6 +97,8 @@ services:
       SHADOW_ANCHORS_PER_DAY: "${SHADOW_ANCHORS_PER_DAY:-}"
       SHADOW_ANCHORS_PER_SESSION: "${SHADOW_ANCHORS_PER_SESSION:-}"
       SHADOW_LOG_STEPS_PER_MIN: "${SHADOW_LOG_STEPS_PER_MIN:-}"
+      # Emergency rollback only: "allow" lets a caller's own key write on the owned gateway again. Unset refuses.
+      MCP_BYO_WRITES: "${MCP_BYO_WRITES:-}"
       # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
       # MCP_OAUTH=1 exists in SSM ("" == absent == off: no OAuth routes, 401 unchanged).
       # The issuer is MCP_PUBLIC_URL, default https://mcp.clockchain.network (never the Host

@@ -1,4 +1,4 @@
-import { readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
+import { onOwnedGateway, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTools } from "./tools.js";
 import type { KeeperGate } from "./entitlement.js";
@@ -23,7 +23,11 @@ export function buildServer(
   principalId = "stdio",
   agentHandshakeScope?: HandshakeSessionTokenPayload,
 ): McpServer {
-  const config: ClockchainConfig = { ...readConfigFromEnv(), ...(overrides ?? {}) };
+  const merged: ClockchainConfig = { ...readConfigFromEnv(), ...(overrides ?? {}) };
+  // A caller's own key on the owned gateway: the gateway trusts our signature and whatever client id the caller named,
+  // so a key we never issued could write as anyone, outside MCP_LOG_BUDGET. Reads only. MCP_BYO_WRITES=allow undoes it.
+  const byoReadOnly = !!overrides?.apiKey && onOwnedGateway(merged) && (process.env.MCP_BYO_WRITES ?? "").trim() !== "allow";
+  const config: ClockchainConfig = byoReadOnly ? { ...merged, readOnly: true } : merged;
   const server = new McpServer({
     name: "clockchain-mcp",
     version: "0.1.0",
@@ -36,6 +40,7 @@ export function buildServer(
   // `gate` (CLO-48) is the per-request keeper gate wired in regardless of surface.
   registerTools(server, config, {
     delegated: !overrides?.apiKey,
+    byoReadOnly,
     surface,
     gate,
     principalId,
