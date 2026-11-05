@@ -327,7 +327,7 @@ if (process.env.EXPECT_MCP_ONLY === "1") {
 assert.equal(process.env.PORT, "8080");
 assert.equal(process.env.MCP_TRANSPORT, "http");
 assert.equal(process.env.MCP_REQUIRE_AUTH, "1");
-assert.equal(process.env.MCP_RATE_PER_MIN, "30");
+assert.equal(process.env.MCP_RATE_PER_MIN, "120");
 assert.equal(process.env.MCP_LOG_BUDGET, "5000");
 assert.equal(process.env.MCP_TOKEN_MINT_PER_HOUR, "10");
 assert.equal(process.env.CLOCKCHAIN_CLIENT_ID, "thetangstr@gmail.com");
@@ -590,7 +590,7 @@ async function resolvedComposeConfig(extraEnv = {}) {
       PORT: "8080",
       MCP_TRANSPORT: "http",
       MCP_REQUIRE_AUTH: "1",
-      MCP_RATE_PER_MIN: "30",
+      MCP_RATE_PER_MIN: "120",
       MCP_LOG_BUDGET: "5000",
       MCP_TOKEN_MINT_PER_HOUR: "10",
       CLOCKCHAIN_CLIENT_ID: "thetangstr@gmail.com",
