@@ -21,6 +21,7 @@ import {
   type EvidencePackage,
   type PoolHealth,
   type ScheduleApproval,
+  READ_ONLY_KEY_MESSAGE,
 } from "@clockchain/core";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -32,7 +33,7 @@ import { getRuntimeAgentHandshakeInvitationService } from "./agent-handshake/inv
 import type { HandshakeSessionTokenPayload } from "./token.js";
 import { idempotent } from "./idempotency.js";
 import type { KeeperGate } from "./entitlement.js";
-import { assertToolClassified } from "./entitlement.js";
+import { assertToolClassified, BYO_READ_TOOLS } from "./entitlement.js";
 import type { Keeper, Trigger } from "@clockchain/keeper";
 import { getRuntimeKeeper, keeperOwnerWebhookSecret, keeperWebhooksEnabled } from "./keeper-runtime.js";
 
@@ -397,6 +398,8 @@ export function registerTools(
   config: ClockchainConfig,
   opts: {
     delegated?: boolean;
+    /** A caller's own key on the owned gateway: only BYO_READ_TOOLS run (see server.ts). */
+    byoReadOnly?: boolean;
     surface?: "full" | "product";
     gate?: KeeperGate;
     principalId?: string;
@@ -439,6 +442,12 @@ export function registerTools(
     ) => {
       assertToolClassified(name);
       return orig(name, meta, async (...args: unknown[]) => {
+        if (opts.byoReadOnly && !BYO_READ_TOOLS.has(name)) {
+          return {
+            isError: true as const,
+            content: [{ type: "text" as const, text: JSON.stringify({ error: "BYO_WRITE_REFUSED", message: READ_ONLY_KEY_MESSAGE }) }],
+          };
+        }
         if (agentHandshakeScope) {
           const input = (args[0] ?? {}) as Record<string, unknown>;
           let allowed = agentHandshakeScope.tools.includes(name);

@@ -109,3 +109,16 @@ export class NotAnchoredError extends ApiError {
     this.name = "NotAnchoredError";
   }
 }
+
+/** Plain words for a caller whose own key can read but not write here. */
+export const READ_ONLY_KEY_MESSAGE =
+  "This key can't write on this server, so nothing was written. Get a free key with POST /token, or sign in, and " +
+  "send it as x-api-key. Reads still work with this key.";
+
+/** A write on a client configured readOnly: thrown before any network call. */
+export class ReadOnlyClientError extends Error {
+  constructor(message = READ_ONLY_KEY_MESSAGE) {
+    super(message);
+    this.name = "ReadOnlyClientError";
+  }
+}

@@ -21,7 +21,8 @@ checks). They are read from memory, so a scrape doesn't walk the disk.
 
 | Watch | Series | Warn | Act now | What it means at the limit |
 |---|---|---|---|---|
-| Ledger writes | `clockchain_log_budget_used` / `clockchain_log_budget_limit` | 80% | 95% | Anchors stop: steps are still recorded, marked `over_limit`, with no block or ledger ID. `/mcp` writes are refused too. |
+| Shadow ledger writes | `clockchain_shadow_log_budget_used` / `clockchain_shadow_log_budget_limit` | 80% | 95% | Anchors stop: steps are still recorded, marked `over_limit`, with no block or ledger ID. `/mcp` writes carry on. |
+| `/mcp` ledger writes | `clockchain_log_budget_used` / `clockchain_log_budget_limit` | 80% | 95% | `/mcp` writes are refused. Shadow's anchors carry on. |
 | Shadow storage | `clockchain_shadow_state_bytes` / `clockchain_shadow_state_bytes_cap` | 70% | 90% | At 100% no new session starts. At 125% no new step is recorded. Existing sessions can still close. |
 | Accounts | `clockchain_oauth_accounts` / `clockchain_oauth_accounts_cap` | 80% | 95% | At 100% sign-up is refused. Accounts already made keep working. |
 | New accounts | rise in `clockchain_oauth_accounts` | over 100 in an hour | over 180 in an hour | The server-wide limit is 200 an hour by default. Accounts are free and have no email, so a spike is probably abuse. |
@@ -33,8 +34,9 @@ checks). They are read from memory, so a scrape doesn't walk the disk.
 ## What to know before acting
 
 **Ledger writes.** `MCP_LOG_BUDGET` is 5000, set in `compose-up.sh`. It counts per process, so a restart or deploy sets the
-count back to 0. That makes it a brake, not a monthly budget. Shadow's anchors and `/mcp`'s writes share it. With logging
-on by default, each step is one write, so a few active preview users can use it up. To get writes moving again, restart
+count back to 0. That makes it a brake, not a monthly budget. Shadow's anchors and `/mcp`'s writes each have their own count
+at that value, so the process's ceiling is twice it, and draining one doesn't stop the other. With logging on by default,
+each step is one write, so a few active users can use up Shadow's. To get writes moving again, restart
 `mcp`, which resets the count, or raise the number in `compose-up.sh` and deploy. Before doing either, check that the use is
 real and not abuse.
 

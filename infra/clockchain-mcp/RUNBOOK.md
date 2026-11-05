@@ -302,16 +302,17 @@ All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString
 | `SHADOW_ENABLED` | off | `1` serves `/shadow/*`. Anything else: those paths answer as if Shadow didn't exist. |
 | `SHADOW_STATE_DIR` | `/app/state/shadow` | Where records live, on the `mcp_state` volume. |
 | `SHADOW_MAX_BYTES` | 1 GB | All of Shadow. New sessions stop at it and new steps at 125%. Shadow won't start if it's over half the filesystem's free space. |
-| `SHADOW_ACCOUNT_MAX_BYTES` | 10 MB | One account. |
+| `SHADOW_ACCOUNT_MAX_BYTES` | 10 MB; with either logging flag 5 MB | One account. |
 | `SHADOW_SESSION_STARTS_PER_DAY` | 30 | One account. |
 | `SHADOW_LINK_CONCURRENCY` | 32 | Viewer and packet responses at once. |
 | `SHADOW_LAZY_AUTH` | off | `1` adds `/shadow/chat/mcp`, which lists its tools before sign-in (claude.ai). Needs OAuth. |
 | `SHADOW_ANON_PER_MINUTE` | 600 | Requests per client to that path before sign-in. |
 | `SHADOW_AUTO_LOG` | off | `1`: logging on by default on **`/shadow/mcp` and `/shadow/chat/mcp`**. Never on a listed server. |
 | `SHADOW_PREVIEW_AUTO_LOG` | off | `1` adds `/shadow/preview/mcp` and `/shadow/preview/chat/mcp`, logging by default. The other paths don't change. |
-| `SHADOW_ANCHORS_PER_DAY`, `SHADOW_ANCHORS_PER_SESSION` | 60, 100; with either logging flag 1000, 1000 | Per account and session, on every endpoint: the flags raise them for the listed paths too. |
-| `SHADOW_LOG_STEPS_PER_MIN` | 120 | `shadow_log_step` calls per account, with either logging flag. |
+| `SHADOW_ANCHORS_PER_DAY`, `SHADOW_ANCHORS_PER_SESSION` | 60, 100; with either logging flag 400, 300 | Per account and session, on every endpoint: the flags raise them for the listed paths too. |
+| `SHADOW_LOG_STEPS_PER_MIN` | 90 | `shadow_log_step` calls per account, with either logging flag. |
 | `SHADOW_LEDGER_CLIENT_ID`, `SHADOW_LEDGER_WALLET_ID` | the delegated client | Shadow's own writer on the ledger. Set both. No email, and not the delegated id. |
+| `MCP_BYO_WRITES` | refuse | Emergency rollback only: `allow` lets a caller's own key write on the owned gateway again. |
 | `MCP_OAUTH` | off | `1` turns sign-in on. Needs `MCP_TOKEN_SIGNING_SECRET`. |
 | `MCP_OAUTH_APPROVALS_PER_HOUR` | 10 | Per IP. |
 | `MCP_OAUTH_ACCOUNTS_PER_HOUR`, `MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR` | 200, 10 | New accounts, in all and per IP. |
@@ -349,6 +350,11 @@ account signed in on a listed path also works on a preview one, and on `/mcp`.
 
 **A stored "stop logging" applies only on endpoints that log by default.** A listed endpoint reads no such setting.
 
+**Either flag also changes what Shadow does on every endpoint,** the listed ones included, as an account's sessions can be
+reached from all of them: the limits above, secrets redacted in `shadow_record` and session starts, an agent id holding a key
+refused, `shadow_verify` needing the ledger for a pass (`indeterminate` with it down), and the viewer's table per step.
+Only the logging tools, the instructions, the footer and the sign-in wording are per endpoint.
+
 ### Enable and disable
 
 - **Enable Shadow:** set `SHADOW_ENABLED=1` and `MCP_OAUTH=1`, plus `SHADOW_LAZY_AUTH=1` for claude.ai and the ledger ids.
@@ -373,7 +379,8 @@ changes, for a build older than this section:
   searches only under `CLOCKCHAIN_CLIENT_ID`. It anchors under that client again too.
 - **Logging by default returns on the listed paths** if `SHADOW_AUTO_LOG=1` is still set, with the old text. Older builds
   don't know `SHADOW_PREVIEW_AUTO_LOG`, and its paths answer 404.
-- **Below `feat/auto-log`:** session metadata was capped at 256 KB, so a session with about 1,000 anchors or more can't be read.
+- **Below `feat/auto-log`:** session metadata was capped at 256 KB. A session within the default 300 anchors can still be read;
+  one over about 1,000, from a raised `SHADOW_ANCHORS_PER_SESSION`, can't.
 
 The other way round, a newer build reads everything an older one wrote. Hashes on the ledger are never touched by any of this.
 

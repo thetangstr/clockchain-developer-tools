@@ -96,6 +96,7 @@ const ONLINE_CONCURRENCY = 8;
 /** shadow_log_turn, the fallback: steps and bytes per call (a request's body is capped at about 1 MB). */
 const MAX_TURN_STEPS = 100;
 const MAX_TURN_BYTES = 900 * 1024;
+const CREDENTIAL_AGENT = "An agent id can't hold a key or token, and nothing was recorded. Use a plain name, or leave agent out.";
 const START_NEW = "Call again without session_id to start a new session; keep logging there.";
 const NEW_SESSION_NOTE = "Pass this session_id with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed; call shadow_close_session and shadow_verify only when the person asks to finish or verify.";
 
@@ -133,8 +134,11 @@ export const SHADOW_ENV_DEFAULTS = {
   linkConcurrency: 32, // SHADOW_LINK_CONCURRENCY
 } as const;
 
-/** Defaults when SHADOW_AUTO_LOG=1: an anchor per step has to fit tasks of 50 steps and more. */
-export const AUTO_LOG_DEFAULTS = { anchorsPerDay: 1000, anchorsPerSession: 1000, logStepsPerMinute: 120 } as const;
+/**
+ * Defaults when SHADOW_AUTO_LOG=1: an anchor per step has to fit tasks of 50 steps and more. At 300 anchors a session's
+ * metadata stays under the 256 KB limit of the build before this flag, so a rollback can still read it.
+ */
+export const AUTO_LOG_DEFAULTS = { anchorsPerDay: 400, anchorsPerSession: 300, logStepsPerMinute: 90, accountBytes: 5 * 1024 * 1024 } as const;
 /** meta.anchors keeps about 260 bytes per anchor, and the metadata file holds at most META_MAX_BYTES. */
 const MAX_ANCHORS_PER_SESSION = 1500;
 
@@ -143,15 +147,16 @@ const MAX_ANCHORS_PER_SESSION = 1500;
  * SHADOW_MAX_BYTES, SHADOW_ACCOUNT_MAX_BYTES, SHADOW_SESSION_STARTS_PER_DAY and SHADOW_LINK_CONCURRENCY set the caps
  * ("" or unset = SHADOW_ENV_DEFAULTS); anything but a positive whole number is a `problem`.
  *
- * SHADOW_AUTO_LOG=1 turns on automatic logging, which anchors every step, so its defaults are 1000 anchors per account
- * per day and per session (SHADOW_ANCHORS_PER_DAY, SHADOW_ANCHORS_PER_SESSION; without the flag, 60 and 100 unless set)
- * and 120 shadow_log_step calls per account per minute (SHADOW_LOG_STEPS_PER_MIN). Without the flag and those settings
- * the result is exactly what it was before them.
+ * Either logging flag below turns on automatic logging, which anchors every step. Its defaults are AUTO_LOG_DEFAULTS: anchors
+ * per account per day and per session (SHADOW_ANCHORS_PER_DAY, SHADOW_ANCHORS_PER_SESSION; without a flag, 60 and 100 unless
+ * set), shadow_log_step calls per account per minute (SHADOW_LOG_STEPS_PER_MIN), and a smaller SHADOW_ACCOUNT_MAX_BYTES.
+ * Without a flag and those settings the result is exactly what it was before them.
  *
  * Automatic logging is per endpoint. SHADOW_AUTO_LOG=1 puts it on /shadow/mcp and /shadow/chat/mcp, the paths directories
  * list, so a listed server must not set it. SHADOW_PREVIEW_AUTO_LOG=1 adds /shadow/preview/mcp and /shadow/preview/chat/mcp,
- * for people who add the URL by hand, and leaves the other two alone: there the person asks, chat by chat. The limits
- * above are per account and per server, so either flag raises them for every endpoint.
+ * for people who add the URL by hand, and leaves the other two alone: there the person asks, chat by chat. What is per
+ * account or per server follows either flag on every endpoint, since one account's sessions are reachable from all of them:
+ * the limits above, redaction in shadow_record and session starts, and shadow_verify needing the ledger for a pass.
  */
 export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
   if ((env.SHADOW_ENABLED ?? "").trim() !== "1") return { enabled: false };
@@ -188,7 +193,7 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
     network: (env.SHADOW_NETWORK ?? "").trim() === "mainnet" ? "clockchain-mainnet" : "clockchain-testnet",
     limits: {
       maxStateBytes: whole("SHADOW_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxStateBytes),
-      maxBytesPerOwner: whole("SHADOW_ACCOUNT_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxBytesPerOwner),
+      maxBytesPerOwner: whole("SHADOW_ACCOUNT_MAX_BYTES", autoLog ? AUTO_LOG_DEFAULTS.accountBytes : SHADOW_ENV_DEFAULTS.maxBytesPerOwner),
       maxSessionStartsPerOwnerPerDay: whole("SHADOW_SESSION_STARTS_PER_DAY", SHADOW_ENV_DEFAULTS.maxSessionStartsPerOwnerPerDay),
       ...(anchorsPerDay !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay ? { maxAnchorsPerOwnerPerDay: anchorsPerDay } : {}),
       ...(anchorsPerSession !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession ? { maxAnchorsPerSession: anchorsPerSession } : {}),
@@ -400,7 +405,9 @@ function ownPinReport<T extends { summary: string; checks: { name: string; statu
     ...report,
     summary: report.summary.replace("the supplied pin", "this server's own pin"),
     checks: report.checks.map((c) =>
-      c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." } : c),
+      c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
+        : c.name === "time" ? { ...c, reason: c.reason.replace("with a single validator they are only as good as its clock", "with a single-operator gateway they are only as good as its clock") }
+          : c),
   };
 }
 
@@ -411,6 +418,7 @@ function hostedViewer(html: string): string {
   return html
     .replaceAll("<b>Proven:</b>", "<b>Matches what the server signed:</b>")
     .replaceAll('<td class="tag">Proven</td>', '<td class="tag">Matches what the server signed</td>')
+    .replace("and that the validators keep good time.</li>", "and that the single-operator gateway keeps good time.</li>")
     .replace("<h2>What this record shows</h2>", `<h2>What this record shows</h2>${OWN_PIN_NOTE}`);
 }
 
@@ -673,7 +681,7 @@ export class ShadowService {
 
   async startSession(ownerId: string, input: { title?: unknown; agents?: unknown }, base: string) {
     if (typeof input.title !== "string" || !cleanText(input.title, 200)) throw bad("Give the session a title (up to 200 characters).");
-    const title = cleanText(input.title, 200);
+    const title = this.autoLog ? cleanText(redactText(input.title.slice(0, 1000)), 200) : cleanText(input.title, 200);
     const agents = this.agentsOf(input.agents);
     const ownerKey = ownerKeyOf(ownerId);
     return this.locks.run(`owner:${ownerKey}`, async () => {
@@ -753,8 +761,10 @@ export class ShadowService {
       const id = isObj(a) ? a.id : a;
       if (typeof id !== "string" || !AGENT_ID.test(id) || id === "collector")
         throw bad('Each agent id is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
+      if (this.autoLog && redactText(id) !== id) throw bad(CREDENTIAL_AGENT);
       if (out.some((x) => x.id === id)) throw bad(`Agent "${id}" is listed twice.`);
-      const role = isObj(a) && typeof a.role === "string" && cleanText(a.role, 100) ? cleanText(a.role, 100) : null;
+      const roleText = isObj(a) && typeof a.role === "string" ? (this.autoLog ? redactText(a.role.slice(0, 1000)) : a.role) : "";
+      const role = cleanText(roleText, 100) ? cleanText(roleText, 100) : null;
       out.push({ id, role });
     }
     return out;
@@ -767,7 +777,7 @@ export class ShadowService {
     const kind = input.kind as RecordKind;
     if (typeof input.agent !== "string" || !input.agent) throw bad("Name the agent that took this step (one of the session's agents).");
     const agent = input.agent;
-    const content = input.content;
+    let content = input.content;
     if (content === undefined) throw bad("content is required: a string, or JSON.");
     const size = Buffer.byteLength(typeof content === "string" ? content : JSON.stringify(content) ?? "");
     if (size > this.limits.maxContentBytes)
@@ -776,6 +786,8 @@ export class ShadowService {
     if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
       throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
     const runInput = typeof input.run_id === "string" ? input.run_id : null;
+    // With logging on by default, the same backstop as the log tools. Size and depth are checked above.
+    if (this.autoLog) content = redactSecrets(content);
     return this.session(ownerKeyOf(ownerId), sessionId, (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is closed. Start a new session to record more.");
       if (!meta.agents.some((a) => a.id === agent))
@@ -906,7 +918,9 @@ export class ShadowService {
     let started = false;
     if (input.session_id === undefined || input.session_id === null || input.session_id === "") {
       const named = [...new Set(steps.map((s) => s.agent).filter((a): a is string => a !== null))];
-      const title = typeof input.title === "string" && cleanText(redactText(input.title), 200) ? redactText(input.title) : `Chat log, ${this.now().toISOString().slice(0, 16).replace("T", " ")} UTC`;
+      // Cut down before anything else looks at it: the title is the one field here with no other limit.
+      const given = typeof input.title === "string" ? cleanText(redactText(input.title.slice(0, 1000)), 200) : "";
+      const title = given || `Chat log, ${this.now().toISOString().slice(0, 16).replace("T", " ")} UTC`;
       sessionId = (await this.startSession(ownerId, { title, ...(named.length ? { agents: named.map((id) => ({ id })) } : {}) }, base)).session_id;
       started = true;
     } else {
@@ -917,7 +931,8 @@ export class ShadowService {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", `This session is closed, so nothing was recorded. ${START_NEW}`);
       if (meta.agentSteps + steps.length > this.limits.maxStepsPerSession || meta.seq + steps.length + 3 > this.maxEvents)
         throw new ShadowError("SHADOW_LIMIT_STEPS", `This session has ${meta.agentSteps} steps and can't take ${steps.length} more, so nothing was recorded. ${START_NEW}`);
-      if (meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession)
+      // The last anchor is kept for shadow_close_session, so a full session can still anchor its final checkpoint.
+      if (meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession - 1)
         throw new ShadowError("SHADOW_LIMIT_SESSION_ANCHORS", `This session has used its ${this.limits.maxAnchorsPerSession} anchors, so nothing was recorded. ${START_NEW}`);
       if (meta.eventsBytes + totalBytes + steps.length * 1024 + 8192 > this.agentEventsMax)
         throw new ShadowError("SHADOW_LIMIT_SESSION_SIZE", `This session is full (${Math.round(this.limits.maxSessionBytes / 1048576)} MB on disk), so nothing was recorded. ${START_NEW}`);
@@ -968,6 +983,7 @@ export class ShadowService {
     const agent = raw.agent === undefined || raw.agent === null || raw.agent === "" ? null : raw.agent;
     if (agent !== null && (typeof agent !== "string" || !AGENT_ID.test(agent) || agent === "collector"))
       throw bad('agent is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
+    if (typeof agent === "string" && redactText(agent) !== agent) throw bad(CREDENTIAL_AGENT);
     const size = Buffer.byteLength(typeof raw.content === "string" ? raw.content : JSON.stringify(raw.content) ?? "");
     if (size > this.limits.maxContentBytes)
       throw new ShadowError("SHADOW_CONTENT_TOO_LARGE", `Content is ${size} bytes; the limit is ${this.limits.maxContentBytes}, and nothing was recorded. Record a summary, or split it over several steps.`);
@@ -1127,7 +1143,9 @@ export class ShadowService {
       const packet = buildPacket(meta, cp, events, this.network, this.now());
       const pin = buildPin(meta, cp);
       // Verified as a relying party would: strictly parsed from its JSON.
-      const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online });
+      // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too.
+      const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog ? { requireOnline: true } : {}) });
+      const report = this.autoLog ? ownPinReport(checked) : checked;
       return {
         session_id: sessionId,
         result: report.result,

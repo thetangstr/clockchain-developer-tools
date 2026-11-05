@@ -27,9 +27,22 @@ export interface ClockchainConfig {
    * Defaults from the endpoint hostname; set CLOCKCHAIN_SUBSTRATE to state it explicitly.
    */
   substrate?: AnchorSubstrate;
+  /**
+   * Refuses every write (anything but a GET, and the contract schedule) before any network call, with
+   * {@link ReadOnlyClientError}. Set for a caller's own key on the owned gateway: this is the chokepoint, so a new
+   * tool that writes through this client can't miss it.
+   */
+  readOnly?: boolean;
 }
 
 export type AnchorSubstrate = "clockchain-network" | "anchoring-gateway";
+
+/**
+ * True when this configuration anchors on the owned gateway. That gateway trusts our request signature and whatever
+ * client id it carries, so a key it never issued can write there as anyone.
+ */
+export const onOwnedGateway = (config: Pick<ClockchainConfig, "substrate" | "endpoint">): boolean =>
+  (config.substrate ?? substrateForEndpoint(config.endpoint)) === "anchoring-gateway";
 
 /** Derive the substrate label from an endpoint when none is configured. */
 export function substrateForEndpoint(endpoint: string | undefined): AnchorSubstrate {

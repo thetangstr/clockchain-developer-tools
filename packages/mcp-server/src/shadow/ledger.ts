@@ -78,9 +78,10 @@ class ShadowClockchainClient extends ClockchainClient {
 export function runtimeShadowLedger(env: NodeJS.ProcessEnv = process.env): ShadowLedger {
   if (testLedger) return testLedger;
   if (!runtimeLedger) {
-    const config = readConfigFromEnv(env);
     const identity = shadowLedgerIdentity(env);
-    runtimeLedger = identity ? new ShadowClockchainClient({ ...config, ...identity }, new ClockchainClient(config)) : new ClockchainClient(config);
+    runtimeLedger = identity
+      ? new ShadowClockchainClient({ ...readConfigFromEnv(env), ...identity }, new ClockchainClient(readConfigFromEnv(env)))
+      : new ClockchainClient(readConfigFromEnv(env));
   }
   return runtimeLedger;
 }

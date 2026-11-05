@@ -47,7 +47,9 @@ default_tools_approval_mode = "approve"
 
 **Bring your own key** (spend your own credits): swap the token for your Clockchain
 credentials as headers — `x-clockchain-api-key`, `x-clockchain-client-id`,
-`x-clockchain-wallet-id` (no MCP token needed).
+`x-clockchain-wallet-id` (no MCP token needed). On a deployment backed by the Clockchain
+anchoring gateway, which includes mcp.clockchain.network today, your own key is **read-only**:
+writes are refused with a clear error. To write there, use a token from `POST /token`, or sign in.
 
 Then run `/mcp` (or your client's equivalent) — you should see `clockchain` with
 all 50 tools — and ask: *"use clockchain to get the current consensus time."*
@@ -152,7 +154,10 @@ Two ways to use the hosted endpoint:
   test — you don't need a Clockchain key.
 - **Bring-your-own-key**: send *your* Clockchain credentials as headers. The server
   uses them for your calls, so writes spend *your* credits. No MCP token needed —
-  your Clockchain key authenticates you (the gateway validates it).
+  your Clockchain key authenticates you (the gateway validates it). On a deployment
+  backed by the Clockchain anchoring gateway, this path is read-only: the gateway
+  checks only the server's signature, so it can't tell whose key this is. Every write
+  is refused before any network call. Use a delegated token to write there.
 
 ```bash
 claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp \

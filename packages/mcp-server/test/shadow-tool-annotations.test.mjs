@@ -32,7 +32,7 @@ const EXPECTED = {
   shadow_verify:             ["Verify a session",              true,  false, true,  true],
   shadow_log_step:           ["Log one step",                  false, true,  false, true],
   shadow_log_turn:           ["Log a whole reply (fallback)",  false, true,  false, true],
-  clockchain_logging:        ["Turn logging on or off",        false, false, true,  false],
+  clockchain_logging:        ["Turn logging on or off",        false, true,  true,  false],
   clockchain_whoami:         ["Which Clockchain account",      true,  false, true,  false],
   clockchain_create_account: ["Create a Clockchain account",   false, true,  true,  false],
   clockchain_signup_help:    ["How Clockchain sign-up works",  true,  false, true,  false],
@@ -208,7 +208,7 @@ test("idempotent: a repeated close is refused with no effect; a repeated checkpo
   assert.equal((await svc.getSession(OWNER, { session_id: s.session_id }, BASE)).steps, closed.steps);
 });
 
-test("idempotent: turning logging off twice is the same as once, and destructive: it deletes nothing", async () => {
+test("idempotent: turning logging off twice is the same as once, and it deletes nothing already recorded", async () => {
   const { svc } = service(true);
   const s = await svc.logStep(OWNER, { kind: "task", content: "x" }, BASE);
   const steps = (await svc.getSession(OWNER, { session_id: s.session_id }, BASE)).steps;

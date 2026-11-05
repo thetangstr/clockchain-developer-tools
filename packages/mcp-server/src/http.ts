@@ -10,6 +10,7 @@ import {
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
+import { createLogBudget } from "./budget.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
 import { installTxtWithShadow, manifestWithShadow } from "./shadow/discovery.js";
 
@@ -841,8 +842,10 @@ export async function runHttp(): Promise<Server> {
   const rlEvents = metrics.counter("clockchain_rate_limit_events_total", "Rate-limit rejections by surface.");
   const uptimeGauge = metrics.gauge("process_uptime_seconds", "Process uptime in seconds.");
   // Launch operations (infra/clockchain-mcp/alerts.md). Totals only, with no owner, session or account in a label.
-  const logBudgetUsed = metrics.gauge("clockchain_log_budget_used", "Ledger writes on our delegated key since this process started (MCP_LOG_BUDGET counts these; a restart resets it).");
-  const logBudgetLimit = metrics.gauge("clockchain_log_budget_limit", "MCP_LOG_BUDGET: delegated-key ledger writes allowed per process. 0 means no cap.");
+  const logBudgetUsed = metrics.gauge("clockchain_log_budget_used", "Ledger writes by /mcp tools on our delegated key since this process started (MCP_LOG_BUDGET counts these; a restart resets it). Shadow has its own count.");
+  const logBudgetLimit = metrics.gauge("clockchain_log_budget_limit", "MCP_LOG_BUDGET: delegated-key ledger writes by /mcp tools allowed per process. 0 means no cap.");
+  const shadowLogBudgetUsed = metrics.gauge("clockchain_shadow_log_budget_used", "Hosted Shadow's ledger writes since this process started (its own count at MCP_LOG_BUDGET; a restart resets it).");
+  const shadowLogBudgetLimit = metrics.gauge("clockchain_shadow_log_budget_limit", "MCP_LOG_BUDGET again: hosted Shadow's ledger writes allowed per process. 0 means no cap.");
   const oauthAccounts = metrics.gauge("clockchain_oauth_accounts", "Clockchain accounts on disk.");
   const oauthAccountsCap = metrics.gauge("clockchain_oauth_accounts_cap", "The most accounts allowed; new sign-ups are refused at it.");
   const shadowStateBytes = metrics.gauge("clockchain_shadow_state_bytes", "Bytes hosted Shadow holds on disk, measured at the last retention sweep and kept current by appends.");
@@ -1149,6 +1152,7 @@ export async function runHttp(): Promise<Server> {
   // shadow_log_step per account, apart from MCP_RATE_PER_MIN: a task with an anchor per step must not hit the general limit.
   const shadowLogStepsPerMinute = shadowConfig.enabled ? shadowConfig.logStepsPerMinute ?? 0 : 0;
   const shadowLogStepLimit = keyedWindowLimiter(shadowLogStepsPerMinute, 60_000, Date.now);
+  const shadowBudget = createLogBudget(process.env);
   // Link clients are bucketed like OAuth's: the real client behind Caddy (MCP_OAUTH_TRUSTED_PROXY), IPv6 by /64.
   const shadowTrustedProxy = (process.env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim() || undefined;
   const shadowLinkClient = (req: IncomingMessage): string =>
@@ -1249,6 +1253,8 @@ export async function runHttp(): Promise<Server> {
         stateDir: shadowConfig.stateDir,
         network: shadowConfig.network,
         ledger: () => runtimeShadowLedger(process.env),
+        // Its own MCP_LOG_BUDGET: draining one can't stop the other's writes (log_action and the rest share the other).
+        budget: () => shadowBudget,
         limits: shadowConfig.limits,
         ...(shadowConfig.autoLog ? { autoLog: true } : {}),
       });
@@ -1467,6 +1473,11 @@ export async function runHttp(): Promise<Server> {
       }
       if (shadowService) {
         const shadow = shadowService.stats();
+        const shadowWrites = shadowBudget.usage?.();
+        if (shadowWrites) {
+          shadowLogBudgetUsed.set({}, shadowWrites.used);
+          shadowLogBudgetLimit.set({}, shadowWrites.limit ?? 0);
+        }
         shadowStateBytes.set({}, shadow.stateBytes);
         shadowStateBytesCap.set({}, shadow.maxStateBytes);
         for (const state of ["queued", "pending", "failed"] as const) shadowAnchorsOwed.set({ state }, shadow.anchors[state]);

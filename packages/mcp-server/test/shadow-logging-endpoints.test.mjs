@@ -287,6 +287,20 @@ test("preview endpoints take a body up to 1 MB for shadow_log_turn; the listed o
   }
 });
 
+test("a large body pays before it is read on an endpoint that logs by default, and only there", async () => {
+  const s = await boot({ SHADOW_PREVIEW_AUTO_LOG: "1", MCP_RATE_PER_MIN: "2" });
+  try {
+    const a = await signUp(s.url);
+    // tools/list is exempt from the rate limit once it has been read, so only the charge before reading can spend it.
+    const big = { _pad: "x".repeat(300 * 1024) };
+    const statuses = async (p) => { const seen = []; for (let i = 0; i < 4; i++) seen.push((await post(s.url, p, "tools/list", big, a.token)).status); return seen; };
+    assert.deepEqual(await statuses(PLAIN), [200, 200, 200, 200], "the listed path is as it was with no flag");
+    assert.deepEqual(await statuses(PREVIEW), [200, 200, 429, 429], "the preview path charges first");
+  } finally {
+    await s.close();
+  }
+});
+
 test("without the flag the preview paths don't exist: 404, no metadata, and sign-in refuses them as a resource", async () => {
   for (const env of [{}, { SHADOW_AUTO_LOG: "1" }]) {
     const s = await boot(env);

@@ -87,6 +87,8 @@ test("the numbers: budget used and limit, Shadow bytes and cap, accounts and cap
     const before = await scrape(s.url);
     assert.equal(value(before, "clockchain_log_budget_used"), 0);
     assert.equal(value(before, "clockchain_log_budget_limit"), 100);
+    assert.equal(value(before, "clockchain_shadow_log_budget_used"), 0);
+    assert.equal(value(before, "clockchain_shadow_log_budget_limit"), 100);
     assert.equal(value(before, "clockchain_oauth_accounts"), 0);
     assert.equal(value(before, "clockchain_oauth_accounts_cap"), 50_000);
     assert.equal(value(before, "clockchain_shadow_state_bytes_cap"), 5_000_000);
@@ -100,7 +102,8 @@ test("the numbers: budget used and limit, Shadow bytes and cap, accounts and cap
 
     const after = await scrape(s.url);
     assert.equal(value(after, "clockchain_oauth_accounts"), 1);
-    assert.equal(value(after, "clockchain_log_budget_used"), s.fake.writes.length, "every ledger write counts");
+    assert.equal(value(after, "clockchain_shadow_log_budget_used"), s.fake.writes.length, "every Shadow write counts, on Shadow's own budget");
+    assert.equal(value(after, "clockchain_log_budget_used"), 0, "and not on the one /mcp's tools share");
     assert.ok(s.fake.writes.length >= 2);
     assert.ok(value(after, "clockchain_shadow_state_bytes") > 0);
     assert.equal(value(after, 'clockchain_shadow_anchors_owed{state="pending"}'), 0);
