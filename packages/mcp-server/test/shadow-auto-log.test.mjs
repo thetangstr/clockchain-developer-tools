@@ -185,6 +185,14 @@ const PINNED = {
   createPageStyleHash: "iOu0RXAqpCZGh0xw5KF5QLpnLtuH+cmZD8P7ebjARtI=",
 };
 const sha = (s) => createHash("sha256").update(s).digest("hex");
+const WRITE_AT_9C81101 = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+const READ_AT_9C81101 = { readOnlyHint: true, openWorldHint: false };
+const HINTS_AT_9C81101 = {
+  shadow_start_session: WRITE_AT_9C81101, shadow_record: WRITE_AT_9C81101, shadow_checkpoint: WRITE_AT_9C81101, shadow_close_session: WRITE_AT_9C81101,
+  shadow_get_session: READ_AT_9C81101, shadow_list_sessions: READ_AT_9C81101, shadow_verify: READ_AT_9C81101, clockchain_whoami: READ_AT_9C81101, clockchain_signup_help: READ_AT_9C81101,
+  clockchain_create_account: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+};
+const withHintsAt9c81101 = (t) => ({ ...t, annotations: HINTS_AT_9C81101[t.name] });
 const INIT = rpcBody("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "auto-log-test", version: "1" } });
 
 test("flag off (unset, 0 or true): tools, instructions, limits and pages are what they were at 9c81101", async () => {
@@ -194,8 +202,9 @@ test("flag off (unset, 0 or true): tools, instructions, limits and pages are wha
       const a = await signUp(s.url);
       const plain = await listTools(s.url, PLAIN, a.token);
       const chat = await listTools(s.url, CHAT, a.token);
-      assert.equal(sha(JSON.stringify(plain)), PINNED.plainTools, "tools on /shadow/mcp");
-      assert.equal(sha(JSON.stringify(chat)), PINNED.chatTools, "tools on /shadow/chat/mcp");
+      // Only the hints have changed since then, on purpose (shadow-tool-annotations.test.mjs pins them): everything else is the same.
+      assert.equal(sha(JSON.stringify(plain.map(withHintsAt9c81101))), PINNED.plainTools, "tools on /shadow/mcp");
+      assert.equal(sha(JSON.stringify(chat.map(withHintsAt9c81101))), PINNED.chatTools, "tools on /shadow/chat/mcp");
       const init = async (p) => (await rpcResult(await post(s.url, p, INIT, a.token))).result.instructions;
       assert.equal(await init(PLAIN), SHADOW_INSTRUCTIONS);
       assert.equal(sha(await init(PLAIN)), PINNED.plainInstructions);

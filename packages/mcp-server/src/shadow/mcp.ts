@@ -1,5 +1,4 @@
-// The /shadow/* routes: the /shadow/mcp MCP endpoint (its own McpServer and instructions, seven tools, authenticated
-// like /mcp) and the two public capability links, /shadow/s/<cap> (the static evidence summary) and
+// The /shadow/* routes: the /shadow/mcp MCP endpoint (its own McpServer and instructions, authenticated like /mcp) and the two public capability links, /shadow/s/<cap> (the static evidence summary) and
 // /shadow/p/<cap>.json (the packet and its pin). http.ts supplies authentication, the body reader and the rate
 // limiter, so this module never re-implements them.
 import { createHash } from "node:crypto";
@@ -193,8 +192,43 @@ function toolError(e: unknown) {
 }
 
 const sessionId = z.string().describe("The session_id from shadow_start_session.");
-const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
-const READ = { readOnlyHint: true, openWorldHint: false } as const;
+
+/**
+ * Every tool's title and hints, in one place (test/shadow-tool-annotations.test.mjs pins them, and what they claim).
+ * All four hints are stated on every tool. Anthropic: "MCP servers must provide all applicable annotations ... in
+ * particular readOnlyHint, destructiveHint, and title" (Directory Policy 5.E). OpenAI: "Set readOnlyHint, destructiveHint,
+ * and openWorldHint to explicit boolean values" (Plugin guidelines).
+ *
+ * destructive: true where the effect can't be undone, not only where something is deleted. OpenAI: "use true for
+ * potentially destructive or irreversible effects, such as ... irreversible sends or transactions. Use false only for
+ * additive writes without destructive or irreversible effects." So every tool that anchors is true, as a hash on the ledger
+ * can't be removed, and so is clockchain_create_account, as an account's name can't be changed. Anthropic: "destructive
+ * tools always prompt", which is a reason to anchor at checkpoints rather than at each step. shadow_record is false: it
+ * adds to a record kept for 30 days and writes nothing to the ledger. clockchain_logging is false: it can be undone.
+ *
+ * openWorld: it reaches past this account: the ledger, as a write or a read, or anyone holding the session's link, who
+ * can read a recorded step. idempotent: a repeat with the same arguments changes nothing more. A repeated close is refused
+ * with no effect; a repeated checkpoint anchors again, because the last anchor is itself a new step. readOnly: nothing the
+ * person or the ledger can see changes. A read may still save the signed checkpoint it computed (shadow_get_session,
+ * shadow_verify).
+ */
+const tool = (title: string, readOnlyHint: boolean, destructiveHint: boolean, idempotentHint: boolean, openWorldHint: boolean) =>
+  ({ title, annotations: { title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint } });
+const TOOL_META = {
+  shadow_log_step: tool("Log one step", false, true, false, true),
+  shadow_log_turn: tool("Log a whole reply (fallback)", false, true, false, true),
+  clockchain_logging: tool("Turn logging on or off", false, false, true, false),
+  shadow_start_session: tool("Start a Shadow session", false, true, false, true),
+  shadow_record: tool("Record a step", false, false, false, true),
+  shadow_checkpoint: tool("Anchor a checkpoint", false, true, false, true),
+  shadow_close_session: tool("Close the session", false, true, true, true),
+  shadow_get_session: tool("Get a session", true, false, true, false),
+  shadow_list_sessions: tool("List sessions", true, false, true, false),
+  shadow_verify: tool("Verify a session", true, false, true, true),
+  clockchain_whoami: tool("Which Clockchain account", true, false, true, false),
+  clockchain_create_account: tool("Create a Clockchain account", false, true, true, false),
+  clockchain_signup_help: tool("How Clockchain sign-up works", true, false, true, false),
+} as const;
 
 /**
  * One McpServer per request, bound to the authenticated owner (stateless, like /mcp). `ownerId` null is the chat
@@ -235,7 +269,7 @@ export function buildShadowServer(
       title: z.string().optional().describe("Optional, for a new session: what this conversation is about, up to 200 characters."),
     };
     server.registerTool("shadow_log_step", {
-      title: "Log one step",
+      ...TOOL_META.shadow_log_step,
       description:
         "Logging is ON by default: call this right after each step, without being asked, one call per step, and never wait until the end of the reply. " +
         "Log the person's request, every tool call and tool result (any connector), every file you write and each message you show. " +
@@ -245,7 +279,6 @@ export function buildShadowServer(
         "If the anchor is pending or over a limit the step is still recorded and block_height and ledger_id are null. If it answers LOGGING_OFF, do not log and do not show a footer. " +
         `The person can say "stop logging" (clockchain_logging). The viewer reads "indeterminate" until the session is closed; call shadow_close_session and shadow_verify only when asked. ${RETENTION}`,
       inputSchema: { ...sessionInput, ...stepInput, run_id: z.string().optional().describe("Optional. A task step starts a run; other steps join the latest open run unless you pass one.") },
-      annotations: WRITE,
     }, async (a) => {
       if (ownerId === null) return toolError(signInRequired());
       if (!autoLog.logStepAllowed) {
@@ -254,27 +287,25 @@ export function buildShadowServer(
       return run((x: typeof a) => service.logStep(owner, x, base))(a);
     });
     server.registerTool("shadow_log_turn", {
-      title: "Log a whole reply (fallback)",
+      ...TOOL_META.shadow_log_turn,
       description:
         "Only for a client that can't log step by step; otherwise use shadow_log_step. Logs up to 100 steps (32 KB each, about 900 KB in all) in one call, in order, and anchors them together: " +
         "the steps share ONE block and ledger record, and each keeps its own hash. Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, viewer) and show_user: end the reply with show_user verbatim. " +
         "Call it before finishing each reply, without being asked, with the person's message, every tool call and result in that turn and the answer as shown. Reuse session_id. Never record hidden reasoning; replace secrets with [redacted]. " +
         `If it answers LOGGING_OFF, do not log and do not show a footer. ${RETENTION}`,
       inputSchema: { ...sessionInput, steps: z.array(z.object(stepInput)).describe("The steps of this reply, in order, 100 at most.") },
-      annotations: WRITE,
     }, run((a) => service.logTurn(owner, a, base)));
     server.registerTool("clockchain_logging", {
-      title: "Turn logging on or off",
+      ...TOOL_META.clockchain_logging,
       description:
         "Turns automatic logging on or off for this Clockchain account, in every chat, until it is changed again. It is on by default. " +
         "\"Stop logging\" means enabled: false; \"turn logging back on\" means enabled: true. While it is off, the log tools refuse and you show no footer. A chat can also stop by turning the connector off in the app.",
       inputSchema: { enabled: z.boolean().describe("true to log, false to stop.") },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     }, run(async (a) => service.setLogging(owner, a.enabled)));
   }
 
   server.registerTool("shadow_start_session", {
-    title: "Start a Shadow session",
+    ...TOOL_META.shadow_start_session,
     description: `Start recording. Call once before your first step. Returns the session_id for the other Shadow tools, the session's viewer and packet links, and anchors a start marker on Clockchain. ${RETENTION}`,
     inputSchema: {
       title: z.string().describe("What this session is about, up to 200 characters."),
@@ -283,11 +314,10 @@ export function buildShadowServer(
         role: z.string().optional().describe("What this agent does (kept on this server, never sent to Clockchain)."),
       })).optional().describe('Who will act in this session. Default: one agent with id "agent".'),
     },
-    annotations: WRITE,
   }, run((a) => service.startSession(owner, a, base)));
 
   server.registerTool("shadow_record", {
-    title: "Record a step",
+    ...TOOL_META.shadow_record,
     description:
       "Record one step, right after it happens. kind: task (starts a run), prompt, message, tool_call ({tool, args}), " +
       "tool_result ({tool, result, is_error}), file ({path, content}), note. Never include hidden reasoning: a step with " +
@@ -300,49 +330,43 @@ export function buildShadowServer(
       content: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).describe("The step itself: text, or JSON. At most 32 KB."),
       run_id: z.string().optional().describe("Optional. A task step starts a run (returned as run_id); other steps join the agent's latest open run unless you pass one."),
     },
-    annotations: WRITE,
   }, run(async (a) => {
     if (autoLog) service.assertLogging(owner);
     return service.record(owner, a);
   }));
 
   server.registerTool("shadow_checkpoint", {
-    title: "Anchor a checkpoint",
+    ...TOOL_META.shadow_checkpoint,
     description: "Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way).",
     inputSchema: { session_id: sessionId },
-    annotations: WRITE,
   }, run((a) => service.checkpoint(owner, a)));
 
   server.registerTool("shadow_close_session", {
-    title: "Close the session",
+    ...TOOL_META.shadow_close_session,
     description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share. No steps can be added afterwards. ${RETENTION}`,
     inputSchema: {
       session_id: sessionId,
       status: z.enum(["succeeded", "failed", "cancelled", "timed_out", "unknown"]).optional()
         .describe("How the recorded task(s) ended, as you report it. Without it, runs still open are recorded as capture gaps."),
     },
-    annotations: WRITE,
   }, run((a) => service.close(owner, a, base)));
 
   server.registerTool("shadow_get_session", {
-    title: "Get a session",
+    ...TOOL_META.shadow_get_session,
     description: `A session's status, step count, Clockchain anchors, time windows, and its viewer and packet links (and its pin once closed). ${RETENTION}`,
     inputSchema: { session_id: sessionId },
-    annotations: READ,
   }, run((a) => service.getSession(owner, a, base)));
 
   server.registerTool("shadow_list_sessions", {
-    title: "List sessions",
+    ...TOOL_META.shadow_list_sessions,
     description: "Your Shadow sessions, newest first.",
     inputSchema: {},
-    annotations: READ,
   }, run(() => service.listSessions(owner)));
 
   server.registerTool("shadow_verify", {
-    title: "Verify a session",
+    ...TOOL_META.shadow_verify,
     description: "Run the Shadow verifier on the session's evidence packet, online against Clockchain where possible. Returns pass, indeterminate or fail, with each check.",
     inputSchema: { session_id: sessionId },
-    annotations: READ,
   }, run((a) => service.verify(owner, a, base)));
 
   if (accounts) registerAccountTools(server, accounts, ownerId, autoLog ? service : undefined);
@@ -359,8 +383,6 @@ const accountView = (account: Account) => ({
 /** "an unnamed account (abc123, created 3 Nov)" or "Acme (abc123)", for status lines. */
 const accountLine = (v: ReturnType<typeof accountView>) => (v.named ? `${v.name} (${v.short_id})` : `${v.name} (${v.short_id}, created ${v.created})`);
 
-const SIGNED_IN = { readOnlyHint: true, openWorldHint: false } as const;
-
 const withAccountOf = (ownerId: string | null) => <A>(fn: (acct: string, a: A) => unknown) => async (a: A) => {
   if (ownerId === null) return toolError(signInRequired());
   if (!ACCT.test(ownerId)) return accountError("ACCOUNT_REQUIRED", "This connection is not signed in with a Clockchain account. Connect with sign-in, then try again.");
@@ -375,12 +397,11 @@ const withAccountOf = (ownerId: string | null) => <A>(fn: (acct: string, a: A) =
 /** clockchain_whoami. `service` (SHADOW_AUTO_LOG=1) adds the logging setting; `canName` says clockchain_create_account is here. */
 function registerWhoami(server: McpServer, accounts: AccountStore, ownerId: string | null, service: ShadowService | undefined, canName: boolean): void {
   server.registerTool("clockchain_whoami", {
-    title: "Which Clockchain account",
+    ...TOOL_META.clockchain_whoami,
     description: service
       ? "The Clockchain account this connection uses: its name and short id, and whether logging is on. Asks the person to connect first if they are not signed in."
       : "The Clockchain account this connection uses: its name and short id. Asks the person to connect first if they are not signed in.",
     inputSchema: {},
-    annotations: SIGNED_IN,
   }, withAccountOf(ownerId)((acct) => {
     const account = accounts.get(acct);
     if (!account) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
@@ -409,14 +430,13 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
   const withAccount = withAccountOf(ownerId);
 
   server.registerTool("clockchain_create_account", {
-    title: "Create a Clockchain account",
+    ...TOOL_META.clockchain_create_account,
     description:
       "Create the person's free Clockchain account (Shadow needs one) and name it, for example after their company. " +
       "If this connection is not signed in, the person is first asked to connect and creates the account in the " +
       "Clockchain window; the call is then retried. An account that already has a name keeps it. Returns the name " +
       "and a short account id, never the account key.",
     inputSchema: { name: z.string().describe("The company or account name, 1 to 40 characters.") },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, withAccount((acct, a: { name: string }) => {
     if (looksLikeAccountKey(a.name)) {
       throw new ShadowError("ACCOUNT_NAME_IS_A_KEY", "That looks like an account key, not a name. It was not stored. Account keys must never go in the chat or a tool call; ask the person for a company or account name instead.");
@@ -440,10 +460,9 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
   registerWhoami(server, accounts, ownerId, service, true);
 
   server.registerTool("clockchain_signup_help", {
-    title: "How Clockchain sign-up works",
+    ...TOOL_META.clockchain_signup_help,
     description: "Explains, in plain words, how to get a Clockchain account from this chat and where the account key is shown.",
     inputSchema: {},
-    annotations: SIGNED_IN,
   }, withAccount(() => ({
     status: "help",
     message: [
