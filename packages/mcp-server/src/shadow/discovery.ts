@@ -23,7 +23,7 @@ const KEPT_ACCOUNT = "No email. A lost account key plus cleared cookies loses th
 const CHATGPT_NOTE = "Not yet confirmed in a real ChatGPT account. Some plans may block write tools.";
 const CLAUDE_CODE_NOTE = "Not yet confirmed with a real Claude Code sign-up.";
 
-const LOGGING_ON = "Logging is on by default once connected: the agent is told to log its chat and tool activity here without being asked. To turn it off, say \"stop logging\" (clockchain_logging), which holds for the whole account; a chat can also stop by turning the connector off in the app.";
+const LOGGING_ON = "Logging is on by default once connected: the connector asks the agent to log its chat and tool activity here as it goes. To turn it off, say \"stop logging\" (clockchain_logging), which holds for the whole account; a chat can also stop by turning the connector off in the app.";
 
 /** The guide's lines. `base` has no trailing slash. `autoLog` is SHADOW_AUTO_LOG=1. */
 function guideLines(base: string, chatPath: string | undefined, autoLog: boolean): string[] {

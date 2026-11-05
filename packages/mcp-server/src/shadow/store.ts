@@ -86,6 +86,8 @@ export type SessionMeta = {
   checkpoint: Checkpoint | null;
   outbox: OutboxRow[];
   anchors: AnchorInfo[];
+  /** Set at close when the assistant gave a count of the person's messages. Older sessions don't have it. */
+  capture?: { person_messages_reported: number; person_messages_logged: number; missing: number };
 };
 
 export type Operator = { operatorId: string; keys: KeyProvider };

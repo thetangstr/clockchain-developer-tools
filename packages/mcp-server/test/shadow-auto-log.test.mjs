@@ -254,19 +254,28 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
     assert.deepEqual(await names(CHAT), await names(CHAT, a.token), "the chat endpoint lists them before sign-in too");
     for (const p of [PLAIN, CHAT]) {
       const { instructions } = (await rpcResult(await post(s.url, p, INIT, a.token))).result;
-      assert.match(instructions, /^Logging is ON by default in every conversation once this connector is connected/);
-      assert.match(instructions, /Call shadow_log_step right after each step happens/);
-      assert.match(instructions, /Never wait until\s+the end of the reply/);
+      assert.match(flatten(instructions), /^The person connected this connector, which keeps a record of the conversation on Clockchain Shadow\. Logging is on by default in every conversation once it is connected, until the person turns it off\./);
+      assert.match(flatten(instructions), /shadow_log_step only appends to the person's own record: it can't change or delete anything\. It adds one step, as the step happens, one call per step/);
+      // The softer wording: it describes logging rather than ordering it. Whether this helps in ChatGPT is a staging test.
+      assert.doesNotMatch(instructions, /without being asked|verbatim|never leave it out|End every reply/i);
       assert.match(instructions, /Replace passwords, API keys and other secrets with \[redacted\]/);
       assert.match(instructions, /Never record hidden reasoning/);
       assert.match(instructions, /reads "indeterminate" until the session is closed/);
-      assert.match(instructions, /only when the person asks to finish or verify/);
+      assert.match(flatten(instructions), /for when the person asks to finish or verify the record, and only then/);
+      assert.match(flatten(instructions), /If a log call returns an error or is blocked, say plainly in your reply that the step was not logged, and invent nothing/);
+      assert.match(flatten(instructions), /person_messages, how many messages the person sent before the one asking to close/);
       const d = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").description;
-      assert.match(d, /End every reply with show_user, verbatim: log your reply as a message step last/);
+      assert.match(d, /show_user is text for the person: a reply usually logs its own text as a message step last and ends with that result's show_user, as written/);
       const turnTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_turn").description;
-      assert.match(turnTool, /end every reply with show_user, verbatim/);
-      assert.match(instructions, /end every reply with show_user/);
-      for (const must of [/ON by default/, /without being asked/, /never wait until the end/, /session_id/, /show_user/, /hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/, /stop logging/, /indeterminate/]) assert.match(d, must);
+      assert.match(turnTool, /show_user, text for the person that a reply usually ends with, as written/);
+      assert.match(turnTool, /on by default/);
+      for (const text of [d, turnTool]) assert.match(text, /only appends.*it can't change or delete anything, in the record or anywhere else/);
+      assert.doesNotMatch(turnTool, /ONE block/);
+      assert.match(turnTool, /Never record hidden reasoning; replace secrets with \[redacted\]/);
+      for (const text of [d, turnTool]) assert.doesNotMatch(text, /without being asked|verbatim|never leave it out|End every reply/i);
+      const closeTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_close_session");
+      assert.equal(closeTool.inputSchema.properties.person_messages.type, "integer");
+      for (const must of [/on by default/, /One call per step/, /session_id/, /show_user/, /hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/, /stop logging/, /indeterminate/]) assert.match(d, must);
     }
     // Before sign-in, a log call gets the 401 that starts the connect flow; so does the plain endpoint.
     for (const p of [CHAT, PLAIN]) {
@@ -319,7 +328,7 @@ for (const p of [PLAIN, CHAT]) {
       // The footer: steps so far, first and last block, latest ledger id, viewer, and the off switch.
       const last = results.at(-1);
       const firstBlock = String(Number(results[0].block_height) - 1);
-      assert.equal(last.show_user.replace(/(\d+ earlier steps[^\n]*\n\n)?\| What happened[^]*?It covers every step up to and including that one\.\n\n/, ""), `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Say 'stop logging' to turn it off.`);
+      assert.equal(last.show_user.replace(/(\d+ earlier steps[^\n]*\n\n)?\| What happened[^]*?It covers every step up to and including that one\.\n\n/, ""), `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Saying 'stop logging' turns it off.`);
       assert.match(results[0].note, /reads "indeterminate" until the session is closed/);
       assert.equal(results[1].note, undefined);
 
@@ -407,7 +416,7 @@ test("shadow_log_turn, the fallback: three replies make one session and three sh
       assert.ok(r.evidence.logged.every((l) => /^[0-9a-f]{64}$/.test(l.hash.replace(/^sha256:/, "")) && l.summary.length <= 80));
       assert.match(r.show_user, /4 steps logged in this reply under one shared anchor, not one per step/);
       assert.match(r.show_user, new RegExp(`Shared anchor: block ${r.evidence.block_height}, ledger ID \`${r.evidence.ledger_id}\`\\.`));
-      assert.match(r.show_user, /Logging is on\. Say 'stop logging' to turn it off\.$/);
+      assert.match(r.show_user, /Logging is on\. Saying 'stop logging' turns it off\.$/);
     }
     assert.match(results[0].show_user, /\(4 steps so far\)/);
     assert.match(results[2].show_user, /\(12 steps so far\)/);
@@ -505,7 +514,7 @@ test("anchor pending, failed or over its limit: the step is recorded, block and 
     stepNulls(r);
     assert.ok(r.hash && r.seq);
     assert.match(r.show_user, /The latest step is recorded, but its anchor is still pending, so it has no block or ledger ID\./);
-    assert.match(r.show_user, /Logging is on\. Say 'stop logging' to turn it off\.$/);
+    assert.match(r.show_user, /Logging is on\. Saying 'stop logging' turns it off\.$/);
     assert.equal((await svc.getSession(O, { session_id: first.session_id }, BASE)).recorded_steps, 2);
     // It lands with the next step: nothing was lost.
     fake.confirm = true;
@@ -885,7 +894,7 @@ test("the hosted viewer says the pin is the server's own, not Proven, and the li
 });
 
 test("discovery says logging is on by default only with the flag on, on all of its pages", async () => {
-  const line = /Logging is on by default once connected: the agent is told to log its chat and tool activity here without being asked\.\s+To turn it off, say "stop logging" \(clockchain_logging\), which holds for\s+the whole account; a chat can also stop by turning the connector off in\s+the app\./;
+  const line = /Logging is on by default once connected: the connector asks the agent to log its chat and tool activity here as it goes\.\s+To turn it off, say "stop logging" \(clockchain_logging\), which holds for\s+the whole account; a chat can also stop by turning the connector off in\s+the app\./;
   const flat = (s) => s.replace(/\s+/g, " ");
   for (const [flag, shown] of [["1", true], [undefined, false]]) {
     const s = await boot(on({ SHADOW_AUTO_LOG: flag }));

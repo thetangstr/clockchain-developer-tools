@@ -95,7 +95,9 @@ const MAX_TURN_STEPS = 100;
 const MAX_TURN_BYTES = 900 * 1024;
 const CREDENTIAL_AGENT = "An agent id can't hold a key or token, and nothing was recorded. Use a plain name, or leave agent out.";
 const START_NEW = "Call again without session_id to start a new session; keep logging there.";
-const NEW_SESSION_NOTE = "Pass this session_id with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed; call shadow_close_session and shadow_verify only when the person asks to finish or verify.";
+const NEW_SESSION_NOTE = "This session_id goes with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed; shadow_close_session and shadow_verify are for when the person asks to finish or verify.";
+/** shadow_close_session's person_messages: well beyond any conversation, and small enough to read as a count. */
+export const MAX_PERSON_MESSAGES = 10_000;
 
 export type ShadowConfig =
   | { enabled: false }
@@ -353,11 +355,11 @@ function shownName(v: unknown, otherwise: string): string {
 }
 
 function stepRow(e: ShadowEvent): StepRow {
-  const p = (e.body.payload ?? {}) as { tool?: unknown; path?: unknown; isError?: unknown; note?: unknown };
+  const p = (e.body.payload ?? {}) as { tool?: unknown; path?: unknown; isError?: unknown; note?: unknown; capture?: unknown };
   const [kind, title] =
     e.body.kind === "task.assigned" ? ["task", "the person's request"]
       : e.body.kind === "agent.prompt" ? ["prompt", "the person's message"]
-        : e.body.kind === "agent.message" ? (p.note === true ? ["note", "agent's note"] : ["message", "message shown"])
+        : e.body.kind === "agent.message" ? (p.capture ? ["note", "count of the person's messages"] : p.note === true ? ["note", "agent's note"] : ["message", "message shown"])
           : e.body.kind === "agent.tool.call" ? ["tool_call", shownName(p.tool, "a tool")]
             : e.body.kind === "agent.tool.result" ? ["tool_result", `${shownName(p.tool, "a tool")}${p.isError === true ? " (error)" : ""}`]
               : ["file", shownName(typeof p.path === "string" ? p.path.split(/[\\/]/).pop() : undefined, "a file")];
@@ -416,6 +418,21 @@ function turnTable(meta: SessionMeta, turn: { rows: StepRow[]; earlier: number }
   ].join("\n");
 }
 
+/**
+ * What can be said about turns missing from a session. A blocked call never reaches this server, so the only evidence
+ * is the assistant's own count at close. A pass from the verifier is about integrity and doesn't touch this.
+ */
+function captureNote(meta: SessionMeta): string {
+  if (meta.state === "open") return "This session is still open, so it can't yet say whether any turn is missing.";
+  const c = meta.capture;
+  if (!c) return "No count of the person's messages was given when this session closed, so this record can't say whether any turn is missing.";
+  const reported = `${c.person_messages_reported} ${c.person_messages_reported === 1 ? "message" : "messages"} from the person`;
+  const own = "That is the assistant's own count, and this server can't see a call that was blocked before it arrived.";
+  if (c.missing > 0) return `${reported}, ${c.person_messages_logged} logged: at least ${c.missing} ${c.missing === 1 ? "turn is" : "turns are"} missing from this record. ${own}`;
+  const closing = c.person_messages_logged > c.person_messages_reported ? " (the closing request can be one of them)" : "";
+  return `${reported}, ${c.person_messages_logged} logged${closing}: no turn shows as missing. ${own} It also doesn't show that every step within a turn was logged.`;
+}
+
 /** The whole session as hashes and metadata, from its own record. No step content, and nothing a caller can supply. */
 function sessionLog(meta: SessionMeta, events: ShadowEvent[]) {
   const cover = coverage(meta);
@@ -436,6 +453,8 @@ function sessionLog(meta: SessionMeta, events: ShadowEvent[]) {
       ledger_records: onLedger.length,
       first_block: blocks.first, last_block: blocks.last,
     },
+    capture: meta.capture ?? null,
+    capture_note: captureNote(meta),
     steps,
     ledger_hash_note: LEDGER_HASH_NOTE,
   };
@@ -452,6 +471,7 @@ function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number;
   const blocks = t.first_block === null ? "Nothing on Clockchain yet." : `On Clockchain: first block ${cell(t.first_block)}, last block ${cell(t.last_block)}, ${t.ledger_records} ledger ${t.ledger_records === 1 ? "record" : "records"}, counting any start or closing anchor.`;
   return [
     "**Clockchain Shadow: everything logged in this session**",
+    log.capture_note,
     `Session \`${log.session_id}\`, ${log.status}. ${t.steps} ${t.steps === 1 ? "step" : "steps"}: ${t.anchored} anchored, ${t.pending} pending${t.not_anchored ? `, ${t.not_anchored} not anchored` : ""}. ${blocks}`,
     lines.join("\n"),
     ...(cap && log.steps.length > shown.length ? [`Showing the first ${shown.length} of ${log.steps.length} steps. The rest are at ${cap.rest}`] : []),
@@ -485,7 +505,7 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
     }[anchor.anchor_status];
     lines.push(`${one ? "The latest step is" : "These steps are"} recorded, but ${said}, so ${one ? "it has" : "they have"} no block or ledger ID. ${anchor.anchor_reason ?? ""}`.trim());
   }
-  lines.push("Logging is on. Say 'stop logging' to turn it off.");
+  lines.push("Logging is on. Saying 'stop logging' turns it off.");
   return lines.join("\n\n");
 }
 
@@ -497,7 +517,8 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
 function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T): T {
   return {
     ...report,
-    summary: report.summary.replace("the supplied pin", "this server's own pin"),
+    // "Captured" would claim more than the verifier can see: it knows the runs in the record, not the work outside it.
+    summary: report.summary.replace("the supplied pin", "this server's own pin").replace("every run was captured", "every recorded run has an ending"),
     checks: report.checks.map((c) =>
       c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
         : c.name === "time" ? { ...c, reason: c.reason.replace("with a single validator they are only as good as its clock", "with a single-operator gateway they are only as good as its clock") }
@@ -935,7 +956,7 @@ export class ShadowService {
     return {
       logging: { enabled },
       message: enabled
-        ? "Logging is on for this account. Log each step from now on and end every reply with show_user from the last result."
+        ? "Logging is on for this account. Steps are logged from now on, and a reply usually ends with show_user from the last result."
         : "Logging is off for this account. Do not log steps and do not show a logging footer until the person turns it back on.",
     };
   }
@@ -971,7 +992,7 @@ export class ShadowService {
     return {
       session_id: r.sessionId,
       shared_anchor: true,
-      anchor_note: "These steps share one anchor: one block and one ledger record for the whole call, not one per step. Use shadow_log_step to give each step its own.",
+      anchor_note: "These steps share one anchor: one block and one ledger record for the whole call, not one per step. shadow_log_step gives each step its own.",
       evidence: {
         logged: r.steps.map((s) => ({ seq: s.seq, kind: s.kind, hash: s.hash, summary: s.summary })),
         ...r.anchor,
@@ -1127,8 +1148,11 @@ export class ShadowService {
     }));
   }
 
-  async close(ownerId: string, input: { session_id?: unknown; status?: unknown }, base: string) {
+  async close(ownerId: string, input: { session_id?: unknown; status?: unknown; person_messages?: unknown }, base: string) {
     const sessionId = sessionIdOf(input.session_id);
+    const counted = this.autoLog && input.person_messages !== undefined && input.person_messages !== null ? input.person_messages : null;
+    if (counted !== null && (typeof counted !== "number" || !Number.isSafeInteger(counted) || counted < 0 || counted > MAX_PERSON_MESSAGES))
+      throw bad(`person_messages is a whole number from 0 to ${MAX_PERSON_MESSAGES}.`);
     if (input.status !== undefined && input.status !== null && !(RUN_STATUSES as readonly unknown[]).includes(input.status))
       throw bad(`status must be one of ${RUN_STATUSES.join(", ")}.`);
     const status = (input.status ?? null) as (typeof RUN_STATUSES)[number] | null;
@@ -1136,6 +1160,7 @@ export class ShadowService {
     const made: { target: string; refused: { code: string; message: string } | null } = { target: "", refused: null };
     await this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is already closed.");
+      if (counted !== null) await this.recordCapture(meta, counted);
       // Session.close(): runs still open become gaps, unless the agent reports how they ended (status); then session.closed.
       for (const r of meta.runs.filter((x) => x.open)) {
         if (status) this.appendStep(meta, "execution.receipt", r.agent, { status, facts: {} }, { agentRunId: r.id }, false);
@@ -1155,7 +1180,7 @@ export class ShadowService {
       const { pin, log } = await this.withEvents(meta, (events) => ({ pin: buildPin(meta, this.latest(meta, events)), log: this.autoLog ? sessionLog(meta, events) : null }));
       this.log("shadow_session_closed", { sessionId, steps: meta.seq, anchors: meta.anchors.length, pending: meta.outbox.length });
       return {
-        ...(log ? { summary: sessionLogText(log, { max: MAX_SUMMARY_ROWS, rest: links.summary ?? links.viewer }), summary_note: "Show this summary to the person in full, as it is." } : {}),
+        ...(log ? { summary: sessionLogText(log, { max: MAX_SUMMARY_ROWS, rest: links.summary ?? links.viewer }), summary_note: "This summary is for the person, in full, as it is.", capture: meta.capture ?? null, capture_note: captureNote(meta) } : {}),
         session_id: sessionId,
         status: "closed",
         steps: meta.seq,
@@ -1163,9 +1188,23 @@ export class ShadowService {
         pin,
         links,
         links_note: LINKS_NOTE,
-        share: "Send the viewer or packet link to whoever should check this record, and the pin through a different channel.",
+        share: "The viewer or packet link is for whoever should check this record; the pin goes by a different channel.",
       };
     });
+  }
+
+  /**
+   * The assistant's count of the person's messages against the task and prompt steps logged, as a signed step, so the
+   * comparison is inside the tamper-evident record. It joins no run, so it can't change whether a run counts as covered,
+   * and so can't change the verifier's verdict. Its `capture` field can't come from a logged step: stepFor builds those.
+   */
+  private async recordCapture(meta: SessionMeta, reported: number): Promise<void> {
+    const logged = await this.withEvents(meta, (events) => events.filter((e) => e.body.kind === "task.assigned" || e.body.kind === "agent.prompt").length);
+    const capture = { person_messages_reported: reported, person_messages_logged: logged, missing: Math.max(0, reported - logged) };
+    const { payload } = stepFor("note", `The assistant counted ${reported} messages from the person before the one asking to close; ${logged} are logged. This is the assistant's own count.`);
+    this.appendStep(meta, "agent.message", meta.agents[0].id, { ...payload, capture }, { boundary: "transcript", agentRunId: null }, false);
+    meta.agentSteps++;
+    meta.capture = capture;
   }
 
   async getSession(ownerId: string, input: { session_id?: unknown }, base: string) {
@@ -1248,6 +1287,7 @@ export class ShadowService {
         online: onlineNote,
         ...(receipts ? { receipts_checked_online: receipts.checked, receipts_total: receipts.total } : {}),
         interpretation: report.interpretation,
+        ...(this.autoLog ? { capture: meta.capture ?? null, capture_note: captureNote(meta) } : {}),
         links: this.links(meta, base),
       };
     }));
@@ -1306,7 +1346,7 @@ export class ShadowService {
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
             const html = hostedViewer(summarize(packet, ownPinReport(report), { packetFile: "packet.json", pinFile: "pin.json" }).html);
-            body = Buffer.from(this.autoLog ? withStepAnchors(html, events, meta.cap) : html);
+            body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }
           this.linkBuildCount++;
           this.linkCache.set(linkKey(kind, meta), body);

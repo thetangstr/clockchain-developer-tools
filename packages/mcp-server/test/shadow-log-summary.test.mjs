@@ -32,7 +32,7 @@ function service(o = {}) {
 }
 const rowsOf = (footer) => footer.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| What happened"));
 const capOf = (r) => new URL(r.viewer ?? r.links.viewer).pathname.split("/").pop();
-const PLAIN = (r, steps, first, last) => `---\n\n**Clockchain Shadow:** ${steps} ${steps === 1 ? "step" : "steps"} logged so far. First block ${first}, last block ${last}. Latest ledger ID: \`${r.ledger_id}\`. Viewer: ${r.viewer}\n\nLogging is on. Say 'stop logging' to turn it off.`;
+const PLAIN = (r, steps, first, last) => `---\n\n**Clockchain Shadow:** ${steps} ${steps === 1 ? "step" : "steps"} logged so far. First block ${first}, last block ${last}. Latest ledger ID: \`${r.ledger_id}\`. Viewer: ${r.viewer}\n\nLogging is on. Saying 'stop logging' turns it off.`;
 const row = (what, r) => `| ${what} | \`${short(r.hash)}\` | \`${short(r.anchored_hash)}\` | ${r.block_height} | \`${r.ledger_id}\` |`;
 
 async function routes(svc, autoLog = {}) {
@@ -62,7 +62,7 @@ test("a message or note step's footer has the table of this turn's steps, from t
   assert.ok(g.show_user.startsWith("---\n\n| What happened | Step hash | Ledger hash | Block | Ledger ID |\n|---|---|---|---|---|\n"));
   assert.ok(g.show_user.indexOf("| What happened") < g.show_user.indexOf("**Clockchain Shadow:**"));
   assert.match(g.show_user, /The ledger hash is the anchored checkpoint's hash, which is what a ledger lookup returns\./);
-  assert.match(g.show_user, /7 steps logged so far\. First block \d+, last block \d+\. Latest ledger ID: `[^`]+`\. Viewer: \S+\n\nLogging is on\. Say 'stop logging' to turn it off\.$/);
+  assert.match(g.show_user, /7 steps logged so far\. First block \d+, last block \d+\. Latest ledger ID: `[^`]+`\. Viewer: \S+\n\nLogging is on\. Saying 'stop logging' turns it off\.$/);
   // No content, in any row.
   assert.doesNotMatch(g.show_user + d.show_user, /restaurants|Book a table|ten found|Found ten|the file's text|a note\b|Now the next one|\/home\/me/);
 });
@@ -153,7 +153,7 @@ test("close: every step in order, its values are what the ledger holds, and the 
   assert.ok(closed.summary.includes(`4 steps: 4 anchored, 0 pending. On Clockchain: first block ${firstBlock}, last block ${lastBlock}, 6 ledger records, counting any start or closing anchor.`), closed.summary);
   assert.match(results[3].show_user, new RegExp(`First block ${firstBlock},`));
   assert.ok(closed.summary.includes(`Session \`${results[0].session_id}\`, closed.`));
-  assert.match(closed.summary_note, /Show this summary to the person in full/);
+  assert.match(closed.summary_note, /This summary is for the person, in full/);
   assert.equal(closed.links.summary, `${BASE}/shadow/s/${capOf(closed)}/summary`);
   assert.equal((await svc.getSession(O, { session_id: results[0].session_id }, BASE)).links.summary, closed.links.summary);
   // The route's text is this same summary, and its JSON holds the same values.
@@ -285,7 +285,7 @@ test("flag off: no summary in the result or the links, no link on the viewer, an
   }
 });
 
-const DISCLOSURE = "Logging is on. Say 'stop logging' to turn it off.";
+const DISCLOSURE = "Logging is on. Saying 'stop logging' turns it off.";
 
 test("the table goes only on message and note steps and shadow_log_turn; every other step gets the plain footer, and no reply can lose the disclosure", async () => {
   const { svc, fake } = service();
@@ -473,12 +473,23 @@ test("anchors that land out of order: viewer, table and summary name the same an
   assert.match(later.show_user, new RegExp(`First block ${log.totals.first_block},`));
 });
 
-test("every place that talks about the footer says to end every reply with show_user; none waits for the request to finish", async () => {
+test("every place that talks about the footer describes it and doesn't order it; none waits for the request to finish", async () => {
   const { svc } = service();
-  assert.match(AUTO_LOG_INSTRUCTIONS.replace(/\s+/g, " "), /end every reply with show_user, which tells them/);
-  assert.match(AUTO_LOG_INSTRUCTIONS.replace(/\s+/g, " "), /End every reply with show_user, verbatim, whether or not the person's request is finished\. Log your reply as a message step last and use that result's show_user/);
+  const flat = AUTO_LOG_INSTRUCTIONS.replace(/\s+/g, " ");
+  assert.match(flat, /the show_user text in each result tells them/);
+  assert.match(flat, /A reply usually logs its own text as a message step last and ends with that result's show_user, as written/);
   assert.doesNotMatch(AUTO_LOG_INSTRUCTIONS, /When the person's request is finished/);
-  assert.match(svc.setLogging(O, true).message, /end every reply with show_user/);
+  const on = svc.setLogging(O, true).message;
+  assert.match(on, /a reply usually ends with show_user/);
+  // What a tool hands back is what the model reads next: nothing there should read as an order from the server.
+  const r = await svc.logStep(O, { kind: "task", content: "a" }, BASE);
+  for (const text of [flat, on, r.note, r.show_user]) assert.doesNotMatch(text, /without being asked|verbatim|never leave it out|end every reply/i);
+  assert.match(r.note, /This session_id goes with every later step/);
+  // Every result on the normal path reads as data: no sentence opens with an order.
+  const turn = await svc.logTurn(O, { session_id: r.session_id, steps: [{ kind: "prompt", content: "b" }, { kind: "message", content: "c" }] }, BASE);
+  const closed = await svc.close(O, { session_id: r.session_id, status: "succeeded", person_messages: 2 }, BASE);
+  const orders = /(?:^|[.!:]\s+)(?:Say|Use|Call|Send|Show|Pass|Log|Run|Keep|Do not|Never|Always|Must|End|Copy|Save)\b/m;
+  for (const text of [on, r.note, r.show_user, turn.anchor_note, turn.show_user, closed.summary_note, closed.share, closed.links_note, closed.capture_note]) assert.doesNotMatch(text, orders, text);
 });
 
 test("shadow_log_turn counts the steps a prompt inside it cuts off, and doesn't count an earlier turn's", async () => {
@@ -492,4 +503,135 @@ test("shadow_log_turn counts the steps a prompt inside it cuts off, and doesn't 
   assert.doesNotMatch(next.show_user, /earlier step/);
   const one = await svc.logTurn(O, { session_id: r.session_id, steps: [{ kind: "message", content: "g" }, { kind: "prompt", content: "h" }] }, BASE);
   assert.match(one.show_user, /1 earlier step is at the viewer link below\./);
+});
+
+// ---- Missing turns: a blocked call never reaches the server, so the assistant's count at close is the only evidence ----
+
+/** Task, then the given number of later prompts. */
+async function chat(svc, prompts) {
+  const a = await svc.logStep(O, { kind: "task", content: "Write a note" }, BASE);
+  const s = { session_id: a.session_id };
+  await svc.logStep(O, { ...s, kind: "message", content: "Done." }, BASE);
+  for (let i = 0; i < prompts; i++) await svc.logStep(O, { ...s, kind: "prompt", content: `More ${i}` }, BASE);
+  return s;
+}
+const textOf = async (svc, cap) => (await svc.linkBody(cap, "log")).toString("utf8");
+
+test("a count above what was logged says a turn is missing, in the close, the summary link, verify and the viewer, and signs it into the record", async () => {
+  const { svc } = service();
+  const s = await chat(svc, 0);
+  const closed = await svc.close(O, { ...s, status: "succeeded", person_messages: 2 }, BASE);
+  const line = "2 messages from the person, 1 logged: at least 1 turn is missing from this record. That is the assistant's own count, and this server can't see a call that was blocked before it arrived.";
+  assert.deepEqual(closed.capture, { person_messages_reported: 2, person_messages_logged: 1, missing: 1 });
+  assert.equal(closed.capture_note, line);
+  assert.ok(closed.summary.startsWith(`**Clockchain Shadow: everything logged in this session**\n\n${line}\n\n`), closed.summary.slice(0, 200));
+  const cap = capOf(closed);
+  assert.ok((await textOf(svc, cap)).includes(line));
+  assert.deepEqual(JSON.parse((await svc.linkBody(cap, "log-json")).toString("utf8")).capture, closed.capture);
+  assert.ok((await svc.summaryForCap(cap)).includes(line.replaceAll("'", "&#39;")));
+  const v = await svc.verify(O, s, BASE);
+  assert.deepEqual(v.capture, closed.capture);
+  assert.equal(v.capture_note, line);
+  // Inside the record: signed, hash-chained, and with no step content in it.
+  const { packet } = JSON.parse((await svc.linkBody(cap, "packet")).toString("utf8"));
+  const note = packet.events.find((e) => e.body.payload?.capture);
+  assert.deepEqual(note.body.payload.capture, closed.capture);
+  assert.equal(note.body.kind, "agent.message");
+  assert.doesNotMatch(JSON.stringify(note.body.payload), /Write a note|Done\./);
+  assert.ok(note.body.seq < packet.events.find((e) => e.body.kind === "session.closed").body.seq);
+  assert.match(closed.summary, /note: count of the person's messages/);
+});
+
+test("the count doesn't change the verdict: the same record passes with and without it, and a pass still says it can't vouch for everything", async () => {
+  const results = [];
+  for (const person_messages of [undefined, 1, 5]) {
+    const { svc } = service();
+    const s = await chat(svc, 0);
+    await svc.close(O, { ...s, status: "succeeded", ...(person_messages === undefined ? {} : { person_messages }) }, BASE);
+    results.push(await svc.verify(O, s, BASE));
+  }
+  assert.deepEqual(results.map((r) => r.result), ["pass", "pass", "pass"]);
+  for (const r of results) {
+    assert.equal(r.summary, "No check failed; the checkpoint matches this server's own pin, every recorded run has an ending and the session completed.");
+    assert.doesNotMatch(r.summary, /every run was captured/);
+    assert.match(r.interpretation, /not a verdict on truth, compliance or complete capture/);
+  }
+  assert.deepEqual(results[0].checks.map((c) => [c.name, c.status]), results[2].checks.map((c) => [c.name, c.status]));
+});
+
+test("a run with only its task stays not covered, so the count's step can't turn it into a pass", async () => {
+  const { svc } = service();
+  const a = await svc.logStep(O, { kind: "task", content: "Write a note" }, BASE);
+  const s = { session_id: a.session_id };
+  await svc.close(O, { ...s, status: "succeeded" , person_messages: 1 }, BASE);
+  const with_ = await svc.verify(O, s, BASE);
+  const b = service();
+  const t = await b.svc.logStep(O, { kind: "task", content: "Write a note" }, BASE);
+  await b.svc.close(O, { session_id: t.session_id, status: "succeeded" }, BASE);
+  const without = await b.svc.verify(O, { session_id: t.session_id }, BASE);
+  assert.equal(with_.result, without.result);
+  assert.equal(with_.result, "indeterminate");
+});
+
+test("the normal close isn't called a gap: the closing message unlogged, or logged, says nothing is missing and never goes negative", async () => {
+  // Two messages, both logged; the closing message isn't logged and isn't counted.
+  const one = service();
+  const a = await chat(one.svc, 1);
+  const c1 = await one.svc.close(O, { ...a, status: "succeeded", person_messages: 2 }, BASE);
+  assert.deepEqual(c1.capture, { person_messages_reported: 2, person_messages_logged: 2, missing: 0 });
+  assert.match(c1.capture_note, /^2 messages from the person, 2 logged: no turn shows as missing\./);
+  assert.match(c1.capture_note, /own count/);
+  assert.match(c1.capture_note, /doesn't show that every step within a turn was logged/);
+  // The closing message logged too: more logged than counted.
+  const two = service();
+  const b = await chat(two.svc, 2);
+  const c2 = await two.svc.close(O, { ...b, status: "succeeded", person_messages: 2 }, BASE);
+  assert.deepEqual(c2.capture, { person_messages_reported: 2, person_messages_logged: 3, missing: 0 });
+  assert.match(c2.capture_note, /^2 messages from the person, 3 logged \(the closing request can be one of them\): no turn shows as missing\./);
+  // Nothing sent before the close, and one message: singular, and zero is a real count.
+  const three = service();
+  const d = await chat(three.svc, 0);
+  const c3 = await three.svc.close(O, { ...d, status: "succeeded", person_messages: 0 }, BASE);
+  assert.deepEqual(c3.capture, { person_messages_reported: 0, person_messages_logged: 1, missing: 0 });
+});
+
+test("no count, or a session still open, says nothing is known about missing turns, and adds no step", async () => {
+  const { svc } = service();
+  const s = await chat(svc, 0);
+  const open = await svc.logStep(O, { ...s, kind: "message", content: "Still going." }, BASE);
+  const stillOpen = await textOf(svc, capOf(open));
+  assert.match(stillOpen, /This session is still open, so it can't yet say whether any turn is missing\./);
+  const before = (await svc.getSession(O, s, BASE)).recorded_steps;
+  const closed = await svc.close(O, { ...s, status: "succeeded" }, BASE);
+  assert.equal(closed.capture, null);
+  assert.equal(closed.capture_note, "No count of the person's messages was given when this session closed, so this record can't say whether any turn is missing.");
+  assert.ok(closed.summary.includes(closed.capture_note));
+  assert.doesNotMatch(closed.summary, /no turn shows as missing|count of the person's messages\./);
+  assert.equal((await svc.getSession(O, s, BASE)).recorded_steps, before);
+  assert.equal((await svc.verify(O, s, BASE)).capture_note, closed.capture_note);
+});
+
+test("person_messages is refused unless it is a whole number in range, and a refused close leaves the session open", async () => {
+  const { svc } = service();
+  const s = await chat(svc, 0);
+  for (const person_messages of [-1, 1.5, "2", 10_001, Number.NaN, {}, true]) {
+    await assert.rejects(svc.close(O, { ...s, status: "succeeded", person_messages }, BASE), /person_messages is a whole number from 0 to 10000/, String(person_messages));
+  }
+  assert.equal((await svc.getSession(O, s, BASE)).status, "open");
+  assert.equal((await svc.close(O, { ...s, status: "succeeded", person_messages: 10_000 }, BASE)).capture.missing, 9_999);
+});
+
+test("a logged note can't pass itself off as the count, and the count is ignored with auto-log off", async () => {
+  const { svc } = service();
+  const a = await svc.logStep(O, { kind: "note", content: { capture: { person_messages_reported: 1, person_messages_logged: 1, missing: 0 } } }, BASE);
+  const closed = await svc.close(O, { session_id: a.session_id }, BASE);
+  assert.equal(closed.capture, null);
+  assert.doesNotMatch(closed.summary, /count of the person's messages\./);
+  const off = service({ autoLog: false });
+  const started = await off.svc.startSession(O, { title: "No auto-log" }, BASE);
+  const c = await off.svc.close(O, { session_id: started.session_id, person_messages: 3 }, BASE);
+  assert.equal(c.capture, undefined);
+  assert.equal(c.summary, undefined);
+  const { packet } = JSON.parse((await off.svc.linkBody(capOf(c), "packet")).toString("utf8"));
+  assert.equal(packet.events.some((e) => e.body.payload?.capture), false);
 });
