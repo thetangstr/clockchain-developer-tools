@@ -265,17 +265,21 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
       assert.match(flatten(instructions), /If a log call returns an error or is blocked, say plainly in your reply that the step was not logged, and invent nothing/);
       assert.match(flatten(instructions), /person_messages, how many messages the person sent before the one asking to close/);
       const d = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").description;
-      assert.match(d, /show_user is text for the person: a reply usually logs its own text as a message step last and ends with that result's show_user, as written/);
+      assert.match(d, /show_user, a table of this turn's steps for the person/);
       const turnTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_turn").description;
-      assert.match(turnTool, /show_user, text for the person that a reply usually ends with, as written/);
-      assert.match(turnTool, /on by default/);
-      for (const text of [d, turnTool]) assert.match(text, /only appends.*it can't change or delete anything, in the record or anywhere else/);
+      assert.match(turnTool, /show_user, a table of these steps for the person/);
+      for (const text of [d, turnTool]) assert.match(text, /only appends: it can't change or delete anything/);
       assert.doesNotMatch(turnTool, /ONE block/);
-      assert.match(turnTool, /Never record hidden reasoning; replace secrets with \[redacted\]/);
+      // ChatGPT's reviewer flags rules for the model in a tool description ("Suspicious Instruction"), so they live in the instructions, and the server enforces them.
+      for (const text of [d, turnTool]) assert.doesNotMatch(text, /Never record|Never include|do not log|do not show|replace (passwords|secrets)|LOGGING_OFF/i);
+      for (const text of [d, turnTool]) assert.match(text, /server redacts common secret formats and refuses steps that contain hidden reasoning/);
+      for (const must of [/Never record hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/]) assert.match(flatten(instructions), must);
+      const stepParams = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").inputSchema.properties;
+      assert.doesNotMatch(JSON.stringify(stepParams), /Never include|\[redacted\]/);
       for (const text of [d, turnTool]) assert.doesNotMatch(text, /without being asked|verbatim|never leave it out|End every reply/i);
       const closeTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_close_session");
       assert.equal(closeTool.inputSchema.properties.person_messages.type, "integer");
-      for (const must of [/on by default/, /One call per step/, /session_id/, /show_user/, /hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/, /stop logging/, /indeterminate/]) assert.match(d, must);
+      for (const must of [/on by default/, /session_id/, /show_user/, /stop logging|clockchain_logging/]) assert.match(d, must);
     }
     // Before sign-in, a log call gets the 401 that starts the connect flow; so does the plain endpoint.
     for (const p of [CHAT, PLAIN]) {

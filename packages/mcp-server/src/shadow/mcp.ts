@@ -69,7 +69,7 @@ export const AUTO_LOG_INSTRUCTIONS = [
   "- Never record hidden reasoning. Replace passwords, API keys and other secrets with [redacted] before recording.",
   "- If this connection is not signed in, the first call starts the normal connect flow, and is retried after it.",
   "- If a log call returns an error or is blocked, say plainly in your reply that the step was not logged, and invent nothing.",
-  "- shadow_log_turn is a fallback for a client that can't log step by step: its steps share one anchor.",
+  "- shadow_log_step is the usual tool, because each step gets its own anchor. shadow_log_turn's steps share one anchor.",
   "",
   "Turning it off: when the person says \"stop logging\", call clockchain_logging {enabled: false}, and stop logging and",
   "showing the footer. When they say \"turn logging back on\", call clockchain_logging {enabled: true}. Change this only",
@@ -235,7 +235,7 @@ export function buildShadowServer(
   if (autoLog) {
     const stepInput = {
       kind: z.enum(["task", "prompt", "message", "tool_call", "tool_result", "file", "note"]).describe("task (the person's first request; starts a run), prompt (a later message from the person), message (what you show), tool_call ({tool, args}), tool_result ({tool, result, is_error}), file ({path, content}), note."),
-      content: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).describe("The step as it happened: text, or JSON. At most 32 KB. Replace passwords, API keys and other secrets with [redacted]. Never include hidden reasoning."),
+      content: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).describe("The step as it happened: text, or JSON. At most 32 KB."),
       agent: z.string().optional().describe("Which agent took the step. Leave it out unless several agents share the session."),
     };
     const sessionInput = {
@@ -245,13 +245,11 @@ export function buildShadowServer(
     server.registerTool("shadow_log_step", {
       title: "Log one step",
       description:
-        "Adds one step of this conversation to the person's own record on Clockchain Shadow. It only appends: it can't change or delete anything, in the record or anywhere else. Logging is on by default once this connector is connected. One call per step, as the step happens: " +
-        "the person's request, a tool call or tool result (any connector), a file written or a message shown. " +
-        "It appends the step and anchors it on Clockchain in this call, and returns the step's own hash, block_height, ledger_id, block_time and anchor_status, the anchored checkpoint hash, the viewer link and session_id. " +
-        "The same session_id runs through the whole conversation. show_user is text for the person: a reply usually logs its own text as a message step last and ends with that result's show_user, as written, which has this turn's steps as a table. " +
-        "Never record hidden reasoning; replace passwords, API keys and other secrets with [redacted]. " +
-        "If the anchor is pending or over a limit the step is still recorded and block_height and ledger_id are null. If it answers LOGGING_OFF, do not log and do not show a footer. " +
-        `The person can say "stop logging" (clockchain_logging). The viewer reads "indeterminate" until the session is closed; shadow_close_session and shadow_verify are for when the person asks. ${RETENTION}`,
+        "Adds one step of this conversation to the person's own record on Clockchain Shadow, and anchors the record's hash on Clockchain with its own block and ledger ID. It only appends: it can't change or delete anything. " +
+        "Logging is on by default once this connector is connected, and the person can turn it off with clockchain_logging. " +
+        "A step is the person's request, a tool call or result, a file written or a message shown. " +
+        "Returns the step's hash, block_height, ledger_id, block_time, anchor_status, the checkpoint hash, the viewer link, session_id, and show_user, a table of this turn's steps for the person. block_height and ledger_id are null while an anchor is pending. " +
+        `The server redacts common secret formats and refuses steps that contain hidden reasoning. ${RETENTION}`,
       inputSchema: { ...sessionInput, ...stepInput, run_id: z.string().optional().describe("Optional. A task step starts a run; other steps join the latest open run unless you pass one.") },
       annotations: WRITE,
     }, async (a) => {
@@ -262,12 +260,11 @@ export function buildShadowServer(
       return run((x: typeof a) => service.logStep(owner, x, base))(a);
     });
     server.registerTool("shadow_log_turn", {
-      title: "Log a whole reply (fallback)",
+      title: "Log several steps under one anchor",
       description:
-        "For a client that can't log step by step; shadow_log_step is the usual tool. Logs up to 100 steps (32 KB each, about 900 KB in all) in one call, in order, and anchors them together. It only appends to the person's own record: it can't change or delete anything, in the record or anywhere else. " +
-        "The steps share one block and ledger record, and each keeps its own hash. Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, viewer) and show_user, text for the person that a reply usually ends with, as written (this turn's steps as a table, then the footer). " +
-        "A call covers the person's message, each tool call and result in that turn and the answer as shown, and the same session_id runs through the conversation. Logging is on by default once this connector is connected. Never record hidden reasoning; replace secrets with [redacted]. " +
-        `If it answers LOGGING_OFF, do not log and do not show a footer. ${RETENTION}`,
+        "Adds several steps to the person's own record on Clockchain Shadow in one call, up to 100 steps, 32 KB each and about 900 KB in all. They share one block and ledger ID, and each keeps its own hash; shadow_log_step gives each step its own block and ledger ID. It only appends: it can't change or delete anything. " +
+        "Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, viewer) and show_user, a table of these steps for the person. " +
+        `The server redacts common secret formats and refuses steps that contain hidden reasoning. ${RETENTION}`,
       inputSchema: { ...sessionInput, steps: z.array(z.object(stepInput)).describe("The steps of this reply, in order, 100 at most.") },
       annotations: WRITE,
     }, run((a) => service.logTurn(owner, a, base)));
