@@ -1,0 +1,105 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "clockchain-shadow",
+  "version": "1.0.0",
+  "description": "A flight recorder for AI agents: a checkable record of a task you ask it to record.",
+  "author": {
+    "name": "[FILL IN: legal entity]",
+    "url": "[FILL IN: website]"
+  },
+  "homepage": "[FILL IN: website]",
+  "keywords": [
+    "audit trail",
+    "flight recorder",
+    "timestamp",
+    "agents"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Clockchain Shadow",
+        "shortDescription": "Flight recorder for AI agents",
+        "longDescription": "Clockchain Shadow records a task you ask it to record. Each step (your request, messages, tool calls and results, files, notes) is added to a hash chain and signed. Fingerprints of the record are then anchored on the Clockchain ledger. You get a viewer link and a packet that someone else can check.\n\nWho it's for: people and teams who want to show what an AI agent did on a task, to a client, a reviewer or a colleague.\n\nHow you use it: ask ChatGPT to record a task with Shadow. It starts a session, records each step, and closes it when you ask. A chat where you don't ask records nothing, and a request in one chat doesn't carry over to the next.\n\nWhat a check tells you: a pass means the record is intact and matches its anchors. It does not mean that what the record says is true or compliant. The record holds only what the agent recorded, so a step could be missed.\n\nWhat is kept, and where:\n- The full record stays on our server for 30 days from the start of the session, then it is deleted. You can delete a record, or your whole account, sooner.\n- Anyone with a record's viewer or packet link can read all of it until then, unless you revoke the link. Share links only with people who may see everything recorded.\n- Only hashes, a session reference and a fixed label go on the ledger. They stay after the record is deleted, because they can't be removed.\n- Secret filtering is best-effort. Don't record passwords, keys or sensitive personal data.\n\nLimitations:\n- This runs on testnet, through one operator's gateway. There are no independent validators yet. In this hosted version one operator holds the record, the signing key, the ledger and the clock, so it is not independent assurance.\n- Ledger entries show a shared account, not yours.\n- Accounts have no email. If you lose your account key and clear your cookies, you lose the account.\n\nShadow does not move money or crypto assets, and you don't need a wallet. It is not an audit or a compliance product.",
+        "developerName": "[FILL IN: legal entity]",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Record a task you ask it to record",
+          "Anchor fingerprints on a testnet ledger",
+          "Share a record by link, and revoke the link",
+          "Verify a record and detect changes",
+          "Delete a record or your account"
+        ],
+        "websiteURL": "[FILL IN]",
+        "supportURL": "[FILL IN]",
+        "privacyPolicyURL": "[FILL IN]",
+        "termsOfServiceURL": "[FILL IN]",
+        "defaultPrompt": [
+          "Record this task with Clockchain Shadow, then give me the viewer link.",
+          "Verify my most recent Clockchain Shadow session.",
+          "List my Clockchain Shadow sessions."
+        ],
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Record and close a short task",
+              "prompt": "Record this task with Clockchain Shadow: write a two-line summary of what a flight recorder does. Then close the session and give me the viewer link.",
+              "tools_triggered": "shadow_start_session, shadow_record, shadow_close_session",
+              "expected_behavior": "The summary, a viewer link, a packet link and a pin. It also states that anyone with the link can read the record."
+            },
+            {
+              "description": "Verify a session",
+              "prompt": "Verify my most recent Clockchain Shadow session.",
+              "tools_triggered": "shadow_list_sessions, shadow_verify",
+              "expected_behavior": "Pass, indeterminate or fail, with each check. It doesn't say the content is true or compliant."
+            },
+            {
+              "description": "List sessions",
+              "prompt": "List my Clockchain Shadow sessions.",
+              "tools_triggered": "shadow_list_sessions",
+              "expected_behavior": "The sample sessions, newest first, with title, status, step count and expiry."
+            },
+            {
+              "description": "Inspect a session",
+              "prompt": "Show the status and ledger anchors of my newest Clockchain Shadow session.",
+              "tools_triggered": "shadow_list_sessions, shadow_get_session",
+              "expected_behavior": "Step count, block heights, ledger ids, links, and the date it will be deleted."
+            },
+            {
+              "description": "Checkpoint mid-task",
+              "prompt": "Start a Clockchain Shadow session called 'Review test', record the note 'started review', anchor a checkpoint, and tell me the block.",
+              "tools_triggered": "shadow_start_session, shadow_record, shadow_checkpoint",
+              "expected_behavior": "A block height and ledger id, or pending if the ledger is slow, stated as such."
+            }
+          ],
+          "negative": [
+            {
+              "description": "No recording unless asked. Expected: an answer, with no Shadow tool called.",
+              "prompt": "What is the capital of France?"
+            },
+            {
+              "description": "No money. Expected: it says it can't and offers nothing in its place.",
+              "prompt": "Use Clockchain Shadow to send $100 in crypto to my friend."
+            },
+            {
+              "description": "No verdict on truth. Expected: it declines to certify and offers to run the integrity check.",
+              "prompt": "Use Clockchain Shadow to certify that my session is legally compliant."
+            }
+          ]
+        },
+        "demo_recording_url": "[FILL IN]",
+        "commerce": false,
+        "commerce_description": "This plugin does not sell products or process payments."
+      },
+      "publication": {
+        "countries": [
+          "[FILL IN: uppercase country codes, after counsel review]"
+        ],
+        "release_notes": "Initial release: start, record, checkpoint, close, get, list and verify sessions; revoke a session's links; delete a session or the account."
+      }
+    }
+  }
+}
