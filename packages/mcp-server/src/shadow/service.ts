@@ -864,7 +864,9 @@ export class ShadowService {
     let started = false;
     if (input.session_id === undefined || input.session_id === null || input.session_id === "") {
       const named = [...new Set(steps.map((s) => s.agent).filter((a): a is string => a !== null))];
-      const title = typeof input.title === "string" && cleanText(redactText(input.title), 200) ? redactText(input.title) : `Chat log, ${this.now().toISOString().slice(0, 16).replace("T", " ")} UTC`;
+      // Cut down before anything else looks at it: the title is the one field here with no other limit.
+      const given = typeof input.title === "string" ? cleanText(redactText(input.title.slice(0, 1000)), 200) : "";
+      const title = given || `Chat log, ${this.now().toISOString().slice(0, 16).replace("T", " ")} UTC`;
       sessionId = (await this.startSession(ownerId, { title, ...(named.length ? { agents: named.map((id) => ({ id })) } : {}) }, base)).session_id;
       started = true;
     } else {

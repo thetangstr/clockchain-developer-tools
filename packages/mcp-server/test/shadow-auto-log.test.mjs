@@ -17,6 +17,7 @@ import { runHttp } from "../dist/http.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { ShadowService, ShadowError, loadShadowConfig } from "../dist/shadow/service.js";
 import { SHADOW_INSTRUCTIONS } from "../dist/shadow/mcp.js";
+import { redactSecrets, redactText } from "../dist/shadow/redact.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { summarize, SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
 import { parseStrict } from "../dist/shadow/lib/profile.js";
@@ -743,6 +744,43 @@ test("consent: with the flag on, every sign-in page says it in the open and in W
   } finally {
     await s.close();
   }
+});
+
+test("redaction stays linear: 1 MB of the worst input takes milliseconds, in the title, in content and in shadow_log_turn", async () => {
+  const within = async (label, f, ms = 1500) => {
+    const t = performance.now();
+    const out = await f();
+    const took = performance.now() - t;
+    assert.ok(took < ms, `${label}: ${Math.round(took)} ms`);
+    return out;
+  };
+  const MB = 1024 * 1024;
+  const fill = (unit, bytes = MB) => unit.repeat(Math.ceil(bytes / unit.length)).slice(0, bytes);
+  const worst = ["-cc_", "-eyJ", "eyJ.", "cc_a.", "-----BEGIN PRIVATE KEY-----", "-----BEGIN ", "-----END PRIVATE KEY-----", "Bearer       ", "password   ", "password= ", "cck_", "sk-", "-sk_live_", "github_pat_", "AIza-", "a.", "a.b-", "-", ".", " ", "eyJaaaaa.bbbbbbbb.cccccccc."];
+  for (const unit of worst) await within(`redactText ${JSON.stringify(unit)}`, () => redactText(fill(unit)), 500);
+  const { svc } = service();
+  const title = await within("1 MB title", () => svc.logStep(O, { title: fill("-cc_"), kind: "task", content: "go" }, BASE));
+  assert.equal(title.anchor_status, "anchored");
+  // Over the 32 KB per step: refused before redaction looks at it.
+  await within("1 MB content", () => assert.rejects(svc.logStep(O, { session_id: title.session_id, kind: "note", content: fill("-cc_") }, BASE), (e) => e.code === "SHADOW_CONTENT_TOO_LARGE"), 200);
+  // The largest request: about 31 steps of 32 KB. Each kind of worst input, across the whole call.
+  for (const unit of ["-cc_", "-eyJ", "-----BEGIN PRIVATE KEY-----"]) {
+    const steps = Array.from({ length: 27 }, () => ({ kind: "note", content: fill(unit, 32 * 1024) }));
+    await within(`shadow_log_turn ${unit}`, () => svc.logTurn(O, { session_id: title.session_id, steps }, BASE));
+  }
+  // Over the 100 steps: refused before any step is looked at.
+  await within("too many steps", () => assert.rejects(svc.logTurn(O, { steps: Array.from({ length: 5000 }, () => ({ kind: "note", content: fill("-cc_", 200) })) }, BASE), (e) => e.code === "SHADOW_LIMIT_TURN_STEPS"), 100);
+  // Still catches what it should.
+  const payload = "e".repeat(300), sig = "b".repeat(43);
+  for (const [input, want] of [
+    [`x cc_${payload}.${sig} y`, "x [redacted] y"], [`Bearer:cc_${payload}.${sig}`, "Bearer:[redacted]"], [`-cc_${payload}.${sig}-`, "-[redacted]"],
+    [`cc_short.${sig}`, `cc_short.${sig}`], [`plain text. no token`, "plain text. no token"],
+    ["-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY----- after", "[redacted] after"], ["-----BEGIN PRIVATE KEY-----\ncut off", "[redacted]"],
+    ["sk_live_abcdefghijklmnop", "[redacted]"], ["github_pat_abcdefghijklmnopqrstuvwx", "[redacted]"], [`AIza${"a".repeat(35)}`, "[redacted]"],
+    ["token eyJhbGciOiJI.eyJzdWIiOiIx.abcdefghijkl end", "token [redacted] end"], ["a.b.c", "a.b.c"], ["version 1.22.333 of www.example.com", "version 1.22.333 of www.example.com"],
+    ["password=hunter2 and more", "password=[redacted] and more"], ['{"password": "hunter 2"}', '{"password": [redacted]}'], ["pwd: abc", "pwd: [redacted]"],
+  ]) assert.equal(redactText(input), want, input);
+  assert.deepEqual(redactSecrets({ password: "hunter2", Authorization: "x", nested: { api_key: "y", ok: "fine" }, count: 3 }), { password: "[redacted]", Authorization: "[redacted]", nested: { api_key: "[redacted]", ok: "fine" }, count: 3 });
 });
 
 // ---- viewer wording and discovery -----------------------------------------------------------------------------------------
