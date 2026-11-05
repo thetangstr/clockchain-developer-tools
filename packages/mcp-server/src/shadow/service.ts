@@ -888,7 +888,8 @@ export class ShadowService {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", `This session is closed, so nothing was recorded. ${START_NEW}`);
       if (meta.agentSteps + steps.length > this.limits.maxStepsPerSession || meta.seq + steps.length + 3 > this.maxEvents)
         throw new ShadowError("SHADOW_LIMIT_STEPS", `This session has ${meta.agentSteps} steps and can't take ${steps.length} more, so nothing was recorded. ${START_NEW}`);
-      if (meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession)
+      // The last anchor is kept for shadow_close_session, so a full session can still anchor its final checkpoint.
+      if (meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession - 1)
         throw new ShadowError("SHADOW_LIMIT_SESSION_ANCHORS", `This session has used its ${this.limits.maxAnchorsPerSession} anchors, so nothing was recorded. ${START_NEW}`);
       if (meta.eventsBytes + totalBytes + steps.length * 1024 + 8192 > this.agentEventsMax)
         throw new ShadowError("SHADOW_LIMIT_SESSION_SIZE", `This session is full (${Math.round(this.limits.maxSessionBytes / 1048576)} MB on disk), so nothing was recorded. ${START_NEW}`);

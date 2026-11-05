@@ -582,13 +582,15 @@ test("a session's caps refuse clearly, say to start a new session, and record no
     if (re) assert.match(e.message, re);
     return true;
   });
-  // Anchors: 3 per session (the start marker and two steps), then the next step is refused and a new session works.
+  // Anchors: 4 per session (the start marker, two steps, and one kept for the close), then the next step is refused,
+  // the session still closes with its final checkpoint anchored, and a new session works.
   {
-    const { svc } = service({ limits: { maxAnchorsPerSession: 3 } });
+    const { svc } = service({ limits: { maxAnchorsPerSession: 4 } });
     const a = await svc.logStep(O, { kind: "task", content: "1" }, BASE);
     await svc.logStep(O, { session_id: a.session_id, kind: "note", content: "2" }, BASE);
     await code(svc.logStep(O, { session_id: a.session_id, kind: "note", content: "3" }, BASE), "SHADOW_LIMIT_SESSION_ANCHORS", /Call again without session_id to start a new session/);
     assert.equal((await svc.getSession(O, { session_id: a.session_id }, BASE)).recorded_steps, 2);
+    assert.equal((await svc.close(O, { session_id: a.session_id, status: "succeeded" }, BASE)).final_checkpoint.status, "anchored");
     assert.equal((await svc.logStep(O, { kind: "note", content: "3" }, BASE)).anchor_status, "anchored");
   }
   // Steps.
@@ -1025,19 +1027,20 @@ test("a session's metadata holds 1000 anchors", { timeout: 300_000 }, async () =
   const anchors = process.env.SHADOW_SLOW_TESTS === "1" ? 1000 : 150;
   const { svc } = service({ limits: { maxAnchorsPerSession: anchors } });
   const first = await svc.logStep(O, { kind: "task", content: "go" }, BASE);
-  for (let i = 0; i < anchors - 2; i++) {
+  for (let i = 0; i < anchors - 3; i++) {
     const r = await svc.logStep(O, { session_id: first.session_id, kind: "note", content: String(i) }, BASE);
     assert.equal(r.anchor_status, "anchored", `step ${i}`);
   }
   const s = await svc.getSession(O, { session_id: first.session_id }, BASE);
-  assert.equal(s.anchors.length, anchors);
+  assert.equal(s.anchors.length, anchors - 1, "the last one is kept for the close");
   await assert.rejects(svc.logStep(O, { session_id: first.session_id, kind: "note", content: "over" }, BASE), (e) => e.code === "SHADOW_LIMIT_SESSION_ANCHORS");
   const dir = svc.store.sessionDir((await import("../dist/shadow/store.js")).ownerKeyOf(O), first.session_id);
   const metaBytes = statSync(path.join(dir, "meta.json")).size;
   assert.ok((metaBytes / anchors) * 1000 < 512 * 1024, `${metaBytes} bytes of metadata for ${anchors} anchors`);
   assert.ok((metaBytes / anchors) * 300 + 64 * 1024 < 256 * 1024, "at the default 300 anchors, under the 256 KB the build before this flag can read");
   assert.ok((statSync(path.join(dir, "events.jsonl")).size / anchors) * 1000 < 7 * 1024 * 1024);
-  assert.equal(readFileSync(path.join(dir, "events.jsonl"), "utf8").trim().split("\n").length, 1 + (anchors - 1) * 2);
+  assert.equal(readFileSync(path.join(dir, "events.jsonl"), "utf8").trim().split("\n").length, 1 + (anchors - 2) * 2);
   const closed = await svc.close(O, { session_id: first.session_id, status: "succeeded" }, BASE);
   assert.equal(closed.status, "closed");
+  assert.equal(closed.final_checkpoint.status, "anchored");
 });
