@@ -93,6 +93,7 @@ const ONLINE_CONCURRENCY = 8;
 /** shadow_log_turn, the fallback: steps and bytes per call (a request's body is capped at about 1 MB). */
 const MAX_TURN_STEPS = 100;
 const MAX_TURN_BYTES = 900 * 1024;
+const CREDENTIAL_AGENT = "An agent id can't hold a key or token, and nothing was recorded. Use a plain name, or leave agent out.";
 const START_NEW = "Call again without session_id to start a new session; keep logging there.";
 const NEW_SESSION_NOTE = "Pass this session_id with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed; call shadow_close_session and shadow_verify only when the person asks to finish or verify.";
 
@@ -631,7 +632,7 @@ export class ShadowService {
 
   async startSession(ownerId: string, input: { title?: unknown; agents?: unknown }, base: string) {
     if (typeof input.title !== "string" || !cleanText(input.title, 200)) throw bad("Give the session a title (up to 200 characters).");
-    const title = cleanText(input.title, 200);
+    const title = this.autoLog ? cleanText(redactText(input.title.slice(0, 1000)), 200) : cleanText(input.title, 200);
     const agents = this.agentsOf(input.agents);
     const ownerKey = ownerKeyOf(ownerId);
     return this.locks.run(`owner:${ownerKey}`, async () => {
@@ -711,8 +712,10 @@ export class ShadowService {
       const id = isObj(a) ? a.id : a;
       if (typeof id !== "string" || !AGENT_ID.test(id) || id === "collector")
         throw bad('Each agent id is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
+      if (this.autoLog && redactText(id) !== id) throw bad(CREDENTIAL_AGENT);
       if (out.some((x) => x.id === id)) throw bad(`Agent "${id}" is listed twice.`);
-      const role = isObj(a) && typeof a.role === "string" && cleanText(a.role, 100) ? cleanText(a.role, 100) : null;
+      const roleText = isObj(a) && typeof a.role === "string" ? (this.autoLog ? redactText(a.role.slice(0, 1000)) : a.role) : "";
+      const role = cleanText(roleText, 100) ? cleanText(roleText, 100) : null;
       out.push({ id, role });
     }
     return out;
@@ -725,7 +728,7 @@ export class ShadowService {
     const kind = input.kind as RecordKind;
     if (typeof input.agent !== "string" || !input.agent) throw bad("Name the agent that took this step (one of the session's agents).");
     const agent = input.agent;
-    const content = input.content;
+    let content = input.content;
     if (content === undefined) throw bad("content is required: a string, or JSON.");
     const size = Buffer.byteLength(typeof content === "string" ? content : JSON.stringify(content) ?? "");
     if (size > this.limits.maxContentBytes)
@@ -734,6 +737,8 @@ export class ShadowService {
     if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
       throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
     const runInput = typeof input.run_id === "string" ? input.run_id : null;
+    // With logging on by default, the same backstop as the log tools. Size and depth are checked above.
+    if (this.autoLog) content = redactSecrets(content);
     return this.session(ownerKeyOf(ownerId), sessionId, (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is closed. Start a new session to record more.");
       if (!meta.agents.some((a) => a.id === agent))
@@ -928,6 +933,7 @@ export class ShadowService {
     const agent = raw.agent === undefined || raw.agent === null || raw.agent === "" ? null : raw.agent;
     if (agent !== null && (typeof agent !== "string" || !AGENT_ID.test(agent) || agent === "collector"))
       throw bad('agent is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
+    if (typeof agent === "string" && redactText(agent) !== agent) throw bad(CREDENTIAL_AGENT);
     const size = Buffer.byteLength(typeof raw.content === "string" ? raw.content : JSON.stringify(raw.content) ?? "");
     if (size > this.limits.maxContentBytes)
       throw new ShadowError("SHADOW_CONTENT_TOO_LARGE", `Content is ${size} bytes; the limit is ${this.limits.maxContentBytes}, and nothing was recorded. Record a summary, or split it over several steps.`);

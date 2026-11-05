@@ -714,6 +714,28 @@ test("secrets: well-known credentials are replaced before they are recorded, and
   }
 });
 
+test("with the flag on, shadow_record and shadow_start_session redact too, and an agent id can't hold a key", async () => {
+  const key = `cck_${"K".repeat(32)}`;
+  const { svc } = service();
+  const s = await svc.startSession(O, { title: `Using ${key}`, agents: [{ id: "agent", role: `holds ${key}` }] }, BASE);
+  const rec = await svc.record(O, { session_id: s.session_id, agent: "agent", kind: "tool_call", content: { tool: "t", args: { password: "hunter2", note: `key ${key} and sk_live_abcdefghijklmnop` } } });
+  assert.ok(rec.seq);
+  const doc = await svc.packetForCap(new URL(s.links.packet).pathname.split("/").pop().replace(/\.json$/, ""));
+  for (const leak of [key, "hunter2", "sk_live_abcdefghijklmnop"]) assert.equal(doc.includes(leak), false, leak);
+  assert.ok(doc.includes("[redacted]"));
+  const code = (e) => { assert.equal(e.code, "SHADOW_BAD_INPUT"); assert.match(e.message, /agent id can't hold a key/); return true; };
+  await assert.rejects(svc.startSession(O, { title: "t", agents: [{ id: `cck_${"A".repeat(32)}` }] }, BASE), code);
+  await assert.rejects(svc.logStep(O, { kind: "task", content: "x", agent: `cck_${"A".repeat(32)}` }, BASE), code);
+  await assert.rejects(svc.logTurn(O, { steps: [{ kind: "task", content: "x", agent: `AKIAABCDEFGHIJKLMNOP` }] }, BASE), (e) => /agent id can't hold a key/.test(e.message));
+  // Without the flag, the record is what it was given.
+  const fake = new FakeLedger();
+  const plain = new ShadowService({ stateDir: tmp("noflag2"), ledger: () => fake, budget: () => createLogBudget({}), sleep: async () => {}, log: () => {} });
+  plain.sweep();
+  const p = await plain.startSession(O, { title: "t" }, BASE);
+  await plain.record(O, { session_id: p.session_id, agent: "agent", kind: "note", content: "password=hunter2" });
+  assert.ok((await plain.packetForCap(new URL(p.links.packet).pathname.split("/").pop().replace(/\.json$/, ""))).includes("password=hunter2"));
+});
+
 test("owner isolation: a session_id from another account is SHADOW_NOT_FOUND, and leaves that session as it was", async () => {
   const s = await boot(on());
   try {
