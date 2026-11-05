@@ -367,7 +367,9 @@ function ownPinReport<T extends { summary: string; checks: { name: string; statu
     ...report,
     summary: report.summary.replace("the supplied pin", "this server's own pin"),
     checks: report.checks.map((c) =>
-      c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." } : c),
+      c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
+        : c.name === "time" ? { ...c, reason: c.reason.replace("with a single validator they are only as good as its clock", "with a single-operator gateway they are only as good as its clock") }
+          : c),
   };
 }
 
@@ -378,6 +380,7 @@ function hostedViewer(html: string): string {
   return html
     .replaceAll("<b>Proven:</b>", "<b>Matches what the server signed:</b>")
     .replaceAll('<td class="tag">Proven</td>', '<td class="tag">Matches what the server signed</td>')
+    .replace("and that the validators keep good time.</li>", "and that the single-operator gateway keeps good time.</li>")
     .replace("<h2>What this record shows</h2>", `<h2>What this record shows</h2>${OWN_PIN_NOTE}`);
 }
 
@@ -1093,7 +1096,9 @@ export class ShadowService {
       const packet = buildPacket(meta, cp, events, this.network, this.now());
       const pin = buildPin(meta, cp);
       // Verified as a relying party would: strictly parsed from its JSON.
-      const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online });
+      // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too.
+      const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog ? { requireOnline: true } : {}) });
+      const report = this.autoLog ? ownPinReport(checked) : checked;
       return {
         session_id: sessionId,
         result: report.result,

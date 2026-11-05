@@ -921,6 +921,7 @@ test("online verification checks every receipt at 100+ and never says pass for o
   const partial = await svc.verify(O, { session_id: first.session_id }, BASE);
   const witness = partial.checks.find((c) => c.name === "witness");
   assert.equal(witness.status, "indeterminate");
+  assert.equal(partial.result, "indeterminate", "a record not confirmed on the ledger doesn't pass");
   assert.equal(partial.receipts_total, 122);
   assert.ok(partial.receipts_checked_online < 122 && partial.receipts_checked_online > 0);
   assert.ok(partial.online.includes(`Checked ${partial.receipts_checked_online} of 122 Clockchain receipts online`), partial.online);
@@ -943,6 +944,41 @@ test("parallel log calls on one session: every step is recorded in one unbroken 
   assert.equal((await svc.getSession(O, { session_id: first.session_id }, BASE)).recorded_steps, 14);
   await svc.close(O, { session_id: first.session_id, status: "succeeded" }, BASE);
   assert.equal((await svc.verify(O, { session_id: first.session_id }, BASE)).result, "pass");
+});
+
+test("shadow_verify with the flag on: the ledger down is indeterminate, never pass; it names this server's pin and a single-operator gateway", async () => {
+  const { svc, fake } = service();
+  const a = await svc.logStep(O, { kind: "task", content: "go" }, BASE);
+  await svc.logStep(O, { session_id: a.session_id, kind: "message", content: "done" }, BASE);
+  await svc.close(O, { session_id: a.session_id, status: "succeeded" }, BASE);
+  const up = await svc.verify(O, { session_id: a.session_id }, BASE);
+  assert.equal(up.result, "pass");
+  assert.match(up.summary, /this server's own pin/);
+  assert.doesNotMatch(JSON.stringify(up), /the supplied pin|single validator|validators keep/);
+  assert.match(up.checks.find((c) => c.name === "time").reason, /single-operator gateway/);
+  assert.match(up.checks.find((c) => c.name === "trust").reason, /isn't independent/);
+  fake.down = true;
+  const down = await svc.verify(O, { session_id: a.session_id }, BASE);
+  assert.equal(down.result, "indeterminate", JSON.stringify(down.summary));
+  assert.equal(down.checks.find((c) => c.name === "witness").status, "indeterminate");
+  assert.equal(down.receipts_checked_online, 0);
+  assert.ok(down.receipts_total > 0);
+  fake.down = false;
+  // The viewer page says the same, and the library's wording is what the library says.
+  const html = await svc.summaryForCap(new URL(a.viewer).pathname.split("/").pop());
+  assert.doesNotMatch(html, /single validator|validators keep/);
+  assert.match(html, /single-operator gateway/);
+  // Without the flag, shadow_verify is what it was.
+  const plain = new ShadowService({ stateDir: tmp("noflag"), ledger: () => fake, budget: () => createLogBudget({}), sleep: async () => {}, log: () => {} });
+  plain.sweep();
+  const s = await plain.startSession(O, { title: "t" }, BASE);
+  await plain.record(O, { session_id: s.session_id, agent: "agent", kind: "task", content: "go" });
+  await plain.record(O, { session_id: s.session_id, agent: "agent", kind: "message", content: "done" });
+  await plain.close(O, { session_id: s.session_id, status: "succeeded" }, BASE);
+  const old = await plain.verify(O, { session_id: s.session_id }, BASE);
+  assert.match(old.summary, /the supplied pin/);
+  fake.down = true;
+  assert.equal((await plain.verify(O, { session_id: s.session_id }, BASE)).result, "pass", "offline pass stays the flag-off behaviour");
 });
 
 test("200 steps with an anchor each: the session fits its caps, the packet and viewer build, and it verifies", { timeout: 120_000 }, async () => {
