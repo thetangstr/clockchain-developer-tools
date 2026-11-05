@@ -101,6 +101,10 @@ services:
       # instead adds /shadow/preview/mcp and /shadow/preview/chat/mcp, added by hand and logging by default, and leaves
       # the listed paths as they are: there the person asks, chat by chat. "" = off (no such paths).
       SHADOW_PREVIEW_AUTO_LOG: "${SHADOW_PREVIEW_AUTO_LOG:-}"
+      # The client and wallet hosted Shadow anchors under, set together ("" = the delegated CLOCKCHAIN_CLIENT_ID below). They
+      # go on a public ledger, so no email. /mcp callers can't name them. The gateway needs no change for a new id.
+      SHADOW_LEDGER_CLIENT_ID: "${SHADOW_LEDGER_CLIENT_ID:-}"
+      SHADOW_LEDGER_WALLET_ID: "${SHADOW_LEDGER_WALLET_ID:-}"
       # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
       # MCP_OAUTH=1 exists in SSM ("" == absent == off: no OAuth routes, 401 unchanged).
       # The issuer is MCP_PUBLIC_URL, default https://mcp.clockchain.network (never the Host

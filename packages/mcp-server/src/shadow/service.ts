@@ -168,6 +168,16 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
   const anchorsPerDay = whole("SHADOW_ANCHORS_PER_DAY", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerDay : DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay);
   const anchorsPerSession = whole("SHADOW_ANCHORS_PER_SESSION", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerSession : DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession);
   if (anchorsPerSession > MAX_ANCHORS_PER_SESSION) problems.push(`SHADOW_ANCHORS_PER_SESSION must be at most ${MAX_ANCHORS_PER_SESSION}`);
+  // Shadow's own writer on the ledger. Unset: the delegated CLOCKCHAIN_CLIENT_ID, as before. It goes on a public ledger, so
+  // no email; and it must differ from the delegated one, or /mcp's writes would land under it.
+  const ledgerClient = (env.SHADOW_LEDGER_CLIENT_ID ?? "").trim();
+  const ledgerWallet = (env.SHADOW_LEDGER_WALLET_ID ?? "").trim();
+  if (Boolean(ledgerClient) !== Boolean(ledgerWallet)) problems.push("SHADOW_LEDGER_CLIENT_ID and SHADOW_LEDGER_WALLET_ID must be set together");
+  for (const [name, value, delegated] of [["SHADOW_LEDGER_CLIENT_ID", ledgerClient, env.CLOCKCHAIN_CLIENT_ID], ["SHADOW_LEDGER_WALLET_ID", ledgerWallet, env.CLOCKCHAIN_WALLET_ID]] as const) {
+    if (!value) continue;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) problems.push(`${name} must be letters, digits and . _ - (it goes on a public ledger, so not an email address)`);
+    if (value.toLowerCase() === (delegated ?? "").trim().toLowerCase()) problems.push(`${name} must differ from the delegated client and wallet`);
+  }
   const logStepsPerMinute = autoLog ? whole("SHADOW_LOG_STEPS_PER_MIN", AUTO_LOG_DEFAULTS.logStepsPerMinute) : undefined;
   return {
     enabled: true,

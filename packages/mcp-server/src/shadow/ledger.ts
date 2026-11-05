@@ -13,6 +13,7 @@ import {
   RateLimitError,
   readConfigFromEnv,
   type BlockResponse,
+  type ClockchainConfig,
   type EvidencePackage,
   type LedgerRecord,
   type LogResponse,
@@ -40,15 +41,47 @@ export interface ShadowLedger {
 let testLedger: ShadowLedger | undefined;
 let runtimeLedger: ShadowLedger | undefined;
 
-/** Test-only: route hosted Shadow's anchoring to a fake ledger (undefined restores the real client). */
+/** Test-only: route hosted Shadow's anchoring to a fake ledger (undefined restores the real client, built afresh). */
 export function __setShadowLedgerForTests(ledger: ShadowLedger | undefined): void {
   testLedger = ledger;
+  runtimeLedger = undefined;
 }
 
-/** The delegated in-process client (CLOCKCHAIN_API_KEY / _CLIENT_ID / _WALLET_ID), built on first use. */
+/**
+ * The client and wallet hosted Shadow anchors under (SHADOW_LEDGER_CLIENT_ID, SHADOW_LEDGER_WALLET_ID), or undefined when
+ * they aren't set, and it anchors under the delegated CLOCKCHAIN_CLIENT_ID as before. loadShadowConfig checks them.
+ */
+export function shadowLedgerIdentity(env: NodeJS.ProcessEnv = process.env): { clientId: string; walletId: string } | undefined {
+  const clientId = (env.SHADOW_LEDGER_CLIENT_ID ?? "").trim();
+  const walletId = (env.SHADOW_LEDGER_WALLET_ID ?? "").trim();
+  return clientId && walletId ? { clientId, walletId } : undefined;
+}
+
+/**
+ * Writes under Shadow's own client. The ledger search is scoped to a client, so it also searches under the client that
+ * earlier sessions were anchored under. Without that their online check would stop at indeterminate, and a retried anchor
+ * could write again what the old client already wrote. A failed search under either is a failed search: never a partial
+ * answer, which the verifier could read as "these records don't exist".
+ */
+class ShadowClockchainClient extends ClockchainClient {
+  constructor(config: ClockchainConfig, private readonly earlier: ClockchainClient) {
+    super(config);
+  }
+  override async searchAsset(assetReferenceId: string): Promise<LedgerRecord[]> {
+    const [own, old] = await Promise.all([super.searchAsset(assetReferenceId), this.earlier.searchAsset(assetReferenceId)]);
+    const seen = new Set(own.map((r) => String(r.ledgerId)));
+    return [...own, ...old.filter((r) => !seen.has(String(r.ledgerId)))];
+  }
+}
+
+/** The delegated in-process client (CLOCKCHAIN_API_KEY / _CLIENT_ID / _WALLET_ID), or Shadow's own identity on it, built on first use. */
 export function runtimeShadowLedger(env: NodeJS.ProcessEnv = process.env): ShadowLedger {
   if (testLedger) return testLedger;
-  runtimeLedger ??= new ClockchainClient(readConfigFromEnv(env));
+  if (!runtimeLedger) {
+    const config = readConfigFromEnv(env);
+    const identity = shadowLedgerIdentity(env);
+    runtimeLedger = identity ? new ShadowClockchainClient({ ...config, ...identity }, new ClockchainClient(config)) : new ClockchainClient(config);
+  }
   return runtimeLedger;
 }
 

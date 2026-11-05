@@ -559,6 +559,9 @@ read_optional_env SHADOW_ANCHORS_PER_SESSION /clockchain/mcp/SHADOW_ANCHORS_PER_
 read_optional_env SHADOW_LOG_STEPS_PER_MIN /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN
 # The hand-added preview endpoints, logging on by default (absent = no such paths; the listed paths never follow it).
 read_optional_env SHADOW_PREVIEW_AUTO_LOG /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG
+# Shadow's own writer on the ledger (absent = the delegated client below).
+read_optional_env SHADOW_LEDGER_CLIENT_ID /clockchain/mcp/SHADOW_LEDGER_CLIENT_ID
+read_optional_env SHADOW_LEDGER_WALLET_ID /clockchain/mcp/SHADOW_LEDGER_WALLET_ID
 # OAuth 2.1 connector sign-in (off unless MCP_OAUTH=1; needs MCP_TOKEN_SIGNING_SECRET, read above).
 # MCP_OAUTH_APPROVALS_PER_HOUR is the per-IP approval ceiling (default 10, like POST /token).
 read_optional_env MCP_OAUTH /clockchain/mcp/MCP_OAUTH

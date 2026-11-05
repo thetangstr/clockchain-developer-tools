@@ -83,7 +83,7 @@ import {
 import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
 import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/service.js";
 import { createShadowHttpHandler, PREVIEW_CHAT_PATH, PREVIEW_PATH, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
-import { runtimeShadowLedger } from "./shadow/ledger.js";
+import { runtimeShadowLedger, shadowLedgerIdentity } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
 import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
 
@@ -1112,6 +1112,13 @@ export async function runHttp(): Promise<Server> {
     return { ok: false };
   };
 
+  // SHADOW_LEDGER_CLIENT_ID / _WALLET_ID, refused in a caller's x-clockchain-client-id / -wallet-id on every MCP request.
+  // The gateway checks only that a request is signed by this server, so this server is what keeps /mcp callers from
+  // writing under Shadow's name. In any letter case: a look-alike would read the same on the ledger.
+  const shadowLedgerIds = new Set(Object.values(shadowLedgerIdentity() ?? {}).map((v) => v.toLowerCase()));
+  const namesShadowLedgerIdentity = (headers: IncomingMessage["headers"]): boolean =>
+    shadowLedgerIds.size > 0 && ["x-clockchain-client-id", "x-clockchain-wallet-id"].some((h) => shadowLedgerIds.has(firstHeader(headers[h]).trim().toLowerCase()));
+
   // One 401 for /mcp and /shadow/mcp. With OAuth on it adds that path's RFC 9728
   // WWW-Authenticate challenge (plus error="invalid_token" when a credential was
   // presented and refused); with OAuth off it is the original response, byte for byte.
@@ -1867,6 +1874,12 @@ export async function runHttp(): Promise<Server> {
       return;
     }
     let byo = clockchainOverrides(req.headers);
+    // Hosted Shadow's writer on the ledger belongs to Shadow: a bring-your-own caller may not name it (see below too).
+    if (namesShadowLedgerIdentity(req.headers)) {
+      res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "reserved_ledger_identity", message: "That client or wallet id is reserved for hosted Shadow, so this request was refused and nothing was written. Use your own." }));
+      return;
+    }
     // Verify auth ONCE here; reuse the verified self-serve payload below for the
     // rate-limit key so we don't HMAC-verify the token twice per request.
     const auth: AuthOutcome = byo ? { ok: true, reason: "static_token" } : checkAuth(req);
