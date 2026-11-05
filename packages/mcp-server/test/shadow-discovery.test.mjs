@@ -176,7 +176,7 @@ test("flag on: /llms.txt and /install.txt add one Shadow section and change noth
     assert.match(text, /403\s+account_required/);
     // What is kept where.
     assert.match(text, /deleted 30 days after the session starts/);
-    assert.match(text, /links\s+cannot\s+be\s+revoked/);
+    assert.match(text, /revokes\s+the\s+link/);
     assert.match(text, /Hashes only/);
     assert.match(text, /not that what it says is true or compliant/);
     assert.doesNotMatch(text, /audited|@(?!example)[a-z]+\.[a-z]+/i);

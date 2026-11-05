@@ -86,6 +86,8 @@ export type SessionMeta = {
   checkpoint: Checkpoint | null;
   outbox: OutboxRow[];
   anchors: AnchorInfo[];
+  /** The person revoked this session's links: its capability file is gone, and no tool hands the links out. */
+  linksRevoked?: true;
 };
 
 export type Operator = { operatorId: string; keys: KeyProvider };
@@ -306,6 +308,21 @@ export class ShadowStore {
     else this.backlog.delete(key);
   }
 
+  sessionExists(ownerKey: string, sessionId: string): boolean {
+    return OWNER_KEY.test(ownerKey) && isSessionId(sessionId) && existsSync(this.sessionDir(ownerKey, sessionId));
+  }
+
+  /** Stops a session's links at once: its capability file goes. The record stays. */
+  revokeCap(meta: SessionMeta): void {
+    this.removeCap(meta.cap);
+  }
+
+  /** Removes everything kept for an owner besides its sessions (signing key, daily counts, logging setting). */
+  deleteOwner(ownerKey: string): void {
+    rmSync(this.ownerDir(ownerKey), { recursive: true, force: true });
+    this.operators.delete(ownerKey);
+  }
+
   /** Anchors still owed across every session, as of the last write or sweep. */
   anchorBacklog(): AnchorBacklog {
     const total: AnchorBacklog = { queued: 0, pending: 0, failed: 0 };
@@ -398,6 +415,7 @@ export class ShadowStore {
   deleteSession(ownerKey: string, sessionId: string, cap: string | null): void {
     rmSync(this.sessionDir(ownerKey, sessionId), { recursive: true, force: true });
     if (cap && CAP.test(cap)) this.removeCap(cap);
+    this.backlog.delete(`${ownerKey}/${sessionId}`);
   }
 
   // ---- link capabilities --------------------------------------------------------------------------------------

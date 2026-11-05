@@ -26,7 +26,7 @@ const PREVIEW = "/shadow/preview/mcp";
 const PREVIEW_CHAT = "/shadow/preview/chat/mcp";
 const CB = "https://claude.ai/api/mcp/auth_callback";
 const ENV_KEYS = ["PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS", "MCP_REQUIRE_AUTH", "MCP_RATE_PER_MIN", "MCP_STATE_DIR", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_LAZY_AUTH", "SHADOW_AUTO_LOG", "SHADOW_PREVIEW_AUTO_LOG", "MCP_LOG_BUDGET", "MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR", "MCP_OAUTH_APPROVALS_PER_HOUR"];
-const SESSION_TOOLS = ["shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_record", "shadow_start_session", "shadow_verify"];
+const SESSION_TOOLS = ["clockchain_delete_account", "shadow_checkpoint", "shadow_close_session", "shadow_delete_session", "shadow_get_session", "shadow_list_sessions", "shadow_record", "shadow_revoke_links", "shadow_start_session", "shadow_verify"];
 const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_signup_help", "clockchain_whoami"];
 const LOG_TOOLS = ["clockchain_logging", "clockchain_whoami", "shadow_log_step", "shadow_log_turn"];
 /** What a directory's checklist rejects, or what makes a listed tool read as logging by default or across chats. */

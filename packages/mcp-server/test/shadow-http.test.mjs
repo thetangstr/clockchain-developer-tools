@@ -25,7 +25,7 @@ const ENV_KEYS = [
   "SHADOW_LINKS_PER_MINUTE", "SHADOW_ALLOW_NON_ACCT", "MCP_REQUIRE_AUTH", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_TRUSTED_PROXY",
   "SHADOW_LINK_CONCURRENCY", "SHADOW_LINK_PER_CLIENT", "SHADOW_LINK_IDLE_MS", "SHADOW_LINK_MAX_MS",
 ];
-const SHADOW_TOOLS = ["shadow_start_session", "shadow_record", "shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_verify"];
+const SHADOW_TOOLS = ["shadow_start_session", "shadow_record", "shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_verify", "shadow_revoke_links", "shadow_delete_session"];
 
 async function boot(env) {
   const saved = {};
@@ -104,7 +104,7 @@ test("off by default: /shadow/* falls through to the handling it had before Shad
   }
 });
 
-test("enabled: /mcp is unchanged, /shadow/mcp has the seven Shadow tools and its instructions", async () => {
+test("enabled: /mcp is unchanged, /shadow/mcp has the Shadow tools and its instructions", async () => {
   __setShadowLedgerForTests(new FakeLedger());
   const app = await boot({ SHADOW_ENABLED: "1", SHADOW_STATE_DIR: mkdtempSync(path.join(tmpdir(), "shadow-on-")) });
   try {
@@ -115,12 +115,12 @@ test("enabled: /mcp is unchanged, /shadow/mcp has the seven Shadow tools and its
     const tools = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, account);
     assert.deepEqual(tools.body.result.tools.map((t) => t.name).sort(), [...SHADOW_TOOLS].sort());
     for (const t of tools.body.result.tools.filter((x) => ["shadow_start_session", "shadow_close_session", "shadow_get_session"].includes(x.name)))
-      assert.match(t.description, /kept 30 days.*cannot be revoked/, t.name);
+      assert.match(t.description, /kept 30 days.*revokes the link/, t.name);
     const init = await rpc(`${app.url}/shadow/mcp`, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } }, account);
     assert.equal(init.body.result.instructions, ASKED_INSTRUCTIONS);
     assert.match(init.body.result.instructions, /shadow_start_session.*\n.*shadow_record/s);
     assert.match(init.body.result.instructions, /kept on this server for 30\s+days/);
-    assert.match(init.body.result.instructions, /links cannot be revoked/);
+    assert.match(init.body.result.instructions, /unless\s+the person revokes the link/);
   } finally {
     await app.close();
     __setShadowLedgerForTests(undefined);
@@ -148,7 +148,7 @@ test("auth matrix (with the test-only SHADOW_ALLOW_NON_ACCT=1): /mcp's credentia
     for (const [label, cred] of accepted) {
       const r = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, cred);
       assert.equal(r.status, 200, label);
-      assert.equal(r.body.result.tools.length, 7, label);
+      assert.equal(r.body.result.tools.length, SHADOW_TOOLS.length, label);
     }
     const refused = [
       ["no credential", undefined],

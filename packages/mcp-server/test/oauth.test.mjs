@@ -2101,7 +2101,7 @@ const CHAT_CHALLENGE = `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-pr
 const chatOn = (extra = {}) => ({ ...shadowOn(), MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, SHADOW_LAZY_AUTH: "1", ...extra });
 const rpc = (method, params, id = 1) => ({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, ...(params ? { params } : {}) });
 const callTool = (name, args = {}) => rpc("tools/call", { name, arguments: args });
-const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_signup_help", "clockchain_whoami"];
+const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_delete_account", "clockchain_signup_help", "clockchain_whoami"];
 
 /** A tool call on the chat endpoint with a token. Every raw result is pushed to `seen`, for the secret scan. */
 async function chatTool(base, token, name, args, seen) {
@@ -2174,7 +2174,7 @@ test("chat sign-in on: initialize, tools/list and ping work without a token; eve
     assert.deepEqual((await rpcResult(await mcpPost(s.url, rpc("ping"), {}, CHAT))).result, {});
     const tools = (await rpcResult(await mcpPost(s.url, rpc("tools/list"), {}, CHAT))).result.tools.map((t) => t.name).sort();
     assert.deepEqual(tools.filter((n) => n.startsWith("clockchain_")), ACCOUNT_TOOLS);
-    assert.equal(tools.length, 10, "the seven Shadow tools and the three account tools");
+    assert.equal(tools.length, 13, "the nine Shadow tools and the four account tools");
 
     // The 401 every refused request gets on /shadow/mcp, with the chat path's metadata URL instead.
     const expected = await snapshot(await mcpPost(s.url, callTool("shadow_start_session", { title: "x" }), {}, "/shadow/mcp"));
@@ -2256,10 +2256,10 @@ test("chat sign-in, as claude.ai does it: tools/list, create_account -> 401 -> o
       await chatTool(s.url, person.token, name, args, seen);
     }
     assert.match(seen.at(-2), /shown only in that window/);
-    // The same token on /shadow/mcp: the same account and sessions, and no account tools there.
+    // The same token on /shadow/mcp: the same account and sessions, and of the account tools only the one to leave.
     const plainTools = (await rpcResult(await mcpPost(s.url, rpc("tools/list"), { authorization: `Bearer ${person.token}` }, "/shadow/mcp"))).result.tools.map((t) => t.name);
-    assert.equal(plainTools.length, 7);
-    assert.equal(plainTools.some((n) => n.startsWith("clockchain_")), false);
+    assert.equal(plainTools.length, 10);
+    assert.deepEqual(plainTools.filter((n) => n.startsWith("clockchain_")), ["clockchain_delete_account"]);
     assert.equal((await shadowCall(s.url, "shadow_get_session", { session_id: started.value.session_id }, person.token)).isError, false);
 
     // The scan: no account key, access or refresh token, cookie, code, grant or request token in any tool result,

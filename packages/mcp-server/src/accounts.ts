@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { cleanStaleFiles, createDurableJsonFile } from "./handshake-core/durable-store.js";
 import { isAcctId, newAcctId } from "./token.js";
@@ -12,6 +12,7 @@ import { isAcctId, newAcctId } from "./token.js";
  *
  *   a/<acct>.json        { acct, name, createdAt, keyHash, unnamed? }
  *   k/<keyHash>.json     { acct }        lookup index for account-key sign-in
+ *   d/<acct>.json        { deletedAt }   a deleted account's id, and nothing else, kept until its last token has expired
  *
  * The account key (`cck_` + 32 base64url characters, 192 random bits) is shown once at creation. Only its SHA-256 is
  * stored, compared in constant time; the key itself is never written or logged.
@@ -23,6 +24,8 @@ export const DEFAULT_MAX_ACCOUNTS = 50_000;
 const KEY_HASH = /^[0-9a-f]{64}$/;
 const ACCOUNT_FILE = /^acct_[A-Za-z0-9_-]{22}\.json$/;
 const RECORD_MAX_BYTES = 4 * 1024;
+/** Past the longest token an account can hold (a refresh token lasts 60 days). */
+const DELETED_KEEP_MS = 90 * 24 * 60 * 60_000;
 
 export interface Account {
   acct: string;
@@ -146,6 +149,9 @@ export class AccountUnavailableError extends Error {
 export class AccountStore {
   private readonly accountsDir: string;
   private readonly keysDir: string;
+  private readonly deletedDir: string;
+  /** Deleted accounts still inside their tokens' lifetime. Tokens are signed and hold no state, so this is what stops them. */
+  private readonly deleted = new Set<string>();
   private readonly cache = new Map<string, Account>();
   /** Unreadable record files -> their mtime when they failed: re-read (and re-quarantined) only once they change. */
   private readonly unreadable = new Map<string, number>();
@@ -155,12 +161,21 @@ export class AccountStore {
   constructor(root: string, private readonly maxAccounts = DEFAULT_MAX_ACCOUNTS, private readonly now: () => number = Date.now) {
     this.accountsDir = join(root, "a");
     this.keysDir = join(root, "k");
-    for (const dir of [root, this.accountsDir, this.keysDir]) {
+    this.deletedDir = join(root, "d");
+    for (const dir of [root, this.accountsDir, this.keysDir, this.deletedDir]) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
     }
     cleanStaleFiles(this.accountsDir);
     cleanStaleFiles(this.keysDir);
+    cleanStaleFiles(this.deletedDir);
+    for (const name of readdirSync(this.deletedDir).filter((n) => ACCOUNT_FILE.test(n))) {
+      const path = join(this.deletedDir, name);
+      if (this.now() - statSync(path).mtimeMs > DELETED_KEEP_MS) {
+        rmSync(path, { force: true });
+        rmSync(`${path}.bak`, { force: true });
+      } else this.deleted.add(name.slice(0, -".json".length));
+    }
     this.total = readdirSync(this.accountsDir).filter((name) => ACCOUNT_FILE.test(name)).length;
   }
 
@@ -266,6 +281,38 @@ export class AccountStore {
     this.accountFile(acct, named).save("now");
     this.cache.set(acct, named);
     return { account: named, outcome: "named" };
+  }
+
+  /** True for an account deleted within the lifetime of its tokens, which must then be refused wherever they are shown. */
+  isDeleted(acct: unknown): boolean {
+    return typeof acct === "string" && this.deleted.has(acct);
+  }
+
+  /**
+   * Deletes an account for good: the id is marked deleted first, so its tokens stop at once, then its key stops signing
+   * in, then the record goes. The name and key hash aren't kept. False when there is no such account. Throws if the mark
+   * can't be written, leaving the account as it was. Its Shadow records are the caller's to delete, before this.
+   */
+  delete(acct: string): boolean {
+    const account = this.get(acct);
+    if (!account) return false;
+    let mark = { deletedAt: new Date(this.now()).toISOString() };
+    createDurableJsonFile<{ deletedAt: string }>({
+      path: join(this.deletedDir, `${acct}.json`),
+      schema: "clockchain-account-deleted-v1",
+      snapshot: () => mark,
+      validate: (v) => { if (!isObject(v) || typeof v.deletedAt !== "string") throw new Error("bad deleted mark"); mark = { deletedAt: v.deletedAt }; return mark; },
+      maxBytes: RECORD_MAX_BYTES,
+    }).save("now");
+    this.deleted.add(acct);
+    for (const path of [join(this.keysDir, `${account.keyHash}.json`), join(this.accountsDir, `${acct}.json`)]) {
+      rmSync(path, { force: true });
+      rmSync(`${path}.bak`, { force: true });
+      this.unreadable.delete(path);
+    }
+    this.cache.delete(acct);
+    this.total -= 1;
+    return true;
   }
 
   /** The account an account key belongs to, or undefined. Throws AccountUnavailableError when a record cannot be read. */

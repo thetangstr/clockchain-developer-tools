@@ -17,7 +17,7 @@ const ABOUT = [
   "the record is intact, not that what it says is true or compliant.",
 ];
 
-const KEPT_RECORD = "On this server, deleted 30 days after the session starts. Until then anyone with a viewer or packet link can read all of it, and links cannot be revoked.";
+const KEPT_RECORD = "On this server, deleted 30 days after the session starts. Until then anyone with a viewer or packet link can read all of it, unless the person revokes the link. The person can delete a record, or the whole account, at any time, through tools.";
 const KEPT_LEDGER = `Hashes only, on the ${SUBSTRATE_LABEL}. They stay after the record is deleted. Writes come from a shared testnet pool, so ledger entries show the pool's client and wallet, not yours.`;
 const KEPT_ACCOUNT = "No email. A lost account key plus cleared cookies loses the account.";
 const CHATGPT_NOTE = "Not yet confirmed in a real ChatGPT account. Some plans may block write tools.";

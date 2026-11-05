@@ -16,9 +16,9 @@ export const SHADOW_INSTRUCTIONS = [
   "Shadow is a flight recorder for your work. It keeps a tamper-evident record of each step you take (tasks, prompts,",
   "messages, tool calls and results, files, notes), signs it, anchors fingerprints of it on Clockchain, and gives you",
   "links anyone can open to check the record. Only hashes go to Clockchain. The record is kept on this server for 30",
-  "days and then deleted. Anyone who has a session's viewer or packet link can read the whole record until then, and",
-  "links cannot be revoked, so share them only with people who may see everything recorded. Sessions belong to the",
-  "signed-in account that started them.",
+  "days and then deleted. Anyone who has a session's viewer or packet link can read the whole record until then, unless",
+  "the person revokes the link or deletes the record, so share links only with people who may see everything recorded.",
+  "Sessions belong to the signed-in account that started them.",
   "",
   "Order of calls:",
   "1. shadow_start_session {title, agents?} once, before you start. Keep the session_id.",
@@ -50,8 +50,9 @@ export const ASKED_INSTRUCTIONS = [
   "Shadow keeps a tamper-evident record of those steps (tasks, prompts, messages, tool calls and results, files, notes),",
   "signs it, anchors fingerprints of it on Clockchain, and gives you links anyone can open to check the record. Only hashes",
   "go to Clockchain, and they can't be removed. The record is kept on this server for 30 days and then deleted. Anyone who",
-  "has a session's viewer or packet link can read the whole record until then, and links cannot be revoked, so share them",
-  "only with people who may see everything recorded. Sessions belong to the signed-in account that started them.",
+  "has a session's viewer or packet link can read the whole record until then, unless the person revokes the link or deletes",
+  "the record, so share links only with people who may see everything recorded. Sessions belong to the signed-in account",
+  "that started them.",
   "",
   "Order of calls:",
   "1. shadow_start_session {title, agents?} once, when the person asks to record. Keep the session_id.",
@@ -63,6 +64,10 @@ export const ASKED_INSTRUCTIONS = [
   "   (succeeded, failed, cancelled, timed_out or unknown) to report how it ended.",
   "5. shadow_get_session and shadow_verify show the result. Share the viewer or packet link, and give the pin",
   "   to the person checking through a different channel.",
+  "",
+  "Deleting, when the person asks: shadow_revoke_links stops a session's links and keeps the record. shadow_delete_session",
+  "deletes a record and its links. clockchain_delete_account deletes the account and all its records. Say what each result",
+  "says, including that hashes stay on Clockchain.",
   "",
   "Record what you showed or did, as it happened. Never record hidden reasoning. Shadow refuses any step that contains",
   "a <think>, <thinking> or <reasoning> tag, a thinking or reasoning block, or a field whose name starts with",
@@ -117,7 +122,7 @@ export const PREVIEW_PATH = "/shadow/preview/mcp";
 export const PREVIEW_CHAT_PATH = "/shadow/preview/chat/mcp";
 
 /** Retention and sharing, said wherever a tool hands out or describes links. */
-const RETENTION = "Records are kept 30 days, then deleted; anyone with a link can read the record until then, and links cannot be revoked.";
+const RETENTION = "Records are kept 30 days, then deleted; anyone with a link can read the record until then, unless the person revokes the link or deletes the record.";
 
 export type ShadowAuth = { ok: true; ownerId: string; rateKey: string } | { ok: false; accountRequired?: boolean };
 
@@ -161,6 +166,8 @@ export interface ShadowHttpDeps {
     allowLogStep(rateKey: string): boolean;
     stepsPerMinute: number;
   };
+  /** The OAuth account store, for clockchain_delete_account on every endpoint. */
+  accounts?: AccountStore;
   /** SHADOW_PREVIEW_AUTO_LOG=1: serves PREVIEW_PATH like /shadow/mcp, and PREVIEW_CHAT_PATH (with `chat`) like the chat endpoint. */
   preview?: boolean;
   chat?: {
@@ -272,6 +279,9 @@ const TOOL_META = {
   clockchain_whoami: tool("Which Clockchain account", true, false, true, false),
   clockchain_create_account: tool("Create a Clockchain account", false, true, true, false),
   clockchain_signup_help: tool("How Clockchain sign-up works", true, false, true, false),
+  shadow_revoke_links: tool("Revoke a session's links", false, true, true, true),
+  shadow_delete_session: tool("Delete a session", false, true, true, true),
+  clockchain_delete_account: tool("Delete the Clockchain account", false, true, true, true),
 } as const;
 
 /**
@@ -283,7 +293,7 @@ export function buildShadowServer(
   service: ShadowService,
   ownerId: string | null,
   base: string,
-  o: { chatAccounts?: AccountStore | undefined; autoLog?: { accounts?: AccountStore | undefined; logStepAllowed: boolean; stepsPerMinute: number } | undefined } = {},
+  o: { chatAccounts?: AccountStore | undefined; accountStore?: AccountStore | undefined; autoLog?: { accounts?: AccountStore | undefined; logStepAllowed: boolean; stepsPerMinute: number } | undefined } = {},
 ): McpServer {
   const accounts = o.chatAccounts;
   const autoLog = o.autoLog;
@@ -421,6 +431,20 @@ export function buildShadowServer(
     inputSchema: { session_id: sessionId },
   }, run((a) => service.verify(owner, a, base)));
 
+  server.registerTool("shadow_revoke_links", {
+    ...TOOL_META.shadow_revoke_links,
+    description: "Use when the person asks to stop a session's links. The session's viewer and packet links stop working at once and can't be turned back on. The record is kept. Anyone who already saved a copy keeps it.",
+    inputSchema: { session_id: sessionId },
+  }, run((a) => service.revokeLinks(owner, a)));
+
+  server.registerTool("shadow_delete_session", {
+    ...TOOL_META.shadow_delete_session,
+    description: "Use when the person asks to delete a record. Deletes the session's record from this server and stops its viewer and packet links at once. This can't be undone. Fingerprints (hashes) already on the Clockchain ledger stay, and the result says so. They hold no content.",
+    inputSchema: { session_id: sessionId },
+  }, run((a) => service.deleteSession(owner, a)));
+
+  const accountStore = accounts ?? o.accountStore ?? autoLog?.accounts;
+  if (accountStore) registerDeleteAccount(server, accountStore, service, ownerId);
   if (accounts) registerAccountTools(server, accounts, ownerId, autoLog ? service : undefined);
   else if (autoLog?.accounts) registerWhoami(server, autoLog.accounts, ownerId, service, false);
   return server;
@@ -471,6 +495,49 @@ function registerWhoami(server: McpServer, accounts: AccountStore, ownerId: stri
         (logging === undefined ? "" : logging ? " Logging is on." : " Logging is off."),
     };
   }));
+}
+
+/** clockchain_delete_account: on every endpoint, as a person must be able to leave from whichever app they connected. */
+function registerDeleteAccount(server: McpServer, accounts: AccountStore, service: ShadowService, ownerId: string | null): void {
+  server.registerTool("clockchain_delete_account", {
+    ...TOOL_META.clockchain_delete_account,
+    description:
+      "Use when the person asks to delete their Clockchain account. Without confirm: true it changes nothing and says what would go. With confirm: true, which needs the person's clear yes in this chat, " +
+      "it deletes the account, every Shadow record in it and all their links, and the account key and sign-ins stop working. This can't be undone. Fingerprints (hashes) already on the Clockchain ledger stay, and the result says so. They hold no content.",
+    inputSchema: { confirm: z.boolean().optional().describe("true only after the person has clearly said yes to deleting the account and everything in it.") },
+  }, async (a) => {
+    if (ownerId === null) return toolError(signInRequired());
+    if (!ACCT.test(ownerId)) return accountError("ACCOUNT_REQUIRED", "This connection is not signed in with a Clockchain account. Connect with sign-in, then try again.");
+    try {
+      const account = accounts.get(ownerId);
+      if (!account) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
+      const view = accountView(account);
+      if (a.confirm !== true) {
+        const would = service.ownerSummary(ownerId);
+        return ok({
+          status: "confirmation_needed",
+          account: view,
+          would_delete: { sessions: would.sessions, steps: would.steps, links: "all of them" },
+          ledger: { kept: true, fingerprints: would.fingerprints },
+          message: `Nothing was deleted. This would delete ${accountLine(view)} with its ${would.sessions} session(s) and all their links, and its account key would stop working. It can't be undone. ${would.fingerprints} fingerprint(s) (hashes) on the Clockchain ledger would stay, because they can't be removed. Ask the person to confirm, then call again with confirm: true.`,
+        });
+      }
+      const done = await service.deleteOwner(ownerId, () => {
+        accounts.delete(ownerId);
+      });
+      return ok({
+        status: "deleted",
+        account: { short_id: view.short_id },
+        sessions_deleted: done.sessions,
+        links: "stopped",
+        ledger: { kept: true, fingerprints: done.fingerprints, note: "Fingerprints (hashes) already on the Clockchain ledger stay and can't be removed. They hold no content." },
+        message: `Deleted. The account ${view.short_id} and its ${done.sessions} session(s) are gone from this server, their links have stopped working, and the account key and this connection's sign-in no longer work. ${done.fingerprints} fingerprint(s) (hashes) stay on the Clockchain ledger, because they can't be removed. They hold no content. Anyone who already saved a copy of a record keeps it. To use Clockchain again, connect and create a new account.`,
+      });
+    } catch (e) {
+      if (e instanceof AccountUnavailableError) return accountError("ACCOUNT_UNAVAILABLE", "Clockchain can't read this account right now, so nothing was deleted. Try again in a few minutes.");
+      return toolError(e);
+    }
+  });
 }
 
 /**
@@ -662,6 +729,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     const logStepAllowed = logStep && autoLog.allowLogStep(auth.rateKey);
     await serve(req, res, body, buildShadowServer(deps.service, auth.ownerId, publicBaseUrl(req.headers), {
       chatAccounts: chat?.accounts,
+      accountStore: deps.accounts,
       autoLog: autoLog && { accounts: autoLog.accounts, logStepAllowed, stepsPerMinute: autoLog.stepsPerMinute },
     }));
   }
@@ -692,6 +760,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     if (typeof method !== "string" || !ANONYMOUS_METHODS.has(method)) return deps.unauthorized(res, req);
     await serve(req, res, body, buildShadowServer(deps.service, null, publicBaseUrl(req.headers), {
       chatAccounts: chat.accounts,
+      accountStore: deps.accounts,
       // The anonymous server only lists tools: every tools/call got the 401 above.
       autoLog: autoLog && { accounts: autoLog.accounts, logStepAllowed: false, stepsPerMinute: autoLog.stepsPerMinute },
     }));

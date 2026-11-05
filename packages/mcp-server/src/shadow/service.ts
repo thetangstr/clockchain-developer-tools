@@ -85,7 +85,10 @@ const MAX_OUTBOX = 20;
 const MAX_PASSES = 10;
 const COLLECTOR_STEP_HEADROOM = 500;
 const ONLINE_TIMEOUT_MS = 20_000;
-const LINKS_NOTE = "Anyone with these links can read the whole record until it is deleted, 30 days after the session started; links cannot be revoked.";
+const LINKS_NOTE = "Anyone with these links can read the whole record until it is deleted, 30 days after the session started, unless the person deletes it sooner or revokes the links first (shadow_delete_session, shadow_revoke_links).";
+const LINKS_REVOKED_NOTE = "The person revoked this session's links, so none exist. The record itself is still kept until it is deleted.";
+const LEDGER_STAYS = "Its fingerprints (hashes) stay on the Clockchain ledger and can't be removed. They hold no content.";
+const COPIES_STAY = "Anyone who already saved a copy keeps it.";
 /** How long one call may spend anchoring before it reports what is still pending. */
 const ANCHOR_BUDGET_MS = 25_000;
 /** Readers at once when checking a session's receipts online. */
@@ -290,6 +293,14 @@ class ByteLru {
       this.bytes -= v.length;
     }
   }
+  /** Drops every body whose key matches: a deleted record must not stay in memory, even unreachable. */
+  deleteWhere(match: (key: string) => boolean): void {
+    for (const [k, v] of this.items) {
+      if (!match(k)) continue;
+      this.items.delete(k);
+      this.bytes -= v.length;
+    }
+  }
   get size(): number {
     return this.bytes;
   }
@@ -350,7 +361,7 @@ function stepSummary(kind: RecordKind, content: unknown): string {
 }
 
 /** The footer to end a reply with: only what the record really holds, in server-made values (no step content). */
-function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[] }, anchor: LogAnchor, viewer: string, turnSteps?: number): string {
+function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[] }, anchor: LogAnchor, viewer: string | null, turnSteps?: number): string {
   const count = (n: number) => `${n} ${n === 1 ? "step" : "steps"}`;
   const heights = meta.anchors.filter((a) => a.blockHeight);
   const latest = meta.anchors.at(-1);
@@ -363,7 +374,7 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
     if (heights.length) parts.push(`First block ${heights[0].blockHeight}, last block ${heights[heights.length - 1].blockHeight}.`);
     if (latest) parts.push(`Latest ledger ID: \`${latest.ledgerId}\`.`);
   }
-  parts.push(`Viewer: ${viewer}`);
+  parts.push(viewer ? `Viewer: ${viewer}` : "Viewer link revoked.");
   const lines = ["---", parts.join(" ")];
   if (anchor.anchor_status !== "anchored") {
     const one = turnSteps === undefined;
@@ -438,7 +449,7 @@ export type ServiceOptions = {
   autoLog?: boolean;
 };
 
-type Links = { viewer: string; packet: string };
+type Links = { viewer: string | null; packet: string | null };
 
 export class ShadowService {
   readonly store: ShadowStore;
@@ -654,6 +665,7 @@ export class ShadowService {
   }
 
   private links(meta: SessionMeta, base: string): Links {
+    if (meta.linksRevoked) return { viewer: null, packet: null };
     return { viewer: `${base}/shadow/s/${meta.cap}`, packet: `${base}/shadow/p/${meta.cap}.json` };
   }
 
@@ -1040,8 +1052,8 @@ export class ShadowService {
         final_checkpoint: this.anchorView(meta, made.target, made.refused),
         pin,
         links: this.links(meta, base),
-        links_note: LINKS_NOTE,
-        share: "Send the viewer or packet link to whoever should check this record, and the pin through a different channel.",
+        links_note: meta.linksRevoked ? LINKS_REVOKED_NOTE : LINKS_NOTE,
+        share: meta.linksRevoked ? "This session's links were revoked, so there is nothing to share." : "Send the viewer or packet link to whoever should check this record, and the pin through a different channel.",
       };
     });
   }
@@ -1065,7 +1077,7 @@ export class ShadowService {
         pending_anchors: meta.outbox.map(pendingView),
         time_windows: windowsView(windows(events)),
         links: this.links(meta, base),
-        links_note: LINKS_NOTE,
+        links_note: meta.linksRevoked ? LINKS_REVOKED_NOTE : LINKS_NOTE,
         ...(pin ? { pin } : { pin_note: "The pin is issued when the session is closed." }),
       };
     }));
@@ -1129,6 +1141,105 @@ export class ShadowService {
     }));
   }
 
+  // ---- delete and revoke, at the person's request --------------------------------------------------------------------
+
+  /** A session deleted now: record, links and cached copies. Call under the session's lock. */
+  private removeSession(ownerKey: string, sessionId: string): { steps: number | null; anchors: number } {
+    let meta: SessionMeta | undefined;
+    try {
+      meta = this.store.readMeta(ownerKey, sessionId);
+    } catch {
+      meta = undefined; // Unreadable is no reason to keep it: the sweep drops a capability file left behind.
+    }
+    const bytes = (meta?.eventsBytes ?? 0) + 4096;
+    this.store.deleteSession(ownerKey, sessionId, meta?.cap ?? null);
+    this.usageBytes = Math.max(0, this.usageBytes - bytes);
+    const owned = this.ownerUsage.get(ownerKey);
+    if (owned !== undefined) this.ownerUsage.set(ownerKey, Math.max(0, owned - bytes));
+    this.linkCache.deleteWhere((key) => key.includes(`:${sessionId}:`));
+    return { steps: meta?.seq ?? null, anchors: meta?.anchors.length ?? 0 };
+  }
+
+  /** Deletes one session for its owner, now. Its links stop at once. */
+  async deleteSession(ownerId: string, input: { session_id?: unknown }) {
+    const sessionId = sessionIdOf(input.session_id);
+    const ownerKey = ownerKeyOf(ownerId);
+    return this.locks.run(`${ownerKey}/${sessionId}`, () => {
+      if (!this.store.sessionExists(ownerKey, sessionId)) throw notFound();
+      const removed = this.removeSession(ownerKey, sessionId);
+      this.log("shadow_session_deleted", { sessionId, anchors: removed.anchors });
+      return {
+        status: "deleted",
+        session_id: sessionId,
+        steps_deleted: removed.steps,
+        links: "stopped",
+        ledger: { kept: true, fingerprints: removed.anchors, note: LEDGER_STAYS },
+        message: `Deleted. The record is gone from this server and its viewer and packet links have stopped working. ${LEDGER_STAYS} ${COPIES_STAY}`,
+      };
+    });
+  }
+
+  /** Stops a session's links without touching the record. The links can't be turned back on. */
+  async revokeLinks(ownerId: string, input: { session_id?: unknown }) {
+    const sessionId = sessionIdOf(input.session_id);
+    return this.session(ownerKeyOf(ownerId), sessionId, (meta) => {
+      const already = meta.linksRevoked === true;
+      if (!already) {
+        // Saved first: linkBody refuses a revoked session whatever its capability file says, so a crash here can't reopen it.
+        meta.linksRevoked = true;
+        this.store.writeMeta(meta);
+        this.store.revokeCap(meta);
+        this.linkCache.deleteWhere((key) => key.includes(`:${sessionId}:`));
+        this.log("shadow_links_revoked", { sessionId });
+      }
+      return {
+        status: already ? "already_revoked" : "revoked",
+        session_id: sessionId,
+        links: "stopped",
+        record: "kept",
+        message: `The viewer and packet links for this session have stopped working, and they can't be turned back on. The record is still kept until it is deleted, ${meta.expiresAt.slice(0, 10)} at the latest. ${COPIES_STAY}`,
+      };
+    });
+  }
+
+  /** What deleting an owner's data would take, for the confirmation. */
+  ownerSummary(ownerId: string): { sessions: number; steps: number; fingerprints: number } {
+    const ownerKey = ownerKeyOf(ownerId);
+    const total = { sessions: 0, steps: 0, fingerprints: 0 };
+    for (const id of this.store.sessionIds(ownerKey)) {
+      total.sessions++;
+      try {
+        const m = this.store.readMeta(ownerKey, id);
+        total.steps += m?.seq ?? 0;
+        total.fingerprints += m?.anchors.length ?? 0;
+      } catch {
+        // Unreadable: counted as a session, and deleted like the rest.
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Deletes everything Shadow keeps for an owner, each session under its own lock and no new session starting meanwhile,
+   * then `finish` (which removes the account, so its tokens stop), then the owner's key and settings.
+   */
+  async deleteOwner(ownerId: string, finish: () => void): Promise<{ sessions: number; fingerprints: number }> {
+    const ownerKey = ownerKeyOf(ownerId);
+    return this.locks.run(`owner:${ownerKey}`, async () => {
+      let sessions = 0, fingerprints = 0;
+      for (const id of this.store.sessionIds(ownerKey)) {
+        const removed = await this.locks.run(`${ownerKey}/${id}`, () => this.removeSession(ownerKey, id));
+        sessions++;
+        fingerprints += removed.anchors;
+      }
+      finish();
+      this.store.deleteOwner(ownerKey);
+      this.ownerUsage.delete(ownerKey);
+      this.log("shadow_owner_deleted", { sessions, anchors: fingerprints });
+      return { sessions, fingerprints };
+    });
+  }
+
   // ---- public links (anyone with the capability) -------------------------------------------------------------------
 
   /**
@@ -1145,7 +1256,7 @@ export class ShadowService {
     } catch {
       meta = undefined;
     }
-    if (!meta || Date.parse(meta.expiresAt) <= this.now().getTime()) return undefined;
+    if (!meta || meta.linksRevoked || Date.parse(meta.expiresAt) <= this.now().getTime()) return undefined;
     const hit = this.linkCache.get(linkKey(kind, meta));
     if (hit) return hit;
     const flight = `${kind}:${meta.sessionId}:${meta.seq}`;

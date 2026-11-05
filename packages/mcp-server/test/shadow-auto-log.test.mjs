@@ -232,9 +232,9 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
   try {
     const a = await signUp(s.url);
     const names = async (p, token) => (await listTools(s.url, p, token)).map((t) => t.name).sort();
-    const shadow = ["shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_log_step", "shadow_log_turn", "shadow_record", "shadow_start_session", "shadow_verify"];
-    assert.deepEqual(await names(PLAIN, a.token), ["clockchain_logging", "clockchain_whoami", ...shadow]);
-    assert.deepEqual(await names(CHAT, a.token), ["clockchain_create_account", "clockchain_logging", "clockchain_signup_help", "clockchain_whoami", ...shadow]);
+    const shadow = ["shadow_checkpoint", "shadow_close_session", "shadow_delete_session", "shadow_get_session", "shadow_list_sessions", "shadow_log_step", "shadow_log_turn", "shadow_record", "shadow_revoke_links", "shadow_start_session", "shadow_verify"];
+    assert.deepEqual(await names(PLAIN, a.token), ["clockchain_delete_account", "clockchain_logging", "clockchain_whoami", ...shadow]);
+    assert.deepEqual(await names(CHAT, a.token), ["clockchain_create_account", "clockchain_delete_account", "clockchain_logging", "clockchain_signup_help", "clockchain_whoami", ...shadow]);
     assert.deepEqual(await names(CHAT), await names(CHAT, a.token), "the chat endpoint lists them before sign-in too");
     for (const p of [PLAIN, CHAT]) {
       const { instructions } = (await rpcResult(await post(s.url, p, INIT, a.token))).result;

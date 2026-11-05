@@ -36,8 +36,11 @@ const EXPECTED = {
   clockchain_whoami:         ["Which Clockchain account",      true,  false, true,  false],
   clockchain_create_account: ["Create a Clockchain account",   false, true,  true,  false],
   clockchain_signup_help:    ["How Clockchain sign-up works",  true,  false, true,  false],
+  shadow_revoke_links:       ["Revoke a session's links",      false, true,  true,  true],
+  shadow_delete_session:     ["Delete a session",              false, true,  true,  true],
+  clockchain_delete_account: ["Delete the Clockchain account", false, true,  true,  true],
 };
-const SESSION_TOOLS = ["shadow_start_session", "shadow_record", "shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_verify"];
+const SESSION_TOOLS = ["shadow_start_session", "shadow_record", "shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_verify", "shadow_revoke_links", "shadow_delete_session", "clockchain_delete_account"];
 const LOG_TOOLS = ["shadow_log_step", "shadow_log_turn", "clockchain_logging", "clockchain_whoami"];
 const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_whoami", "clockchain_signup_help"];
 

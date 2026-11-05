@@ -1104,6 +1104,8 @@ export async function runHttp(): Promise<Server> {
     const presented = presentedApiKey(req.headers);
     if (!looksLikeSelfServe(presented)) return { ok: false };
     const v1 = verifyToken(signingSecret, presented);
+    // A token is signed and holds no state, so a deleted account's token is refused by name, on every surface.
+    if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
     if (v1.valid) return { ok: true, reason: "demo_token_v1", payload: v1.payload };
     const v2 = verifyTrialToken(signingSecret, presented);
     if (v2.valid) return { ok: true, trial: v2.payload };
@@ -1222,6 +1224,7 @@ export async function runHttp(): Promise<Server> {
     if (!presented) return { ok: false };
     if (looksLikeSelfServe(presented)) {
       const v1 = verifyToken(signingSecret, presented);
+      if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
       if (v1.valid) return signed(v1.payload);
       const v2 = verifyTrialToken(signingSecret, presented);
       if (v2.valid) return signed(v2.payload);
@@ -1267,6 +1270,7 @@ export async function runHttp(): Promise<Server> {
         linkClient: shadowLinkClient,
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
         ...(shadowPreview ? { preview: true } : {}),
+        ...(oauth?.accounts ? { accounts: oauth.accounts } : {}),
         ...(shadowConfig.autoLog ? {
           autoLog: {
             // Per endpoint: only these paths get the logging tools and instructions.

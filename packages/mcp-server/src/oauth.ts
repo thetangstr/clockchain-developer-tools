@@ -517,7 +517,7 @@ function smallPrint(app: string, redirectHost: string, autoLog?: boolean, shadow
 <li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
 <li>${app} can read and add to every Shadow record in this account, including records made from other apps.</li>
 <li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>
-<li>Shadow keeps the records of your agents’ work for 30 days.</li>
+<li>Shadow keeps the records of your agents’ work for 30 days. You can delete a record or your account sooner, from the chat.</li>
 <li>Only fingerprints go on the Clockchain ledger, never the content itself.</li>
 </ul>
 <p>Only continue if you just started connecting from this app and <code>${escapeHtml(redirectHost)}</code> is where you expect to return. The app’s name comes from the app; Clockchain doesn’t verify it.</p>
@@ -1402,13 +1402,17 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         sendOAuthError(res, 400, "invalid_grant", "The authorization code was already used.");
         return;
       }
+      if (accounts?.isDeleted(code.acct)) {
+        sendOAuthError(res, 400, "invalid_grant", "This Clockchain account was deleted.");
+        return;
+      }
       if (!mark(usedCodes, code.jti, code.exp)) return;
       issueTokens(res, "authorization_code", { cid, n: client.n, acct: code.acct, rs: code.rs ?? resource, fam: code.jti });
       return;
     }
     if (grant === "refresh_token") {
       const refresh = unseal<RefreshBlob>("refresh", params.get("refresh_token"));
-      if (!refresh || !safeEqual(refresh.cid, cid) || revokedFamilies.has(refresh.fam)) {
+      if (!refresh || !safeEqual(refresh.cid, cid) || revokedFamilies.has(refresh.fam) || accounts?.isDeleted(refresh.acct)) {
         sendOAuthError(res, 400, "invalid_grant", "The refresh token is invalid, expired, or revoked.");
         return;
       }
