@@ -97,6 +97,10 @@ services:
       SHADOW_ANCHORS_PER_DAY: "${SHADOW_ANCHORS_PER_DAY:-}"
       SHADOW_ANCHORS_PER_SESSION: "${SHADOW_ANCHORS_PER_SESSION:-}"
       SHADOW_LOG_STEPS_PER_MIN: "${SHADOW_LOG_STEPS_PER_MIN:-}"
+      # SHADOW_AUTO_LOG reaches the paths directories list, so a listed server must not set it. SHADOW_PREVIEW_AUTO_LOG=1
+      # instead adds /shadow/preview/mcp and /shadow/preview/chat/mcp, added by hand and logging by default, and leaves
+      # the listed paths as they are: there the person asks, chat by chat. "" = off (no such paths).
+      SHADOW_PREVIEW_AUTO_LOG: "${SHADOW_PREVIEW_AUTO_LOG:-}"
       # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
       # MCP_OAUTH=1 exists in SSM ("" == absent == off: no OAuth routes, 401 unchanged).
       # The issuer is MCP_PUBLIC_URL, default https://mcp.clockchain.network (never the Host

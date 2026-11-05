@@ -37,6 +37,39 @@ export const SHADOW_INSTRUCTIONS = [
   "most 32 KB. Send one JSON-RPC message per request (batches are refused).",
 ].join("\n");
 
+/**
+ * The instructions where the person asks (every endpoint without automatic logging, and so every listed one). Nothing
+ * here may tell an agent to record unasked, or carry over from one chat to the next (Anthropic Directory Policy 1.E, 1.G
+ * and 2.D; OpenAI's plugin guidelines on triggering and chat logs). test/shadow-logging-endpoints.test.mjs scans for it.
+ */
+export const ASKED_INSTRUCTIONS = [
+  "Shadow records a task only when the person asks for it. Do not start a session unless they ask in this chat. A request",
+  "holds for this chat only: in a new chat, record nothing unless they ask again. While a session they asked for is open,",
+  "record the steps of that task as they happen, and stop when the task is done or they say to stop.",
+  "",
+  "Shadow keeps a tamper-evident record of those steps (tasks, prompts, messages, tool calls and results, files, notes),",
+  "signs it, anchors fingerprints of it on Clockchain, and gives you links anyone can open to check the record. Only hashes",
+  "go to Clockchain, and they can't be removed. The record is kept on this server for 30 days and then deleted. Anyone who",
+  "has a session's viewer or packet link can read the whole record until then, and links cannot be revoked, so share them",
+  "only with people who may see everything recorded. Sessions belong to the signed-in account that started them.",
+  "",
+  "Order of calls:",
+  "1. shadow_start_session {title, agents?} once, when the person asks to record. Keep the session_id.",
+  "2. shadow_record {session_id, agent, kind, content} for each step of that task, in the order the steps happened.",
+  "   kind: task (what you were asked to do; starts a run), prompt, message, tool_call ({tool, args}),",
+  "   tool_result ({tool, result, is_error}), file ({path, content}), note.",
+  "3. shadow_checkpoint {session_id} after important steps (optional): anchors the record so far on Clockchain.",
+  "4. shadow_close_session {session_id, status} when the work is done. If you recorded a task, pass status",
+  "   (succeeded, failed, cancelled, timed_out or unknown) to report how it ended.",
+  "5. shadow_get_session and shadow_verify show the result. Share the viewer or packet link, and give the pin",
+  "   to the person checking through a different channel.",
+  "",
+  "Record what you showed or did, as it happened. Never record hidden reasoning. Shadow refuses any step that contains",
+  "a <think>, <thinking> or <reasoning> tag, a thinking or reasoning block, or a field whose name starts with",
+  "reasoning, thinking or thought, in any kind of step, tool arguments and files included. Each step's content is at",
+  "most 32 KB. Send one JSON-RPC message per request (batches are refused).",
+].join("\n");
+
 /** Added on the chat sign-in endpoint (SHADOW_LAZY_AUTH), which also carries the three account tools. */
 export const ACCOUNT_INSTRUCTIONS = [
   "",
@@ -76,6 +109,13 @@ export const AUTO_LOG_INSTRUCTIONS = [
   "",
 ].join("\n");
 
+/** The account lines where the person asks: the same, without advertising the price (OpenAI's plugin guidelines). */
+const ASKED_ACCOUNT_INSTRUCTIONS = ACCOUNT_INSTRUCTIONS.replace("a free Clockchain account", "a Clockchain account");
+
+/** The hand-added endpoints with logging on by default (SHADOW_PREVIEW_AUTO_LOG=1). Not named in any discovery file. */
+export const PREVIEW_PATH = "/shadow/preview/mcp";
+export const PREVIEW_CHAT_PATH = "/shadow/preview/chat/mcp";
+
 /** Retention and sharing, said wherever a tool hands out or describes links. */
 const RETENTION = "Records are kept 30 days, then deleted; anyone with a link can read the record until then, and links cannot be revoked.";
 
@@ -108,17 +148,21 @@ export interface ShadowHttpDeps {
    * challenge as /shadow/mcp, which starts the client's sign-in and its retry of the call.
    */
   /**
-   * SHADOW_AUTO_LOG=1, on /shadow/mcp and the chat endpoint: logging is on by default. Adds shadow_log_step,
-   * shadow_log_turn, clockchain_logging and clockchain_whoami. shadow_log_step skips allowCall (MCP_RATE_PER_MIN) for
-   * its own limit, because a 50-step task must not run into the general one.
+   * Logging on by default, on the endpoints in `paths` only: /shadow/mcp and the chat endpoint with SHADOW_AUTO_LOG=1,
+   * the preview ones with SHADOW_PREVIEW_AUTO_LOG=1. Adds shadow_log_step, shadow_log_turn, clockchain_logging and
+   * clockchain_whoami there. shadow_log_step skips allowCall (MCP_RATE_PER_MIN) for its own limit, because a 50-step
+   * task must not run into the general one.
    */
   autoLog?: {
+    paths: ReadonlySet<string>;
     /** The OAuth account store, for clockchain_whoami's name. */
     accounts?: AccountStore;
     /** false once this caller has used its shadow_log_step calls for the minute. */
     allowLogStep(rateKey: string): boolean;
     stepsPerMinute: number;
   };
+  /** SHADOW_PREVIEW_AUTO_LOG=1: serves PREVIEW_PATH like /shadow/mcp, and PREVIEW_CHAT_PATH (with `chat`) like the chat endpoint. */
+  preview?: boolean;
   chat?: {
     path: string;
     /** The OAuth account store (shared with the sign-in page). */
@@ -130,7 +174,7 @@ export interface ShadowHttpDeps {
   };
 }
 
-/** A request body on /shadow/mcp and the chat endpoint when SHADOW_AUTO_LOG=1: shadow_log_turn takes up to 100 steps. */
+/** A request body on an endpoint with logging on by default: shadow_log_turn takes up to 100 steps. */
 const AUTO_LOG_MAX_BODY = 1024 * 1024;
 const isLogStepCall = (body: unknown): boolean => {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return false;
@@ -243,11 +287,16 @@ export function buildShadowServer(
 ): McpServer {
   const accounts = o.chatAccounts;
   const autoLog = o.autoLog;
-  const instructions = accounts ? SHADOW_INSTRUCTIONS + "\n" + ACCOUNT_INSTRUCTIONS : SHADOW_INSTRUCTIONS;
   const server = new McpServer(
     { name: "clockchain-shadow", version: VERSION },
-    { instructions: autoLog ? AUTO_LOG_INSTRUCTIONS + "\n" + instructions : instructions },
+    {
+      instructions: autoLog
+        ? AUTO_LOG_INSTRUCTIONS + "\n" + SHADOW_INSTRUCTIONS + (accounts ? "\n" + ACCOUNT_INSTRUCTIONS : "")
+        : ASKED_INSTRUCTIONS + (accounts ? "\n" + ASKED_ACCOUNT_INSTRUCTIONS : ""),
+    },
   );
+  // Where the person asks, what each recording tool does and when it applies are said plainly (the directory checklists).
+  const asked = (text: string): string => (autoLog ? "" : text);
   const owner = ownerId ?? "";
   const run = <A>(fn: (a: A) => Promise<unknown>) => async (a: A) => {
     if (ownerId === null) return toolError(signInRequired());
@@ -306,7 +355,9 @@ export function buildShadowServer(
 
   server.registerTool("shadow_start_session", {
     ...TOOL_META.shadow_start_session,
-    description: `Start recording. Call once before your first step. Returns the session_id for the other Shadow tools, the session's viewer and packet links, and anchors a start marker on Clockchain. ${RETENTION}`,
+    description: autoLog
+      ? `Start recording. Call once before your first step. Returns the session_id for the other Shadow tools, the session's viewer and packet links, and anchors a start marker on Clockchain. ${RETENTION}`
+      : `Use only when the person asks to record this task or chat. Starts a record, and returns the session_id for the other Shadow tools and the session's viewer and packet links. Anchors a start marker on Clockchain: a hash that can't be removed. ${RETENTION}`,
     inputSchema: {
       title: z.string().describe("What this session is about, up to 200 characters."),
       agents: z.array(z.object({
@@ -319,7 +370,8 @@ export function buildShadowServer(
   server.registerTool("shadow_record", {
     ...TOOL_META.shadow_record,
     description:
-      "Record one step, right after it happens. kind: task (starts a run), prompt, message, tool_call ({tool, args}), " +
+      (autoLog ? "Record one step, right after it happens. " : "Use only for a session the person asked to record. Adds one step to that record, on this server; nothing goes on the ledger. ") +
+      "kind: task (starts a run), prompt, message, tool_call ({tool, args}), " +
       "tool_result ({tool, result, is_error}), file ({path, content}), note. Never include hidden reasoning: a step with " +
       "a <think>/<thinking>/<reasoning> tag or a reasoning*, thinking* or thought* field is refused, whatever its kind. " +
       "Returns seq and hash.",
@@ -337,13 +389,13 @@ export function buildShadowServer(
 
   server.registerTool("shadow_checkpoint", {
     ...TOOL_META.shadow_checkpoint,
-    description: "Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way).",
+    description: `Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way).${asked(" The anchored hash can't be removed.")}`,
     inputSchema: { session_id: sessionId },
   }, run((a) => service.checkpoint(owner, a)));
 
   server.registerTool("shadow_close_session", {
     ...TOOL_META.shadow_close_session,
-    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share. No steps can be added afterwards. ${RETENTION}`,
+    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share. No steps can be added afterwards.${asked(" The anchored hash can't be removed.")} ${RETENTION}`,
     inputSchema: {
       session_id: sessionId,
       status: z.enum(["succeeded", "failed", "cancelled", "timed_out", "unknown"]).optional()
@@ -432,7 +484,7 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
   server.registerTool("clockchain_create_account", {
     ...TOOL_META.clockchain_create_account,
     description:
-      "Create the person's free Clockchain account (Shadow needs one) and name it, for example after their company. " +
+      `Create the person's ${service ? "free " : ""}Clockchain account (Shadow needs one) and name it, for example after their company. ` +
       "If this connection is not signed in, the person is first asked to connect and creates the account in the " +
       "Clockchain window; the call is then retried. An account that already has a name keeps it. Returns the name " +
       "and a short account id, never the account key.",
@@ -466,10 +518,11 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
   }, withAccount(() => ({
     status: "help",
     message: [
-      "Clockchain accounts are free (testnet) and need no email.",
+      service ? "Clockchain accounts are free (testnet) and need no email." : "Clockchain accounts are on testnet and need no email.",
       "To get one from this chat: ask for it (for example \"create a Clockchain account for Acme\"). A Connect button appears; in the Clockchain window that opens, click Create account. The window shows the account key once, with a Download key file link: save it there. Then the chat carries on and names the account.",
       "The account key is shown only in that window. It never appears in this chat, and nobody should ask for it here. It signs you in on another device or app: choose \"I have an account key\" in the Clockchain window.",
       "Already have an account? When the Clockchain window opens, choose \"I have an account key\", or click Allow if it shows your account.",
+      ...(service ? [] : ["Shadow records a task only when you ask for it, in that chat. Records are kept 30 days and anyone holding a record's link can read them."]),
       ...(service ? ["Once connected, this app logs its chats and tool activity to Clockchain Shadow by default. Records are kept 30 days and anyone holding a record's link can read it. To stop, say \"stop logging\", which turns it off for the account until you turn it back on; a chat can also stop by turning the connector off in the app."] : []),
     ].join("\n"),
   })));
@@ -557,11 +610,11 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
 
   return async (req, res) => {
     const path = (req.url ?? "").split("?")[0];
-    if (path === "/shadow/mcp") return mcp(req, res);
-    if (deps.chat && path === deps.chat.path) return mcp(req, res, deps.chat);
+    if (path === "/shadow/mcp" || (deps.preview && path === PREVIEW_PATH)) return mcp(req, res, path);
+    if (deps.chat && (path === deps.chat.path || (deps.preview && path === PREVIEW_CHAT_PATH))) return mcp(req, res, path, deps.chat);
     if (path === "/shadow/connect" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
-      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog !== undefined));
+      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog?.paths.has("/shadow/mcp") === true));
       return;
     }
     const view = /^\/shadow\/s\/([A-Za-z0-9_-]{22})$/.exec(path);
@@ -570,21 +623,23 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     return view ? link(req, res, "summary", view[1]) : link(req, res, "packet", packet![1]);
   };
 
-  async function mcp(req: IncomingMessage, res: ServerResponse, chat?: NonNullable<ShadowHttpDeps["chat"]>): Promise<void> {
+  async function mcp(req: IncomingMessage, res: ServerResponse, path: string, chat?: NonNullable<ShadowHttpDeps["chat"]>): Promise<void> {
+    // Logging on by default is this endpoint's, not the process's: anywhere else, the tools for it don't exist.
+    const autoLog = deps.autoLog?.paths.has(path) ? deps.autoLog : undefined;
     const auth = deps.authenticate(req);
     if (!auth.ok) {
-      if (chat && !auth.accountRequired && chat.anonymous(req)) return anonymous(req, res, chat);
+      if (chat && !auth.accountRequired && chat.anonymous(req)) return anonymous(req, res, chat, autoLog);
       return auth.accountRequired ? deps.accountRequired(res, req) : deps.unauthorized(res, req);
     }
     let body: unknown;
     if (req.method === "POST") {
-      if (deps.autoLog && Number(req.headers["content-length"] ?? "0") > AUTO_LOG_MAX_BODY) {
+      if (autoLog && Number(req.headers["content-length"] ?? "0") > AUTO_LOG_MAX_BODY) {
         res.writeHead(413, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "This request is over 1 MB and was not read, so nothing was recorded. Log fewer or smaller steps per call." } }));
         return;
       }
       try {
-        body = await deps.readJsonBody(req, deps.autoLog ? AUTO_LOG_MAX_BODY : 512 * 1024);
+        body = await deps.readJsonBody(req, autoLog ? AUTO_LOG_MAX_BODY : 512 * 1024);
       } catch {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "invalid_json_body" }));
@@ -596,13 +651,12 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
         res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({
           jsonrpc: "2.0", id: null,
-          error: { code: -32600, message: `JSON-RPC batches are not supported on ${chat ? chat.path : "/shadow/mcp"}. Send one message per request.` },
+          error: { code: -32600, message: `JSON-RPC batches are not supported on ${path}. Send one message per request.` },
         }));
         return;
       }
     }
     // shadow_log_step has its own per-account limit, answered as a tool error that says to wait and log the step again.
-    const autoLog = deps.autoLog;
     const logStep = autoLog !== undefined && isLogStepCall(body);
     if (!logStep && !deps.allowCall(auth.rateKey, body, res)) return;
     const logStepAllowed = logStep && autoLog.allowLogStep(auth.rateKey);
@@ -616,7 +670,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
    * The chat endpoint without a credential: one discovery message per request, or the 401 that starts sign-in. Every
    * such request counts against the per-client anonymous limit before its body is read, and the body is small.
    */
-  async function anonymous(req: IncomingMessage, res: ServerResponse, chat: NonNullable<ShadowHttpDeps["chat"]>): Promise<void> {
+  async function anonymous(req: IncomingMessage, res: ServerResponse, chat: NonNullable<ShadowHttpDeps["chat"]>, autoLog: ShadowHttpDeps["autoLog"]): Promise<void> {
     if (!chat.allowAnonymous(req)) {
       res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
       res.end(JSON.stringify({ error: "rate_limited" }));
@@ -636,7 +690,6 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     const method = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as { method?: unknown }).method : undefined;
     // Before the SDK runs: a tool handler can only answer 200, and only a 401 starts the client's sign-in.
     if (typeof method !== "string" || !ANONYMOUS_METHODS.has(method)) return deps.unauthorized(res, req);
-    const autoLog = deps.autoLog;
     await serve(req, res, body, buildShadowServer(deps.service, null, publicBaseUrl(req.headers), {
       chatAccounts: chat.accounts,
       // The anonymous server only lists tools: every tools/call got the 401 above.

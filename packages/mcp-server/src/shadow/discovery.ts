@@ -25,7 +25,12 @@ const CLAUDE_CODE_NOTE = "Not yet confirmed with a real Claude Code sign-up.";
 
 const LOGGING_ON = "Logging is on by default once connected: the agent is told to log its chat and tool activity here without being asked. To turn it off, say \"stop logging\" (clockchain_logging), which holds for the whole account; a chat can also stop by turning the connector off in the app.";
 
-/** The guide's lines. `base` has no trailing slash. `autoLog` is SHADOW_AUTO_LOG=1. */
+const LOGGING_ASKED = "Shadow records a task only when the person asks for it, chat by chat. A request in one chat does not carry over to the next.";
+
+/**
+ * The guide's lines. `base` has no trailing slash. `autoLog` is SHADOW_AUTO_LOG=1, which puts logging on by default on the
+ * two endpoints named here. These files never name the hand-added /shadow/preview/* endpoints.
+ */
 function guideLines(base: string, chatPath: string | undefined, autoLog: boolean): string[] {
   const shadow = `${base}${SHADOW_PATH}`;
   const chat = chatPath ? `${base}${chatPath}` : undefined;
@@ -37,7 +42,8 @@ function guideLines(base: string, chatPath: string | undefined, autoLog: boolean
       ? [`  ${shadow}`, "    for ChatGPT and Claude Code", `  ${chat}`, "    for claude.ai: the same tools, plus sign-up from the chat"]
       : [`  ${shadow}`]),
     "",
-    ...(autoLog ? [...wrap(LOGGING_ON).map((l) => l.replace(/^ {2}/, "")), ""] : []),
+    ...wrap(autoLog ? LOGGING_ON : LOGGING_ASKED).map((l) => l.replace(/^ {2}/, "")),
+    "",
     "An account is required. It is free, on testnet, and needs no email. The free",
     "key from the command below works on /mcp only. Shadow refuses it with 403",
     "account_required.",
@@ -156,7 +162,7 @@ export function manifestWithShadow(base: string, chatPath?: string, autoLog = fa
         },
       },
       keptWhere: { record: KEPT_RECORD, ledger: KEPT_LEDGER, account: KEPT_ACCOUNT },
-      ...(autoLog ? { logging: LOGGING_ON } : {}),
+      logging: autoLog ? LOGGING_ON : LOGGING_ASKED,
     },
   };
 }

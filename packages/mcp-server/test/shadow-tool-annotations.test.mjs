@@ -16,6 +16,8 @@ import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 
 const PLAIN = "/shadow/mcp";
 const CHAT = "/shadow/chat/mcp";
+const PREVIEW = "/shadow/preview/mcp";
+const PREVIEW_CHAT = "/shadow/preview/chat/mcp";
 const STATIC = "static-annotation-token";
 const tmp = (label) => mkdtempSync(path.join(tmpdir(), `shadow-annotations-${label}-`));
 
@@ -39,7 +41,7 @@ const SESSION_TOOLS = ["shadow_start_session", "shadow_record", "shadow_checkpoi
 const LOG_TOOLS = ["shadow_log_step", "shadow_log_turn", "clockchain_logging", "clockchain_whoami"];
 const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_whoami", "clockchain_signup_help"];
 
-const ENV_KEYS = ["PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS", "MCP_REQUIRE_AUTH", "MCP_STATE_DIR", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_LAZY_AUTH", "SHADOW_AUTO_LOG", "SHADOW_ALLOW_NON_ACCT", "MCP_LOG_BUDGET"];
+const ENV_KEYS = ["PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS", "MCP_REQUIRE_AUTH", "MCP_STATE_DIR", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_LAZY_AUTH", "SHADOW_AUTO_LOG", "SHADOW_PREVIEW_AUTO_LOG", "SHADOW_ALLOW_NON_ACCT", "MCP_LOG_BUDGET"];
 
 async function boot(env) {
   const saved = {};
@@ -104,6 +106,18 @@ for (const [label, autoLog] of [["automatic logging on", "1"], ["automatic loggi
     }
   });
 }
+
+test("on the preview endpoints too, every tool has its title and all four hints", async () => {
+  const s = await boot({ SHADOW_PREVIEW_AUTO_LOG: "1" });
+  try {
+    assertPinned(await list(s.url, PREVIEW, STATIC), [...SESSION_TOOLS, ...LOG_TOOLS], PREVIEW);
+    const chat = [...new Set([...SESSION_TOOLS, ...ACCOUNT_TOOLS, ...LOG_TOOLS])];
+    assertPinned(await list(s.url, PREVIEW_CHAT, STATIC), chat, `${PREVIEW_CHAT} signed in`);
+    assertPinned(await list(s.url, PREVIEW_CHAT), chat, `${PREVIEW_CHAT} before sign-in`);
+  } finally {
+    await s.close();
+  }
+});
 
 test("a read-only tool is never marked destructive, and a repeat of one is always marked idempotent", () => {
   for (const [name, [, readOnly, destructive, idempotent]] of Object.entries(EXPECTED)) {

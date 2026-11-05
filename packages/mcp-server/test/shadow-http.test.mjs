@@ -11,7 +11,7 @@ import test from "node:test";
 import { runHttp } from "../dist/http.js";
 import { mintToken, mintTrialToken, mintHandshakeSessionToken } from "../dist/token.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
-import { SHADOW_INSTRUCTIONS } from "../dist/shadow/mcp.js";
+import { ASKED_INSTRUCTIONS } from "../dist/shadow/mcp.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
 import { parseStrict } from "../dist/shadow/lib/profile.js";
@@ -117,9 +117,9 @@ test("enabled: /mcp is unchanged, /shadow/mcp has the seven Shadow tools and its
     for (const t of tools.body.result.tools.filter((x) => ["shadow_start_session", "shadow_close_session", "shadow_get_session"].includes(x.name)))
       assert.match(t.description, /kept 30 days.*cannot be revoked/, t.name);
     const init = await rpc(`${app.url}/shadow/mcp`, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } }, account);
-    assert.equal(init.body.result.instructions, SHADOW_INSTRUCTIONS);
+    assert.equal(init.body.result.instructions, ASKED_INSTRUCTIONS);
     assert.match(init.body.result.instructions, /shadow_start_session.*\n.*shadow_record/s);
-    assert.match(init.body.result.instructions, /kept on this server for 30\ndays/);
+    assert.match(init.body.result.instructions, /kept on this server for 30\s+days/);
     assert.match(init.body.result.instructions, /links cannot be revoked/);
   } finally {
     await app.close();

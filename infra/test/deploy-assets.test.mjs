@@ -172,6 +172,7 @@ const expectedContractEnv = {
   SHADOW_ANCHORS_PER_DAY: "shadow-anchors-per-day\n",
   SHADOW_ANCHORS_PER_SESSION: "shadow-anchors-per-session\n",
   SHADOW_LOG_STEPS_PER_MIN: "shadow-log-steps-per-min\n",
+  SHADOW_PREVIEW_AUTO_LOG: "shadow-preview-auto-log\n",
   // OAuth connector sign-in (optional reads, after the receipts block).
   MCP_OAUTH: "oauth-flag-on\n",
   MCP_OAUTH_APPROVALS_PER_HOUR: "oauth-approvals\n",
@@ -478,6 +479,7 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_ANCHORS_PER_DAY) value=$'shadow-anchors-per-day\\n' ;;
   /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION) value=$'shadow-anchors-per-session\\n' ;;
   /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN) value=$'shadow-log-steps-per-min\\n' ;;
+  /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG) value=$'shadow-preview-auto-log\\n' ;;
   /clockchain/mcp/MCP_OAUTH) value=$'oauth-flag-on\\n' ;;
   /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR) value=$'oauth-approvals\\n' ;;
   /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_HOUR) value=$'oauth-accounts\\n' ;;

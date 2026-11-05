@@ -16,7 +16,7 @@ import test from "node:test";
 import { runHttp } from "../dist/http.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { ShadowService, ShadowError, loadShadowConfig } from "../dist/shadow/service.js";
-import { SHADOW_INSTRUCTIONS } from "../dist/shadow/mcp.js";
+import { ASKED_INSTRUCTIONS } from "../dist/shadow/mcp.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { summarize, SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
 import { parseStrict } from "../dist/shadow/lib/profile.js";
@@ -176,39 +176,18 @@ const BASE = "https://mcp.example.test";
 
 // ---- flag off ---------------------------------------------------------------------------------------------------------
 
-// sha256 of tools/list's tools and of initialize's instructions at 9c81101, the production build before this flag.
-const PINNED = {
-  plainTools: "4c5caf873406afddcc47ed90cfc442342a103af06039cff9ff6c64c2466bdbe7",
-  chatTools: "a6eaea19387338cde6a7469d14bf9ca5fb96fc90b4122ce09066641488ba5bf6",
-  plainInstructions: "320f0b83466b7bec855609559603bdf2cbbbfa5f1004ec980777a6fe2e27aa17",
-  chatInstructions: "ba02d04c7611b0b2c810d1ac2ece24bf0ce10a2713f56fca8abbb47a48a5bbfd",
-  createPageStyleHash: "iOu0RXAqpCZGh0xw5KF5QLpnLtuH+cmZD8P7ebjARtI=",
-};
-const sha = (s) => createHash("sha256").update(s).digest("hex");
-const WRITE_AT_9C81101 = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
-const READ_AT_9C81101 = { readOnlyHint: true, openWorldHint: false };
-const HINTS_AT_9C81101 = {
-  shadow_start_session: WRITE_AT_9C81101, shadow_record: WRITE_AT_9C81101, shadow_checkpoint: WRITE_AT_9C81101, shadow_close_session: WRITE_AT_9C81101,
-  shadow_get_session: READ_AT_9C81101, shadow_list_sessions: READ_AT_9C81101, shadow_verify: READ_AT_9C81101, clockchain_whoami: READ_AT_9C81101, clockchain_signup_help: READ_AT_9C81101,
-  clockchain_create_account: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-};
-const withHintsAt9c81101 = (t) => ({ ...t, annotations: HINTS_AT_9C81101[t.name] });
+// The sign-in page's stylesheet hash at 9c81101, the production build before this flag.
+const PINNED = { createPageStyleHash: "iOu0RXAqpCZGh0xw5KF5QLpnLtuH+cmZD8P7ebjARtI=" };
 const INIT = rpcBody("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "auto-log-test", version: "1" } });
 
-test("flag off (unset, 0 or true): tools, instructions, limits and pages are what they were at 9c81101", async () => {
+test("flag off (unset, 0 or true): no logging tools, the person asks, and the limits and pages are what they were", async () => {
   for (const flag of [undefined, "0", "true"]) {
     const s = await boot(on({ SHADOW_AUTO_LOG: flag }));
     try {
       const a = await signUp(s.url);
-      const plain = await listTools(s.url, PLAIN, a.token);
-      const chat = await listTools(s.url, CHAT, a.token);
-      // Only the hints have changed since then, on purpose (shadow-tool-annotations.test.mjs pins them): everything else is the same.
-      assert.equal(sha(JSON.stringify(plain.map(withHintsAt9c81101))), PINNED.plainTools, "tools on /shadow/mcp");
-      assert.equal(sha(JSON.stringify(chat.map(withHintsAt9c81101))), PINNED.chatTools, "tools on /shadow/chat/mcp");
       const init = async (p) => (await rpcResult(await post(s.url, p, INIT, a.token))).result.instructions;
-      assert.equal(await init(PLAIN), SHADOW_INSTRUCTIONS);
-      assert.equal(sha(await init(PLAIN)), PINNED.plainInstructions);
-      assert.equal(sha(await init(CHAT)), PINNED.chatInstructions);
+      assert.equal(await init(PLAIN), ASKED_INSTRUCTIONS);
+      assert.ok((await init(CHAT)).startsWith(`${ASKED_INSTRUCTIONS}\n`));
       // The sign-in page: no logging line, and the same stylesheet hash.
       const page = await openPage(s.url);
       assert.doesNotMatch(page.html, /logs its chats/);

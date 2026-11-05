@@ -106,8 +106,12 @@ export type ShadowConfig =
       limits: Pick<ShadowLimits, "maxStateBytes" | "maxBytesPerOwner" | "maxSessionStartsPerOwnerPerDay"> &
         Partial<Pick<ShadowLimits, "maxAnchorsPerOwnerPerDay" | "maxAnchorsPerSession" | "onlineVerifyMaxReceipts">>;
       linkConcurrency: number;
-      /** SHADOW_AUTO_LOG=1: logging is on by default for every connected account (shadow_log_step and friends). */
+      /** Logging on by default is available on some endpoint (SHADOW_AUTO_LOG=1 or SHADOW_PREVIEW_AUTO_LOG=1): its limits and viewer table apply. */
       autoLog?: true;
+      /** SHADOW_AUTO_LOG=1: /shadow/mcp and /shadow/chat/mcp log by default. Never on a listed server. */
+      autoLogOnMainPaths?: true;
+      /** SHADOW_PREVIEW_AUTO_LOG=1: the hand-added /shadow/preview/* endpoints exist, and log by default. */
+      previewAutoLog?: true;
       /** SHADOW_LOG_STEPS_PER_MIN: shadow_log_step calls per account per minute, apart from MCP_RATE_PER_MIN. */
       logStepsPerMinute?: number;
       /** Set when a cap setting is malformed: Shadow then refuses to start (every /shadow path answers 503). */
@@ -140,6 +144,11 @@ const MAX_ANCHORS_PER_SESSION = 1500;
  * per day and per session (SHADOW_ANCHORS_PER_DAY, SHADOW_ANCHORS_PER_SESSION; without the flag, 60 and 100 unless set)
  * and 120 shadow_log_step calls per account per minute (SHADOW_LOG_STEPS_PER_MIN). Without the flag and those settings
  * the result is exactly what it was before them.
+ *
+ * Automatic logging is per endpoint. SHADOW_AUTO_LOG=1 puts it on /shadow/mcp and /shadow/chat/mcp, the paths directories
+ * list, so a listed server must not set it. SHADOW_PREVIEW_AUTO_LOG=1 adds /shadow/preview/mcp and /shadow/preview/chat/mcp,
+ * for people who add the URL by hand, and leaves the other two alone: there the person asks, chat by chat. The limits
+ * above are per account and per server, so either flag raises them for every endpoint.
  */
 export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
   if ((env.SHADOW_ENABLED ?? "").trim() !== "1") return { enabled: false };
@@ -153,7 +162,9 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
     }
     return Number(raw);
   };
-  const autoLog = (env.SHADOW_AUTO_LOG ?? "").trim() === "1";
+  const autoLogOnMainPaths = (env.SHADOW_AUTO_LOG ?? "").trim() === "1";
+  const previewAutoLog = (env.SHADOW_PREVIEW_AUTO_LOG ?? "").trim() === "1";
+  const autoLog = autoLogOnMainPaths || previewAutoLog;
   const anchorsPerDay = whole("SHADOW_ANCHORS_PER_DAY", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerDay : DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay);
   const anchorsPerSession = whole("SHADOW_ANCHORS_PER_SESSION", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerSession : DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession);
   if (anchorsPerSession > MAX_ANCHORS_PER_SESSION) problems.push(`SHADOW_ANCHORS_PER_SESSION must be at most ${MAX_ANCHORS_PER_SESSION}`);
@@ -173,6 +184,8 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
     },
     linkConcurrency: whole("SHADOW_LINK_CONCURRENCY", SHADOW_ENV_DEFAULTS.linkConcurrency),
     ...(autoLog ? { autoLog: true as const, logStepsPerMinute } : {}),
+    ...(autoLogOnMainPaths ? { autoLogOnMainPaths: true as const } : {}),
+    ...(previewAutoLog ? { previewAutoLog: true as const } : {}),
     ...(problems.length ? { problem: problems.join("; ") } : {}),
   };
 }

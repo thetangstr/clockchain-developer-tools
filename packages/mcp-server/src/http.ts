@@ -81,7 +81,7 @@ import {
 } from "./agent-contract/server-card.js";
 import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
 import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/service.js";
-import { createShadowHttpHandler, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
+import { createShadowHttpHandler, PREVIEW_CHAT_PATH, PREVIEW_PATH, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
 import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
@@ -615,12 +615,18 @@ export async function runHttp(): Promise<Server> {
   // needed" connectors: it connects and lists tools without a token, and its first tool call starts sign-in. A
   // separate path, so /shadow/mcp (ChatGPT, Claude Code, "Sign in now" connectors) is untouched. Off: no such path.
   const shadowAtStart = loadShadowConfig(process.env);
-  const shadowAutoLog = shadowAtStart.enabled && shadowAtStart.autoLog === true;
+  const shadowAutoLog = shadowAtStart.enabled && shadowAtStart.autoLogOnMainPaths === true;
+  const shadowPreview = shadowAtStart.enabled && shadowAtStart.previewAutoLog === true;
   const shadowChatPath = (process.env.SHADOW_LAZY_AUTH ?? "").trim() === "1" && shadowAtStart.enabled && oauthConfig.kind === "ready"
     ? "/shadow/chat/mcp"
     : undefined;
+  // SHADOW_PREVIEW_AUTO_LOG=1: the hand-added endpoints with logging on by default. Nothing else about the server changes.
+  const shadowPreviewChatPath = shadowPreview && shadowChatPath ? PREVIEW_CHAT_PATH : undefined;
   if (oauthConfig.kind === "misconfigured") {
     console.error(`[clockchain-mcp] OAuth misconfigured (routes off): ${oauthConfig.reason}`);
+  }
+  if (shadowAutoLog) {
+    console.warn(JSON.stringify({ event: "shadow_auto_log_on_listed_paths", note: "SHADOW_AUTO_LOG=1 puts logging on by default on /shadow/mcp and /shadow/chat/mcp. Directories list those paths: use SHADOW_PREVIEW_AUTO_LOG=1 on a listed server" }));
   }
   const oauth: OAuthHandler | undefined = oauthConfig.kind === "ready"
     ? createOAuthHandler({
@@ -635,9 +641,12 @@ export async function runHttp(): Promise<Server> {
         cookieName: oauthConfig.cookieName,
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
-        ...(shadowChatPath ? { chatPaths: [shadowChatPath] } : {}),
-        // SHADOW_AUTO_LOG=1: every sign-in page says plainly that logging is on by default once connected.
+        ...(shadowChatPath ? { chatPaths: shadowPreviewChatPath ? [shadowChatPath, shadowPreviewChatPath] : [shadowChatPath] } : {}),
+        ...(shadowPreview ? { extraPaths: [PREVIEW_PATH] } : {}),
+        // Every sign-in page says plainly how logging works for the endpoint it signs in to.
         ...(shadowAutoLog ? { autoLog: true } : {}),
+        ...(shadowPreview ? { autoLogPaths: shadowPreviewChatPath ? [PREVIEW_PATH, shadowPreviewChatPath] : [PREVIEW_PATH] } : {}),
+        ...(shadowAtStart.enabled ? { shadowAsked: true } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
       })
     : undefined;
@@ -1151,13 +1160,15 @@ export async function runHttp(): Promise<Server> {
   const shadowAccountRequired = (res: ServerResponse, req: IncomingMessage): void => {
     const base = publicBaseUrl(req.headers);
     const headers: Record<string, string> = { "content-type": "application/json", "cache-control": "no-store" };
-    const challenge = oauth?.challenge(pathOf(req.url) === shadowChatPath ? shadowChatPath : "/shadow/mcp", false)?.["www-authenticate"];
+    // The endpoint the request reached: every /shadow MCP path has its own challenge, so a client signs in to that one.
+    const endpoint = [shadowChatPath, ...(shadowPreview ? [PREVIEW_PATH, shadowPreviewChatPath] : [])].includes(pathOf(req.url)) ? pathOf(req.url) : "/shadow/mcp";
+    const challenge = oauth?.challenge(endpoint, false)?.["www-authenticate"];
     if (challenge) headers["www-authenticate"] = `${challenge}, error="insufficient_scope", error_description="sign in with a Clockchain account"`;
     res.writeHead(403, headers);
     res.end(JSON.stringify({
       error: "account_required",
       message:
-        "Hosted Shadow keeps records for signed-in accounts only. Connect " + `${base}${pathOf(req.url) === shadowChatPath ? shadowChatPath : "/shadow/mcp"}` + " with sign-in " +
+        "Hosted Shadow keeps records for signed-in accounts only. Connect " + `${base}${endpoint}` + " with sign-in " +
         "(OAuth): add it as a connector or remote MCP server in your client and approve the Clockchain sign-in page. " +
         "A token from POST /token or a static MCP token is not accepted here.",
       sign_in_available: oauth !== undefined,
@@ -1238,8 +1249,14 @@ export async function runHttp(): Promise<Server> {
         },
         linkClient: shadowLinkClient,
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
+        ...(shadowPreview ? { preview: true } : {}),
         ...(shadowConfig.autoLog ? {
           autoLog: {
+            // Per endpoint: only these paths get the logging tools and instructions.
+            paths: new Set<string>([
+              ...(shadowAutoLog ? ["/shadow/mcp", ...(shadowChatPath ? [shadowChatPath] : [])] : []),
+              ...(shadowPreview ? [PREVIEW_PATH, ...(shadowPreviewChatPath ? [shadowPreviewChatPath] : [])] : []),
+            ]),
             accounts: oauth?.accounts,
             allowLogStep: (rateKey: string) => shadowLogStepLimit(`shadowlogstep:${rateKey}`),
             stepsPerMinute: shadowLogStepsPerMinute,

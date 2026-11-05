@@ -185,8 +185,14 @@ export interface OAuthOptions {
    * sign-in for one of them (its `resource`) gets the one-click create page, the name coming later from the chat.
    */
   chatPaths?: readonly string[];
+  /** More MCP paths, served and challenged like /mcp and /shadow/mcp (SHADOW_PREVIEW_AUTO_LOG: the preview endpoint). */
+  extraPaths?: readonly string[];
   /** SHADOW_AUTO_LOG=1: the sign-in pages say that the app logs its chats and tool activity by default once connected. */
   autoLog?: boolean;
+  /** SHADOW_PREVIEW_AUTO_LOG=1: the same, but only on a sign-in for one of these MCP paths (its `resource`). */
+  autoLogPaths?: readonly string[];
+  /** Hosted Shadow is on: where logging isn't on by default, the small print says Shadow records only when asked. */
+  shadowAsked?: boolean;
   /**
    * Where spent codes, spent refresh tokens and revoked families are kept across restarts (src/oauth-replay.ts).
    * Unset: memory only (tests). Set but unusable: the token endpoint refuses closed (503).
@@ -475,6 +481,8 @@ interface ConsentView {
   oneClick?: boolean;
   /** Logging is on by default once connected (SHADOW_AUTO_LOG=1): said in the open, and in "What this allows". */
   autoLog?: boolean;
+  /** The person asks, chat by chat: said in "What this allows". */
+  shadowAsked?: boolean;
 }
 
 const requestField = (token: string): string => `<input type="hidden" name="request" value="${escapeHtml(token)}">`;
@@ -498,13 +506,14 @@ function loggingConsent(app: string, tag: "p class=\"who\"" | "p"): string {
 }
 
 /** The small print: testnet, then what allowing means (the reviewed wording, unchanged), folded. */
-function smallPrint(app: string, redirectHost: string, autoLog?: boolean): string {
+function smallPrint(app: string, redirectHost: string, autoLog?: boolean, shadowAsked?: boolean): string {
   return `<footer class="foot">
 <p>Free testnet · only fingerprints go on the Clockchain ledger</p>
 <details class="more">
 <summary>What this allows</summary>
 <ul>${autoLog ? `
-<li>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}
+<li>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}${!autoLog && shadowAsked ? `
+<li>Shadow records a task only when you ask for it, in that chat.</li>` : ""}
 <li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
 <li>${app} can read and add to every Shadow record in this account, including records made from other apps.</li>
 <li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>
@@ -540,7 +549,7 @@ ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="cancel" class="link">Cancel</button>
 </div>
 </form>
-${smallPrint(app, v.redirectHost, v.autoLog)}`);
+${smallPrint(app, v.redirectHost, v.autoLog, v.shadowAsked)}`);
   }
   return htmlDocument(title, `${head}
 <div class="flow">
@@ -566,7 +575,7 @@ ${requestField(v.requestToken)}
 </form>
 </div>
 </div>
-${smallPrint(app, v.redirectHost, v.autoLog)}`);
+${smallPrint(app, v.redirectHost, v.autoLog, v.shadowAsked)}`);
 }
 
 interface KeyView {
@@ -778,10 +787,13 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
   }
 
-  const mcpPaths: readonly string[] = [...MCP_PATHS, ...(options.chatPaths ?? [])];
+  const mcpPaths: readonly string[] = [...MCP_PATHS, ...(options.extraPaths ?? []), ...(options.chatPaths ?? [])];
   const chatResources = new Set((options.chatPaths ?? []).map((p) => `${base}${p}`));
   /** A sign-in started by a chat endpoint's 401 (its resource): the create page needs no name. */
   const fromChat = (request: RequestBlob): boolean => request.rs !== undefined && chatResources.has(request.rs);
+  const autoLogResources = new Set((options.autoLogPaths ?? []).map((p) => `${base}${p}`));
+  /** Whether the endpoint this sign-in is for logs by default. No `resource`: only if every endpoint does (SHADOW_AUTO_LOG). */
+  const logsByDefault = (request: RequestBlob): boolean => options.autoLog === true || (request.rs !== undefined && autoLogResources.has(request.rs));
   const resourceHrefs = new Set([`${base}/`, ...mcpPaths.map((p) => `${base}${p}`)]);
   /** undefined = absent; null = not one of ours; else the normalized href. */
   function resourceParam(values: string[]): string | undefined | null {
@@ -1000,7 +1012,8 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       ...(o.error ? { error: o.error } : {}),
       ...(o.keyOpen ? { keyOpen: true } : {}),
       ...(fromChat(request) ? { oneClick: true } : {}),
-      ...(options.autoLog ? { autoLog: true } : {}),
+      ...(logsByDefault(request) ? { autoLog: true } : {}),
+      ...(options.shadowAsked ? { shadowAsked: true } : {}),
     }));
   }
 
@@ -1211,7 +1224,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         key: created.key,
         requestToken,
         grant,
-        ...(options.autoLog ? { autoLog: true } : {}),
+        ...(logsByDefault(request) ? { autoLog: true } : {}),
       }));
       return;
     }
