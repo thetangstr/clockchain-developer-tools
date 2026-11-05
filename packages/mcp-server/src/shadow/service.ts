@@ -336,11 +336,21 @@ function stepSummary(kind: RecordKind, content: unknown): string {
 type StepRow = { seq: number; kind: string; title: string; hash: string };
 
 const MAX_TURN_ROWS = 30;
-const MAX_SUMMARY_ROWS = 100;
+const MAX_SUMMARY_ROWS = 50;
 const LEDGER_HASH_NOTE = "The ledger hash is the anchored checkpoint's hash, which is what a ledger lookup returns. It covers every step up to and including that one.";
 
-/** A name safe to show: secrets were redacted before the step was recorded, and these characters can't break a table. */
-const shownName = (v: unknown, otherwise: string) => (typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,63}$/.test(v) ? v : otherwise);
+const CREDENTIAL_PREFIX = /(?:^|[-_.])(?:glpat|npm|hf|dop|whsec|sk|ghp|gho|github_pat|xox[a-z])[-_]/i;
+
+/**
+ * A tool or file name to show, in backticks so it reads as a name and not as text from the server. Anything that could be
+ * a credential or an identifier shows as `otherwise`: a session may predate redaction, and redaction can't know every
+ * format. So no long run of letters and digits, and no more digits than a version or a year.
+ */
+function shownName(v: unknown, otherwise: string): string {
+  if (typeof v !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/.test(v)) return otherwise;
+  if (/[A-Za-z0-9]{20,}/.test(v) || (v.match(/\d/g)?.length ?? 0) > 6 || CREDENTIAL_PREFIX.test(v) || redactText(v) !== v) return otherwise;
+  return `\`${v}\``;
+}
 
 function stepRow(e: ShadowEvent): StepRow {
   const p = (e.body.payload ?? {}) as { tool?: unknown; path?: unknown; isError?: unknown; note?: unknown };
@@ -354,23 +364,37 @@ function stepRow(e: ShadowEvent): StepRow {
   return { seq: e.body.seq, kind, title, hash: e.hash };
 }
 
-/** The steps since the latest prompt or task, that step included: at most the last MAX_TURN_ROWS, and how many came before. */
-function turnRows(events: ShadowEvent[]): { rows: StepRow[]; earlier: number } {
+/**
+ * The steps since the latest prompt or task, that step included: at most the last MAX_TURN_ROWS. `earlier` counts those
+ * cut off by the cap, and those in this call (from seq `callFrom` on) before the boundary: a table never drops one unsaid.
+ */
+function turnRows(events: ShadowEvent[], callFrom: number): { rows: StepRow[]; earlier: number } {
   const steps = events.filter((e) => AGENT_KINDS.has(e.body.kind));
   let from = steps.length - 1;
   while (from > 0 && steps[from].body.kind !== "agent.prompt" && steps[from].body.kind !== "task.assigned") from--;
   const turn = steps.slice(Math.max(from, 0));
-  return { rows: turn.slice(-MAX_TURN_ROWS).map(stepRow), earlier: Math.max(0, turn.length - MAX_TURN_ROWS) };
+  const cut = steps.slice(0, Math.max(from, 0)).filter((e) => e.body.seq >= callFrom).length;
+  return { rows: turn.slice(-MAX_TURN_ROWS).map(stepRow), earlier: cut + Math.max(0, turn.length - MAX_TURN_ROWS) };
 }
 
-/** For rows in order: the first anchored checkpoint covering each one. A step with none has none, whatever is queued. */
-function coverage(meta: SessionMeta): (seq: number) => SessionMeta["anchors"][number] | undefined {
+/**
+ * For rows in order: the first anchored checkpoint covering each one. Without one, a step is pending only if a checkpoint
+ * still queued for Clockchain covers it; otherwise nothing is on its way, and it is not anchored.
+ */
+function coverage(meta: SessionMeta): (seq: number) => { anchor?: SessionMeta["anchors"][number]; status: "anchored" | "pending" | "not_anchored" } {
   const anchors = meta.anchors.filter((a) => a.marker === "checkpoint" && a.count !== null).sort((a, b) => a.count! - b.count!);
+  const queued = Math.max(-1, ...meta.outbox.filter((r) => r.kind === "checkpoint" && r.state !== "failed").map((r) => r.body?.count ?? -1));
   let i = 0;
   return (seq) => {
     while (i < anchors.length && anchors[i].count! < seq) i++;
-    return anchors[i];
+    return anchors[i] ? { anchor: anchors[i], status: "anchored" } : { status: seq <= queued ? "pending" : "not_anchored" };
   };
+}
+
+/** First and last block by number, since anchors can land out of order. */
+function blockSpan(anchors: { blockHeight: string }[]): { first: string | null; last: string | null } {
+  const heights = anchors.map((a) => a.blockHeight).filter((h) => /^\d+$/.test(h)).sort((a, b) => Number(a) - Number(b));
+  return { first: heights[0] ?? null, last: heights.at(-1) ?? null };
 }
 
 const bareHash = (h: string) => h.replace(/^sha256:/, "");
@@ -380,13 +404,13 @@ const cell = (v: unknown) => String(v).replace(/[\u0000-\u001f`|]/g, "");
 function turnTable(meta: SessionMeta, turn: { rows: StepRow[]; earlier: number }): string {
   const cover = coverage(meta);
   const rows = turn.rows.map((r) => {
-    const a = cover(r.seq);
-    const anchored = a ? `\`${cell(bareHash(a.hash).slice(0, 12))}\` | ${cell(a.blockHeight)} | \`${cell(a.ledgerId)}\`` : "pending | pending | pending";
+    const { anchor: a, status } = cover(r.seq);
+    const anchored = a ? `\`${cell(bareHash(a.hash).slice(0, 12))}\` | ${cell(a.blockHeight)} | \`${cell(a.ledgerId)}\`` : status === "pending" ? "pending | pending | pending" : "not anchored | not anchored | not anchored";
     return `| ${r.kind}: ${r.title} | \`${bareHash(r.hash).slice(0, 12)}\` | ${anchored} |`;
   });
   const n = turn.earlier;
   return [
-    ...(n ? [`${n} earlier ${n === 1 ? "step" : "steps"} in this turn ${n === 1 ? "is" : "are"} at the viewer link below.`, ""] : []),
+    ...(n ? [`${n} earlier ${n === 1 ? "step is" : "steps are"} at the viewer link below.`, ""] : []),
     "| What happened | Step hash | Ledger hash | Block | Ledger ID |", "|---|---|---|---|---|", ...rows,
     "", LEDGER_HASH_NOTE,
   ].join("\n");
@@ -396,20 +420,21 @@ function turnTable(meta: SessionMeta, turn: { rows: StepRow[]; earlier: number }
 function sessionLog(meta: SessionMeta, events: ShadowEvent[]) {
   const cover = coverage(meta);
   const steps = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map(stepRow).map((r) => {
-    const a = cover(r.seq);
-    return { seq: r.seq, kind: r.kind, title: r.title, step_hash: r.hash, status: a ? "anchored" as const : "pending" as const, ledger_hash: a?.hash ?? null, block: a?.blockHeight ?? null, ledger_id: a?.ledgerId ?? null };
+    const { anchor: a, status } = cover(r.seq);
+    return { seq: r.seq, kind: r.kind, title: r.title, step_hash: r.hash, status, ledger_hash: a?.hash ?? null, block: a?.blockHeight ?? null, ledger_id: a?.ledgerId ?? null };
   });
   const anchored = steps.filter((s) => s.status === "anchored");
   // Every record this session has on the ledger, as the footer counts them: its start and closing anchors too.
   const onLedger = meta.anchors.filter((a) => a.blockHeight);
+  const blocks = blockSpan(onLedger);
   return {
     session_id: meta.sessionId,
     status: meta.state,
     expires_at: meta.expiresAt,
     totals: {
-      steps: steps.length, anchored: anchored.length, pending: steps.length - anchored.length,
+      steps: steps.length, anchored: anchored.length, pending: steps.filter((s) => s.status === "pending").length, not_anchored: steps.filter((s) => s.status === "not_anchored").length,
       ledger_records: onLedger.length,
-      first_block: onLedger[0]?.blockHeight ?? null, last_block: onLedger.at(-1)?.blockHeight ?? null,
+      first_block: blocks.first, last_block: blocks.last,
     },
     steps,
     ledger_hash_note: LEDGER_HASH_NOTE,
@@ -421,13 +446,13 @@ function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number;
   const t = log.totals;
   const shown = cap ? log.steps.slice(0, cap.max) : log.steps;
   const lines = shown.map((s, i) => {
-    const ledger = s.status === "anchored" ? `Ledger hash \`${cell(s.ledger_hash)}\`. Block ${cell(s.block)}. Ledger ID \`${cell(s.ledger_id)}\`.` : "Ledger hash pending. Block pending. Ledger ID pending.";
+    const ledger = s.status === "anchored" ? `Ledger hash \`${cell(s.ledger_hash)}\`. Block ${cell(s.block)}. Ledger ID \`${cell(s.ledger_id)}\`.` : s.status === "pending" ? "Ledger hash pending. Block pending. Ledger ID pending." : "Not anchored, so no ledger hash, block or ledger ID.";
     return `${i + 1}. ${s.kind}: ${s.title}. Step hash \`${s.step_hash}\`. ${ledger}`;
   });
   const blocks = t.first_block === null ? "Nothing on Clockchain yet." : `On Clockchain: first block ${cell(t.first_block)}, last block ${cell(t.last_block)}, ${t.ledger_records} ledger ${t.ledger_records === 1 ? "record" : "records"}, counting any start or closing anchor.`;
   return [
     "**Clockchain Shadow: everything logged in this session**",
-    `Session \`${log.session_id}\`, ${log.status}. ${t.steps} ${t.steps === 1 ? "step" : "steps"}: ${t.anchored} anchored, ${t.pending} pending. ${blocks}`,
+    `Session \`${log.session_id}\`, ${log.status}. ${t.steps} ${t.steps === 1 ? "step" : "steps"}: ${t.anchored} anchored, ${t.pending} pending${t.not_anchored ? `, ${t.not_anchored} not anchored` : ""}. ${blocks}`,
     lines.join("\n"),
     ...(cap && log.steps.length > shown.length ? [`Showing the first ${shown.length} of ${log.steps.length} steps. The rest are at ${cap.rest}`] : []),
     LEDGER_HASH_NOTE,
@@ -437,7 +462,7 @@ function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number;
 /** The footer to end a reply with: only what the record really holds, in server-made values (no step content). */
 function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[] }, anchor: LogAnchor, viewer: string, table: string, turnSteps?: number): string {
   const count = (n: number) => `${n} ${n === 1 ? "step" : "steps"}`;
-  const heights = meta.anchors.filter((a) => a.blockHeight);
+  const span = blockSpan(meta.anchors);
   const latest = meta.anchors.at(-1);
   const parts: string[] = [];
   if (turnSteps !== undefined) {
@@ -445,11 +470,11 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
     if (anchor.anchor_status === "anchored") parts.push(`Shared anchor: block ${anchor.block_height}, ledger ID \`${anchor.ledger_id}\`.`);
   } else {
     parts.push(`**Clockchain Shadow:** ${count(meta.agentSteps)} logged so far.`);
-    if (heights.length) parts.push(`First block ${heights[0].blockHeight}, last block ${heights[heights.length - 1].blockHeight}.`);
+    if (span.first !== null) parts.push(`First block ${span.first}, last block ${span.last}.`);
     if (latest) parts.push(`Latest ledger ID: \`${latest.ledgerId}\`.`);
   }
   parts.push(`Viewer: ${viewer}`);
-  const lines = ["---", table, parts.join(" ")];
+  const lines = ["---", ...(table ? [table] : []), parts.join(" ")];
   if (anchor.anchor_status !== "anchored") {
     const one = turnSteps === undefined;
     const said = {
@@ -498,7 +523,8 @@ const escHtml = (s: unknown) => String(s ?? "").replace(/[&<>"'`]/g, (c) => `&#$
  * step that carries them): each step's own hash, and the block and ledger id of the first anchor that covers it.
  */
 function withStepAnchors(html: string, events: ShadowEvent[], cap: string): string {
-  const anchors = events.filter((e) => e.body.kind === "clockchain.anchored" && (e.body.payload as any)?.marker === "checkpoint");
+  const anchors = events.filter((e) => e.body.kind === "clockchain.anchored" && (e.body.payload as any)?.marker === "checkpoint")
+    .sort((a, b) => Number((a.body.payload as any).checkpoint?.count) - Number((b.body.payload as any).checkpoint?.count));
   let i = 0;
   const rows = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map((e) => {
     while (i < anchors.length && Number((anchors[i].body.payload as any).checkpoint?.count) < e.body.seq) i++;
@@ -909,7 +935,7 @@ export class ShadowService {
     return {
       logging: { enabled },
       message: enabled
-        ? "Logging is on for this account. Log each step from now on and end each reply with the footer from the last result."
+        ? "Logging is on for this account. Log each step from now on and end every reply with show_user from the last result."
         : "Logging is off for this account. Do not log steps and do not show a logging footer until the person turns it back on.",
     };
   }
@@ -923,7 +949,7 @@ export class ShadowService {
   async logStep(ownerId: string, input: { session_id?: unknown; title?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown }, base: string) {
     if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
       throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
-    const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, steps: [input], runInput: typeof input.run_id === "string" ? input.run_id : null, maxSteps: 1 }, base);
+    const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, steps: [input], runInput: typeof input.run_id === "string" ? input.run_id : null, maxSteps: 1, table: input.kind === "message" || input.kind === "note" }, base);
     const step = r.steps[0];
     return {
       session_id: r.sessionId,
@@ -941,7 +967,7 @@ export class ShadowService {
   /** The fallback: several steps in one call, sharing one anchor. */
   async logTurn(ownerId: string, input: { session_id?: unknown; title?: unknown; steps?: unknown }, base: string) {
     if (!Array.isArray(input.steps) || input.steps.length === 0) throw bad("steps must be a list of 1 or more steps.");
-    const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, steps: input.steps as LogStepInput[], runInput: null, maxSteps: MAX_TURN_STEPS }, base);
+    const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, steps: input.steps as LogStepInput[], runInput: null, maxSteps: MAX_TURN_STEPS, table: true }, base);
     return {
       session_id: r.sessionId,
       shared_anchor: true,
@@ -956,7 +982,7 @@ export class ShadowService {
     };
   }
 
-  private async logSteps(ownerId: string, input: { session_id?: unknown; title?: unknown; steps: LogStepInput[]; runInput: string | null; maxSteps: number }, base: string) {
+  private async logSteps(ownerId: string, input: { session_id?: unknown; title?: unknown; steps: LogStepInput[]; runInput: string | null; maxSteps: number; table: boolean }, base: string) {
     this.assertLogging(ownerId);
     if (input.steps.length > input.maxSteps)
       throw new ShadowError("SHADOW_LIMIT_TURN_STEPS", `One call logs at most ${input.maxSteps} steps; this one has ${input.steps.length}. Nothing was recorded. Split them over several calls.`);
@@ -1023,7 +1049,7 @@ export class ShadowService {
       // From here on the steps are recorded: whatever happens to the anchor is reported, never an error.
       try {
         const cp = await this.withEvents(meta, (events) => {
-          made.turn = turnRows(events);
+          if (input.table) made.turn = turnRows(events, made.steps[0].seq);
           return checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now());
         });
         meta.checkpoint = cp;
@@ -1037,7 +1063,7 @@ export class ShadowService {
     await this.drain(ownerKey, sessionId, { deadline: Math.max(budgetEnd, Date.now() + 2_000), stopOnFailure: true });
     return this.session(ownerKey, sessionId, (meta) => {
       const anchor = this.logAnchor(meta, made.target, made.refused);
-      return { sessionId, started, steps: made.steps, anchor, table: turnTable(meta, made.turn), viewer: this.links(meta, base).viewer, meta: { agentSteps: meta.agentSteps, anchors: meta.anchors.map((a) => ({ blockHeight: a.blockHeight, ledgerId: a.ledgerId })) } };
+      return { sessionId, started, steps: made.steps, anchor, table: input.table ? turnTable(meta, made.turn) : "", viewer: this.links(meta, base).viewer, meta: { agentSteps: meta.agentSteps, anchors: meta.anchors.map((a) => ({ blockHeight: a.blockHeight, ledgerId: a.ledgerId })) } };
     });
   }
 
@@ -1262,7 +1288,8 @@ export class ShadowService {
         return this.withEvents(meta, async (events) => {
           if (kind === "log" || kind === "log-json") {
             const log = sessionLog(meta, events);
-            const body = Buffer.from(kind === "log" ? sessionLogText(log) : JSON.stringify(log, null, 1));
+            // In JSON a title is a value, so without the backticks that mark a name in text.
+            const body = Buffer.from(kind === "log" ? sessionLogText(log) : JSON.stringify({ ...log, steps: log.steps.map((s) => ({ ...s, title: s.title.replaceAll("`", "") })) }, null, 1));
             this.linkBuildCount++;
             this.linkCache.set(linkKey(kind, meta), body);
             return body;

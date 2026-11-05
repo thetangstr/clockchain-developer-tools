@@ -262,6 +262,10 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
       assert.match(instructions, /reads "indeterminate" until the session is closed/);
       assert.match(instructions, /only when the person asks to finish or verify/);
       const d = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").description;
+      assert.match(d, /End every reply with show_user, verbatim: log your reply as a message step last/);
+      const turnTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_turn").description;
+      assert.match(turnTool, /end every reply with show_user, verbatim/);
+      assert.match(instructions, /end every reply with show_user/);
       for (const must of [/ON by default/, /without being asked/, /never wait until the end/, /session_id/, /show_user/, /hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/, /stop logging/, /indeterminate/]) assert.match(d, must);
     }
     // Before sign-in, a log call gets the 401 that starts the connect flow; so does the plain endpoint.

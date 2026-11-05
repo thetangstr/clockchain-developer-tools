@@ -129,7 +129,7 @@ check(closed.status === "closed" && closed.final_checkpoint.status === "anchored
 console.log("\nClose summary:\n" + hide(closed.summary) + "\n");
 check(typeof closed.summary === "string" && /in full/.test(closed.summary_note ?? ""), "close returns the summary, and says to show it in full");
 const summaryMisses = results.filter((r) => !closed.summary.includes(`Step hash \`${r.hash}\`. Ledger hash \`${r.anchored_hash}\`. Block ${r.block_height}. Ledger ID \`${r.ledger_id}\`.`));
-check(steps > 100 || summaryMisses.length === 0, `the close summary matches every step's result (${summaryMisses.length} don't)`);
+check(steps > 50 || summaryMisses.length === 0, `the close summary matches every step's result (${summaryMisses.length} don't)`);
 const logClosedRes = await fetch(closed.links.summary);
 const logClosedText = await logClosedRes.text();
 check(logClosedRes.status === 200 && logClosedText.includes(`${steps} steps: ${steps} anchored, 0 pending`), `summary link when closed: HTTP ${logClosedRes.status}, ${logClosedText.length} bytes`);
