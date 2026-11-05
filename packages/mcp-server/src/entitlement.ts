@@ -61,6 +61,22 @@ export const KEEPER_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * What a caller's own key may call on the owned anchoring gateway, which trusts our signature and any client id. Default
+ * deny: a tool not listed here is refused before it runs. Keeper and handshake tools write through paths other than the
+ * caller's client, so ClockchainConfig.readOnly alone wouldn't stop them. See byoReadOnly in server.ts.
+ */
+export const BYO_READ_TOOLS: ReadonlySet<string> = new Set([
+  "get_time", "get_timestamp", "get_block", "get_validation",
+  "get_log_entry", "search_actions", "verify_asset", "stopwatch_verify",
+  "verify_receipt", "verify_package", "verify_identity_at", "verify_cross_party",
+  "build_evidence_package", "generate_audit_trail", "generate_compliance_report",
+  "get_identity_history", "resolve_agent",
+  "get_contract_types", "estimate_schedule", "list_schedules",
+  "timer_status", "timer_list", "tsa_status",
+  "handshake_status", "handshake_get_certificate", "agent_handshake_status", "agent_handshake_get_certificate",
+]);
+
+/**
  * Free / generation / read tools (LLD §6.1). The explicit complement of
  * {@link KEEPER_TOOLS}: value lands before the wall (generation, reads, in-
  * session verification). Listed explicitly so that adding a tool forces a

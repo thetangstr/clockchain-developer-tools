@@ -20,6 +20,9 @@ export const TOOL_COUNT = CLASSIFIED_TOOLS.size;
 const SUBSTRATE = process.env.CLOCKCHAIN_SUBSTRATE === "clockchain-network" || process.env.CLOCKCHAIN_SUBSTRATE === "anchoring-gateway"
   ? process.env.CLOCKCHAIN_SUBSTRATE
   : (() => { try { const h = new URL(process.env.CLOCKCHAIN_ENDPOINT || "https://node.clockchain.network").hostname; return h === "clockchain.network" || h.endsWith(".clockchain.network") ? "clockchain-network" : "anchoring-gateway"; } catch { return "anchoring-gateway"; } })();
+// On the owned gateway a caller's own key can read but not write (see server.ts), so the text below must not promise it.
+const BYO_READS_ONLY = SUBSTRATE === "anchoring-gateway" && (process.env.MCP_BYO_WRITES ?? "").trim() !== "allow";
+const BYO_SPEND = BYO_READS_ONLY ? "reads only here; to write, use a token from POST /token" : "writes spend your credits";
 export const SUBSTRATE_LABEL = SUBSTRATE === "clockchain-network"
   ? "single-validator Clockchain testnet"
   : "Clockchain anchoring gateway (testnet, single operator)";
@@ -75,8 +78,7 @@ AUTH — pick ONE (using the wrong header is the #1 cause of a 401):
   (a) Testnet token (shared testnet pool) — get one INSTANTLY, no signup:
         curl -X POST https://mcp.clockchain.network/token
       then send it as:  x-api-key: <YOUR_TOKEN>
-  (b) Your own Clockchain API key — if you already have one (writes spend YOUR
-      credits). Do NOT put a Clockchain key in x-api-key; use these three headers:
+  (b) Your own Clockchain API key — if you already have one (${BYO_READS_ONLY ? "reads only here;\n      to write, use a token" : "writes spend YOUR\n      credits"}). Do NOT put a Clockchain key in x-api-key; use these three headers:
         x-clockchain-api-key:   <YOUR_CLOCKCHAIN_KEY>
         x-clockchain-client-id: <you@example.com>
         x-clockchain-wallet-id: <you@example.com>
@@ -158,7 +160,7 @@ export const MCP_MANIFEST = {
         name: "clockchain-key",
         in: "header",
         headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
-        note: "your own Clockchain API key (writes spend your credits)",
+        note: `your own Clockchain API key (${BYO_SPEND})`,
       },
     ],
   },
@@ -463,7 +465,7 @@ ${BASE_CSS}</style>
       <span class="sn">1</span>
       <div class="sbody">
         <h4>Get a testnet token</h4>
-        <p>Click for an instant <b>testnet token</b> (delegated — writes spend our testnet credits, easiest for a quick test). Or bring your own <b>Clockchain API key</b> (writes spend your credits) — <a href="https://clockchain.network" target="_blank" rel="noopener">how to get one →</a></p>
+        <p>Click for an instant <b>testnet token</b> (delegated — writes spend our testnet credits, easiest for a quick test). Or bring your own <b>Clockchain API key</b> (${BYO_SPEND}) — <a href="https://clockchain.network" target="_blank" rel="noopener">how to get one →</a></p>
         <p><button class="cpy" id="getTokenBtn" onclick="getToken(this)" style="cursor:pointer">Get a testnet token</button></p>
         <div class="code" id="tokenOut" hidden><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="tokenVal"></code></pre></div>
         <p class="hint" id="tokenHint" hidden></p>
@@ -481,7 +483,7 @@ ${BASE_CSS}</style>
         <p class="hint" style="margin-top:8px"><b>Codex</b> uses <span class="mono">~/.codex/config.toml</span> (TOML) — same endpoint and header:</p>
         <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(TOML_CODEX)}</code></pre></div>
         <details class="byok">
-          <summary>Use your own Clockchain API key (writes spend your credits)</summary>
+          <summary>Use your own Clockchain API key (${BYO_SPEND})</summary>
           <p class="hint" style="margin:10px 0 0">Use your Clockchain credentials as headers instead of <span class="mono">x-api-key</span> — no MCP token needed. Same endpoint, your credits.</p>
           <div class="code"><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code>${esc(CMD_BYOK)}</code></pre></div>
         </details>

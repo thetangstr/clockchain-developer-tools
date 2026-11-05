@@ -1,6 +1,7 @@
 import { substrateForEndpoint, type AnchorSubstrate, type ClockchainConfig } from "./config.js";
 import { DEFAULT_ENDPOINT } from "./config.js";
 import {
+  ReadOnlyClientError,
   ApiError,
   AuthError,
   InsufficientCreditsError,
@@ -1270,6 +1271,8 @@ export class ClockchainClient {
     params: Record<string, string | number>,
     fileField: string = "contractFile",
   ): Promise<T> {
+    // Only the estimate reads, of everything that posts a contract.
+    if (this.config.readOnly && path !== "/api/contract/estimate") throw new ReadOnlyClientError();
     const { contractSource, ...fields } = params as Record<string, string | number> & {
       contractSource?: string;
     };
@@ -1395,6 +1398,7 @@ export class ClockchainClient {
   private async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const method = opts.method ?? "GET";
+    if (this.config.readOnly && method !== "GET") throw new ReadOnlyClientError();
     const bodyString = opts.body !== undefined ? JSON.stringify(opts.body) : "";
     const headers: Record<string, string> = {
       "x-api-key": this.config.apiKey,

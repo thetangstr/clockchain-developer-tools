@@ -356,11 +356,21 @@ for (const [label, env] of [
   });
 }
 
-test("on: the 401 keeps its status and exact body, and gains WWW-Authenticate only on /mcp and /shadow/mcp", async () => {
+test("on: the 401 keeps its status, /mcp keeps its exact body, /shadow/* points to sign-in, and WWW-Authenticate appears only on /mcp and /shadow/mcp", async () => {
   const off = await boot(shadowOn());
   const on = await boot({ ...shadowOn(), MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
   try {
-    for (const p of ["/mcp", "/shadow/mcp", "/"]) {
+    const shadowBody = JSON.parse(await (await mcpPost(on.url, INIT, {}, "/shadow/mcp")).text());
+    assert.equal(shadowBody.error, "unauthorized");
+    assert.match(shadowBody.message, /needs a signed-in Clockchain account/);
+    assert.match(shadowBody.message, /A key from POST \/token or an MCP token does not work here/);
+    assert.equal(shadowBody.endpoint, `${PUBLIC}/shadow/mcp`);
+    assert.equal(shadowBody.instructions, `${PUBLIC}/shadow/connect`);
+    assert.equal(shadowBody.auth, "oauth");
+    assert.equal(JSON.stringify(shadowBody).includes("x-api-key"), false);
+    // With OAuth off there is no sign-in to point to: /shadow/mcp keeps /mcp's body.
+    assert.equal(await (await mcpPost(off.url, INIT, {}, "/shadow/mcp")).text(), await (await mcpPost(off.url, INIT, {}, "/mcp")).text());
+    for (const p of ["/mcp", "/"]) {
       const a = await mcpPost(off.url, INIT, {}, p);
       const b = await mcpPost(on.url, INIT, {}, p);
       assert.equal(a.status, 401);
@@ -379,13 +389,14 @@ test("on: the 401 keeps its status and exact body, and gains WWW-Authenticate on
     const stale = await mcpPost(on.url, INIT, { authorization: `Bearer ${expired}` });
     assert.equal(stale.status, 401);
     assert.equal(stale.headers.get("www-authenticate"), `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`);
-    // /shadow/mcp: the same shared 401, with its own metadata URL; any refused credential adds error="invalid_token".
+    // /shadow/mcp: the same status, its own metadata URL and its own body; any refused credential adds error="invalid_token".
     for (const authorization of [`Bearer ${expired}`, "Bearer not-an-mcp-token"]) {
       const refused = await mcpPost(on.url, INIT, { authorization }, "/shadow/mcp");
       assert.equal(refused.status, 401);
       assert.equal(refused.headers.get("www-authenticate"), `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource/shadow/mcp", error="invalid_token"`);
+      assert.deepEqual(JSON.parse(await refused.text()), shadowBody);
       const offRefused = await mcpPost(off.url, INIT, { authorization }, "/shadow/mcp");
-      assert.equal(await refused.text(), await offRefused.text());
+      assert.equal(offRefused.status, 401);
       assert.equal(offRefused.headers.get("www-authenticate"), null);
     }
   } finally {
@@ -2168,6 +2179,7 @@ test("chat sign-in on: initialize, tools/list and ping work without a token; eve
     // The 401 every refused request gets on /shadow/mcp, with the chat path's metadata URL instead.
     const expected = await snapshot(await mcpPost(s.url, callTool("shadow_start_session", { title: "x" }), {}, "/shadow/mcp"));
     expected.headers["www-authenticate"] = CHAT_CHALLENGE;
+    expected.body = expected.body.replace(`${PUBLIC}/shadow/mcp`, `${PUBLIC}${CHAT}`);
     for (const body of [
       ...[...ACCOUNT_TOOLS, "shadow_start_session", "shadow_list_sessions", "no_such_tool"].map((n) => callTool(n, { name: "Acme" })),
       rpc("resources/list"), rpc("prompts/list"), rpc("notifications/cancelled", { requestId: 1 }, null), [INIT], { id: 1 }, "initialize",

@@ -550,6 +550,12 @@ read_optional_env SHADOW_LINK_CONCURRENCY /clockchain/mcp/SHADOW_LINK_CONCURRENC
 # Sign-up from the chat (absent = off: no /shadow/chat/mcp).
 read_optional_env SHADOW_LAZY_AUTH /clockchain/mcp/SHADOW_LAZY_AUTH
 read_optional_env SHADOW_ANON_PER_MINUTE /clockchain/mcp/SHADOW_ANON_PER_MINUTE
+# Logging on by default for connected accounts (absent = off) and its limits (absent = the code's defaults).
+read_optional_env SHADOW_AUTO_LOG /clockchain/mcp/SHADOW_AUTO_LOG
+read_optional_env SHADOW_ANCHORS_PER_DAY /clockchain/mcp/SHADOW_ANCHORS_PER_DAY
+read_optional_env SHADOW_ANCHORS_PER_SESSION /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION
+read_optional_env SHADOW_LOG_STEPS_PER_MIN /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN
+read_optional_env MCP_BYO_WRITES /clockchain/mcp/MCP_BYO_WRITES
 # OAuth 2.1 connector sign-in (off unless MCP_OAUTH=1; needs MCP_TOKEN_SIGNING_SECRET, read above).
 # MCP_OAUTH_APPROVALS_PER_HOUR is the per-IP approval ceiling (default 10, like POST /token).
 read_optional_env MCP_OAUTH /clockchain/mcp/MCP_OAUTH
@@ -578,7 +584,7 @@ fi
 export PORT=8080
 export MCP_TRANSPORT=http
 export MCP_REQUIRE_AUTH=1
-export MCP_RATE_PER_MIN=30
+export MCP_RATE_PER_MIN=120
 export MCP_LOG_BUDGET=5000
 export MCP_TOKEN_MINT_PER_HOUR=10
 export CLOCKCHAIN_CLIENT_ID=thetangstr@gmail.com

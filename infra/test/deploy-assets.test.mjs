@@ -168,6 +168,11 @@ const expectedContractEnv = {
   SHADOW_LINK_CONCURRENCY: "shadow-link-concurrency\n",
   SHADOW_LAZY_AUTH: "shadow-lazy-auth\n",
   SHADOW_ANON_PER_MINUTE: "shadow-anon-per-minute\n",
+  SHADOW_AUTO_LOG: "shadow-auto-log\n",
+  SHADOW_ANCHORS_PER_DAY: "shadow-anchors-per-day\n",
+  SHADOW_ANCHORS_PER_SESSION: "shadow-anchors-per-session\n",
+  SHADOW_LOG_STEPS_PER_MIN: "shadow-log-steps-per-min\n",
+  MCP_BYO_WRITES: "mcp-byo-writes\n",
   // OAuth connector sign-in (optional reads, after the receipts block).
   MCP_OAUTH: "oauth-flag-on\n",
   MCP_OAUTH_APPROVALS_PER_HOUR: "oauth-approvals\n",
@@ -327,7 +332,7 @@ if (process.env.EXPECT_MCP_ONLY === "1") {
 assert.equal(process.env.PORT, "8080");
 assert.equal(process.env.MCP_TRANSPORT, "http");
 assert.equal(process.env.MCP_REQUIRE_AUTH, "1");
-assert.equal(process.env.MCP_RATE_PER_MIN, "30");
+assert.equal(process.env.MCP_RATE_PER_MIN, "120");
 assert.equal(process.env.MCP_LOG_BUDGET, "5000");
 assert.equal(process.env.MCP_TOKEN_MINT_PER_HOUR, "10");
 assert.equal(process.env.CLOCKCHAIN_CLIENT_ID, "thetangstr@gmail.com");
@@ -470,6 +475,11 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_LINK_CONCURRENCY) value=$'shadow-link-concurrency\\n' ;;
   /clockchain/mcp/SHADOW_LAZY_AUTH) value=$'shadow-lazy-auth\\n' ;;
   /clockchain/mcp/SHADOW_ANON_PER_MINUTE) value=$'shadow-anon-per-minute\\n' ;;
+  /clockchain/mcp/SHADOW_AUTO_LOG) value=$'shadow-auto-log\\n' ;;
+  /clockchain/mcp/SHADOW_ANCHORS_PER_DAY) value=$'shadow-anchors-per-day\\n' ;;
+  /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION) value=$'shadow-anchors-per-session\\n' ;;
+  /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN) value=$'shadow-log-steps-per-min\\n' ;;
+  /clockchain/mcp/MCP_BYO_WRITES) value=$'mcp-byo-writes\\n' ;;
   /clockchain/mcp/MCP_OAUTH) value=$'oauth-flag-on\\n' ;;
   /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR) value=$'oauth-approvals\\n' ;;
   /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_HOUR) value=$'oauth-accounts\\n' ;;
@@ -590,7 +600,7 @@ async function resolvedComposeConfig(extraEnv = {}) {
       PORT: "8080",
       MCP_TRANSPORT: "http",
       MCP_REQUIRE_AUTH: "1",
-      MCP_RATE_PER_MIN: "30",
+      MCP_RATE_PER_MIN: "120",
       MCP_LOG_BUDGET: "5000",
       MCP_TOKEN_MINT_PER_HOUR: "10",
       CLOCKCHAIN_CLIENT_ID: "thetangstr@gmail.com",

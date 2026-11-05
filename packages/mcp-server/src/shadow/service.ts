@@ -12,6 +12,7 @@ import { getSharedLogBudget, type LogBudget } from "../budget.js";
 import { clip, parseStrict } from "./lib/profile.js";
 import { verifyPacket } from "./lib/verify.js";
 import { summarize } from "./lib/summary.js";
+import { redactSecrets, redactText } from "./redact.js";
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, ShadowEvent } from "./lib/types.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
@@ -87,6 +88,14 @@ const ONLINE_TIMEOUT_MS = 20_000;
 const LINKS_NOTE = "Anyone with these links can read the whole record until it is deleted, 30 days after the session started; links cannot be revoked.";
 /** How long one call may spend anchoring before it reports what is still pending. */
 const ANCHOR_BUDGET_MS = 25_000;
+/** Readers at once when checking a session's receipts online. */
+const ONLINE_CONCURRENCY = 8;
+/** shadow_log_turn, the fallback: steps and bytes per call (a request's body is capped at about 1 MB). */
+const MAX_TURN_STEPS = 100;
+const MAX_TURN_BYTES = 900 * 1024;
+const CREDENTIAL_AGENT = "An agent id can't hold a key or token, and nothing was recorded. Use a plain name, or leave agent out.";
+const START_NEW = "Call again without session_id to start a new session; keep logging there.";
+const NEW_SESSION_NOTE = "Pass this session_id with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed; call shadow_close_session and shadow_verify only when the person asks to finish or verify.";
 
 export type ShadowConfig =
   | { enabled: false }
@@ -95,8 +104,13 @@ export type ShadowConfig =
       stateDir: string;
       network: Network;
       /** The env-tunable caps (security review follow-up, finding 2); the rest keep DEFAULT_SHADOW_LIMITS. */
-      limits: Pick<ShadowLimits, "maxStateBytes" | "maxBytesPerOwner" | "maxSessionStartsPerOwnerPerDay">;
+      limits: Pick<ShadowLimits, "maxStateBytes" | "maxBytesPerOwner" | "maxSessionStartsPerOwnerPerDay"> &
+        Partial<Pick<ShadowLimits, "maxAnchorsPerOwnerPerDay" | "maxAnchorsPerSession" | "onlineVerifyMaxReceipts">>;
       linkConcurrency: number;
+      /** SHADOW_AUTO_LOG=1: logging is on by default for every connected account (shadow_log_step and friends). */
+      autoLog?: true;
+      /** SHADOW_LOG_STEPS_PER_MIN: shadow_log_step calls per account per minute, apart from MCP_RATE_PER_MIN. */
+      logStepsPerMinute?: number;
       /** Set when a cap setting is malformed: Shadow then refuses to start (every /shadow path answers 503). */
       problem?: string;
     };
@@ -114,9 +128,22 @@ export const SHADOW_ENV_DEFAULTS = {
 } as const;
 
 /**
+ * Defaults when SHADOW_AUTO_LOG=1: an anchor per step has to fit tasks of 50 steps and more. At 300 anchors a session's
+ * metadata stays under the 256 KB limit of the build before this flag, so a rollback can still read it.
+ */
+export const AUTO_LOG_DEFAULTS = { anchorsPerDay: 400, anchorsPerSession: 300, logStepsPerMinute: 90, accountBytes: 5 * 1024 * 1024 } as const;
+/** meta.anchors keeps about 260 bytes per anchor, and the metadata file holds at most META_MAX_BYTES. */
+const MAX_ANCHORS_PER_SESSION = 1500;
+
+/**
  * SHADOW_ENABLED=1 turns hosted Shadow on; SHADOW_STATE_DIR (default /app/state/shadow) is where it keeps records.
  * SHADOW_MAX_BYTES, SHADOW_ACCOUNT_MAX_BYTES, SHADOW_SESSION_STARTS_PER_DAY and SHADOW_LINK_CONCURRENCY set the caps
  * ("" or unset = SHADOW_ENV_DEFAULTS); anything but a positive whole number is a `problem`.
+ *
+ * SHADOW_AUTO_LOG=1 turns on automatic logging, which anchors every step. Its defaults are AUTO_LOG_DEFAULTS: anchors per
+ * account per day and per session (SHADOW_ANCHORS_PER_DAY, SHADOW_ANCHORS_PER_SESSION; without the flag, 60 and 100 unless
+ * set), shadow_log_step calls per account per minute (SHADOW_LOG_STEPS_PER_MIN), and a smaller SHADOW_ACCOUNT_MAX_BYTES.
+ * Without the flag and those settings the result is exactly what it was before them.
  */
 export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
   if ((env.SHADOW_ENABLED ?? "").trim() !== "1") return { enabled: false };
@@ -130,16 +157,26 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
     }
     return Number(raw);
   };
+  const autoLog = (env.SHADOW_AUTO_LOG ?? "").trim() === "1";
+  const anchorsPerDay = whole("SHADOW_ANCHORS_PER_DAY", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerDay : DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay);
+  const anchorsPerSession = whole("SHADOW_ANCHORS_PER_SESSION", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerSession : DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession);
+  if (anchorsPerSession > MAX_ANCHORS_PER_SESSION) problems.push(`SHADOW_ANCHORS_PER_SESSION must be at most ${MAX_ANCHORS_PER_SESSION}`);
+  const logStepsPerMinute = autoLog ? whole("SHADOW_LOG_STEPS_PER_MIN", AUTO_LOG_DEFAULTS.logStepsPerMinute) : undefined;
   return {
     enabled: true,
     stateDir: (env.SHADOW_STATE_DIR ?? "").trim() || "/app/state/shadow",
     network: (env.SHADOW_NETWORK ?? "").trim() === "mainnet" ? "clockchain-mainnet" : "clockchain-testnet",
     limits: {
       maxStateBytes: whole("SHADOW_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxStateBytes),
-      maxBytesPerOwner: whole("SHADOW_ACCOUNT_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxBytesPerOwner),
+      maxBytesPerOwner: whole("SHADOW_ACCOUNT_MAX_BYTES", autoLog ? AUTO_LOG_DEFAULTS.accountBytes : SHADOW_ENV_DEFAULTS.maxBytesPerOwner),
       maxSessionStartsPerOwnerPerDay: whole("SHADOW_SESSION_STARTS_PER_DAY", SHADOW_ENV_DEFAULTS.maxSessionStartsPerOwnerPerDay),
+      ...(anchorsPerDay !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay ? { maxAnchorsPerOwnerPerDay: anchorsPerDay } : {}),
+      ...(anchorsPerSession !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession ? { maxAnchorsPerSession: anchorsPerSession } : {}),
+      // Every receipt is checked online, however many a session has (a start marker plus the session's anchors).
+      ...(autoLog ? { onlineVerifyMaxReceipts: anchorsPerSession + 1 } : {}),
     },
     linkConcurrency: whole("SHADOW_LINK_CONCURRENCY", SHADOW_ENV_DEFAULTS.linkConcurrency),
+    ...(autoLog ? { autoLog: true as const, logStepsPerMinute } : {}),
     ...(problems.length ? { problem: problems.join("; ") } : {}),
   };
 }
@@ -271,6 +308,105 @@ function sessionIdOf(v: unknown): string {
   return v;
 }
 
+const loggingOff = () => new ShadowError("LOGGING_OFF", "Logging is off for this Clockchain account, because the person turned it off. Nothing was recorded. Do not log this step and do not show a logging footer. If the person asks to turn logging back on, call clockchain_logging {enabled: true}.");
+
+// ---- automatic logging: results ----------------------------------------------------------------------------------
+
+type LogStepInput = { agent?: unknown; kind?: unknown; content?: unknown };
+type LoggedStep = { seq: number; hash: string; kind: RecordKind; runId: string | null; summary: string };
+type LogAnchor = {
+  block_height: string | null; ledger_id: string | null; block_time: string | null; anchored_hash: string | null; covers_steps: number | null;
+  anchor_status: "anchored" | "pending" | "failed" | "over_limit" | "not_anchored"; anchor_reason?: string;
+};
+
+/** A short clip of a step for its result: what a person would recognise it by. */
+function stepSummary(kind: RecordKind, content: unknown): string {
+  const flat = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v) ?? "").replace(/\s+/g, " ").trim();
+  const c = isObj(content) ? content : null;
+  const name = c ? c.tool ?? c.name ?? c.path ?? c.filename : undefined;
+  const body = !c ? flat(content) : kind === "file" ? "" : flat(c.args ?? c.arguments ?? c.input ?? c.result ?? c.output ?? c.content ?? content);
+  const text = (typeof name === "string" ? `${name} ${body}` : body).trim();
+  const chars = Array.from(text);
+  return (chars.length > 80 ? chars.slice(0, 79).join("") + "…" : text).toWellFormed();
+}
+
+/** The footer to end a reply with: only what the record really holds, in server-made values (no step content). */
+function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[] }, anchor: LogAnchor, viewer: string, turnSteps?: number): string {
+  const count = (n: number) => `${n} ${n === 1 ? "step" : "steps"}`;
+  const heights = meta.anchors.filter((a) => a.blockHeight);
+  const latest = meta.anchors.at(-1);
+  const parts: string[] = [];
+  if (turnSteps !== undefined) {
+    parts.push(`**Clockchain Shadow:** ${count(turnSteps)} logged in this reply under one shared anchor, not one per step (${count(meta.agentSteps)} so far).`);
+    if (anchor.anchor_status === "anchored") parts.push(`Shared anchor: block ${anchor.block_height}, ledger ID \`${anchor.ledger_id}\`.`);
+  } else {
+    parts.push(`**Clockchain Shadow:** ${count(meta.agentSteps)} logged so far.`);
+    if (heights.length) parts.push(`First block ${heights[0].blockHeight}, last block ${heights[heights.length - 1].blockHeight}.`);
+    if (latest) parts.push(`Latest ledger ID: \`${latest.ledgerId}\`.`);
+  }
+  parts.push(`Viewer: ${viewer}`);
+  const lines = ["---", parts.join(" ")];
+  if (anchor.anchor_status !== "anchored") {
+    const one = turnSteps === undefined;
+    const said = {
+      pending: one ? "its anchor is still pending" : "their anchor is still pending",
+      over_limit: "an anchoring limit has been reached",
+      failed: one ? "its anchor failed" : "their anchor failed",
+      not_anchored: one ? "it has no anchor yet" : "they have no anchor yet",
+    }[anchor.anchor_status];
+    lines.push(`${one ? "The latest step is" : "These steps are"} recorded, but ${said}, so ${one ? "it has" : "they have"} no block or ledger ID. ${anchor.anchor_reason ?? ""}`.trim());
+  }
+  lines.push("Logging is on. Say 'stop logging' to turn it off.");
+  return lines.join("\n\n");
+}
+
+/**
+ * The hosted viewer checks a packet against the pin this same server made, so its checks aren't independent. The
+ * library's summary, which is vendored and unchanged, is written for a pin that reached the reader separately: here the
+ * report says whose pin it was, and {@link hostedViewer} replaces its "Proven" tag.
+ */
+function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T): T {
+  return {
+    ...report,
+    summary: report.summary.replace("the supplied pin", "this server's own pin"),
+    checks: report.checks.map((c) =>
+      c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
+        : c.name === "time" ? { ...c, reason: c.reason.replace("with a single validator they are only as good as its clock", "with a single-operator gateway they are only as good as its clock") }
+          : c),
+  };
+}
+
+const OWN_PIN_NOTE = `<p class="meta">The pin behind this page came from this server, so these checks aren't independent. For an independent check, run the command at the end of this page with a pin you received separately.</p>`;
+
+/** The summary page with "Proven" (which step content can't produce: it is escaped) saying what was really checked. */
+function hostedViewer(html: string): string {
+  return html
+    .replaceAll("<b>Proven:</b>", "<b>Matches what the server signed:</b>")
+    .replaceAll('<td class="tag">Proven</td>', '<td class="tag">Matches what the server signed</td>')
+    .replace("and that the validators keep good time.</li>", "and that the single-operator gateway keeps good time.</li>")
+    .replace("<h2>What this record shows</h2>", `<h2>What this record shows</h2>${OWN_PIN_NOTE}`);
+}
+
+const escHtml = (s: unknown) => String(s ?? "").replace(/[&<>"'`]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/**
+ * The viewer's per-step table, added to the library's summary page (which is vendored, and lists receipts only by the
+ * step that carries them): each step's own hash, and the block and ledger id of the first anchor that covers it.
+ */
+function withStepAnchors(html: string, events: ShadowEvent[]): string {
+  const anchors = events.filter((e) => e.body.kind === "clockchain.anchored" && (e.body.payload as any)?.marker === "checkpoint");
+  let i = 0;
+  const rows = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map((e) => {
+    while (i < anchors.length && Number((anchors[i].body.payload as any).checkpoint?.count) < e.body.seq) i++;
+    const p = anchors[i]?.body.payload as any;
+    return `<tr><td>${escHtml(e.body.seq)}</td><td>${escHtml(e.body.kind)}</td><td><code>${escHtml(e.hash)}</code></td><td>${p ? escHtml(p.blockHeight) : "not anchored yet"}</td><td>${p ? `<code>${escHtml(p.ledgerId)}</code>` : "none"}</td></tr>`;
+  }).join("");
+  const table = `<h2>Steps and their anchors</h2><p class="meta">Each anchor is a checkpoint over every step up to it. Steps with the same ledger ID were logged in one call and share that anchor.</p><div class="scroll"><table><tr><th>#</th><th>Step</th><th>Hash</th><th>Block</th><th>Ledger ID</th></tr>${rows}</table></div>\n`;
+  // Step content is escaped on the page, so this heading can only be the library's own.
+  const at = html.indexOf("<h2>Clockchain receipts");
+  return at < 0 ? html : html.slice(0, at) + table + html.slice(at);
+}
+
 // ---- the service ------------------------------------------------------------------------------------------------------
 
 export type ServiceOptions = {
@@ -282,6 +418,8 @@ export type ServiceOptions = {
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   log?: (event: string, fields: Record<string, string | number | boolean | null>) => void;
+  /** SHADOW_AUTO_LOG=1: the viewer's per-step table of hash, block and ledger id, and verify's receipt counts. */
+  autoLog?: boolean;
 };
 
 type Links = { viewer: string; packet: string };
@@ -295,6 +433,7 @@ export class ShadowService {
   private readonly ledger: () => ShadowLedger;
   private readonly budget: () => LogBudget;
   private readonly log: NonNullable<ServiceOptions["log"]>;
+  private readonly autoLog: boolean;
   private readonly locks = new KeyedMutex();
   private readonly heavy = new Gate(32);
   private readonly drains = new Map<string, Promise<void>>();
@@ -319,8 +458,10 @@ export class ShadowService {
     this.ledger = o.ledger ?? (() => { throw new Error("no ledger"); });
     this.budget = o.budget ?? (() => getSharedLogBudget());
     this.log = o.log ?? ((event, fields) => console.error(JSON.stringify({ event, ...fields })));
-    // The session budget covers events.jsonl plus meta.json and its .bak.
-    const metaBudget = Math.min(2 * META_MAX_BYTES, Math.floor(this.limits.maxSessionBytes / 4));
+    this.autoLog = o.autoLog === true;
+    // The session budget covers events.jsonl plus meta.json and its .bak. Metadata stays small with few anchors.
+    const metaBytes = this.limits.maxAnchorsPerSession > DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession ? META_MAX_BYTES : 256 * 1024;
+    const metaBudget = Math.min(2 * metaBytes, Math.floor(this.limits.maxSessionBytes / 4));
     this.eventsMax = this.limits.maxSessionBytes - metaBudget;
     this.agentEventsMax = this.eventsMax - Math.min(256 * 1024, Math.floor(this.eventsMax / 4));
     this.maxEvents = this.limits.maxStepsPerSession + COLLECTOR_STEP_HEADROOM;
@@ -497,7 +638,7 @@ export class ShadowService {
 
   async startSession(ownerId: string, input: { title?: unknown; agents?: unknown }, base: string) {
     if (typeof input.title !== "string" || !cleanText(input.title, 200)) throw bad("Give the session a title (up to 200 characters).");
-    const title = cleanText(input.title, 200);
+    const title = this.autoLog ? cleanText(redactText(input.title.slice(0, 1000)), 200) : cleanText(input.title, 200);
     const agents = this.agentsOf(input.agents);
     const ownerKey = ownerKeyOf(ownerId);
     return this.locks.run(`owner:${ownerKey}`, async () => {
@@ -577,8 +718,10 @@ export class ShadowService {
       const id = isObj(a) ? a.id : a;
       if (typeof id !== "string" || !AGENT_ID.test(id) || id === "collector")
         throw bad('Each agent id is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
+      if (this.autoLog && redactText(id) !== id) throw bad(CREDENTIAL_AGENT);
       if (out.some((x) => x.id === id)) throw bad(`Agent "${id}" is listed twice.`);
-      const role = isObj(a) && typeof a.role === "string" && cleanText(a.role, 100) ? cleanText(a.role, 100) : null;
+      const roleText = isObj(a) && typeof a.role === "string" ? (this.autoLog ? redactText(a.role.slice(0, 1000)) : a.role) : "";
+      const role = cleanText(roleText, 100) ? cleanText(roleText, 100) : null;
       out.push({ id, role });
     }
     return out;
@@ -591,7 +734,7 @@ export class ShadowService {
     const kind = input.kind as RecordKind;
     if (typeof input.agent !== "string" || !input.agent) throw bad("Name the agent that took this step (one of the session's agents).");
     const agent = input.agent;
-    const content = input.content;
+    let content = input.content;
     if (content === undefined) throw bad("content is required: a string, or JSON.");
     const size = Buffer.byteLength(typeof content === "string" ? content : JSON.stringify(content) ?? "");
     if (size > this.limits.maxContentBytes)
@@ -600,6 +743,8 @@ export class ShadowService {
     if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
       throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
     const runInput = typeof input.run_id === "string" ? input.run_id : null;
+    // With logging on by default, the same backstop as the log tools. Size and depth are checked above.
+    if (this.autoLog) content = redactSecrets(content);
     return this.session(ownerKeyOf(ownerId), sessionId, (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is closed. Start a new session to record more.");
       if (!meta.agents.some((a) => a.id === agent))
@@ -618,25 +763,210 @@ export class ShadowService {
         if (e instanceof RecordError) throw new ShadowError(e.code, e.message);
         throw bad(`${(e as Error).message}.`);
       }
-      let runId: string | null = null;
-      if (kind === "task") {
-        runId = runInput ?? randomUUID();
-        if (meta.runs.some((r) => r.id === runId)) throw new ShadowError("SHADOW_RUN_EXISTS", `Run ${runId} already exists in this session; use a new run_id.`);
-        if (meta.runs.filter((r) => r.open).length >= this.limits.maxOpenRuns)
-          throw new ShadowError("SHADOW_LIMIT_RUNS", `This session has ${this.limits.maxOpenRuns} open runs, the most allowed.`);
-      } else if (runInput) {
-        const r = meta.runs.find((x) => x.id === runInput);
-        if (!r || r.agent !== agent) throw new ShadowError("SHADOW_RUN_NOT_FOUND", `No run ${runInput} for "${agent}" in this session. A task step starts a run.`);
-        if (!r.open) throw new ShadowError("SHADOW_RUN_ENDED", `Run ${runInput} has ended.`);
-        runId = r.id;
-      } else {
-        // Without run_id, a step joins the agent's latest open run, if it has one.
-        runId = [...meta.runs].reverse().find((r) => r.open && r.agent === agent)?.id ?? null;
-      }
+      const runId = this.runFor(meta, kind, agent, runInput);
       const event = this.appendStep(meta, spec.kind, agent, spec.payload, { boundary: spec.boundary, agentRunId: runId }, true);
       this.store.writeMeta(meta);
       return { seq: event.body.seq, hash: event.hash, kind: spec.kind, run_id: runId };
     });
+  }
+
+  private runFor(meta: SessionMeta, kind: RecordKind, agent: string, runInput: string | null): string | null {
+    if (kind === "task") {
+      const runId = runInput ?? randomUUID();
+      if (meta.runs.some((r) => r.id === runId)) throw new ShadowError("SHADOW_RUN_EXISTS", `Run ${runId} already exists in this session; use a new run_id.`);
+      if (meta.runs.filter((r) => r.open).length >= this.limits.maxOpenRuns)
+        throw new ShadowError("SHADOW_LIMIT_RUNS", `This session has ${this.limits.maxOpenRuns} open runs, the most allowed.`);
+      return runId;
+    }
+    if (runInput) {
+      const r = meta.runs.find((x) => x.id === runInput);
+      if (!r || r.agent !== agent) throw new ShadowError("SHADOW_RUN_NOT_FOUND", `No run ${runInput} for "${agent}" in this session. A task step starts a run.`);
+      if (!r.open) throw new ShadowError("SHADOW_RUN_ENDED", `Run ${runInput} has ended.`);
+      return r.id;
+    }
+    // Without run_id, a step joins the agent's latest open run, if it has one.
+    return [...meta.runs].reverse().find((r) => r.open && r.agent === agent)?.id ?? null;
+  }
+
+  // ---- automatic logging (SHADOW_AUTO_LOG) -------------------------------------------------------------------------
+
+  /** The owner's logging setting; default on. A setting that cannot be read refuses logging rather than guessing. */
+  loggingEnabled(ownerId: string): boolean {
+    try {
+      return !this.store.loggingOff(ownerKeyOf(ownerId));
+    } catch {
+      throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't read this account's logging setting right now, so nothing was logged. Do not show a logging footer.");
+    }
+  }
+
+  setLogging(ownerId: string, enabled: boolean) {
+    this.store.setLoggingOff(ownerKeyOf(ownerId), !enabled);
+    this.log("shadow_logging_set", { enabled });
+    return {
+      logging: { enabled },
+      message: enabled
+        ? "Logging is on for this account. Log each step from now on and end each reply with the footer from the last result."
+        : "Logging is off for this account. Do not log steps and do not show a logging footer until the person turns it back on.",
+    };
+  }
+
+  /** Refuses shadow_record and the logging tools once the owner turned logging off. */
+  assertLogging(ownerId: string): void {
+    if (!this.loggingEnabled(ownerId)) throw loggingOff();
+  }
+
+  /** One step: appended and anchored in this call, with its own hash, and the block and ledger id of its own anchor. */
+  async logStep(ownerId: string, input: { session_id?: unknown; title?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown }, base: string) {
+    if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
+      throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
+    const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, steps: [input], runInput: typeof input.run_id === "string" ? input.run_id : null, maxSteps: 1 }, base);
+    const step = r.steps[0];
+    return {
+      session_id: r.sessionId,
+      seq: step.seq,
+      hash: step.hash,
+      kind: step.kind,
+      ...(step.runId ? { run_id: step.runId } : {}),
+      ...r.anchor,
+      viewer: r.viewer,
+      show_user: logFooter(r.meta, r.anchor, r.viewer),
+      ...(r.started ? { note: NEW_SESSION_NOTE } : {}),
+    };
+  }
+
+  /** The fallback: several steps in one call, sharing one anchor. */
+  async logTurn(ownerId: string, input: { session_id?: unknown; title?: unknown; steps?: unknown }, base: string) {
+    if (!Array.isArray(input.steps) || input.steps.length === 0) throw bad("steps must be a list of 1 or more steps.");
+    const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, steps: input.steps as LogStepInput[], runInput: null, maxSteps: MAX_TURN_STEPS }, base);
+    return {
+      session_id: r.sessionId,
+      shared_anchor: true,
+      anchor_note: "These steps share one anchor: one block and one ledger record for the whole call, not one per step. Use shadow_log_step to give each step its own.",
+      evidence: {
+        logged: r.steps.map((s) => ({ seq: s.seq, kind: s.kind, hash: s.hash, summary: s.summary })),
+        ...r.anchor,
+        viewer: r.viewer,
+      },
+      show_user: logFooter(r.meta, r.anchor, r.viewer, r.steps.length),
+      ...(r.started ? { note: NEW_SESSION_NOTE } : {}),
+    };
+  }
+
+  private async logSteps(ownerId: string, input: { session_id?: unknown; title?: unknown; steps: LogStepInput[]; runInput: string | null; maxSteps: number }, base: string) {
+    this.assertLogging(ownerId);
+    if (input.steps.length > input.maxSteps)
+      throw new ShadowError("SHADOW_LIMIT_TURN_STEPS", `One call logs at most ${input.maxSteps} steps; this one has ${input.steps.length}. Nothing was recorded. Split them over several calls.`);
+    const many = input.maxSteps > 1;
+    // Everything that can refuse a step's content comes first, so a refused call leaves no trace, not even a new session.
+    const steps = input.steps.map((raw, i) => {
+      try {
+        return this.prepareStep(raw);
+      } catch (e) {
+        if (many && e instanceof ShadowError) throw new ShadowError(e.code, `Step ${i + 1}: ${e.message}`);
+        throw e;
+      }
+    });
+    const totalBytes = steps.reduce((n, s) => n + s.encodedBytes, 0);
+    if (totalBytes > MAX_TURN_BYTES)
+      throw new ShadowError("SHADOW_CONTENT_TOO_LARGE", `These steps hold ${totalBytes} bytes; one call takes at most ${MAX_TURN_BYTES}. Nothing was recorded. Split them over several calls.`);
+    const ownerKey = ownerKeyOf(ownerId);
+    const budgetEnd = Date.now() + ANCHOR_BUDGET_MS;
+    let sessionId: string;
+    let started = false;
+    if (input.session_id === undefined || input.session_id === null || input.session_id === "") {
+      const named = [...new Set(steps.map((s) => s.agent).filter((a): a is string => a !== null))];
+      // Cut down before anything else looks at it: the title is the one field here with no other limit.
+      const given = typeof input.title === "string" ? cleanText(redactText(input.title.slice(0, 1000)), 200) : "";
+      const title = given || `Chat log, ${this.now().toISOString().slice(0, 16).replace("T", " ")} UTC`;
+      sessionId = (await this.startSession(ownerId, { title, ...(named.length ? { agents: named.map((id) => ({ id })) } : {}) }, base)).session_id;
+      started = true;
+    } else {
+      sessionId = sessionIdOf(input.session_id);
+    }
+    const made: { steps: LoggedStep[]; target: string | null; refused: { code: string; message: string } | null } = { steps: [], target: null, refused: null };
+    await this.session(ownerKey, sessionId, async (meta) => {
+      if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", `This session is closed, so nothing was recorded. ${START_NEW}`);
+      if (meta.agentSteps + steps.length > this.limits.maxStepsPerSession || meta.seq + steps.length + 3 > this.maxEvents)
+        throw new ShadowError("SHADOW_LIMIT_STEPS", `This session has ${meta.agentSteps} steps and can't take ${steps.length} more, so nothing was recorded. ${START_NEW}`);
+      // The last anchor is kept for shadow_close_session, so a full session can still anchor its final checkpoint.
+      if (meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession - 1)
+        throw new ShadowError("SHADOW_LIMIT_SESSION_ANCHORS", `This session has used its ${this.limits.maxAnchorsPerSession} anchors, so nothing was recorded. ${START_NEW}`);
+      if (meta.eventsBytes + totalBytes + steps.length * 1024 + 8192 > this.agentEventsMax)
+        throw new ShadowError("SHADOW_LIMIT_SESSION_SIZE", `This session is full (${Math.round(this.limits.maxSessionBytes / 1048576)} MB on disk), so nothing was recorded. ${START_NEW}`);
+      const full = this.accountFull(meta.ownerKey, totalBytes);
+      if (full) throw full;
+      if (this.usageBytes >= this.limits.maxStateBytes * 1.25)
+        throw new ShadowError("SHADOW_STORAGE_FULL", "Shadow's storage is full right now, so nothing was recorded. Say so in your reply; do not show a logging footer.");
+      for (const s of steps) {
+        const agent = s.agent ?? meta.agents[0].id;
+        if (!meta.agents.some((a) => a.id === agent))
+          throw new ShadowError("SHADOW_UNKNOWN_AGENT", `"${agent}" is not one of this session's agents (${meta.agents.map((a) => a.id).join(", ")}), so nothing was recorded. Use one of those, or leave agent out.`);
+      }
+      if (meta.runs.filter((r) => r.open).length + steps.filter((s) => s.kind === "task").length > this.limits.maxOpenRuns)
+        throw new ShadowError("SHADOW_LIMIT_RUNS", `This session has too many open runs (${this.limits.maxOpenRuns} at most), so nothing was recorded. Use kind prompt for a later message from the person, or start a new session: ${START_NEW}`);
+      try {
+        for (const s of steps) {
+          const agent = s.agent ?? meta.agents[0].id;
+          const runId = this.runFor(meta, s.kind, agent, input.runInput);
+          const event = this.appendStep(meta, s.spec.kind, agent, s.spec.payload, { boundary: s.spec.boundary, agentRunId: runId }, true);
+          made.steps.push({ seq: event.body.seq, hash: event.hash, kind: s.kind, runId, summary: s.summary });
+        }
+      } finally {
+        if (made.steps.length) this.store.writeMeta(meta);
+      }
+      // From here on the steps are recorded: whatever happens to the anchor is reported, never an error.
+      try {
+        const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
+        meta.checkpoint = cp;
+        made.target = cp.hash;
+        made.refused = this.queueCheckpoint(meta, cp);
+        this.store.writeMeta(meta);
+      } catch (e) {
+        made.refused = { code: e instanceof ShadowError ? e.code : "SHADOW_INTERNAL", message: "The steps are recorded, but no checkpoint could be signed for them yet; the next call will cover them." };
+      }
+    });
+    await this.drain(ownerKey, sessionId, { deadline: Math.max(budgetEnd, Date.now() + 2_000), stopOnFailure: true });
+    return this.session(ownerKey, sessionId, (meta) => {
+      const anchor = this.logAnchor(meta, made.target, made.refused);
+      return { sessionId, started, steps: made.steps, anchor, viewer: this.links(meta, base).viewer, meta: { agentSteps: meta.agentSteps, anchors: meta.anchors.map((a) => ({ blockHeight: a.blockHeight, ledgerId: a.ledgerId })) } };
+    });
+  }
+
+  private prepareStep(raw: LogStepInput) {
+    if (!isObj(raw)) throw bad("Each step is {kind, content} with an optional agent.");
+    if (typeof raw.kind !== "string" || !(RECORD_KINDS as readonly string[]).includes(raw.kind)) throw bad(`kind must be one of ${RECORD_KINDS.join(", ")}.`);
+    const kind = raw.kind as RecordKind;
+    if (raw.content === undefined) throw bad("content is required: a string, or JSON.");
+    const agent = raw.agent === undefined || raw.agent === null || raw.agent === "" ? null : raw.agent;
+    if (agent !== null && (typeof agent !== "string" || !AGENT_ID.test(agent) || agent === "collector"))
+      throw bad('agent is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
+    if (typeof agent === "string" && redactText(agent) !== agent) throw bad(CREDENTIAL_AGENT);
+    const size = Buffer.byteLength(typeof raw.content === "string" ? raw.content : JSON.stringify(raw.content) ?? "");
+    if (size > this.limits.maxContentBytes)
+      throw new ShadowError("SHADOW_CONTENT_TOO_LARGE", `Content is ${size} bytes; the limit is ${this.limits.maxContentBytes}, and nothing was recorded. Record a summary, or split it over several steps.`);
+    if (!depthWithin(raw.content, 48)) throw bad("Content is nested too deeply (more than 48 levels).");
+    const content = redactSecrets(raw.content);
+    let spec;
+    try {
+      spec = stepFor(kind, content);
+    } catch (e) {
+      if (e instanceof RecordError) throw new ShadowError(e.code, e.message);
+      throw bad(`${(e as Error).message}.`);
+    }
+    return { kind, agent: agent as string | null, content, spec, encodedBytes: Buffer.byteLength(JSON.stringify(spec.payload) ?? ""), summary: stepSummary(kind, content) };
+  }
+
+  /** What became of the anchor for this call's checkpoint: a block and a ledger id only when they really exist. */
+  private logAnchor(meta: SessionMeta, target: string | null, refused: { code: string; message: string } | null): LogAnchor {
+    const none = { block_height: null, ledger_id: null, block_time: null, anchored_hash: null, covers_steps: null };
+    const a = target ? meta.anchors.find((x) => x.hash === target) : undefined;
+    if (a) return { block_height: a.blockHeight, ledger_id: a.ledgerId, block_time: a.blockTime, anchored_hash: a.hash, covers_steps: a.count, anchor_status: "anchored" };
+    const row = target ? meta.outbox.find((x) => x.hash === target) : undefined;
+    if (!row) return { ...none, anchor_status: "not_anchored", anchor_reason: refused?.message ?? "No anchor was sent for these steps." };
+    if (row.state === "failed") return { ...none, anchor_status: "failed", anchor_reason: reasonOf(row) ?? "Clockchain did not accept it." };
+    const limited = [row, ...meta.outbox].find((r) => r.lastErrorCode === "anchor_limit" || r.lastErrorCode === "log_budget");
+    if (limited) return { ...none, anchor_status: "over_limit", anchor_reason: reasonOf(limited) ?? "An anchoring limit has been reached." };
+    return { ...none, anchor_status: "pending", anchor_reason: reasonOf(row) ?? "Waiting to be sent to Clockchain." };
   }
 
   async checkpoint(ownerId: string, input: { session_id?: unknown }) {
@@ -750,12 +1080,17 @@ export class ShadowService {
     const ledgerIds = await this.session(ownerKey, sessionId, (meta) => meta.anchors.map((a) => a.ledgerId));
     let online: Awaited<ReturnType<typeof prefetchOnline>> | undefined;
     let onlineNote: string;
+    let receipts: { checked: number; total: number } | undefined;
     if (ledgerIds.length > this.limits.onlineVerifyMaxReceipts) {
       onlineNote = `Checked offline: this session has ${ledgerIds.length} Clockchain receipts, more than the ${this.limits.onlineVerifyMaxReceipts} checked online here. Run shadow-verify packet.json --pin pin.json --online to confirm them all.`;
     } else {
       try {
-        online = await prefetchOnline(this.ledger(), { network: this.network, referenceId: referenceId(sessionId), ledgerIds, timeoutMs: ONLINE_TIMEOUT_MS });
+        online = await prefetchOnline(this.ledger(), { network: this.network, referenceId: referenceId(sessionId), ledgerIds, timeoutMs: ONLINE_TIMEOUT_MS, concurrency: this.autoLog ? ONLINE_CONCURRENCY : 1 });
         onlineNote = "Checked online against the Clockchain ledger, from this server.";
+        if (this.autoLog) {
+          receipts = { checked: online.receiptsChecked, total: ledgerIds.length };
+          if (receipts.checked < receipts.total) onlineNote = `Checked ${receipts.checked} of ${receipts.total} Clockchain receipts online in the time allowed; the rest were not checked, so witness stays indeterminate. Run shadow_verify again, or shadow-verify packet.json --pin pin.json --online.`;
+        }
       } catch {
         onlineNote = "Checked offline: Clockchain could not be reached.";
       }
@@ -765,13 +1100,16 @@ export class ShadowService {
       const packet = buildPacket(meta, cp, events, this.network, this.now());
       const pin = buildPin(meta, cp);
       // Verified as a relying party would: strictly parsed from its JSON.
-      const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online });
+      // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too.
+      const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog ? { requireOnline: true } : {}) });
+      const report = this.autoLog ? ownPinReport(checked) : checked;
       return {
         session_id: sessionId,
         result: report.result,
         summary: report.summary,
         checks: report.checks,
         online: onlineNote,
+        ...(receipts ? { receipts_checked_online: receipts.checked, receipts_total: receipts.total } : {}),
         interpretation: report.interpretation,
         links: this.links(meta, base),
       };
@@ -822,7 +1160,8 @@ export class ShadowService {
             }, null, 1));
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
-            body = Buffer.from(summarize(packet, report, { packetFile: "packet.json", pinFile: "pin.json" }).html);
+            const html = hostedViewer(summarize(packet, ownPinReport(report), { packetFile: "packet.json", pinFile: "pin.json" }).html);
+            body = Buffer.from(this.autoLog ? withStepAnchors(html, events) : html);
           }
           this.linkBuildCount++;
           this.linkCache.set(linkKey(kind, meta), body);
@@ -874,18 +1213,18 @@ export class ShadowService {
   }
 
   /** Drains the session's outbox once; concurrent callers share the pass. Never holds the lock across the network. */
-  private drain(ownerKey: string, sessionId: string): Promise<void> {
+  private drain(ownerKey: string, sessionId: string, o: { deadline?: number; stopOnFailure?: boolean } = {}): Promise<void> {
     const key = `${ownerKey}/${sessionId}`;
     const running = this.drains.get(key);
     if (running) return running;
-    const p = this.drainOnce(ownerKey, sessionId).finally(() => this.drains.delete(key));
+    const p = this.drainOnce(ownerKey, sessionId, o).finally(() => this.drains.delete(key));
     this.drains.set(key, p);
     return p;
   }
 
-  private async drainOnce(ownerKey: string, sessionId: string): Promise<void> {
+  private async drainOnce(ownerKey: string, sessionId: string, o: { deadline?: number; stopOnFailure?: boolean }): Promise<void> {
     const tried = new Set<string>();
-    const deadline = Date.now() + ANCHOR_BUDGET_MS;
+    const deadline = o.deadline ?? Date.now() + ANCHOR_BUDGET_MS;
     for (;;) {
       if (Date.now() >= deadline) return; // What is left stays queued for the next call.
       const job = await this.session(ownerKey, sessionId, (meta) => {
@@ -905,7 +1244,8 @@ export class ShadowService {
       tried.add(job.id);
       const outcome = await this.anchorNetwork(ownerKey, sessionId, job, deadline);
       const halt = await this.session(ownerKey, sessionId, (meta) => this.applyOutcome(meta, job.id, outcome)).catch(() => true);
-      if (halt) return;
+      // A step's call comes back quickly when Clockchain refuses: the rest stay queued for the next step.
+      if (halt || (o.stopOnFailure && outcome.kind === "failed")) return;
     }
   }
 

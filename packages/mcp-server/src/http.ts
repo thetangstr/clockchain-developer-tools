@@ -10,7 +10,9 @@ import {
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
+import { createLogBudget } from "./budget.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
+import { installTxtWithShadow, manifestWithShadow } from "./shadow/discovery.js";
 
 // The landing page's demo video + poster, served same-origin from the image
 // (packages/mcp-server/assets, copied by the Dockerfile). They used to hot-link a
@@ -613,7 +615,9 @@ export async function runHttp(): Promise<Server> {
   // SHADOW_LAZY_AUTH=1 (with hosted Shadow and OAuth on) adds the chat sign-in endpoint for claude.ai's "Sign in when
   // needed" connectors: it connects and lists tools without a token, and its first tool call starts sign-in. A
   // separate path, so /shadow/mcp (ChatGPT, Claude Code, "Sign in now" connectors) is untouched. Off: no such path.
-  const shadowChatPath = (process.env.SHADOW_LAZY_AUTH ?? "").trim() === "1" && loadShadowConfig(process.env).enabled && oauthConfig.kind === "ready"
+  const shadowAtStart = loadShadowConfig(process.env);
+  const shadowAutoLog = shadowAtStart.enabled && shadowAtStart.autoLog === true;
+  const shadowChatPath = (process.env.SHADOW_LAZY_AUTH ?? "").trim() === "1" && shadowAtStart.enabled && oauthConfig.kind === "ready"
     ? "/shadow/chat/mcp"
     : undefined;
   if (oauthConfig.kind === "misconfigured") {
@@ -633,6 +637,8 @@ export async function runHttp(): Promise<Server> {
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
         ...(shadowChatPath ? { chatPaths: [shadowChatPath] } : {}),
+        // SHADOW_AUTO_LOG=1: every sign-in page says plainly that logging is on by default once connected.
+        ...(shadowAutoLog ? { autoLog: true } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
       })
     : undefined;
@@ -1106,6 +1112,10 @@ export async function runHttp(): Promise<Server> {
   const shadowLinkLimit = keyedWindowLimiter(Number(process.env.SHADOW_LINKS_PER_MINUTE || "60"), 60_000, Date.now);
   // Discovery before sign-in on the chat endpoint, per client (generous: claude.ai calls from shared egress).
   const shadowAnonymousLimit = keyedWindowLimiter(Number(process.env.SHADOW_ANON_PER_MINUTE || "600"), 60_000, Date.now);
+  // shadow_log_step per account, apart from MCP_RATE_PER_MIN: a task with an anchor per step must not hit the general limit.
+  const shadowLogStepsPerMinute = shadowConfig.enabled ? shadowConfig.logStepsPerMinute ?? 0 : 0;
+  const shadowLogStepLimit = keyedWindowLimiter(shadowLogStepsPerMinute, 60_000, Date.now);
+  const shadowBudget = createLogBudget(process.env);
   // Link clients are bucketed like OAuth's: the real client behind Caddy (MCP_OAUTH_TRUSTED_PROXY), IPv6 by /64.
   const shadowTrustedProxy = (process.env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim() || undefined;
   const shadowLinkClient = (req: IncomingMessage): string =>
@@ -1122,6 +1132,24 @@ export async function runHttp(): Promise<Server> {
   if (shadowConfig.enabled && !oauth && !shadowAllowNonAcct) {
     console.warn(JSON.stringify({ event: "shadow_needs_oauth", note: "hosted Shadow accepts only signed-in accounts; with MCP_OAUTH off nobody can use it" }));
   }
+  // A 401 on /shadow/*: the same status and challenge as /mcp's, but /mcp's body sends an agent to x-api-key and POST
+  // /token, whose key Shadow then refuses. With OAuth on, it says what works here. With OAuth off: /mcp's, unchanged.
+  const shadowUnauthorized = (res: ServerResponse, req?: IncomingMessage): void => {
+    if (!oauth || !req || oauthConfig.kind !== "ready") return mcpUnauthorized(res, req);
+    const base = oauthConfig.publicUrl;
+    res.writeHead(401, { "content-type": "application/json", ...oauth.challenge(pathOf(req.url), presentedApiKey(req.headers) !== "") });
+    res.end(JSON.stringify({
+      error: "unauthorized",
+      message:
+        "Hosted Shadow needs a signed-in Clockchain account (free, no email). Add this endpoint to your MCP client as a " +
+        "connector or remote MCP server with OAuth sign-in; the client starts sign-in from this response's " +
+        "WWW-Authenticate header. A key from POST /token or an MCP token does not work here.",
+      endpoint: `${base}${pathOf(req.url)}`,
+      transport: "http",
+      auth: "oauth",
+      instructions: `${base}/shadow/connect`,
+    }));
+  };
   const shadowAccountRequired = (res: ServerResponse, req: IncomingMessage): void => {
     const base = publicBaseUrl(req.headers);
     const headers: Record<string, string> = { "content-type": "application/json", "cache-control": "no-store" };
@@ -1185,7 +1213,10 @@ export async function runHttp(): Promise<Server> {
         stateDir: shadowConfig.stateDir,
         network: shadowConfig.network,
         ledger: () => runtimeShadowLedger(process.env),
+        // Its own MCP_LOG_BUDGET: draining one can't stop the other's writes (log_action and the rest share the other).
+        budget: () => shadowBudget,
         limits: shadowConfig.limits,
+        ...(shadowConfig.autoLog ? { autoLog: true } : {}),
       });
       const disk = diskBudgetProblem(shadowConfig.stateDir, shadowConfig.limits.maxStateBytes);
       if (disk) throw Object.assign(new Error(disk), { name: "ShadowConfigError" });
@@ -1194,7 +1225,7 @@ export async function runHttp(): Promise<Server> {
       shadowHandler = createShadowHttpHandler({
         service: shadowService,
         authenticate: shadowAuthenticate,
-        unauthorized: mcpUnauthorized,
+        unauthorized: shadowUnauthorized,
         accountRequired: shadowAccountRequired,
         readJsonBody,
         allowCall: (rateKey, body, res) => {
@@ -1211,6 +1242,13 @@ export async function runHttp(): Promise<Server> {
         },
         linkClient: shadowLinkClient,
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
+        ...(shadowConfig.autoLog ? {
+          autoLog: {
+            accounts: oauth?.accounts,
+            allowLogStep: (rateKey: string) => shadowLogStepLimit(`shadowlogstep:${rateKey}`),
+            stepsPerMinute: shadowLogStepsPerMinute,
+          },
+        } : {}),
         ...(shadowChatPath ? {
           chat: {
             path: shadowChatPath,
@@ -1231,6 +1269,11 @@ export async function runHttp(): Promise<Server> {
       console.error(JSON.stringify({ event: "shadow_unavailable", error, ...(error === "ShadowConfigError" ? { reason: (e as Error).message } : {}) }));
     }
   }
+  // The discovery files name Shadow only where a person can use it: it started, and sign-in is on (it takes signed-in
+  // accounts only). Anything else serves the plain files, byte for byte. URLs come from MCP_PUBLIC_URL, never the Host.
+  const shadowPublicUrl = shadowHandler && oauthConfig.kind === "ready" ? oauthConfig.publicUrl : undefined;
+  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : INSTALL_TXT;
+  const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : MCP_MANIFEST, null, 2);
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestStarted = Date.now();
@@ -1382,7 +1425,7 @@ export async function runHttp(): Promise<Server> {
         "content-type": "text/plain; charset=utf-8",
         "cache-control": "public, max-age=300",
       });
-      res.end(INSTALL_TXT);
+      res.end(installBody);
       return;
     }
 
@@ -1394,7 +1437,7 @@ export async function runHttp(): Promise<Server> {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "public, max-age=300",
       });
-      res.end(JSON.stringify(MCP_MANIFEST, null, 2));
+      res.end(manifestBody);
       return;
     }
 
