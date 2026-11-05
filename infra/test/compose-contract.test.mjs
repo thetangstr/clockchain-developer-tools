@@ -138,6 +138,14 @@ test("the mcp service carries the handshake v2 receipts env and compose-up reads
   }
 });
 
+test("/metrics: the token reaches the mcp service from an optional SSM secret, so absent means the route stays 404", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  assert.match(mcpBlock, /^\s+MCP_METRICS_TOKEN:\s*"\$\{MCP_METRICS_TOKEN:-\}"\s*$/m);
+  assert.match(up, /^read_optional_secret MCP_METRICS_TOKEN \/clockchain\/mcp\/MCP_METRICS_TOKEN$/m);
+});
+
 test("hosted Shadow: the mcp service carries SHADOW_* (empty default = off) and compose-up reads each optionally", async () => {
   const source = await readFile(composeFile, "utf8");
   const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));

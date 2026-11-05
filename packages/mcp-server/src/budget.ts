@@ -27,6 +27,8 @@ export interface LogBudget {
   remaining(): number | null;
   /** Whether a cap is active. */
   readonly enabled: boolean;
+  /** Writes recorded since this process started, and the cap (null when there is none). For /metrics. */
+  usage?(): { used: number; limit: number | null };
 }
 
 /**
@@ -76,10 +78,13 @@ export function createLogBudget(
       }
     },
     record() {
-      if (enabled) used++;
+      used++;
     },
     remaining() {
       return enabled ? Math.max(0, cap - used) : null;
+    },
+    usage() {
+      return { used, limit: enabled ? cap : null };
     },
   };
 }

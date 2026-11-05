@@ -130,9 +130,21 @@ function dirBytes(dir: string): number {
   return total;
 }
 
+/** Anchors a session still owes Clockchain, by state. Totals only: nothing here names an owner or a session. */
+export type AnchorBacklog = { queued: number; pending: number; failed: number };
+
+function backlogOf(meta: SessionMeta): AnchorBacklog | undefined {
+  if (meta.outbox.length === 0) return undefined;
+  const b: AnchorBacklog = { queued: 0, pending: 0, failed: 0 };
+  for (const r of meta.outbox) b[r.state]++;
+  return b;
+}
+
 export class ShadowStore {
   readonly root: string;
   private readonly operators = new Map<string, Operator>();
+  /** Sessions with anchors still owed, kept current by writeMeta and rebuilt by every sweep, so /metrics never walks the disk. */
+  private readonly backlog = new Map<string, AnchorBacklog>();
 
   constructor(root: string) {
     this.root = root;
@@ -284,6 +296,25 @@ export class ShadowStore {
     // Never resurrect a session the retention sweep removed while an operation was in flight.
     if (!existsSync(this.sessionDir(meta.ownerKey, meta.sessionId))) throw new Error("session removed");
     this.metaFile(meta.ownerKey, meta.sessionId, () => meta).save("now");
+    this.noteBacklog(meta);
+  }
+
+  private noteBacklog(meta: SessionMeta): void {
+    const key = `${meta.ownerKey}/${meta.sessionId}`;
+    const b = backlogOf(meta);
+    if (b) this.backlog.set(key, b);
+    else this.backlog.delete(key);
+  }
+
+  /** Anchors still owed across every session, as of the last write or sweep. */
+  anchorBacklog(): AnchorBacklog {
+    const total: AnchorBacklog = { queued: 0, pending: 0, failed: 0 };
+    for (const b of this.backlog.values()) {
+      total.queued += b.queued;
+      total.pending += b.pending;
+      total.failed += b.failed;
+    }
+    return total;
   }
 
   sessionIds(ownerKey: string): string[] {
@@ -419,6 +450,7 @@ export class ShadowStore {
    */
   sweep(nowMs: number, retentionMs: number, busy: (ownerKey: string, sessionId: string) => boolean): { removed: number; bytes: number } {
     let removed = 0;
+    this.backlog.clear();
     const ownersDir = join(this.root, "owners");
     const live = new Set<string>();
     if (existsSync(ownersDir)) {
@@ -444,7 +476,10 @@ export class ShadowStore {
             removed++;
           } else {
             remaining++;
-            if (meta) live.add(createHash("sha256").update(meta.cap).digest("hex"));
+            if (meta) {
+              live.add(createHash("sha256").update(meta.cap).digest("hex"));
+              this.noteBacklog(meta);
+            }
           }
         }
         if (remaining === 0) {

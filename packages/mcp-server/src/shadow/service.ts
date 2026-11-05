@@ -15,7 +15,7 @@ import { summarize } from "./lib/summary.js";
 import { redactSecrets, redactText } from "./redact.js";
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, ShadowEvent } from "./lib/types.js";
-import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
+import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
   ANCHOR_LABEL, RECORD_KINDS, RecordError, START_LABEL, VERSION, LIBRARY, advance, buildEvent, buildPacket, buildPin,
   checkpointOver, receiptPayload, referenceId, startHashOf, stepFor, type RecordKind,
@@ -447,6 +447,7 @@ export class ShadowService {
   private readonly agentEventsMax: number;
   private readonly maxEvents: number;
   private usageBytes = 0;
+  private lastSweepMs: number | undefined;
   /** Bytes per owner, computed on first use and kept current by appends; the sweep starts it afresh. */
   private readonly ownerUsage = new Map<string, number>();
   private readonly linkCache: ByteLru;
@@ -515,9 +516,15 @@ export class ShadowService {
   sweep(): { removed: number; bytes: number } {
     const r = this.store.sweep(this.now().getTime(), this.limits.retentionMs, (o, s) => this.locks.busy(`${o}/${s}`));
     this.usageBytes = r.bytes;
+    this.lastSweepMs = this.now().getTime();
     this.ownerUsage.clear();
     this.log("shadow_sweep", { removed: r.removed, bytes: r.bytes });
     return r;
+  }
+
+  /** For /metrics: totals only, and read from memory, so a scrape never walks the disk. */
+  stats(): { stateBytes: number; maxStateBytes: number; anchors: AnchorBacklog; lastSweepMs: number | undefined } {
+    return { stateBytes: this.usageBytes, maxStateBytes: this.limits.maxStateBytes, anchors: this.store.anchorBacklog(), lastSweepMs: this.lastSweepMs };
   }
 
   // ---- session access --------------------------------------------------------------------------------------------------

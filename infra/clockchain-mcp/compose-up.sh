@@ -538,6 +538,8 @@ read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM /clockchain/mcp/HANDSHAKE_
 read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL
 read_optional_env HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN
 read_optional_env HANDSHAKE_V2_RECEIPTS_FILE /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE
+# GET /metrics (absent = the route answers 404). docker-compose.yml already carries it; nothing read it from SSM until now.
+read_optional_secret MCP_METRICS_TOKEN /clockchain/mcp/MCP_METRICS_TOKEN
 # Hosted Shadow (opt-in, off unless SHADOW_ENABLED=1; state defaults to /app/state/shadow). Optional reads, like the
 # contract block above: an absent parameter leaves the variable unset and every /shadow path answers 404.
 read_optional_env SHADOW_ENABLED /clockchain/mcp/SHADOW_ENABLED

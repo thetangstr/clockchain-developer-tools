@@ -169,6 +169,11 @@ export class AccountStore {
     return this.total;
   }
 
+  /** The global cap on accounts. */
+  get cap(): number {
+    return this.maxAccounts;
+  }
+
   private accountFile(acct: string, current?: Account) {
     return createDurableJsonFile<Account>({
       path: join(this.accountsDir, `${acct}.json`),

@@ -68,6 +68,7 @@ import { buildStandaloneDiscovery, clientBucket, createStandaloneHttpHandler, li
 import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 import { normalizeRelayBaseUrl } from "./handshake/relay.js";
 import { MetricsRegistry, bounded } from "./metrics.js";
+import { getSharedLogBudget } from "./budget.js";
 import { createStatusCache, type PerformanceSnapshot, type StatusDeps } from "./status.js";
 import { renderStatusPage } from "./status-page.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
@@ -839,6 +840,15 @@ export async function runHttp(): Promise<Server> {
   const depDuration = metrics.histogram("clockchain_dependency_probe_seconds", "Dependency probe latency by probe.");
   const rlEvents = metrics.counter("clockchain_rate_limit_events_total", "Rate-limit rejections by surface.");
   const uptimeGauge = metrics.gauge("process_uptime_seconds", "Process uptime in seconds.");
+  // Launch operations (infra/clockchain-mcp/alerts.md). Totals only, with no owner, session or account in a label.
+  const logBudgetUsed = metrics.gauge("clockchain_log_budget_used", "Ledger writes on our delegated key since this process started (MCP_LOG_BUDGET counts these; a restart resets it).");
+  const logBudgetLimit = metrics.gauge("clockchain_log_budget_limit", "MCP_LOG_BUDGET: delegated-key ledger writes allowed per process. 0 means no cap.");
+  const oauthAccounts = metrics.gauge("clockchain_oauth_accounts", "Clockchain accounts on disk.");
+  const oauthAccountsCap = metrics.gauge("clockchain_oauth_accounts_cap", "The most accounts allowed; new sign-ups are refused at it.");
+  const shadowStateBytes = metrics.gauge("clockchain_shadow_state_bytes", "Bytes hosted Shadow holds on disk, measured at the last retention sweep and kept current by appends.");
+  const shadowStateBytesCap = metrics.gauge("clockchain_shadow_state_bytes_cap", "SHADOW_MAX_BYTES: new sessions are refused at it, new steps at 125% of it.");
+  const shadowAnchorsOwed = metrics.gauge("clockchain_shadow_anchors_owed", "Anchors sessions still owe Clockchain: queued, pending (written, no block yet) or failed (given up).");
+  const shadowSweepAge = metrics.gauge("clockchain_shadow_last_sweep_age_seconds", "Seconds since the last retention sweep finished. Absent while Shadow is off or failed to start: nothing is being deleted then.");
 
   function classifyRoute(method: string | undefined, url: string | undefined, accept: string): string {
     const p = pathOf(url);
@@ -1428,6 +1438,22 @@ export async function runHttp(): Promise<Server> {
       }
       pruneSessions(Date.now()); // refresh inflight even with no new tool calls
       uptimeGauge.set({}, (Date.now() - processStartedAtMs) / 1000);
+      const budget = getSharedLogBudget().usage?.();
+      if (budget) {
+        logBudgetUsed.set({}, budget.used);
+        logBudgetLimit.set({}, budget.limit ?? 0);
+      }
+      if (oauth?.accounts) {
+        oauthAccounts.set({}, oauth.accounts.count());
+        oauthAccountsCap.set({}, oauth.accounts.cap);
+      }
+      if (shadowService) {
+        const shadow = shadowService.stats();
+        shadowStateBytes.set({}, shadow.stateBytes);
+        shadowStateBytesCap.set({}, shadow.maxStateBytes);
+        for (const state of ["queued", "pending", "failed"] as const) shadowAnchorsOwed.set({ state }, shadow.anchors[state]);
+        if (shadow.lastSweepMs !== undefined) shadowSweepAge.set({}, (Date.now() - shadow.lastSweepMs) / 1000);
+      }
       res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store" });
       res.end(metrics.collect());
       return;
