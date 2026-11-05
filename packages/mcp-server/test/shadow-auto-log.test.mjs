@@ -640,12 +640,29 @@ test("the rate limit: a 50-step task never meets MCP_RATE_PER_MIN, and shadow_lo
   } finally {
     await s.close();
   }
+  // Past its own limit a step spends the general limit too, up to a real 429, and a large body pays before it is read.
+  const u = await boot(on({ MCP_RATE_PER_MIN: "4", SHADOW_LOG_STEPS_PER_MIN: "2" }));
+  try {
+    const a = await signUp(u.url);
+    const call = () => post(u.url, PLAIN, rpcBody("tools/call", { name: "shadow_log_step", arguments: { kind: "note", content: "x" } }), a.token);
+    const seen = [];
+    for (let i = 0; i < 8; i++) seen.push((await call()).status);
+    assert.deepEqual(seen, [200, 200, 200, 200, 200, 200, 429, 429], "2 within its limit, then 4 charged to the general limit, then 429");
+    const b = await signUp(u.url, "Big");
+    const big = rpcBody("tools/call", { name: "shadow_log_step", arguments: { kind: "note", content: "y".repeat(300 * 1024) } });
+    const sent = [];
+    for (let i = 0; i < 6; i++) sent.push((await post(u.url, PLAIN, big, b.token)).status);
+    assert.deepEqual(sent, [200, 200, 200, 200, 429, 429], "large bodies are charged before they are read, even for shadow_log_step");
+  } finally {
+    await u.close();
+  }
   const t = await boot(on({ MCP_RATE_PER_MIN: "1000", SHADOW_LOG_STEPS_PER_MIN: "5" }));
   try {
     const a = await signUp(t.url);
     const first = await tool(t.url, PLAIN, a.token, "shadow_log_step", { kind: "task", content: "go" });
     for (let i = 0; i < 4; i++) assert.equal((await tool(t.url, PLAIN, a.token, "shadow_log_step", { session_id: first.value.session_id, kind: "note", content: String(i) })).isError, false);
     const limited = await tool(t.url, PLAIN, a.token, "shadow_log_step", { session_id: first.value.session_id, kind: "note", content: "sixth" });
+    assert.equal((await tool(t.url, PLAIN, a.token, "shadow_list_sessions")).isError, false);
     assert.equal(limited.isError, true);
     assert.equal(limited.value.error, "SHADOW_LOG_RATE");
     assert.match(limited.value.message, /5 steps in the last minute.*this step was not recorded.*Wait 30 seconds, then call shadow_log_step again/);

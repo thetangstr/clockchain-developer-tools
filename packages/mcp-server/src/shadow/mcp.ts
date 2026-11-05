@@ -133,6 +133,8 @@ export interface ShadowHttpDeps {
 
 /** A request body on /shadow/mcp and the chat endpoint when SHADOW_AUTO_LOG=1: shadow_log_turn takes up to 100 steps. */
 const AUTO_LOG_MAX_BODY = 1024 * 1024;
+/** Above this, a body spends the general rate limit before it is read: one step needs far less, even fully escaped. */
+const AUTO_LOG_CHEAP_BODY = 256 * 1024;
 const isLogStepCall = (body: unknown): boolean => {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return false;
   const m = body as { method?: unknown; params?: { name?: unknown } | null };
@@ -558,11 +560,20 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
       return auth.accountRequired ? deps.accountRequired(res, req) : deps.unauthorized(res, req);
     }
     let body: unknown;
+    let charged = false;
     if (req.method === "POST") {
       if (deps.autoLog && Number(req.headers["content-length"] ?? "0") > AUTO_LOG_MAX_BODY) {
         res.writeHead(413, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "This request is over 1 MB and was not read, so nothing was recorded. Log fewer or smaller steps per call." } }));
         return;
+      }
+      // A large (or unsized) body costs memory and parsing whatever it says, so it pays first, and can get a 429 unread.
+      if (deps.autoLog) {
+        const declared = req.headers["content-length"];
+        if (declared === undefined || Number(declared) > AUTO_LOG_CHEAP_BODY) {
+          if (!deps.allowCall(auth.rateKey, undefined, res)) return;
+          charged = true;
+        }
       }
       try {
         body = await deps.readJsonBody(req, deps.autoLog ? AUTO_LOG_MAX_BODY : 512 * 1024);
@@ -587,6 +598,8 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     const logStep = autoLog !== undefined && isLogStepCall(body);
     if (!logStep && !deps.allowCall(auth.rateKey, body, res)) return;
     const logStepAllowed = logStep && autoLog.allowLogStep(auth.rateKey);
+    // A step within its own limit costs nothing else. Past it, a caller spends the general limit too, up to a real 429.
+    if (!logStepAllowed && !charged && !deps.allowCall(auth.rateKey, body, res)) return;
     await serve(req, res, body, buildShadowServer(deps.service, auth.ownerId, publicBaseUrl(req.headers), {
       chatAccounts: chat?.accounts,
       autoLog: autoLog && { accounts: autoLog.accounts, logStepAllowed, stepsPerMinute: autoLog.stepsPerMinute },
