@@ -122,7 +122,7 @@ a `timer_set` whose `webhook_url` targets it. Poll (`timer_status`) always works
      It prints the created/started times of the `caddy`, `host` and `mcp`
      containers before and after; `caddy` and `host` `created=` must not change
      (`host` restarts itself every ~121s by design, so its `started=` moves).
-     In-memory `mcp` state is still lost, so the notice/freeze rule still applies.
+     See "What a restart loses": the notice/freeze rule still applies.
      The profile-gated `telemetry-sink` is never touched by either mode's
      start path; a full restart (compose `down`) removes it and it must be
      started again with `sink-up.sh up` — see `telemetry-sink/RUNBOOK.md`.
@@ -235,9 +235,18 @@ bodies are deleted 24 hours after a session ends (digests stay).
 
 Holds (long-polls) are not persisted: clients simply call `handshake_next` again.
 
+**What a restart loses.** Checked against the code: `csha_`, `ccra_` and `csla_` handles are on disk
+(`handshake-core/handle-map.ts`, with `HANDSHAKE_STATE_DIR` set in `docker-compose.yml`), and survive an
+`mcp` restart or deploy, as this section says. An earlier line here said they were lost; that was out of date. A
+handle map that can't be read falls back to memory (`handshake_handles_memory_only`, below). A restart still loses
+calls and long-polls in flight, rate-limit windows, the `MCP_LOG_BUDGET` count, and trial sessions and entitlements
+(`MCP_SESSION_FILE` isn't set, so that store is in memory). The notice/freeze rule still applies because of those.
+
 **Backup.** Copy the directories while the stack runs (each file is replaced atomically, so any copy
-is a consistent per-file snapshot):
-`docker run --rm -v mcp_state:/s -v "$PWD":/b alpine tar czf /b/handshake-state.tgz -C /s standalone-handshake agent-handshake-v2`.
+is a consistent per-file snapshot). The compose volume is named after its project, so look it up, and stop if
+it isn't found: a wrong name would make `docker run` create a new, empty volume. See "Back up Shadow and accounts"
+for Shadow, which needs more care.
+`VOL=$(docker volume ls -q --filter label=com.docker.compose.project=clockchain-mcp --filter label=com.docker.compose.volume=mcp_state); test -n "$VOL" && docker run --rm -v "$VOL":/s:ro -v "$PWD":/b alpine tar czf /b/handshake-state.tgz -C /s standalone-handshake agent-handshake-v2`.
 
 **Restore.** Stop `mcp`, extract into the volume keeping ownership and modes (`tar xzpf`), start
 `mcp`. Files readable by group/other are refused.
@@ -273,3 +282,229 @@ one, so an admission loop in the logs names the exact refusal.
 **Staging.** The staging container (`/opt/clockchain-mcp/staging-compose.yml`, not in this repo)
 has no state volume. Test restarts there with `docker restart` (keeps the container filesystem),
 not by recreating the container, and set `HANDSHAKE_STATE_DIR` to a path inside it.
+
+## Hosted Shadow and sign-in
+
+Shadow is a flight recorder for AI agents. The record stays on this box for 30 days, and only hashes go on the ledger.
+Sign-in is OAuth 2.1 (`src/oauth.ts`), and an account has no email.
+
+**This is a single-operator ledger.** Shadow anchors to the anchoring gateway above: one container on this box, run by
+us. In hosted mode one operator holds the record, the signing key, the ledger and the clock, so a pass isn't independent
+assurance, and the pin served with a packet proves only that the record is what this server signed. Don't say "validator",
+"decentralized" or "independent network" about it. A pass means the record is intact. It doesn't mean it's true or compliant.
+
+### Settings
+
+All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString. Absent means the default.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `SHADOW_ENABLED` | off | `1` serves `/shadow/*`. Anything else: those paths answer as if Shadow didn't exist. |
+| `SHADOW_STATE_DIR` | `/app/state/shadow` | Where records live, on the `mcp_state` volume. |
+| `SHADOW_MAX_BYTES` | 1 GB | All of Shadow. New sessions stop at it and new steps at 125%. Shadow won't start if it's over half the filesystem's free space. |
+| `SHADOW_ACCOUNT_MAX_BYTES` | 10 MB | One account. |
+| `SHADOW_SESSION_STARTS_PER_DAY` | 30 | One account. |
+| `SHADOW_LINK_CONCURRENCY` | 32 | Viewer and packet responses at once. |
+| `SHADOW_LAZY_AUTH` | off | `1` adds `/shadow/chat/mcp`, which lists its tools before sign-in (claude.ai). Needs OAuth. |
+| `SHADOW_ANON_PER_MINUTE` | 600 | Requests per client to that path before sign-in. |
+| `SHADOW_AUTO_LOG` | off | `1`: logging on by default on **`/shadow/mcp` and `/shadow/chat/mcp`**. Never on a listed server. |
+| `SHADOW_PREVIEW_AUTO_LOG` | off | `1` adds `/shadow/preview/mcp` and `/shadow/preview/chat/mcp`, logging by default. The other paths don't change. |
+| `SHADOW_ANCHORS_PER_DAY`, `SHADOW_ANCHORS_PER_SESSION` | 60, 100; with either logging flag 1000, 1000 | Per account and session, on every endpoint: the flags raise them for the listed paths too. |
+| `SHADOW_LOG_STEPS_PER_MIN` | 120 | `shadow_log_step` calls per account, with either logging flag. |
+| `SHADOW_LEDGER_CLIENT_ID`, `SHADOW_LEDGER_WALLET_ID` | the delegated client | Shadow's own writer on the ledger. Set both. No email, and not the delegated id. |
+| `MCP_OAUTH` | off | `1` turns sign-in on. Needs `MCP_TOKEN_SIGNING_SECRET`. |
+| `MCP_OAUTH_APPROVALS_PER_HOUR` | 10 | Per IP. |
+| `MCP_OAUTH_ACCOUNTS_PER_HOUR`, `MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR` | 200, 10 | New accounts, in all and per IP. |
+| `MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR` | 20 | Account-key sign-in tries. |
+| `MCP_METRICS_TOKEN` | off | Bearer token for `/metrics`, which answers 404 without one. See `alerts.md`. |
+| `OPENAI_APPS_CHALLENGE_TOKEN` | off | See "ChatGPT domain check". |
+
+A malformed Shadow setting stops Shadow from starting: every `/shadow` path answers 503, and the reason is in the log as
+`shadow_unavailable`. To apply a setting with no code change, deploy the same commit again: `compose-up.sh` reads SSM each
+time. A deploy that changes `docker-compose.yml` or `compose-up.sh` is refused as infra drift (exit 5). For a change that
+only adds settings to `mcp`, like these, use `--allow-infra-drift`, which recreates only `mcp`.
+
+### Logging is per endpoint
+
+| Endpoint | With no flag | Who it's for |
+|---|---|---|
+| `/shadow/mcp`, `/shadow/chat/mcp` | The person asks, chat by chat. No log tools, no account setting, no footer. | Directory listings. OpenAI's package uses the first, Claude's the second. |
+| `/shadow/preview/mcp`, `/shadow/preview/chat/mcp` | Don't exist. With `SHADOW_PREVIEW_AUTO_LOG=1`: logging on by default, an account-level "stop logging", the footer. | People who add the URL by hand. No discovery file names them. |
+
+Why: Anthropic's policy says "Software must not collect extraneous conversation data, even for logging purposes" and
+rules out "changes to Claude's behavior across sessions". OpenAI's rules out "overly broad triggering". See
+`project-shadow/docs/launch/directory-rules.md`.
+
+**Before listing, or after any deploy to a listed server,** check that the listed paths carry none of it. Both must print 0:
+
+```bash
+curl -s -X POST https://mcp.clockchain.network/shadow/chat/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | grep -cE 'shadow_log_step|without being asked|from any connector'
+curl -s -X POST https://mcp.clockchain.network/shadow/chat/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"check","version":"1"}}}' | grep -cE 'without being asked|from any connector'
+```
+
+Turning on `SHADOW_AUTO_LOG` after listing is a material change that Anthropic must be told about (Policy 3.H). The server
+logs `shadow_auto_log_on_listed_paths` at boot while it's on. Connectors added by hand to `/shadow/chat/mcp` stop logging by
+default once `SHADOW_AUTO_LOG` is unset, so move them to the preview path first. A token isn't tied to one endpoint: an
+account signed in on a listed path also works on a preview one, and on `/mcp`.
+
+**A stored "stop logging" applies only on endpoints that log by default.** A listed endpoint reads no such setting.
+
+### Enable and disable
+
+- **Enable Shadow:** set `SHADOW_ENABLED=1` and `MCP_OAUTH=1`, plus `SHADOW_LAZY_AUTH=1` for claude.ai and the ledger ids.
+  Deploy. Run `node scripts/e2e-shadow-public.mjs` (read-only by default).
+- **Disable Shadow:** set `SHADOW_ENABLED` to `0`, then deploy. Every `/shadow` path stops, including viewer links. Records
+  stay on the volume. **The retention sweep stops with it,** and so does the 30-day deletion we promise, so run the purge
+  below daily until Shadow is back. The same is true while a bad setting keeps Shadow from starting.
+- **Disable sign-in:** set `MCP_OAUTH` to `0`, then deploy. Accounts and replay state stay on the volume. Nobody can reach
+  Shadow, as it takes signed-in accounts only, but its sweep goes on. Tokens already issued still work on `/mcp` until they
+  expire.
+- **Stop logging by default:** set `SHADOW_AUTO_LOG` and `SHADOW_PREVIEW_AUTO_LOG` to `0`, then deploy. Nothing is deleted.
+
+### Rollback with state present
+
+Roll back as in "Rollback" above, and leave the `mcp_state` volume alone. Older builds ignore files they don't know. What
+changes, for a build older than this section:
+
+- **Deleted accounts come back to life for a while.** Older builds don't read `accounts/d/`, so a deleted account's token
+  works until it expires (access 7 days; a refresh token 60), and can start new records. Its old records stay gone.
+- **Revoked links stay dead,** as their capability files are gone, but an older build still hands out the dead URL.
+- **Sessions anchored under Shadow's new client** stop at `indeterminate` on the online check, not `fail`, as an older build
+  searches only under `CLOCKCHAIN_CLIENT_ID`. It anchors under that client again too.
+- **Logging by default returns on the listed paths** if `SHADOW_AUTO_LOG=1` is still set, with the old text. Older builds
+  don't know `SHADOW_PREVIEW_AUTO_LOG`, and its paths answer 404.
+- **Below `feat/auto-log`:** session metadata was capped at 256 KB, so a session with about 1,000 anchors or more can't be read.
+
+The other way round, a newer build reads everything an older one wrote. Hashes on the ledger are never touched by any of this.
+
+### Back up Shadow and accounts
+
+Shadow, accounts and OAuth replay state all live on the `mcp_state` volume. Back up `shadow`, `accounts` and `oauth` together.
+Without `oauth`, spent refresh tokens work again after a restore; without `accounts/d`, deleted accounts do.
+
+```bash
+VOL=$(docker volume ls -q --filter label=com.docker.compose.project=clockchain-mcp --filter label=com.docker.compose.volume=mcp_state)
+test -n "$VOL" || { echo "no mcp_state volume found: stop"; exit 1; }
+MCP=$(docker ps -q --filter label=com.docker.compose.project=clockchain-mcp --filter label=com.docker.compose.service=mcp)
+docker stop "$MCP"
+docker run --rm -v "$VOL":/s:ro -v "$PWD":/b alpine tar czf /b/mcp-state.tgz -C /s shadow accounts oauth standalone-handshake agent-handshake-v2
+docker start "$MCP"
+```
+
+The volume lookup comes from Compose's labels and hasn't been run on the box, so check the first backup's contents.
+
+**Stop `mcp` first, for a backup you may restore.** A session is an event log plus a metadata file, written one after the
+other, so a live copy can catch the metadata ahead of the log. A session like that refuses to load after a restore
+(`shadow_session_inconsistent`). `tar` also exits 1 if a file changes while it reads. A live copy is fine if a few open sessions
+may be lost. If Shadow has never run, leave out the directories that don't exist, or `tar` stops.
+
+**A backup is sensitive.** `shadow/owners/*/key.json` holds operator signing keys in the clear, and `events.jsonl` holds whatever
+agents recorded, secrets included if they sent any. Encrypt it, and restrict who can read it. **Deleted records stay in old
+backups:** delete backups within 30 days, or we keep records past what we promise. Restoring an old backup also brings back
+records and accounts people have deleted since, so after a restore, tell the founder and check what came back.
+
+The ledger is separate: back up the `anchor_gateway_data` volume too, as online checks read it. Losing it leaves every session's
+online check at `indeterminate`. Restore as above: stop `mcp`, `tar xzpf` into the volume, start `mcp`.
+
+### Purge
+
+`scripts/shadow-purge.mjs` removes sessions by owner or age from the state directory. It's a dry run unless given `--apply`, and
+prints no titles or content. From the box checkout:
+
+```bash
+MCP=$(docker ps -q --filter label=com.docker.compose.project=clockchain-mcp --filter label=com.docker.compose.service=mcp)
+docker exec -i "$MCP" node --input-type=module - --older-than 30d < scripts/shadow-purge.mjs
+docker exec -i "$MCP" node --input-type=module - --older-than 30d --apply < scripts/shadow-purge.mjs
+docker exec -i "$MCP" node --input-type=module - --owner acct_XXXXXXXXXXXXXXXXXXXXXX --apply < scripts/shadow-purge.mjs
+```
+
+While Shadow is off, use `--older-than 30d` daily. Deleting removes the link too. A running server catches up its totals at the
+next sweep or restart. The ledger keeps its hashes.
+
+### People can delete their own data
+
+Through tools, on every endpoint, with no help from us:
+
+| Tool | What it does |
+|---|---|
+| `shadow_revoke_links` | Stops a session's links at once, for good. The record stays. |
+| `shadow_delete_session` | Deletes the record and its links at once. |
+| `clockchain_delete_account` | Without `confirm: true`, says what would go. With it: the account, all its records and links. The key, cookie and tokens stop working everywhere. |
+
+Each result says hashes stay on the ledger. A deleted account leaves only its id in `accounts/d/`, kept 90 days, so that its tokens
+stay refused until the last has expired. It holds no name or key hash.
+
+### Rotating `MCP_TOKEN_SIGNING_SECRET`
+
+**Don't, unless you must. It invalidates every registered client.** OAuth is stateless: a `client_id` is itself sealed under this
+secret, as are access tokens, refresh tokens, codes and the account cookie. There's no previous-key support, so after a
+rotation:
+
+- Every connected app gets 401, and its refresh fails. Apps that cached their `client_id` get "Unknown client_id" and may not
+  register again by themselves, so people may have to remove the connector and add it again.
+- Everyone signs in again with their **account key**, which still works, as it's stored as a hash. Anyone with no key and an old
+  cookie **has lost their account**: the cookie stops working too.
+- `POST /token` keys, and `MCP_PROMOTE_SECRET` if it isn't set separately, stop working as well.
+- Records and accounts aren't touched. Directory listings still work, once people reconnect.
+
+Tell the founder and the travel orchestrator first. Treat a leak as the only good reason.
+
+### Shadow's writer on the ledger
+
+`CLOCKCHAIN_CLIENT_ID` in `compose-up.sh` is the founder's email, and without these settings every Shadow anchor shows it.
+
+- **The gateway needs no change for a new id.** `gateway.mjs` has no list of clients. It checks only that a request is signed with
+  `GATEWAY_SIGNING_SECRET`, and uses the client only to scope idempotency and search. If production ever anchors to a network that
+  checks clients, the id would have to be registered there.
+- **Old sessions keep working.** Search is scoped by client, so Shadow searches under both ids. Don't change
+  `CLOCKCHAIN_CLIENT_ID` until 30 days after setting these, or older sessions' online checks stop at `indeterminate` until they expire.
+- **Others can't use it.** `x-clockchain-client-id` and `-wallet-id` naming these ids get 403 on every MCP request.
+- **It covers Shadow only.** `/mcp`'s own writes, including those from an account token, still show the delegated client.
+
+### Directory reviewer account
+
+Both directories want a populated test account. Records expire after 30 days and a review can take longer, so the script can run again:
+
+```bash
+node scripts/seed-reviewer-account.mjs --base http://localhost:8080 --key-file /secure/path/reviewer.txt
+```
+
+The first run creates the account and writes its key to that file, mode 0600. It prints the key nowhere. Later runs sign in with the
+file, keep samples with over 10 days left, replace the rest and verify each. Each new sample spends 3 ledger writes, whose hashes can't
+be removed. It refuses any base that isn't local or staging, and unknown hosts count as production. For the real account, the founder
+runs it with `--base https://mcp.clockchain.network --allow-production`, just before submitting and at least every 20 days during
+review. This creates a production account on purpose. Put the key in a password manager, and enter it only in the portal's secure
+review form. To retire the account, call `clockchain_delete_account {confirm: true}`.
+
+`scripts/chatgpt-review-cases.mjs` then runs the tools behind the review test cases against that account. See `infra/chatgpt-plugin/README.md`.
+
+### ChatGPT domain check
+
+OpenAI's portal gives a token to serve as plain text at `/.well-known/openai-apps-challenge`. Set
+`/clockchain/mcp/OPENAI_APPS_CHALLENGE_TOKEN` to it and deploy. Check with `curl -s https://mcp.clockchain.network/.well-known/openai-apps-challenge`.
+Unset, the path answers like any other unknown path. One hostname serves one plugin's token, so a second plugin here needs the parent domain.
+
+### Publishing to the MCP registry
+
+There's no publish script: `scripts/` has none, and `.github` doesn't do it. It's done by hand, from a person's machine. Nothing has been
+published from this branch. These steps come from `mcp-launch-plan.md` and search results, not the publisher's own docs, so check them against
+`mcp-publisher --help` first.
+
+1. Get `mcp-publisher` from `modelcontextprotocol/registry`.
+2. Log in for the `network.clockchain` namespace with DNS (`mcp-publisher login dns --domain clockchain.network`). It prints a TXT record for
+   `clockchain.network`. The namespace was verified once already, as `network.clockchain/time` is published, but we don't hold that key in this repo.
+3. `mcp-publisher validate`, then `mcp-publisher publish`, with `server.json` in the current directory. To publish the draft, copy
+   `server.shadow.draft.json` to `server.json` elsewhere and remove its `___DRAFT_WARNING`.
+
+Today (read 4 November):
+
+- **`network.clockchain/time` is live and broken.** Version 0.1.0, published 7 July, status active, points at a Cloud Run URL that answers 503. It also
+  says "neutral verified network time". Its source isn't in this repo.
+- **`network.clockchain/clockchain` isn't published.** `server.json` is ready for a first publish, and passes the 2025-12-11 schema. It didn't before:
+  its description was 290 characters, and the schema allows 100.
+- **`network.clockchain/shadow`** is `server.shadow.draft.json`. Publish it only once the privacy, terms and support pages are live and
+  production runs with `SHADOW_AUTO_LOG` unset.
+- **`server.product.draft.json`** stays unpublished (`PRODUCT-VS-TEST.md`).
+- **Order:** publish `clockchain`, mark `time` deprecated, and publish `shadow` when it's ready. `repository` points at the public
+  `thetangstr/clockchain-developer-tools`, while the code now lives in the private `clockchain-network/clockchain-mcp`. A person checking the link sees the old repo. That's the founder's call.
+
