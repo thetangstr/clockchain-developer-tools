@@ -262,6 +262,10 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
       assert.match(instructions, /reads "indeterminate" until the session is closed/);
       assert.match(instructions, /only when the person asks to finish or verify/);
       const d = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").description;
+      assert.match(d, /End every reply with show_user, verbatim: log your reply as a message step last/);
+      const turnTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_turn").description;
+      assert.match(turnTool, /end every reply with show_user, verbatim/);
+      assert.match(instructions, /end every reply with show_user/);
       for (const must of [/ON by default/, /without being asked/, /never wait until the end/, /session_id/, /show_user/, /hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/, /stop logging/, /indeterminate/]) assert.match(d, must);
     }
     // Before sign-in, a log call gets the 401 that starts the connect flow; so does the plain endpoint.
@@ -315,7 +319,7 @@ for (const p of [PLAIN, CHAT]) {
       // The footer: steps so far, first and last block, latest ledger id, viewer, and the off switch.
       const last = results.at(-1);
       const firstBlock = String(Number(results[0].block_height) - 1);
-      assert.equal(last.show_user, `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Say 'stop logging' to turn it off.`);
+      assert.equal(last.show_user.replace(/(\d+ earlier steps[^\n]*\n\n)?\| What happened[^]*?It covers every step up to and including that one\.\n\n/, ""), `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Say 'stop logging' to turn it off.`);
       assert.match(results[0].note, /reads "indeterminate" until the session is closed/);
       assert.equal(results[1].note, undefined);
 
@@ -328,6 +332,19 @@ for (const p of [PLAIN, CHAT]) {
       }
 
       const closed = await tool(s.url, p, a.token, "shadow_close_session", { session_id: sessionId, status: "succeeded" });
+      // The summary, through the real route, open or closed: the same steps as the results said, and the ledger's records.
+      const base = closed.value.links.summary.replace(/^https?:\/\/[^/]+/, s.url);
+      const logged = await (await fetch(`${base}?format=json`)).json();
+      assert.equal(logged.steps.length, 50);
+      for (const [i, r] of results.entries()) {
+        const row = logged.steps[i];
+        assert.deepEqual([row.seq, row.step_hash, row.ledger_hash, row.block, row.ledger_id], [r.seq, r.hash, r.anchored_hash, r.block_height, r.ledger_id]);
+        assert.ok(closed.value.summary.includes(`Step hash \`${r.hash}\`. Ledger hash \`${r.anchored_hash}\`. Block ${r.block_height}. Ledger ID \`${r.ledger_id}\`.`));
+      }
+      const text = await fetch(base);
+      assert.equal(text.status, 200);
+      assert.match(text.headers.get("content-type"), /^text\/plain/);
+      assert.match(await text.text(), /50 steps: 50 anchored, 0 pending/);
       assert.equal(closed.value.final_checkpoint.status, "anchored");
       const verify = await tool(s.url, p, a.token, "shadow_verify", { session_id: sessionId });
       assert.equal(verify.value.result, "pass", JSON.stringify(verify.value.checks.filter((c) => c.status !== "pass")));

@@ -228,3 +228,8 @@ test("H-REQ-01: the enrollment key reaches only mcp; the relay binding (default 
   assert.match(up, /^read_optional_env AGENT_HANDSHAKE_V2_RELAY_BINDING "\$AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM"$/m);
   assert.match(up, /^read_optional_env AGENT_HANDSHAKE_V2_COORDINATOR_KEYS "\$AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM"$/m);
 });
+
+test("the comment on SHADOW_AUTO_LOG states the defaults the server uses", async () => {
+  const text = (await readFile(composeFile, "utf8")).replace(/\s*#\s*/g, " ");
+  assert.match(text, /anchors default to 400 per account per day and 300 per session \(without it, 60 and 100\), and shadow_log_step to 90 calls per account per minute/);
+});

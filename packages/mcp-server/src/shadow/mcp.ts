@@ -55,7 +55,7 @@ export const ACCOUNT_INSTRUCTIONS = [
 export const AUTO_LOG_INSTRUCTIONS = [
   "Logging is ON by default in every conversation once this connector is connected: you log your activity to Clockchain",
   "Shadow without being asked, until the person turns it off. The sign-in page says so, but someone who connected before",
-  "it did may not know: the footer on each reply tells them, so never leave it out.",
+  "it did may not know: end every reply with show_user, which tells them, so never leave it out.",
   "",
   "How to log:",
   "- Call shadow_log_step right after each step happens, one call per step: the person's request (kind task for the first",
@@ -63,7 +63,9 @@ export const AUTO_LOG_INSTRUCTIONS = [
   "  from any connector, every file you write (kind file) and each message you show (kind message). Never wait until",
   "  the end of the reply. Each call returns that step's own hash, block height and ledger ID.",
   "- Omit session_id on the first step of a conversation, then pass the returned session_id with every later step.",
-  "- End each reply with the show_user text from your last log call, verbatim. Do not log that footer itself.",
+  "- End every reply with show_user, verbatim, whether or not the person's request is finished. Log your reply as a",
+  "  message step last and use that result's show_user: it has a table of this turn's steps. If a reply has no message",
+  "  step, use the show_user from your last log call. Do not log show_user itself.",
   "- Never record hidden reasoning. Replace passwords, API keys and other secrets with [redacted] before recording.",
   "- If this connection is not signed in, your first call starts the normal connect flow, and is retried after it.",
   "- If a log call returns an error, say plainly in your reply that the step was not logged, and invent nothing.",
@@ -75,7 +77,8 @@ export const AUTO_LOG_INSTRUCTIONS = [
   "LOGGING_OFF, do not log and do not show a footer. A chat can also stop by turning the connector off in the app.",
   "",
   "The viewer page reads \"indeterminate\" until the session is closed. That is expected. Call shadow_close_session (with",
-  "status, how the task ended) and shadow_verify only when the person asks to finish or verify the record.",
+  "status, how the task ended) and shadow_verify only when the person asks to finish or verify the record. When a session",
+  "is closed, show the summary from the result to the person in full.",
   "",
 ].join("\n");
 
@@ -244,7 +247,7 @@ export function buildShadowServer(
         "Logging is ON by default: call this right after each step, without being asked, one call per step, and never wait until the end of the reply. " +
         "Log the person's request, every tool call and tool result (any connector), every file you write and each message you show. " +
         "It appends the step and anchors it on Clockchain in this call, and returns the step's own hash, block_height, ledger_id, block_time and anchor_status, the anchored checkpoint hash, the viewer link and session_id. " +
-        "Reuse session_id for the whole conversation. End each reply with the show_user text from your last log call, verbatim. " +
+        "Reuse session_id for the whole conversation. End every reply with show_user, verbatim: log your reply as a message step last and use that result's show_user, which has this turn's steps as a table. " +
         "Never record hidden reasoning; replace passwords, API keys and other secrets with [redacted]. " +
         "If the anchor is pending or over a limit the step is still recorded and block_height and ledger_id are null. If it answers LOGGING_OFF, do not log and do not show a footer. " +
         `The person can say "stop logging" (clockchain_logging). The viewer reads "indeterminate" until the session is closed; call shadow_close_session and shadow_verify only when asked. ${RETENTION}`,
@@ -261,7 +264,7 @@ export function buildShadowServer(
       title: "Log a whole reply (fallback)",
       description:
         "Only for a client that can't log step by step; otherwise use shadow_log_step. Logs up to 100 steps (32 KB each, about 900 KB in all) in one call, in order, and anchors them together: " +
-        "the steps share ONE block and ledger record, and each keeps its own hash. Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, viewer) and show_user: end the reply with show_user verbatim. " +
+        "the steps share ONE block and ledger record, and each keeps its own hash. Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, viewer) and show_user: end every reply with show_user, verbatim (this turn's steps as a table, then the footer). " +
         "Call it before finishing each reply, without being asked, with the person's message, every tool call and result in that turn and the answer as shown. Reuse session_id. Never record hidden reasoning; replace secrets with [redacted]. " +
         `If it answers LOGGING_OFF, do not log and do not show a footer. ${RETENTION}`,
       inputSchema: { ...sessionInput, steps: z.array(z.object(stepInput)).describe("The steps of this reply, in order, 100 at most.") },
@@ -319,7 +322,7 @@ export function buildShadowServer(
 
   server.registerTool("shadow_close_session", {
     title: "Close the session",
-    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share. No steps can be added afterwards. ${RETENTION}`,
+    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share.${autoLog ? " Also returns summary, every step's hashes, block and ledger ID: show it to the person in full." : ""} No steps can be added afterwards. ${RETENTION}`,
     inputSchema: {
       session_id: sessionId,
       status: z.enum(["succeeded", "failed", "cancelled", "timed_out", "unknown"]).optional()
@@ -330,7 +333,7 @@ export function buildShadowServer(
 
   server.registerTool("shadow_get_session", {
     title: "Get a session",
-    description: `A session's status, step count, Clockchain anchors, time windows, and its viewer and packet links (and its pin once closed). ${RETENTION}`,
+    description: `A session's status, step count, Clockchain anchors, time windows, and its viewer${autoLog ? ", packet and summary" : " and packet"} links (and its pin once closed). ${RETENTION}`,
     inputSchema: { session_id: sessionId },
     annotations: READ,
   }, run((a) => service.getSession(owner, a, base)));
@@ -486,7 +489,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     res.end(JSON.stringify({ error: "busy" }));
   }
 
-  async function link(req: IncomingMessage, res: ServerResponse, kind: "packet" | "summary", cap: string): Promise<void> {
+  async function link(req: IncomingMessage, res: ServerResponse, kind: "packet" | "summary" | "log" | "log-json", cap: string): Promise<void> {
     if (!deps.allowLink(req)) {
       deps.onLinkRateLimited?.();
       res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
@@ -534,7 +537,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
       "content-length": String(body.length),
       ...(kind === "summary"
         ? { "content-type": "text/html; charset=utf-8", "content-security-policy": HTML_CSP }
-        : { "content-type": "application/json; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'" }),
+        : { "content-type": kind === "log" ? "text/plain; charset=utf-8" : "application/json; charset=utf-8", "content-security-policy": "default-src 'none'; frame-ancestors 'none'" }),
     });
     // The shared Buffer itself: no per-reader copy.
     res.end(body);
@@ -548,6 +551,12 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
       res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog !== undefined));
       return;
+    }
+    // The log summary of a session, by the same capability as its viewer. Only with SHADOW_AUTO_LOG=1.
+    const logged = deps.autoLog ? /^\/shadow\/s\/([A-Za-z0-9_-]{22})\/summary$/.exec(path) : null;
+    if (logged && req.method === "GET") {
+      const format = new URLSearchParams((req.url ?? "").split("?")[1] ?? "").get("format");
+      return link(req, res, format === "json" ? "log-json" : "log", logged[1]);
     }
     const view = /^\/shadow\/s\/([A-Za-z0-9_-]{22})$/.exec(path);
     const packet = /^\/shadow\/p\/([A-Za-z0-9_-]{22})\.json$/.exec(path);
