@@ -1114,6 +1114,13 @@ export async function runHttp(): Promise<Server> {
     return { ok: false };
   };
 
+  // Public by design: OpenAI reads it to confirm we control this hostname. Printable, no spaces, or it stays off.
+  const openaiChallengeRaw = (process.env.OPENAI_APPS_CHALLENGE_TOKEN ?? "").trim();
+  const openaiChallengeToken = /^[\x21-\x7e]{1,1024}$/.test(openaiChallengeRaw) ? openaiChallengeRaw : "";
+  if (openaiChallengeRaw && !openaiChallengeToken) {
+    console.error(JSON.stringify({ event: "openai_challenge_token_ignored", note: "OPENAI_APPS_CHALLENGE_TOKEN must be 1 to 1024 printable characters with no spaces; the route stays off" }));
+  }
+
   // SHADOW_LEDGER_CLIENT_ID / _WALLET_ID, refused in a caller's x-clockchain-client-id / -wallet-id on every MCP request.
   // The gateway checks only that a request is signed by this server, so this server is what keeps /mcp callers from
   // writing under Shadow's name. In any letter case: a look-alike would read the same on the ledger.
@@ -1467,6 +1474,14 @@ export async function runHttp(): Promise<Server> {
       }
       res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store" });
       res.end(metrics.collect());
+      return;
+    }
+
+    // OpenAI's domain check for a ChatGPT plugin: the exact token as plain text. Off unless OPENAI_APPS_CHALLENGE_TOKEN is
+    // set: this path then falls through to the usual handling, as if this block weren't here.
+    if ((req.method === "GET" || req.method === "HEAD") && openaiChallengeToken && pathOf(req.url) === "/.well-known/openai-apps-challenge") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "content-length": String(Buffer.byteLength(openaiChallengeToken)), "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(req.method === "HEAD" ? undefined : openaiChallengeToken);
       return;
     }
 

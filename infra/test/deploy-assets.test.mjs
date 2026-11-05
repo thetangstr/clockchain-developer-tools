@@ -176,6 +176,7 @@ const expectedContractEnv = {
   SHADOW_PREVIEW_AUTO_LOG: "shadow-preview-auto-log\n",
   SHADOW_LEDGER_CLIENT_ID: "shadow-ledger-client\n",
   SHADOW_LEDGER_WALLET_ID: "shadow-ledger-wallet\n",
+  OPENAI_APPS_CHALLENGE_TOKEN: "openai-challenge\n",
   // OAuth connector sign-in (optional reads, after the receipts block).
   MCP_OAUTH: "oauth-flag-on\n",
   MCP_OAUTH_APPROVALS_PER_HOUR: "oauth-approvals\n",
@@ -485,6 +486,7 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG) value=$'shadow-preview-auto-log\\n' ;;
   /clockchain/mcp/SHADOW_LEDGER_CLIENT_ID) value=$'shadow-ledger-client\\n' ;;
   /clockchain/mcp/SHADOW_LEDGER_WALLET_ID) value=$'shadow-ledger-wallet\\n' ;;
+  /clockchain/mcp/OPENAI_APPS_CHALLENGE_TOKEN) value=$'openai-challenge\\n' ;;
   /clockchain/mcp/MCP_METRICS_TOKEN) value=$'metrics-token\\n' ;;
   /clockchain/mcp/MCP_OAUTH) value=$'oauth-flag-on\\n' ;;
   /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR) value=$'oauth-approvals\\n' ;;
