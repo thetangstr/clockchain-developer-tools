@@ -10,6 +10,7 @@ import {
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
+import { createLogBudget } from "./budget.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
 import { installTxtWithShadow, manifestWithShadow } from "./shadow/discovery.js";
 
@@ -1114,6 +1115,7 @@ export async function runHttp(): Promise<Server> {
   // shadow_log_step per account, apart from MCP_RATE_PER_MIN: a task with an anchor per step must not hit the general limit.
   const shadowLogStepsPerMinute = shadowConfig.enabled ? shadowConfig.logStepsPerMinute ?? 0 : 0;
   const shadowLogStepLimit = keyedWindowLimiter(shadowLogStepsPerMinute, 60_000, Date.now);
+  const shadowBudget = createLogBudget(process.env);
   // Link clients are bucketed like OAuth's: the real client behind Caddy (MCP_OAUTH_TRUSTED_PROXY), IPv6 by /64.
   const shadowTrustedProxy = (process.env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim() || undefined;
   const shadowLinkClient = (req: IncomingMessage): string =>
@@ -1211,6 +1213,8 @@ export async function runHttp(): Promise<Server> {
         stateDir: shadowConfig.stateDir,
         network: shadowConfig.network,
         ledger: () => runtimeShadowLedger(process.env),
+        // Its own MCP_LOG_BUDGET: draining one can't stop the other's writes (log_action and the rest share the other).
+        budget: () => shadowBudget,
         limits: shadowConfig.limits,
         ...(shadowConfig.autoLog ? { autoLog: true } : {}),
       });
