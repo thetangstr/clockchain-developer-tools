@@ -11,6 +11,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { ClockchainClient, readConfigFromEnv, type ClockchainConfig } from "@clockchain/core";
 import { buildServer } from "./server.js";
 import { LANDING_HTML, INSTALL_TXT, MCP_MANIFEST } from "./landing.js";
+import { installTxtWithShadow, manifestWithShadow } from "./shadow/discovery.js";
 
 // The landing page's demo video + poster, served same-origin from the image
 // (packages/mcp-server/assets, copied by the Dockerfile). They used to hot-link a
@@ -1231,6 +1232,11 @@ export async function runHttp(): Promise<Server> {
       console.error(JSON.stringify({ event: "shadow_unavailable", error, ...(error === "ShadowConfigError" ? { reason: (e as Error).message } : {}) }));
     }
   }
+  // The discovery files name Shadow only where a person can use it: it started, and sign-in is on (it takes signed-in
+  // accounts only). Anything else serves the plain files, byte for byte. URLs come from MCP_PUBLIC_URL, never the Host.
+  const shadowPublicUrl = shadowHandler && oauthConfig.kind === "ready" ? oauthConfig.publicUrl : undefined;
+  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath) : INSTALL_TXT;
+  const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath) : MCP_MANIFEST, null, 2);
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestStarted = Date.now();
@@ -1382,7 +1388,7 @@ export async function runHttp(): Promise<Server> {
         "content-type": "text/plain; charset=utf-8",
         "cache-control": "public, max-age=300",
       });
-      res.end(INSTALL_TXT);
+      res.end(installBody);
       return;
     }
 
@@ -1394,7 +1400,7 @@ export async function runHttp(): Promise<Server> {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "public, max-age=300",
       });
-      res.end(JSON.stringify(MCP_MANIFEST, null, 2));
+      res.end(manifestBody);
       return;
     }
 

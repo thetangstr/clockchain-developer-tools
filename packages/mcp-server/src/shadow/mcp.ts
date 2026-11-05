@@ -10,6 +10,7 @@ import { z } from "zod";
 import { VERSION } from "./recorder.js";
 import { SUMMARY_CSP } from "./lib/summary.js";
 import { ShadowError, type ShadowService } from "./service.js";
+import { connectInstructions } from "./discovery.js";
 import { accountCreatedDay, AccountUnavailableError, cleanAccountName, displayAccountName, looksLikeAccountKey, shortAccountId, type Account, type AccountStore } from "../accounts.js";
 
 export const SHADOW_INSTRUCTIONS = [
@@ -95,26 +96,6 @@ export interface ShadowHttpDeps {
 /** What a client may do on the chat endpoint before signing in, in a body of at most 16 KB. */
 const ANONYMOUS_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "ping"]);
 const ANONYMOUS_MAX_BODY = 16 * 1024;
-
-/** The page a 403 points at: how to connect to hosted Shadow with sign-in. Plain text, for people and agents. */
-export function connectInstructions(base: string): string {
-  return [
-    "Hosted Shadow: connect with sign-in",
-    "",
-    `Endpoint: ${base}/shadow/mcp (Streamable HTTP)`,
-    "",
-    "Hosted Shadow keeps records for signed-in Clockchain accounts only. Add the endpoint above to your MCP client as",
-    "a connector or remote MCP server with OAuth sign-in, then approve the Clockchain sign-in page it opens. ChatGPT",
-    "connectors and Claude (claude.ai connectors, or `claude mcp add --transport http shadow <endpoint>` in Claude Code,",
-    "then /mcp to sign in) discover sign-in on their own from the server's 401.",
-    "",
-    "A token from POST /token or a static MCP token is not accepted on /shadow/mcp; it gets 403 account_required.",
-    "",
-    "Records are kept 30 days, then deleted. Anyone with a session's viewer or packet link can read the whole record",
-    "until then, and links cannot be revoked.",
-    "",
-  ].join("\n");
-}
 
 const first = (h: string | string[] | undefined): string => (Array.isArray(h) ? h[0] : h) ?? "";
 const ACCT = /^acct_[A-Za-z0-9_-]{22}$/;
@@ -438,7 +419,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     if (deps.chat && path === deps.chat.path) return mcp(req, res, deps.chat);
     if (path === "/shadow/connect" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
-      res.end(connectInstructions(publicBaseUrl(req.headers)));
+      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path));
       return;
     }
     const view = /^\/shadow\/s\/([A-Za-z0-9_-]{22})$/.exec(path);
