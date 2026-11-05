@@ -598,7 +598,6 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     // shadow_log_step has its own per-account limit, answered as a tool error that says to wait and log the step again.
     const autoLog = deps.autoLog;
     const logStep = autoLog !== undefined && isLogStepCall(body);
-    if (!logStep && !deps.allowCall(auth.rateKey, body, res)) return;
     const logStepAllowed = logStep && autoLog.allowLogStep(auth.rateKey);
     // A step within its own limit costs nothing else. Past it, a caller spends the general limit too, up to a real 429.
     if (!logStepAllowed && !charged && !deps.allowCall(auth.rateKey, body, res)) return;

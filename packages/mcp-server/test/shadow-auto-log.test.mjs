@@ -223,13 +223,15 @@ test("flag off (unset, 0 or true): tools, instructions, limits and pages are wha
   assert.equal(off.autoLog, undefined);
 });
 
-test("settings: 1000 anchors a day and a session and 120 steps a minute with the flag on; each can be set; bad values stop Shadow", () => {
+test("settings: with the flag on, 400 anchors a day, 300 a session, 90 steps a minute and 5 MB an account; each can be set; bad values stop Shadow", () => {
   const d = loadShadowConfig({ SHADOW_ENABLED: "1", SHADOW_AUTO_LOG: "1" });
   assert.equal(d.autoLog, true);
-  assert.equal(d.limits.maxAnchorsPerOwnerPerDay, 1000);
-  assert.equal(d.limits.maxAnchorsPerSession, 1000);
-  assert.equal(d.limits.onlineVerifyMaxReceipts, 1001);
-  assert.equal(d.logStepsPerMinute, 120);
+  assert.equal(d.limits.maxAnchorsPerOwnerPerDay, 400);
+  assert.equal(d.limits.maxAnchorsPerSession, 300);
+  assert.equal(d.limits.onlineVerifyMaxReceipts, 301);
+  assert.equal(d.limits.maxBytesPerOwner, 5 * 1024 * 1024);
+  assert.equal(d.logStepsPerMinute, 90);
+  assert.equal(loadShadowConfig({ SHADOW_ENABLED: "1" }).limits.maxBytesPerOwner, 10 * 1024 * 1024, "unchanged without the flag");
   const set = loadShadowConfig({ SHADOW_ENABLED: "1", SHADOW_AUTO_LOG: "1", SHADOW_ANCHORS_PER_DAY: "7", SHADOW_ANCHORS_PER_SESSION: "9", SHADOW_LOG_STEPS_PER_MIN: "11" });
   assert.deepEqual([set.limits.maxAnchorsPerOwnerPerDay, set.limits.maxAnchorsPerSession, set.logStepsPerMinute], [7, 9, 11]);
   // The per-day limit is a setting without the flag too.
@@ -1033,6 +1035,7 @@ test("a session's metadata holds 1000 anchors", { timeout: 300_000 }, async () =
   const dir = svc.store.sessionDir((await import("../dist/shadow/store.js")).ownerKeyOf(O), first.session_id);
   const metaBytes = statSync(path.join(dir, "meta.json")).size;
   assert.ok((metaBytes / anchors) * 1000 < 512 * 1024, `${metaBytes} bytes of metadata for ${anchors} anchors`);
+  assert.ok((metaBytes / anchors) * 300 + 64 * 1024 < 256 * 1024, "at the default 300 anchors, under the 256 KB the build before this flag can read");
   assert.ok((statSync(path.join(dir, "events.jsonl")).size / anchors) * 1000 < 7 * 1024 * 1024);
   assert.equal(readFileSync(path.join(dir, "events.jsonl"), "utf8").trim().split("\n").length, 1 + (anchors - 1) * 2);
   const closed = await svc.close(O, { session_id: first.session_id, status: "succeeded" }, BASE);

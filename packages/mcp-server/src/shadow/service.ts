@@ -127,8 +127,11 @@ export const SHADOW_ENV_DEFAULTS = {
   linkConcurrency: 32, // SHADOW_LINK_CONCURRENCY
 } as const;
 
-/** Defaults when SHADOW_AUTO_LOG=1: an anchor per step has to fit tasks of 50 steps and more. */
-export const AUTO_LOG_DEFAULTS = { anchorsPerDay: 1000, anchorsPerSession: 1000, logStepsPerMinute: 120 } as const;
+/**
+ * Defaults when SHADOW_AUTO_LOG=1: an anchor per step has to fit tasks of 50 steps and more. At 300 anchors a session's
+ * metadata stays under the 256 KB limit of the build before this flag, so a rollback can still read it.
+ */
+export const AUTO_LOG_DEFAULTS = { anchorsPerDay: 400, anchorsPerSession: 300, logStepsPerMinute: 90, accountBytes: 5 * 1024 * 1024 } as const;
 /** meta.anchors keeps about 260 bytes per anchor, and the metadata file holds at most META_MAX_BYTES. */
 const MAX_ANCHORS_PER_SESSION = 1500;
 
@@ -137,10 +140,10 @@ const MAX_ANCHORS_PER_SESSION = 1500;
  * SHADOW_MAX_BYTES, SHADOW_ACCOUNT_MAX_BYTES, SHADOW_SESSION_STARTS_PER_DAY and SHADOW_LINK_CONCURRENCY set the caps
  * ("" or unset = SHADOW_ENV_DEFAULTS); anything but a positive whole number is a `problem`.
  *
- * SHADOW_AUTO_LOG=1 turns on automatic logging, which anchors every step, so its defaults are 1000 anchors per account
- * per day and per session (SHADOW_ANCHORS_PER_DAY, SHADOW_ANCHORS_PER_SESSION; without the flag, 60 and 100 unless set)
- * and 120 shadow_log_step calls per account per minute (SHADOW_LOG_STEPS_PER_MIN). Without the flag and those settings
- * the result is exactly what it was before them.
+ * SHADOW_AUTO_LOG=1 turns on automatic logging, which anchors every step. Its defaults are AUTO_LOG_DEFAULTS: anchors per
+ * account per day and per session (SHADOW_ANCHORS_PER_DAY, SHADOW_ANCHORS_PER_SESSION; without the flag, 60 and 100 unless
+ * set), shadow_log_step calls per account per minute (SHADOW_LOG_STEPS_PER_MIN), and a smaller SHADOW_ACCOUNT_MAX_BYTES.
+ * Without the flag and those settings the result is exactly what it was before them.
  */
 export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
   if ((env.SHADOW_ENABLED ?? "").trim() !== "1") return { enabled: false };
@@ -165,7 +168,7 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
     network: (env.SHADOW_NETWORK ?? "").trim() === "mainnet" ? "clockchain-mainnet" : "clockchain-testnet",
     limits: {
       maxStateBytes: whole("SHADOW_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxStateBytes),
-      maxBytesPerOwner: whole("SHADOW_ACCOUNT_MAX_BYTES", SHADOW_ENV_DEFAULTS.maxBytesPerOwner),
+      maxBytesPerOwner: whole("SHADOW_ACCOUNT_MAX_BYTES", autoLog ? AUTO_LOG_DEFAULTS.accountBytes : SHADOW_ENV_DEFAULTS.maxBytesPerOwner),
       maxSessionStartsPerOwnerPerDay: whole("SHADOW_SESSION_STARTS_PER_DAY", SHADOW_ENV_DEFAULTS.maxSessionStartsPerOwnerPerDay),
       ...(anchorsPerDay !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay ? { maxAnchorsPerOwnerPerDay: anchorsPerDay } : {}),
       ...(anchorsPerSession !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession ? { maxAnchorsPerSession: anchorsPerSession } : {}),
