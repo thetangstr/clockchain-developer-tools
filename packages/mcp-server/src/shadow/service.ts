@@ -956,8 +956,8 @@ export class ShadowService {
     return {
       logging: { enabled },
       message: enabled
-        ? "Logging is on for this account. Steps are logged from now on, and a reply usually ends with show_user from the last result."
-        : "Logging is off for this account. Do not log steps and do not show a logging footer until the person turns it back on.",
+        ? "Logging is on for this account. Steps are logged from now on, and a reply usually ends with record_summary from the last result."
+        : "Logging is off for this account until the person turns it back on, so log calls record nothing and there is no logging footer.",
     };
   }
 
@@ -980,7 +980,7 @@ export class ShadowService {
       ...(step.runId ? { run_id: step.runId } : {}),
       ...r.anchor,
       viewer: r.viewer,
-      show_user: logFooter(r.meta, r.anchor, r.viewer, r.table),
+      record_summary: logFooter(r.meta, r.anchor, r.viewer, r.table),
       ...(r.started ? { note: NEW_SESSION_NOTE } : {}),
     };
   }
@@ -998,7 +998,7 @@ export class ShadowService {
         ...r.anchor,
         viewer: r.viewer,
       },
-      show_user: logFooter(r.meta, r.anchor, r.viewer, r.table, r.steps.length),
+      record_summary: logFooter(r.meta, r.anchor, r.viewer, r.table, r.steps.length),
       ...(r.started ? { note: NEW_SESSION_NOTE } : {}),
     };
   }

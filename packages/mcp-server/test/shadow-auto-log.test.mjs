@@ -265,9 +265,9 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
       assert.match(flatten(instructions), /If a log call returns an error or is blocked, say plainly in your reply that the step was not logged, and invent nothing/);
       assert.match(flatten(instructions), /person_messages, how many messages the person sent before the one asking to close/);
       const d = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").description;
-      assert.match(d, /show_user, a table of this turn's steps for the person/);
+      assert.match(d, /record_summary, a table of this turn's steps\. The person expects each reply to end with record_summary, as written/);
       const turnTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_turn").description;
-      assert.match(turnTool, /show_user, a table of these steps for the person/);
+      assert.match(turnTool, /record_summary, a table of these steps\. The person expects each reply to end with record_summary, as written/);
       for (const text of [d, turnTool]) assert.match(text, /only appends: it can't change or delete anything/);
       assert.doesNotMatch(turnTool, /ONE block/);
       // ChatGPT's reviewer flags rules for the model in a tool description ("Suspicious Instruction"), so they live in the instructions, and the server enforces them.
@@ -279,7 +279,7 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
       for (const text of [d, turnTool]) assert.doesNotMatch(text, /without being asked|verbatim|never leave it out|End every reply/i);
       const closeTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_close_session");
       assert.equal(closeTool.inputSchema.properties.person_messages.type, "integer");
-      for (const must of [/on by default/, /session_id/, /show_user/, /stop logging|clockchain_logging/]) assert.match(d, must);
+      for (const must of [/on by default/, /session_id/, /record_summary/, /stop logging|clockchain_logging/]) assert.match(d, must);
     }
     // Before sign-in, a log call gets the 401 that starts the connect flow; so does the plain endpoint.
     for (const p of [CHAT, PLAIN]) {
@@ -332,7 +332,7 @@ for (const p of [PLAIN, CHAT]) {
       // The footer: steps so far, first and last block, latest ledger id, viewer, and the off switch.
       const last = results.at(-1);
       const firstBlock = String(Number(results[0].block_height) - 1);
-      assert.equal(last.show_user.replace(/(\d+ earlier steps[^\n]*\n\n)?\| What happened[^]*?It covers every step up to and including that one\.\n\n/, ""), `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Saying 'stop logging' turns it off.`);
+      assert.equal(last.record_summary.replace(/(\d+ earlier steps[^\n]*\n\n)?\| What happened[^]*?It covers every step up to and including that one\.\n\n/, ""), `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Saying 'stop logging' turns it off.`);
       assert.match(results[0].note, /reads "indeterminate" until the session is closed/);
       assert.equal(results[1].note, undefined);
 
@@ -418,12 +418,12 @@ test("shadow_log_turn, the fallback: three replies make one session and three sh
       assert.equal(r.evidence.logged.length, 4);
       assert.deepEqual(r.evidence.logged.map((l) => l.kind).slice(1), ["tool_call", "tool_result", "message"]);
       assert.ok(r.evidence.logged.every((l) => /^[0-9a-f]{64}$/.test(l.hash.replace(/^sha256:/, "")) && l.summary.length <= 80));
-      assert.match(r.show_user, /4 steps logged in this reply under one shared anchor, not one per step/);
-      assert.match(r.show_user, new RegExp(`Shared anchor: block ${r.evidence.block_height}, ledger ID \`${r.evidence.ledger_id}\`\\.`));
-      assert.match(r.show_user, /Logging is on\. Saying 'stop logging' turns it off\.$/);
+      assert.match(r.record_summary, /4 steps logged in this reply under one shared anchor, not one per step/);
+      assert.match(r.record_summary, new RegExp(`Shared anchor: block ${r.evidence.block_height}, ledger ID \`${r.evidence.ledger_id}\`\\.`));
+      assert.match(r.record_summary, /Logging is on\. Saying 'stop logging' turns it off\.$/);
     }
-    assert.match(results[0].show_user, /\(4 steps so far\)/);
-    assert.match(results[2].show_user, /\(12 steps so far\)/);
+    assert.match(results[0].record_summary, /\(4 steps so far\)/);
+    assert.match(results[2].record_summary, /\(12 steps so far\)/);
     assert.equal(results[1].evidence.logged[1].summary, 'lookup {"i":1}');
     const closed = await tool(s.url, PLAIN, a.token, "shadow_close_session", { session_id: sessionId, status: "succeeded" });
     assert.equal((await tool(s.url, PLAIN, a.token, "shadow_verify", { session_id: sessionId })).value.result, "pass");
@@ -453,7 +453,7 @@ test("clockchain_logging: on by default, off refuses the log tools and shadow_re
     sessionId = (await tool(s.url, PLAIN, a.token, "shadow_log_step", { kind: "task", content: "before" })).value.session_id;
     const offNow = await tool(s.url, PLAIN, a.token, "clockchain_logging", { enabled: false });
     assert.deepEqual(offNow.value.logging, { enabled: false });
-    assert.match(offNow.value.message, /Do not log steps and do not show a logging footer/);
+    assert.match(offNow.value.message, /log calls record nothing and there is no logging footer/);
   } finally {
     await s.close();
   }
@@ -517,8 +517,8 @@ test("anchor pending, failed or over its limit: the step is recorded, block and 
     assert.equal(r.anchor_status, "pending");
     stepNulls(r);
     assert.ok(r.hash && r.seq);
-    assert.match(r.show_user, /The latest step is recorded, but its anchor is still pending, so it has no block or ledger ID\./);
-    assert.match(r.show_user, /Logging is on\. Saying 'stop logging' turns it off\.$/);
+    assert.match(r.record_summary, /The latest step is recorded, but its anchor is still pending, so it has no block or ledger ID\./);
+    assert.match(r.record_summary, /Logging is on\. Saying 'stop logging' turns it off\.$/);
     assert.equal((await svc.getSession(O, { session_id: first.session_id }, BASE)).recorded_steps, 2);
     // It lands with the next step: nothing was lost.
     fake.confirm = true;
@@ -535,9 +535,9 @@ test("anchor pending, failed or over its limit: the step is recorded, block and 
     assert.equal(r.seq, 2);
     assert.notEqual(r.anchor_status, "anchored");
     stepNulls(r);
-    assert.doesNotMatch(r.show_user, /First block|Latest ledger ID/, "no anchor, so no block and no ledger id");
-    assert.match(r.show_user, /1 step logged so far/);
-    assert.match(r.show_user, /so it has no block or ledger ID/);
+    assert.doesNotMatch(r.record_summary, /First block|Latest ledger ID/, "no anchor, so no block and no ledger id");
+    assert.match(r.record_summary, /1 step logged so far/);
+    assert.match(r.record_summary, /so it has no block or ledger ID/);
     fake.down = false;
     const again = await svc.logStep(O, { session_id: r.session_id, kind: "message", content: "back" }, BASE);
     assert.equal(again.seq > r.seq, true);
@@ -552,7 +552,7 @@ test("anchor pending, failed or over its limit: the step is recorded, block and 
     assert.equal(r.anchor_status, "failed");
     stepNulls(r);
     assert.match(r.anchor_reason, /Clockchain did not accept it \(Permanent, .*\)\./);
-    assert.match(r.show_user, /The latest step is recorded, but its anchor failed, so it has no block or ledger ID\./);
+    assert.match(r.record_summary, /The latest step is recorded, but its anchor failed, so it has no block or ledger ID\./);
     assert.equal((await svc.getSession(O, { session_id: first.session_id }, BASE)).recorded_steps, 2);
   }
   // Over the account's anchors for the day: recorded, over_limit, and the next day it anchors.
@@ -568,8 +568,8 @@ test("anchor pending, failed or over its limit: the step is recorded, block and 
     assert.equal(over.anchor_status, "over_limit");
     stepNulls(over);
     assert.match(over.anchor_reason, /Today's anchor limit for your account is used up/);
-    assert.match(over.show_user, /The latest step is recorded, but an anchoring limit has been reached, so it has no block or ledger ID\. Today's anchor limit/);
-    assert.match(over.show_user, /Latest ledger ID/, "earlier anchors stay true");
+    assert.match(over.record_summary, /The latest step is recorded, but an anchoring limit has been reached, so it has no block or ledger ID\. Today's anchor limit/);
+    assert.match(over.record_summary, /Latest ledger ID/, "earlier anchors stay true");
     assert.equal(fake.writes.length, 3, "nothing written past the limit");
     assert.equal((await svc.getSession(O, { session_id: first.session_id }, BASE)).recorded_steps, 3);
     clock.t += 24 * 60 * 60_000;
@@ -598,8 +598,8 @@ test("anchor pending, failed or over its limit: the step is recorded, block and 
     const r = await svc.logTurn(O, { session_id: first.session_id, steps: [{ kind: "note", content: "pending" }] }, BASE);
     assert.equal(r.evidence.anchor_status, "pending");
     assert.equal(r.evidence.block_height, null);
-    assert.doesNotMatch(r.show_user, /Shared anchor:/);
-    assert.match(r.show_user, /These steps are recorded, but their anchor is still pending, so they have no block or ledger ID\./);
+    assert.doesNotMatch(r.record_summary, /Shared anchor:/);
+    assert.match(r.record_summary, /These steps are recorded, but their anchor is still pending, so they have no block or ledger ID\./);
   }
 });
 

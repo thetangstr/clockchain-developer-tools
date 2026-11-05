@@ -50,21 +50,21 @@ test("a message or note step's footer has the table of this turn's steps, from t
   const b = await svc.logStep(O, { ...s, kind: "tool_call", content: { tool: "search_web", args: { q: "restaurants" } } }, BASE);
   const c = await svc.logStep(O, { ...s, kind: "tool_result", content: { tool: "search_web", result: "ten found", is_error: true } }, BASE);
   const d = await svc.logStep(O, { ...s, kind: "message", content: "Found ten." }, BASE);
-  assert.deepEqual(rowsOf(d.show_user), [
+  assert.deepEqual(rowsOf(d.record_summary), [
     row("task: the person's request", a), row("tool_call: `search_web`", b), row("tool_result: `search_web` (error)", c), row("message: message shown", d),
   ]);
   // The next prompt starts a new table, and that prompt is its first row.
   const e = await svc.logStep(O, { ...s, kind: "prompt", content: "Now the next one" }, BASE);
   const f = await svc.logStep(O, { ...s, kind: "file", content: { path: "/home/me/plans/booking.md", content: "the file's text" } }, BASE);
   const g = await svc.logStep(O, { ...s, kind: "note", content: "a note" }, BASE);
-  assert.deepEqual(rowsOf(g.show_user), [row("prompt: the person's message", e), row("file: `booking.md`", f), row("note: agent's note", g)]);
+  assert.deepEqual(rowsOf(g.record_summary), [row("prompt: the person's message", e), row("file: `booking.md`", f), row("note: agent's note", g)]);
   // Above the existing lines, which are all still there.
-  assert.ok(g.show_user.startsWith("---\n\n| What happened | Step hash | Ledger hash | Block | Ledger ID |\n|---|---|---|---|---|\n"));
-  assert.ok(g.show_user.indexOf("| What happened") < g.show_user.indexOf("**Clockchain Shadow:**"));
-  assert.match(g.show_user, /The ledger hash is the anchored checkpoint's hash, which is what a ledger lookup returns\./);
-  assert.match(g.show_user, /7 steps logged so far\. First block \d+, last block \d+\. Latest ledger ID: `[^`]+`\. Viewer: \S+\n\nLogging is on\. Saying 'stop logging' turns it off\.$/);
+  assert.ok(g.record_summary.startsWith("---\n\n| What happened | Step hash | Ledger hash | Block | Ledger ID |\n|---|---|---|---|---|\n"));
+  assert.ok(g.record_summary.indexOf("| What happened") < g.record_summary.indexOf("**Clockchain Shadow:**"));
+  assert.match(g.record_summary, /The ledger hash is the anchored checkpoint's hash, which is what a ledger lookup returns\./);
+  assert.match(g.record_summary, /7 steps logged so far\. First block \d+, last block \d+\. Latest ledger ID: `[^`]+`\. Viewer: \S+\n\nLogging is on\. Saying 'stop logging' turns it off\.$/);
   // No content, in any row.
-  assert.doesNotMatch(g.show_user + d.show_user, /restaurants|Book a table|ten found|Found ten|the file's text|a note\b|Now the next one|\/home\/me/);
+  assert.doesNotMatch(g.record_summary + d.record_summary, /restaurants|Book a table|ten found|Found ten|the file's text|a note\b|Now the next one|\/home\/me/);
 });
 
 test("a step with no anchor shows pending and invents nothing; it shows its real anchor once one covers it", async () => {
@@ -73,7 +73,7 @@ test("a step with no anchor shows pending and invents nothing; it shows its real
   fake.confirm = false;
   const b = await svc.logStep(O, { session_id: a.session_id, kind: "message", content: "pending one" }, BASE);
   assert.equal(b.anchor_status, "pending");
-  const [first, second] = rowsOf(b.show_user);
+  const [first, second] = rowsOf(b.record_summary);
   assert.equal(first, row("task: the person's request", a));
   assert.equal(second, `| message: message shown | \`${short(b.hash)}\` | pending | pending | pending |`);
   const whileOpen = await svc.linkBody(capOf(b), "log-json").then((x) => JSON.parse(x));
@@ -82,7 +82,7 @@ test("a step with no anchor shows pending and invents nothing; it shows its real
   fake.confirm = true;
   fake.confirmPending();
   const c = await svc.logStep(O, { session_id: a.session_id, kind: "message", content: "landed" }, BASE);
-  const rows = rowsOf(c.show_user);
+  const rows = rowsOf(c.record_summary);
   assert.equal(rows.length, 3);
   assert.doesNotMatch(rows[1], /pending/);
   assert.ok(fake.records.some((r) => rows[1].includes(r.ledgerId) && rows[1].includes(short(r.assetHash)) && rows[1].includes(`| ${r.blockHeight} |`)), rows[1]);
@@ -91,7 +91,7 @@ test("a step with no anchor shows pending and invents nothing; it shows its real
   const down = service();
   down.fake.down = true;
   const r = await down.svc.logStep(O, { kind: "message", content: "offline" }, BASE);
-  assert.deepEqual(rowsOf(r.show_user), [`| message: message shown | \`${short(r.hash)}\` | pending | pending | pending |`]);
+  assert.deepEqual(rowsOf(r.record_summary), [`| message: message shown | \`${short(r.hash)}\` | pending | pending | pending |`]);
   const closed = await down.svc.close(O, { session_id: r.session_id }, BASE);
   assert.match(closed.summary, /Ledger hash pending\. Block pending\. Ledger ID pending\./);
   assert.match(closed.summary, /1 step: 0 anchored, 1 pending\. Nothing on Clockchain yet\./);
@@ -100,7 +100,7 @@ test("a step with no anchor shows pending and invents nothing; it shows its real
 test("shadow_log_turn's rows share its one anchor, each keeps its own hash, and a later call has its own", async () => {
   const { svc, fake } = service();
   const t1 = await svc.logTurn(O, { steps: [{ kind: "task", content: "go" }, { kind: "tool_call", content: { tool: "lookup" } }, { kind: "message", content: "done" }] }, BASE);
-  const rows = rowsOf(t1.show_user);
+  const rows = rowsOf(t1.record_summary);
   assert.equal(rows.length, 3);
   const e = t1.evidence;
   rows.forEach((r, i) => {
@@ -108,9 +108,9 @@ test("shadow_log_turn's rows share its one anchor, each keeps its own hash, and 
     assert.ok(r.endsWith(`| \`${short(e.anchored_hash)}\` | ${e.block_height} | \`${e.ledger_id}\` |`), r);
   });
   assert.equal(fake.records.find((x) => x.ledgerId === e.ledger_id).assetHash, e.anchored_hash);
-  assert.match(t1.show_user, /Shared anchor: block/);
+  assert.match(t1.record_summary, /Shared anchor: block/);
   const t2 = await svc.logTurn(O, { session_id: t1.session_id, steps: [{ kind: "message", content: "more" }] }, BASE);
-  const rows2 = rowsOf(t2.show_user);
+  const rows2 = rowsOf(t2.record_summary);
   assert.equal(rows2.length, 4, "no new prompt: the same turn");
   assert.ok(rows2[0].includes(e.ledger_id));
   assert.ok(rows2[3].includes(t2.evidence.ledger_id));
@@ -123,13 +123,13 @@ test("a long turn shows its last 30 rows and says how many earlier ones are at t
   let r;
   const all = [a];
   for (let i = 0; i < 49; i++) all.push(r = await svc.logStep(O, { session_id: a.session_id, kind: "message", content: `step ${i}` }, BASE));
-  const rows = rowsOf(r.show_user);
+  const rows = rowsOf(r.record_summary);
   assert.equal(rows.length, 30);
   assert.deepEqual(rows, all.slice(-30).map((x) => row("message: message shown", x)));
-  assert.match(r.show_user, /20 earlier steps are at the viewer link below\./);
-  assert.match(r.show_user, new RegExp(`Viewer: ${r.viewer}`));
+  assert.match(r.record_summary, /20 earlier steps are at the viewer link below\./);
+  assert.match(r.record_summary, new RegExp(`Viewer: ${r.viewer}`));
   // Fifty steps: the footer stays small, and every result stays that size.
-  assert.ok(Buffer.byteLength(r.show_user) < 8192, `${Buffer.byteLength(r.show_user)} bytes`);
+  assert.ok(Buffer.byteLength(r.record_summary) < 8192, `${Buffer.byteLength(r.record_summary)} bytes`);
   const viewer = await svc.summaryForCap(capOf(r));
   for (const x of all) assert.ok(viewer.includes(x.anchored_hash), "the viewer shows each ledger hash");
   assert.match(viewer, new RegExp(`<a href="${capOf(r)}/summary">`));
@@ -151,7 +151,7 @@ test("close: every step in order, its values are what the ledger holds, and the 
   assert.equal(onLedger.length, 6);
   const [firstBlock, lastBlock] = [onLedger[0].blockHeight, onLedger.at(-1).blockHeight];
   assert.ok(closed.summary.includes(`4 steps: 4 anchored, 0 pending. On Clockchain: first block ${firstBlock}, last block ${lastBlock}, 6 ledger records, counting any start or closing anchor.`), closed.summary);
-  assert.match(results[3].show_user, new RegExp(`First block ${firstBlock},`));
+  assert.match(results[3].record_summary, new RegExp(`First block ${firstBlock},`));
   assert.ok(closed.summary.includes(`Session \`${results[0].session_id}\`, closed.`));
   assert.match(closed.summary_note, /This summary is for the person, in full/);
   assert.equal(closed.links.summary, `${BASE}/shadow/s/${capOf(closed)}/summary`);
@@ -235,12 +235,12 @@ test("no step content reaches a title: secrets are redacted before they are reco
   for (const step of steps) results.push(await svc.logStep(O, { ...s, ...step }, BASE));
   const closed = await svc.close(O, s, BASE);
   const cap = capOf(closed);
-  const shown = [...results.map((r) => r.show_user), closed.summary, (await svc.linkBody(cap, "log")).toString(), (await svc.linkBody(cap, "log-json")).toString()].join("\n");
+  const shown = [...results.map((r) => r.record_summary), closed.summary, (await svc.linkBody(cap, "log")).toString(), (await svc.linkBody(cap, "log-json")).toString()].join("\n");
   assert.doesNotMatch(shown, /MARKER|sk-ant|fake \| row|ignore all|Bearer/);
   const titles = JSON.parse((await svc.linkBody(cap, "log-json")).toString()).steps.map((x) => `${x.kind}: ${x.title}`);
   assert.deepEqual(titles, ["task: the person's request", "tool_call: a tool", "tool_result: a tool", "file: a file", "tool_call: a tool", "tool_call: a tool", "tool_result: a tool", "message: message shown", "prompt: the person's message"]);
   // Every table is still one row per step.
-  for (const r of results) for (const l of rowsOf(r.show_user)) assert.equal(l.split("|").length, 7, l);
+  for (const r of results) for (const l of rowsOf(r.record_summary)) assert.equal(l.split("|").length, 7, l);
 });
 
 test("the summary obeys the record's expiry and deletion, and its cached body doesn't outlive them", async () => {
@@ -295,29 +295,29 @@ test("the table goes only on message and note steps and shadow_log_turn; every o
     ["prompt", "next"], ["tool_call", { tool: "search_web" }], ["tool_result", { tool: "search_web", result: "r" }], ["file", { path: "a.md", content: "c" }],
     ["message", "shown"], ["note", "noted"],
   ];
-  assert.equal(rowsOf(a.show_user).length, 0);
+  assert.equal(rowsOf(a.record_summary).length, 0);
   let n = 1;
   for (const [kind, content] of kinds) {
     const r = await svc.logStep(O, { ...s, kind, content }, BASE);
     n++;
-    assert.ok(r.show_user.endsWith(DISCLOSURE), kind);
-    assert.match(r.show_user, new RegExp(`\\*\\*Clockchain Shadow:\\*\\* ${n} steps logged so far`), kind);
-    assert.equal(rowsOf(r.show_user).length > 0, kind === "message" || kind === "note", kind);
-    assert.equal(r.show_user.includes("| What happened"), kind === "message" || kind === "note", kind);
+    assert.ok(r.record_summary.endsWith(DISCLOSURE), kind);
+    assert.match(r.record_summary, new RegExp(`\\*\\*Clockchain Shadow:\\*\\* ${n} steps logged so far`), kind);
+    assert.equal(rowsOf(r.record_summary).length > 0, kind === "message" || kind === "note", kind);
+    assert.equal(r.record_summary.includes("| What happened"), kind === "message" || kind === "note", kind);
   }
   // A turn that ends with a tool result: the plain footer, right to the block and ledger id, with nothing about a table.
   const last = await svc.logStep(O, { ...s, kind: "tool_result", content: { tool: "search_web", result: "again" } }, BASE);
   const first = fake.records[0].blockHeight;
-  assert.equal(last.show_user, PLAIN(last, 8, first, last.block_height));
+  assert.equal(last.record_summary, PLAIN(last, 8, first, last.block_height));
   const turn = await svc.logTurn(O, { ...s, steps: [{ kind: "tool_result", content: { tool: "x", result: "y" } }] }, BASE);
-  assert.ok(rowsOf(turn.show_user).length > 0);
-  assert.ok(turn.show_user.endsWith(DISCLOSURE));
+  assert.ok(rowsOf(turn.record_summary).length > 0);
+  assert.ok(turn.record_summary.endsWith(DISCLOSURE));
   // Whatever becomes of the anchor.
   fake.confirm = false;
   const pending = await svc.logStep(O, { ...s, kind: "tool_call", content: { tool: "z" } }, BASE);
   assert.equal(pending.anchor_status, "pending");
-  assert.ok(pending.show_user.endsWith(DISCLOSURE));
-  assert.match(pending.show_user, /recorded, but its anchor is still pending/);
+  assert.ok(pending.record_summary.endsWith(DISCLOSURE));
+  assert.match(pending.record_summary, /recorded, but its anchor is still pending/);
 });
 
 test("the cost of a turn: one table, not one per step", async () => {
@@ -326,9 +326,9 @@ test("the cost of a turn: one table, not one per step", async () => {
   const results = [a];
   for (let i = 0; i < 48; i++) results.push(await svc.logStep(O, { session_id: a.session_id, kind: i % 2 ? "tool_result" : "tool_call", content: { tool: "t", result: "r" } }, BASE));
   results.push(await svc.logStep(O, { session_id: a.session_id, kind: "message", content: "done" }, BASE));
-  const total = results.reduce((n, r) => n + Buffer.byteLength(r.show_user), 0);
+  const total = results.reduce((n, r) => n + Buffer.byteLength(r.record_summary), 0);
   assert.ok(total < 30 * 1024, `50 steps, ${total} bytes of footers`);
-  assert.equal(rowsOf(results.at(-1).show_user).length, 30);
+  assert.equal(rowsOf(results.at(-1).record_summary).length, 30);
 });
 
 test("hostile names are shown in backticks or not at all: no colon, no at sign, at most 40 characters", async () => {
@@ -351,12 +351,12 @@ test("hostile names are shown in backticks or not at all: no colon, no at sign, 
   for (const [step] of steps) await svc.logStep(O, { ...s, ...step }, BASE);
   const m = await svc.logStep(O, { ...s, kind: "message", content: "done" }, BASE);
   const closed = await svc.close(O, s, BASE);
-  const inTable = rowsOf(m.show_user);
+  const inTable = rowsOf(m.record_summary);
   steps.forEach(([, want], i) => {
     assert.ok(inTable[i + 1].startsWith(`| ${want} |`), `${want}: ${inTable[i + 1]}`);
     assert.ok(closed.summary.includes(`${i + 2}. ${want}. Step hash`), want);
   });
-  for (const text of [m.show_user, closed.summary]) {
+  for (const text of [m.record_summary, closed.summary]) {
     assert.doesNotMatch(text, /SYSTEM|admin@|evil-phish\.example\/x|\*\*bold/);
     assert.doesNotMatch(text.replaceAll("`www.evil-phish.example`", "").replaceAll("`IGNORE_PRIOR_INSTRUCTIONS.md`", ""), /evil-phish|IGNORE_PRIOR/, "never outside backticks");
   }
@@ -394,14 +394,14 @@ test("names shaped like a credential or an identifier show as a tool or a file, 
   }
   const m = await on.logStep(O, { session_id: a.session_id, kind: "message", content: "done" }, BASE);
   const closed = await on.close(O, { session_id: a.session_id }, BASE);
-  const text = [m.show_user, closed.summary, (await on.linkBody(capOf(closed), "log")).toString(), (await on.linkBody(capOf(closed), "log-json")).toString()].join("\n");
+  const text = [m.record_summary, closed.summary, (await on.linkBody(capOf(closed), "log")).toString(), (await on.linkBody(capOf(closed), "log-json")).toString()].join("\n");
   for (const name of shapes) assert.ok(!text.includes(name), name);
   // Ordinary names still show.
   const b = await on.logStep(O, { kind: "task", content: "go" }, BASE);
   for (const [tool, want] of [["search_web", "`search_web`"], ["gpt-4o.chat", "`gpt-4o.chat`"], ["report-2026.pdf", "`report-2026.pdf`"], ["read_network_requests", "`read_network_requests`"]]) {
     const r = await on.logStep(O, { session_id: b.session_id, kind: "tool_call", content: { tool } }, BASE);
     const n = await on.logStep(O, { session_id: b.session_id, kind: "note", content: "n" }, BASE);
-    assert.ok(n.show_user.includes(`tool_call: ${want} | \`${short(r.hash)}\``), `${tool}: ${n.show_user}`);
+    assert.ok(n.record_summary.includes(`tool_call: ${want} | \`${short(r.hash)}\``), `${tool}: ${n.record_summary}`);
   }
 });
 
@@ -412,7 +412,7 @@ test("after a permanent failure a step says not anchored, not pending; a retry s
   fake.failNextLog = new ApiError("Clockchain API error (400)", 400);
   const failed = await svc.logStep(O, { ...s, kind: "message", content: "refused" }, BASE);
   assert.equal(failed.anchor_status, "failed");
-  const row = rowsOf(failed.show_user)[1];
+  const row = rowsOf(failed.record_summary)[1];
   assert.equal(row, `| message: message shown | \`${short(failed.hash)}\` | not anchored | not anchored | not anchored |`);
   const logged = JSON.parse((await svc.linkBody(capOf(a), "log-json")).toString());
   assert.deepEqual([logged.steps[1].status, logged.steps[1].ledger_hash, logged.steps[1].block, logged.steps[1].ledger_id], ["not_anchored", null, null, null]);
@@ -421,7 +421,7 @@ test("after a permanent failure a step says not anchored, not pending; a retry s
   assert.match((await svc.linkBody(capOf(a), "log")).toString(), /Not anchored, so no ledger hash, block or ledger ID\./);
   // A later anchor covers it, and it says so.
   const c = await svc.logStep(O, { ...s, kind: "message", content: "landed" }, BASE);
-  assert.doesNotMatch(rowsOf(c.show_user)[1], /not anchored|pending/);
+  assert.doesNotMatch(rowsOf(c.record_summary)[1], /not anchored|pending/);
   // Close with the final anchor refused for good: every step it would have covered, and nothing else.
   const other = service();
   const b = await other.svc.logStep(O, { kind: "task", content: "go" }, BASE);
@@ -440,7 +440,7 @@ test("after a permanent failure a step says not anchored, not pending; a retry s
   flaky.fake.down = true;
   const g = await flaky.svc.logStep(O, { session_id: f.session_id, kind: "message", content: "retry" }, BASE);
   assert.equal(g.anchor_status, "pending");
-  assert.ok(rowsOf(g.show_user)[1].endsWith("| pending | pending | pending |"));
+  assert.ok(rowsOf(g.record_summary)[1].endsWith("| pending | pending | pending |"));
 });
 
 test("anchors that land out of order: viewer, table and summary name the same anchor for each step, and first and last block go by number", async () => {
@@ -470,39 +470,39 @@ test("anchors that land out of order: viewer, table and summary name the same an
   }
   // The footer's first and last block agree with the summary.
   const later = await svc.logStep(O, { ...s, kind: "tool_call", content: { tool: "t" } }, BASE);
-  assert.match(later.show_user, new RegExp(`First block ${log.totals.first_block},`));
+  assert.match(later.record_summary, new RegExp(`First block ${log.totals.first_block},`));
 });
 
 test("every place that talks about the footer describes it and doesn't order it; none waits for the request to finish", async () => {
   const { svc } = service();
   const flat = AUTO_LOG_INSTRUCTIONS.replace(/\s+/g, " ");
-  assert.match(flat, /the show_user text in each result tells them/);
-  assert.match(flat, /A reply usually logs its own text as a message step last and ends with that result's show_user, as written/);
+  assert.match(flat, /the record_summary text in each result tells them/);
+  assert.match(flat, /A reply usually logs its own text as a message step last and ends with that result's record_summary, as written/);
   assert.doesNotMatch(AUTO_LOG_INSTRUCTIONS, /When the person's request is finished/);
   const on = svc.setLogging(O, true).message;
-  assert.match(on, /a reply usually ends with show_user/);
+  assert.match(on, /a reply usually ends with record_summary/);
   // What a tool hands back is what the model reads next: nothing there should read as an order from the server.
   const r = await svc.logStep(O, { kind: "task", content: "a" }, BASE);
-  for (const text of [flat, on, r.note, r.show_user]) assert.doesNotMatch(text, /without being asked|verbatim|never leave it out|end every reply/i);
+  for (const text of [flat, on, r.note, r.record_summary]) assert.doesNotMatch(text, /without being asked|verbatim|never leave it out|end every reply/i);
   assert.match(r.note, /This session_id goes with every later step/);
   // Every result on the normal path reads as data: no sentence opens with an order.
   const turn = await svc.logTurn(O, { session_id: r.session_id, steps: [{ kind: "prompt", content: "b" }, { kind: "message", content: "c" }] }, BASE);
   const closed = await svc.close(O, { session_id: r.session_id, status: "succeeded", person_messages: 2 }, BASE);
   const orders = /(?:^|[.!:]\s+)(?:Say|Use|Call|Send|Show|Pass|Log|Run|Keep|Do not|Never|Always|Must|End|Copy|Save)\b/m;
-  for (const text of [on, r.note, r.show_user, turn.anchor_note, turn.show_user, closed.summary_note, closed.share, closed.links_note, closed.capture_note]) assert.doesNotMatch(text, orders, text);
+  for (const text of [on, r.note, r.record_summary, turn.anchor_note, turn.record_summary, closed.summary_note, closed.share, closed.links_note, closed.capture_note]) assert.doesNotMatch(text, orders, text);
 });
 
 test("shadow_log_turn counts the steps a prompt inside it cuts off, and doesn't count an earlier turn's", async () => {
   const { svc } = service();
   const r = await svc.logTurn(O, { steps: [{ kind: "task", content: "a" }, { kind: "tool_call", content: { tool: "t" } }, { kind: "message", content: "b" }, { kind: "prompt", content: "c" }, { kind: "message", content: "d" }] }, BASE);
-  assert.equal(rowsOf(r.show_user).length, 2);
-  assert.match(r.show_user, /3 earlier steps are at the viewer link below\./);
-  assert.match(r.show_user, /5 steps logged in this reply/);
+  assert.equal(rowsOf(r.record_summary).length, 2);
+  assert.match(r.record_summary, /3 earlier steps are at the viewer link below\./);
+  assert.match(r.record_summary, /5 steps logged in this reply/);
   const next = await svc.logTurn(O, { session_id: r.session_id, steps: [{ kind: "prompt", content: "e" }, { kind: "message", content: "f" }] }, BASE);
-  assert.equal(rowsOf(next.show_user).length, 2);
-  assert.doesNotMatch(next.show_user, /earlier step/);
+  assert.equal(rowsOf(next.record_summary).length, 2);
+  assert.doesNotMatch(next.record_summary, /earlier step/);
   const one = await svc.logTurn(O, { session_id: r.session_id, steps: [{ kind: "message", content: "g" }, { kind: "prompt", content: "h" }] }, BASE);
-  assert.match(one.show_user, /1 earlier step is at the viewer link below\./);
+  assert.match(one.record_summary, /1 earlier step is at the viewer link below\./);
 });
 
 // ---- Missing turns: a blocked call never reaches the server, so the assistant's count at close is the only evidence ----
@@ -634,4 +634,17 @@ test("a logged note can't pass itself off as the count, and the count is ignored
   assert.equal(c.summary, undefined);
   const { packet } = JSON.parse((await off.svc.linkBody(capOf(c), "packet")).toString("utf8"));
   assert.equal(packet.events.some((e) => e.body.payload?.capture), false);
+});
+
+test("the table is under record_summary, and no record_summary field is left in a log result", async () => {
+  const { svc } = service();
+  const first = await svc.logStep(O, { kind: "task", content: "a" }, BASE);
+  const later = await svc.logStep(O, { session_id: first.session_id, kind: "message", content: "b" }, BASE);
+  const turn = await svc.logTurn(O, { session_id: first.session_id, steps: [{ kind: "prompt", content: "c" }] }, BASE);
+  for (const r of [first, later, turn]) {
+    assert.equal(r.record_summary, undefined);
+    assert.equal(typeof r.record_summary, "string");
+  }
+  assert.match(later.record_summary, /\| What happened \|/);
+  assert.doesNotMatch(svc.setLogging(O, false).message, /\bDo not\b/);
 });
