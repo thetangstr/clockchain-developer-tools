@@ -90,6 +90,13 @@ services:
       SHADOW_LAZY_AUTH: "${SHADOW_LAZY_AUTH:-}"
       # Requests per minute per client to /shadow/chat/mcp before sign-in ("" = 600).
       SHADOW_ANON_PER_MINUTE: "${SHADOW_ANON_PER_MINUTE:-}"
+      # Logging on by default for connected accounts: SHADOW_AUTO_LOG=1 adds shadow_log_step and friends on /shadow/mcp and
+      # /shadow/chat/mcp, and says so on the sign-in pages. "" = off. With it on, anchors default to 1000 per account per
+      # day and per session (without it, 60 and 100), and shadow_log_step to 120 calls per account per minute.
+      SHADOW_AUTO_LOG: "${SHADOW_AUTO_LOG:-}"
+      SHADOW_ANCHORS_PER_DAY: "${SHADOW_ANCHORS_PER_DAY:-}"
+      SHADOW_ANCHORS_PER_SESSION: "${SHADOW_ANCHORS_PER_SESSION:-}"
+      SHADOW_LOG_STEPS_PER_MIN: "${SHADOW_LOG_STEPS_PER_MIN:-}"
       # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
       # MCP_OAUTH=1 exists in SSM ("" == absent == off: no OAuth routes, 401 unchanged).
       # The issuer is MCP_PUBLIC_URL, default https://mcp.clockchain.network (never the Host

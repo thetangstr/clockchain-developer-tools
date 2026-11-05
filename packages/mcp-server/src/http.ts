@@ -613,7 +613,9 @@ export async function runHttp(): Promise<Server> {
   // SHADOW_LAZY_AUTH=1 (with hosted Shadow and OAuth on) adds the chat sign-in endpoint for claude.ai's "Sign in when
   // needed" connectors: it connects and lists tools without a token, and its first tool call starts sign-in. A
   // separate path, so /shadow/mcp (ChatGPT, Claude Code, "Sign in now" connectors) is untouched. Off: no such path.
-  const shadowChatPath = (process.env.SHADOW_LAZY_AUTH ?? "").trim() === "1" && loadShadowConfig(process.env).enabled && oauthConfig.kind === "ready"
+  const shadowAtStart = loadShadowConfig(process.env);
+  const shadowAutoLog = shadowAtStart.enabled && shadowAtStart.autoLog === true;
+  const shadowChatPath = (process.env.SHADOW_LAZY_AUTH ?? "").trim() === "1" && shadowAtStart.enabled && oauthConfig.kind === "ready"
     ? "/shadow/chat/mcp"
     : undefined;
   if (oauthConfig.kind === "misconfigured") {
@@ -633,6 +635,8 @@ export async function runHttp(): Promise<Server> {
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
         ...(shadowChatPath ? { chatPaths: [shadowChatPath] } : {}),
+        // SHADOW_AUTO_LOG=1: every sign-in page says plainly that logging is on by default once connected.
+        ...(shadowAutoLog ? { autoLog: true } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
       })
     : undefined;
@@ -1106,6 +1110,9 @@ export async function runHttp(): Promise<Server> {
   const shadowLinkLimit = keyedWindowLimiter(Number(process.env.SHADOW_LINKS_PER_MINUTE || "60"), 60_000, Date.now);
   // Discovery before sign-in on the chat endpoint, per client (generous: claude.ai calls from shared egress).
   const shadowAnonymousLimit = keyedWindowLimiter(Number(process.env.SHADOW_ANON_PER_MINUTE || "600"), 60_000, Date.now);
+  // shadow_log_step per account, apart from MCP_RATE_PER_MIN: a task with an anchor per step must not hit the general limit.
+  const shadowLogStepsPerMinute = shadowConfig.enabled ? shadowConfig.logStepsPerMinute ?? 0 : 0;
+  const shadowLogStepLimit = keyedWindowLimiter(shadowLogStepsPerMinute, 60_000, Date.now);
   // Link clients are bucketed like OAuth's: the real client behind Caddy (MCP_OAUTH_TRUSTED_PROXY), IPv6 by /64.
   const shadowTrustedProxy = (process.env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim() || undefined;
   const shadowLinkClient = (req: IncomingMessage): string =>
@@ -1186,6 +1193,7 @@ export async function runHttp(): Promise<Server> {
         network: shadowConfig.network,
         ledger: () => runtimeShadowLedger(process.env),
         limits: shadowConfig.limits,
+        ...(shadowConfig.autoLog ? { autoLog: true } : {}),
       });
       const disk = diskBudgetProblem(shadowConfig.stateDir, shadowConfig.limits.maxStateBytes);
       if (disk) throw Object.assign(new Error(disk), { name: "ShadowConfigError" });
@@ -1211,6 +1219,13 @@ export async function runHttp(): Promise<Server> {
         },
         linkClient: shadowLinkClient,
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
+        ...(shadowConfig.autoLog ? {
+          autoLog: {
+            accounts: oauth?.accounts,
+            allowLogStep: (rateKey: string) => shadowLogStepLimit(`shadowlogstep:${rateKey}`),
+            stepsPerMinute: shadowLogStepsPerMinute,
+          },
+        } : {}),
         ...(shadowChatPath ? {
           chat: {
             path: shadowChatPath,

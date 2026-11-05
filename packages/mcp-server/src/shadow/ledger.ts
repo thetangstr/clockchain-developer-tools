@@ -196,19 +196,37 @@ function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {
  * under the session reference. Answers come from that snapshot; anything not fetched in time reads as unreachable,
  * which the verifier reports as indeterminate rather than failing.
  */
-export async function prefetchOnline(ledger: ShadowLedger, o: { network: string; referenceId: string; ledgerIds: string[]; timeoutMs: number }): Promise<OnlineClient> {
+export async function prefetchOnline(
+  ledger: ShadowLedger,
+  o: { network: string; referenceId: string; ledgerIds: string[]; timeoutMs: number; concurrency?: number },
+): Promise<OnlineClient & { receiptsChecked: number }> {
   const deadline = Date.now() + o.timeoutMs;
   const entries = new Map<string, { assetHash: string | null; blockHeight: string | null; blockTime: string | null; submittedAt: string | null }>();
-  for (const id of o.ledgerIds) {
-    try {
-      const rec = await withDeadline(ledger.getLedgerEntry(id), deadline);
-      const blockHeight = str(rec.blockHeight);
-      const blockTime = blockHeight ? normalizeGatewayTime((await withDeadline(ledger.getBlock(blockHeight), deadline)).blockTime) : null;
-      entries.set(id, { assetHash: str(rec.assetHash), blockHeight, blockTime, submittedAt: normalizeGatewayTime(rec.createdTimestamp) });
-    } catch {
-      // Unreachable for this receipt.
+  // A session with an anchor per step has hundreds of receipts: a few readers at once, one read per block.
+  const blocks = new Map<string, Promise<{ blockTime?: unknown }>>();
+  let next = 0;
+  const reader = async () => {
+    while (next < o.ledgerIds.length && Date.now() < deadline) {
+      const id = o.ledgerIds[next++];
+      try {
+        const rec = await withDeadline(ledger.getLedgerEntry(id), deadline);
+        const blockHeight = str(rec.blockHeight);
+        let blockTime: string | null = null;
+        if (blockHeight) {
+          let read = blocks.get(blockHeight);
+          if (!read) {
+            read = ledger.getBlock(blockHeight);
+            blocks.set(blockHeight, read);
+          }
+          blockTime = normalizeGatewayTime((await withDeadline(read, deadline)).blockTime as string);
+        }
+        entries.set(id, { assetHash: str(rec.assetHash), blockHeight, blockTime, submittedAt: normalizeGatewayTime(rec.createdTimestamp) });
+      } catch {
+        // Unreachable for this receipt: the verifier reports witness as indeterminate.
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, o.concurrency ?? 1) }, reader));
   const last = o.ledgerIds.at(-1);
   let pkg: { valid: boolean } | undefined;
   if (last) {
@@ -227,6 +245,7 @@ export async function prefetchOnline(ledger: ShadowLedger, o: { network: string;
   }
   const unreachable = () => Promise.reject(new Error("Clockchain could not be reached"));
   return {
+    receiptsChecked: entries.size,
     network: o.network,
     logEntry: (id) => {
       const e = entries.get(id);

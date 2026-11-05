@@ -50,6 +50,32 @@ export const ACCOUNT_INSTRUCTIONS = [
   "  If someone pastes one into the chat, tell them to keep it private and not to share it again.",
 ].join("\n");
 
+/** First in the instructions when SHADOW_AUTO_LOG=1. The essentials are in shadow_log_step's description too. */
+export const AUTO_LOG_INSTRUCTIONS = [
+  "Logging is ON by default in every conversation once this connector is connected: you log your activity to Clockchain",
+  "Shadow without being asked, until the person turns it off. The person agreed to this when they connected.",
+  "",
+  "How to log:",
+  "- Call shadow_log_step right after each step happens, one call per step: the person's request (kind task for the first",
+  "  in a conversation, kind prompt after that), every tool call (kind tool_call), every tool result (kind tool_result),",
+  "  from any connector, every file you write (kind file) and each message you show (kind message). Never wait until",
+  "  the end of the reply. Each call returns that step's own hash, block height and ledger ID.",
+  "- Omit session_id on the first step of a conversation, then pass the returned session_id with every later step.",
+  "- End each reply with the show_user text from your last log call, verbatim. Do not log that footer itself.",
+  "- Never record hidden reasoning. Replace passwords, API keys and other secrets with [redacted] before recording.",
+  "- If this connection is not signed in, your first call starts the normal connect flow, and is retried after it.",
+  "- If a log call returns an error, say plainly in your reply that the step was not logged, and invent nothing.",
+  "- shadow_log_turn is only a fallback for a client that can't log step by step: its steps share one anchor.",
+  "",
+  "Turning it off: when the person says \"stop logging\", call clockchain_logging {enabled: false}, and stop logging and",
+  "showing the footer. When they say \"turn logging back on\", call clockchain_logging {enabled: true}. If a log call",
+  "answers LOGGING_OFF, do not log and do not show a footer. A chat can also stop by turning the connector off in the app.",
+  "",
+  "The viewer page reads \"indeterminate\" until the session is closed. That is expected. Call shadow_close_session (with",
+  "status, how the task ended) and shadow_verify only when the person asks to finish or verify the record.",
+  "",
+].join("\n");
+
 /** Retention and sharing, said wherever a tool hands out or describes links. */
 const RETENTION = "Records are kept 30 days, then deleted; anyone with a link can read the record until then, and links cannot be revoked.";
 
@@ -81,6 +107,18 @@ export interface ShadowHttpDeps {
    * through so a client can connect before sign-in; everything else (every tools/call) gets the same 401 and
    * challenge as /shadow/mcp, which starts the client's sign-in and its retry of the call.
    */
+  /**
+   * SHADOW_AUTO_LOG=1, on /shadow/mcp and the chat endpoint: logging is on by default. Adds shadow_log_step,
+   * shadow_log_turn, clockchain_logging and clockchain_whoami. shadow_log_step skips allowCall (MCP_RATE_PER_MIN) for
+   * its own limit, because a 50-step task must not run into the general one.
+   */
+  autoLog?: {
+    /** The OAuth account store, for clockchain_whoami's name. */
+    accounts?: AccountStore;
+    /** false once this caller has used its shadow_log_step calls for the minute. */
+    allowLogStep(rateKey: string): boolean;
+    stepsPerMinute: number;
+  };
   chat?: {
     path: string;
     /** The OAuth account store (shared with the sign-in page). */
@@ -91,6 +129,14 @@ export interface ShadowHttpDeps {
     allowAnonymous(req: IncomingMessage): boolean;
   };
 }
+
+/** A request body on /shadow/mcp and the chat endpoint when SHADOW_AUTO_LOG=1: shadow_log_turn takes up to 100 steps. */
+const AUTO_LOG_MAX_BODY = 1024 * 1024;
+const isLogStepCall = (body: unknown): boolean => {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return false;
+  const m = body as { method?: unknown; params?: { name?: unknown } | null };
+  return m.method === "tools/call" && m.params?.name === "shadow_log_step";
+};
 
 /** What a client may do on the chat endpoint before signing in, in a body of at most 16 KB. */
 const ANONYMOUS_METHODS = new Set(["initialize", "notifications/initialized", "tools/list", "ping"]);
@@ -174,10 +220,18 @@ const READ = { readOnlyHint: true, openWorldHint: false } as const;
  * endpoint's anonymous server, which only answers initialize and tools/list: the HTTP gate refuses any tools/call
  * without a token (401) before this server runs, and its tools fail closed anyway. `accounts` adds the account tools.
  */
-export function buildShadowServer(service: ShadowService, ownerId: string | null, base: string, accounts?: AccountStore): McpServer {
+export function buildShadowServer(
+  service: ShadowService,
+  ownerId: string | null,
+  base: string,
+  o: { chatAccounts?: AccountStore | undefined; autoLog?: { accounts?: AccountStore | undefined; logStepAllowed: boolean; stepsPerMinute: number } | undefined } = {},
+): McpServer {
+  const accounts = o.chatAccounts;
+  const autoLog = o.autoLog;
+  const instructions = accounts ? SHADOW_INSTRUCTIONS + "\n" + ACCOUNT_INSTRUCTIONS : SHADOW_INSTRUCTIONS;
   const server = new McpServer(
     { name: "clockchain-shadow", version: VERSION },
-    { instructions: accounts ? SHADOW_INSTRUCTIONS + "\n" + ACCOUNT_INSTRUCTIONS : SHADOW_INSTRUCTIONS },
+    { instructions: autoLog ? AUTO_LOG_INSTRUCTIONS + "\n" + instructions : instructions },
   );
   const owner = ownerId ?? "";
   const run = <A>(fn: (a: A) => Promise<unknown>) => async (a: A) => {
@@ -188,6 +242,55 @@ export function buildShadowServer(service: ShadowService, ownerId: string | null
       return toolError(e);
     }
   };
+
+  if (autoLog) {
+    const stepInput = {
+      kind: z.enum(["task", "prompt", "message", "tool_call", "tool_result", "file", "note"]).describe("task (the person's first request; starts a run), prompt (a later message from the person), message (what you show), tool_call ({tool, args}), tool_result ({tool, result, is_error}), file ({path, content}), note."),
+      content: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).describe("The step as it happened: text, or JSON. At most 32 KB. Replace passwords, API keys and other secrets with [redacted]. Never include hidden reasoning."),
+      agent: z.string().optional().describe("Which agent took the step. Leave it out unless several agents share the session."),
+    };
+    const sessionInput = {
+      session_id: z.string().optional().describe("The session_id from your earlier log call in this conversation. Omit it only on the first step: that starts a session."),
+      title: z.string().optional().describe("Optional, for a new session: what this conversation is about, up to 200 characters."),
+    };
+    server.registerTool("shadow_log_step", {
+      title: "Log one step",
+      description:
+        "Logging is ON by default: call this right after each step, without being asked, one call per step, and never wait until the end of the reply. " +
+        "Log the person's request, every tool call and tool result (any connector), every file you write and each message you show. " +
+        "It appends the step and anchors it on Clockchain in this call, and returns the step's own hash, block_height, ledger_id, block_time and anchor_status, the anchored checkpoint hash, the viewer link and session_id. " +
+        "Reuse session_id for the whole conversation. End each reply with the show_user text from your last log call, verbatim. " +
+        "Never record hidden reasoning; replace passwords, API keys and other secrets with [redacted]. " +
+        "If the anchor is pending or over a limit the step is still recorded and block_height and ledger_id are null. If it answers LOGGING_OFF, do not log and do not show a footer. " +
+        `The person can say "stop logging" (clockchain_logging). The viewer reads "indeterminate" until the session is closed; call shadow_close_session and shadow_verify only when asked. ${RETENTION}`,
+      inputSchema: { ...sessionInput, ...stepInput, run_id: z.string().optional().describe("Optional. A task step starts a run; other steps join the latest open run unless you pass one.") },
+      annotations: WRITE,
+    }, async (a) => {
+      if (ownerId === null) return toolError(signInRequired());
+      if (!autoLog.logStepAllowed) {
+        return toolError(new ShadowError("SHADOW_LOG_RATE", `This account has logged ${autoLog.stepsPerMinute} steps in the last minute, the most allowed, so this step was not recorded. Wait 30 seconds, then call shadow_log_step again with the same step.`));
+      }
+      return run((x: typeof a) => service.logStep(owner, x, base))(a);
+    });
+    server.registerTool("shadow_log_turn", {
+      title: "Log a whole reply (fallback)",
+      description:
+        "Only for a client that can't log step by step; otherwise use shadow_log_step. Logs up to 100 steps (32 KB each, about 900 KB in all) in one call, in order, and anchors them together: " +
+        "the steps share ONE block and ledger record, and each keeps its own hash. Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, viewer) and show_user: end the reply with show_user verbatim. " +
+        "Call it before finishing each reply, without being asked, with the person's message, every tool call and result in that turn and the answer as shown. Reuse session_id. Never record hidden reasoning; replace secrets with [redacted]. " +
+        `If it answers LOGGING_OFF, do not log and do not show a footer. ${RETENTION}`,
+      inputSchema: { ...sessionInput, steps: z.array(z.object(stepInput)).describe("The steps of this reply, in order, 100 at most.") },
+      annotations: WRITE,
+    }, run((a) => service.logTurn(owner, a, base)));
+    server.registerTool("clockchain_logging", {
+      title: "Turn logging on or off",
+      description:
+        "Turns automatic logging on or off for this Clockchain account, in every chat, until it is changed again. It is on by default. " +
+        "\"Stop logging\" means enabled: false; \"turn logging back on\" means enabled: true. While it is off, the log tools refuse and you show no footer. A chat can also stop by turning the connector off in the app.",
+      inputSchema: { enabled: z.boolean().describe("true to log, false to stop.") },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    }, run(async (a) => service.setLogging(owner, a.enabled)));
+  }
 
   server.registerTool("shadow_start_session", {
     title: "Start a Shadow session",
@@ -217,7 +320,10 @@ export function buildShadowServer(service: ShadowService, ownerId: string | null
       run_id: z.string().optional().describe("Optional. A task step starts a run (returned as run_id); other steps join the agent's latest open run unless you pass one."),
     },
     annotations: WRITE,
-  }, run((a) => service.record(owner, a)));
+  }, run(async (a) => {
+    if (autoLog) service.assertLogging(owner);
+    return service.record(owner, a);
+  }));
 
   server.registerTool("shadow_checkpoint", {
     title: "Anchor a checkpoint",
@@ -258,7 +364,8 @@ export function buildShadowServer(service: ShadowService, ownerId: string | null
     annotations: READ,
   }, run((a) => service.verify(owner, a, base)));
 
-  if (accounts) registerAccountTools(server, accounts, ownerId);
+  if (accounts) registerAccountTools(server, accounts, ownerId, autoLog ? service : undefined);
+  else if (autoLog?.accounts) registerWhoami(server, autoLog.accounts, ownerId, service, false);
   return server;
 }
 
@@ -271,23 +378,54 @@ const accountView = (account: Account) => ({
 /** "an unnamed account (abc123, created 3 Nov)" or "Acme (abc123)", for status lines. */
 const accountLine = (v: ReturnType<typeof accountView>) => (v.named ? `${v.name} (${v.short_id})` : `${v.name} (${v.short_id}, created ${v.created})`);
 
+const SIGNED_IN = { readOnlyHint: true, openWorldHint: false } as const;
+
+const withAccountOf = (ownerId: string | null) => <A>(fn: (acct: string, a: A) => unknown) => async (a: A) => {
+  if (ownerId === null) return toolError(signInRequired());
+  if (!ACCT.test(ownerId)) return accountError("ACCOUNT_REQUIRED", "This connection is not signed in with a Clockchain account. Connect with sign-in, then try again.");
+  try {
+    return ok(fn(ownerId, a));
+  } catch (e) {
+    if (e instanceof AccountUnavailableError) return accountError("ACCOUNT_UNAVAILABLE", "Clockchain can't read this account right now. Try again in a few minutes.");
+    return toolError(e);
+  }
+};
+
+/** clockchain_whoami. `service` (SHADOW_AUTO_LOG=1) adds the logging setting; `canName` says clockchain_create_account is here. */
+function registerWhoami(server: McpServer, accounts: AccountStore, ownerId: string | null, service: ShadowService | undefined, canName: boolean): void {
+  server.registerTool("clockchain_whoami", {
+    title: "Which Clockchain account",
+    description: service
+      ? "The Clockchain account this connection uses: its name and short id, and whether logging is on. Asks the person to connect first if they are not signed in."
+      : "The Clockchain account this connection uses: its name and short id. Asks the person to connect first if they are not signed in.",
+    inputSchema: {},
+    annotations: SIGNED_IN,
+  }, withAccountOf(ownerId)((acct) => {
+    const account = accounts.get(acct);
+    if (!account) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
+    const view = accountView(account);
+    const logging = service?.loggingEnabled(acct);
+    return {
+      status: "signed_in",
+      account: view,
+      ...(logging === undefined ? {} : { logging: { enabled: logging } }),
+      message: (view.named
+        ? `This connection uses the Clockchain account ${accountLine(view)}.`
+        : canName
+          ? `This connection uses ${accountLine(view)}. If it was created in the last 15 minutes, ask the person for a name and call clockchain_create_account {name}; after that it can no longer be named from the chat.`
+          : `This connection uses ${accountLine(view)}.`) +
+        (logging === undefined ? "" : logging ? " Logging is on." : " Logging is off."),
+    };
+  }));
+}
+
 /**
  * clockchain_create_account, clockchain_whoami and clockchain_signup_help (chat sign-in endpoint only). They see the
  * account through the token's verified acct and return only its name, short id and a status line: never the account
  * key, a token, a cookie or a link.
  */
-function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId: string | null): void {
-  const withAccount = <A>(fn: (acct: string, a: A) => unknown) => async (a: A) => {
-    if (ownerId === null) return toolError(signInRequired());
-    if (!ACCT.test(ownerId)) return accountError("ACCOUNT_REQUIRED", "This connection is not signed in with a Clockchain account. Connect with sign-in, then try again.");
-    try {
-      return ok(fn(ownerId, a));
-    } catch (e) {
-      if (e instanceof AccountUnavailableError) return accountError("ACCOUNT_UNAVAILABLE", "Clockchain can't read this account right now. Try again in a few minutes.");
-      return toolError(e);
-    }
-  };
-  const SIGNED_IN = { readOnlyHint: true, openWorldHint: false } as const;
+function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId: string | null, service: ShadowService | undefined): void {
+  const withAccount = withAccountOf(ownerId);
 
   server.registerTool("clockchain_create_account", {
     title: "Create a Clockchain account",
@@ -318,23 +456,7 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
       : { status: "already_named", account: view, message: `This connection already uses the Clockchain account ${accountLine(view)}. It keeps that name; nothing was renamed.` };
   }));
 
-  server.registerTool("clockchain_whoami", {
-    title: "Which Clockchain account",
-    description: "The Clockchain account this connection uses: its name and short id. Asks the person to connect first if they are not signed in.",
-    inputSchema: {},
-    annotations: SIGNED_IN,
-  }, withAccount((acct) => {
-    const account = accounts.get(acct);
-    if (!account) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
-    const view = accountView(account);
-    return {
-      status: "signed_in",
-      account: view,
-      message: view.named
-        ? `This connection uses the Clockchain account ${accountLine(view)}.`
-        : `This connection uses ${accountLine(view)}. If it was created in the last 15 minutes, ask the person for a name and call clockchain_create_account {name}; after that it can no longer be named from the chat.`,
-    };
-  }));
+  registerWhoami(server, accounts, ownerId, service, true);
 
   server.registerTool("clockchain_signup_help", {
     title: "How Clockchain sign-up works",
@@ -348,6 +470,7 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
       "To get one from this chat: ask for it (for example \"create a Clockchain account for Acme\"). A Connect button appears; in the Clockchain window that opens, click Create account. The window shows the account key once, with a Download key file link: save it there. Then the chat carries on and names the account.",
       "The account key is shown only in that window. It never appears in this chat, and nobody should ask for it here. It signs you in on another device or app: choose \"I have an account key\" in the Clockchain window.",
       "Already have an account? When the Clockchain window opens, choose \"I have an account key\", or click Allow if it shows your account.",
+      ...(service ? ["Once connected, this app logs its chats and tool activity to Clockchain Shadow by default. Records are kept 30 days and anyone holding a record's link can read it. To stop, say \"stop logging\", which turns it off for the account until you turn it back on; a chat can also stop by turning the connector off in the app."] : []),
     ].join("\n"),
   })));
 }
@@ -455,8 +578,13 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     }
     let body: unknown;
     if (req.method === "POST") {
+      if (deps.autoLog && Number(req.headers["content-length"] ?? "0") > AUTO_LOG_MAX_BODY) {
+        res.writeHead(413, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "This request is over 1 MB and was not read, so nothing was recorded. Log fewer or smaller steps per call." } }));
+        return;
+      }
       try {
-        body = await deps.readJsonBody(req, 512 * 1024);
+        body = await deps.readJsonBody(req, deps.autoLog ? AUTO_LOG_MAX_BODY : 512 * 1024);
       } catch {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "invalid_json_body" }));
@@ -473,8 +601,15 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
         return;
       }
     }
-    if (!deps.allowCall(auth.rateKey, body, res)) return;
-    await serve(req, res, body, buildShadowServer(deps.service, auth.ownerId, publicBaseUrl(req.headers), chat?.accounts));
+    // shadow_log_step has its own per-account limit, answered as a tool error that says to wait and log the step again.
+    const autoLog = deps.autoLog;
+    const logStep = autoLog !== undefined && isLogStepCall(body);
+    if (!logStep && !deps.allowCall(auth.rateKey, body, res)) return;
+    const logStepAllowed = logStep && autoLog.allowLogStep(auth.rateKey);
+    await serve(req, res, body, buildShadowServer(deps.service, auth.ownerId, publicBaseUrl(req.headers), {
+      chatAccounts: chat?.accounts,
+      autoLog: autoLog && { accounts: autoLog.accounts, logStepAllowed, stepsPerMinute: autoLog.stepsPerMinute },
+    }));
   }
 
   /**
@@ -501,7 +636,12 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     const method = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as { method?: unknown }).method : undefined;
     // Before the SDK runs: a tool handler can only answer 200, and only a 401 starts the client's sign-in.
     if (typeof method !== "string" || !ANONYMOUS_METHODS.has(method)) return deps.unauthorized(res, req);
-    await serve(req, res, body, buildShadowServer(deps.service, null, publicBaseUrl(req.headers), chat.accounts));
+    const autoLog = deps.autoLog;
+    await serve(req, res, body, buildShadowServer(deps.service, null, publicBaseUrl(req.headers), {
+      chatAccounts: chat.accounts,
+      // The anonymous server only lists tools: every tools/call got the 401 above.
+      autoLog: autoLog && { accounts: autoLog.accounts, logStepAllowed: false, stepsPerMinute: autoLog.stepsPerMinute },
+    }));
   }
 
   async function serve(req: IncomingMessage, res: ServerResponse, body: unknown, server: McpServer): Promise<void> {

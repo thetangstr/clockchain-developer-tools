@@ -3,6 +3,7 @@
 //
 //   owners/<ownerKey>/key.json                      operator id + Ed25519 private key (0600, written once)
 //   owners/<ownerKey>/usage.json                    anchors and session starts today (the per-owner daily limits)
+//   owners/<ownerKey>/settings.json                 written once the owner turns automatic logging off (SHADOW_AUTO_LOG)
 //   owners/<ownerKey>/sessions/<sessionId>/meta.json      small durable JSON: state, head, checkpoint, outbox, anchors
 //   owners/<ownerKey>/sessions/<sessionId>/events.jsonl   append-only, fsync'd, one event per line
 //   caps/<sha256(cap)>.json                         link capability -> (ownerKey, sessionId)
@@ -17,7 +18,8 @@ import { appendDurableLine, cleanStaleFiles, createDurableJsonFile } from "../ha
 import type { KeyProvider } from "./lib/keys.js";
 import type { Checkpoint, CheckpointBody, Network, ShadowEvent } from "./lib/types.js";
 
-export const META_MAX_BYTES = 256 * 1024;
+/** Big enough for a session with an anchor per step: about 260 bytes per anchor in meta.anchors. */
+export const META_MAX_BYTES = 512 * 1024;
 const KEY_MAX_BYTES = 8 * 1024;
 const SMALL_MAX_BYTES = 4 * 1024;
 
@@ -177,6 +179,30 @@ export class ShadowStore {
     if (this.operators.size >= 512) this.operators.delete(this.operators.keys().next().value as string);
     this.operators.set(ownerKey, op);
     return op;
+  }
+
+  // ---- the owner's logging setting (SHADOW_AUTO_LOG) ------------------------------------------------------------
+
+  private settingsFile(ownerKey: string, current: () => { loggingOff: boolean }) {
+    return createDurableJsonFile<{ loggingOff: boolean }>({
+      path: join(this.ownerDir(ownerKey), "settings.json"),
+      schema: "shadow-settings-v1",
+      snapshot: current,
+      validate: (v) => {
+        if (!isObj(v) || typeof v.loggingOff !== "boolean") throw new Error("bad settings file");
+        return { loggingOff: v.loggingOff };
+      },
+      maxBytes: SMALL_MAX_BYTES,
+    });
+  }
+
+  /** True once the owner turned logging off. Default false. Throws if the file cannot be read (callers fail closed). */
+  loggingOff(ownerKey: string): boolean {
+    return this.settingsFile(ownerKey, () => ({ loggingOff: false })).load()?.loggingOff === true;
+  }
+
+  setLoggingOff(ownerKey: string, loggingOff: boolean): void {
+    this.settingsFile(ownerKey, () => ({ loggingOff })).save("now");
   }
 
   // ---- per-owner daily anchor count ---------------------------------------------------------------------------
@@ -424,7 +450,8 @@ export class ShadowStore {
         if (remaining === 0) {
           const keyPath = join(odir, "key.json");
           const keyAge = existsSync(keyPath) ? nowMs - statSync(keyPath).mtimeMs : Infinity;
-          if (keyAge > retentionMs) {
+          // A logging setting outlives the records: "off" must never silently turn back on.
+          if (keyAge > retentionMs && !existsSync(join(odir, "settings.json"))) {
             rmSync(odir, { recursive: true, force: true });
             this.operators.delete(ownerKey);
           }

@@ -168,6 +168,10 @@ const expectedContractEnv = {
   SHADOW_LINK_CONCURRENCY: "shadow-link-concurrency\n",
   SHADOW_LAZY_AUTH: "shadow-lazy-auth\n",
   SHADOW_ANON_PER_MINUTE: "shadow-anon-per-minute\n",
+  SHADOW_AUTO_LOG: "shadow-auto-log\n",
+  SHADOW_ANCHORS_PER_DAY: "shadow-anchors-per-day\n",
+  SHADOW_ANCHORS_PER_SESSION: "shadow-anchors-per-session\n",
+  SHADOW_LOG_STEPS_PER_MIN: "shadow-log-steps-per-min\n",
   // OAuth connector sign-in (optional reads, after the receipts block).
   MCP_OAUTH: "oauth-flag-on\n",
   MCP_OAUTH_APPROVALS_PER_HOUR: "oauth-approvals\n",
@@ -470,6 +474,10 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_LINK_CONCURRENCY) value=$'shadow-link-concurrency\\n' ;;
   /clockchain/mcp/SHADOW_LAZY_AUTH) value=$'shadow-lazy-auth\\n' ;;
   /clockchain/mcp/SHADOW_ANON_PER_MINUTE) value=$'shadow-anon-per-minute\\n' ;;
+  /clockchain/mcp/SHADOW_AUTO_LOG) value=$'shadow-auto-log\\n' ;;
+  /clockchain/mcp/SHADOW_ANCHORS_PER_DAY) value=$'shadow-anchors-per-day\\n' ;;
+  /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION) value=$'shadow-anchors-per-session\\n' ;;
+  /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN) value=$'shadow-log-steps-per-min\\n' ;;
   /clockchain/mcp/MCP_OAUTH) value=$'oauth-flag-on\\n' ;;
   /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR) value=$'oauth-approvals\\n' ;;
   /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_HOUR) value=$'oauth-accounts\\n' ;;

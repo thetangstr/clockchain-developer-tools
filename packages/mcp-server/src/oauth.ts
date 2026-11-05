@@ -185,6 +185,8 @@ export interface OAuthOptions {
    * sign-in for one of them (its `resource`) gets the one-click create page, the name coming later from the chat.
    */
   chatPaths?: readonly string[];
+  /** SHADOW_AUTO_LOG=1: the sign-in pages say that the app logs its chats and tool activity by default once connected. */
+  autoLog?: boolean;
   /**
    * Where spent codes, spent refresh tokens and revoked families are kept across restarts (src/oauth-replay.ts).
    * Unset: memory only (tests). Set but unusable: the token endpoint refuses closed (503).
@@ -471,6 +473,8 @@ interface ConsentView {
   keyOpen?: boolean;
   /** A sign-in from the chat: Create account needs no name (the chat names the account afterwards). */
   oneClick?: boolean;
+  /** Logging is on by default once connected (SHADOW_AUTO_LOG=1): said in the open, and in "What this allows". */
+  autoLog?: boolean;
 }
 
 const requestField = (token: string): string => `<input type="hidden" name="request" value="${escapeHtml(token)}">`;
@@ -488,13 +492,19 @@ function appLine(app: string, redirectHost: string): string {
   return `<p class="app">${app} · returns you to <code>${escapeHtml(redirectHost)}</code></p>`;
 }
 
+/** The most important thing a person agrees to when logging is on by default: never folded away. */
+function loggingConsent(app: string, tag: "p class=\"who\"" | "p"): string {
+  return `<${tag}><strong>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off.</strong> Records are kept 30 days, and anyone holding a record’s link can read them.</p>`;
+}
+
 /** The small print: testnet, then what allowing means (the reviewed wording, unchanged), folded. */
-function smallPrint(app: string, redirectHost: string): string {
+function smallPrint(app: string, redirectHost: string, autoLog?: boolean): string {
   return `<footer class="foot">
 <p>Free testnet · only fingerprints go on the Clockchain ledger</p>
 <details class="more">
 <summary>What this allows</summary>
-<ul>
+<ul>${autoLog ? `
+<li>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}
 <li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
 <li>${app} can read and add to every Shadow record in this account, including records made from other apps.</li>
 <li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>
@@ -516,7 +526,8 @@ function consentPage(v: ConsentView): string {
   const action = escapeHtml(v.action);
   const head = `<h1>${escapeHtml(title)}</h1>
 ${appLine(app, v.redirectHost)}${v.error ? `
-<p class="alert" role="alert">${escapeHtml(v.error)}</p>` : ""}`;
+<p class="alert" role="alert">${escapeHtml(v.error)}</p>` : ""}${v.autoLog ? `
+${loggingConsent(app, 'p class="who"')}` : ""}`;
   if (v.signedIn) {
     return htmlDocument(title, `${head}
 <p class="who">${signedInAs(v.signedIn.account)}</p>
@@ -529,7 +540,7 @@ ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="cancel" class="link">Cancel</button>
 </div>
 </form>
-${smallPrint(app, v.redirectHost)}`);
+${smallPrint(app, v.redirectHost, v.autoLog)}`);
   }
   return htmlDocument(title, `${head}
 <div class="flow">
@@ -555,7 +566,7 @@ ${requestField(v.requestToken)}
 </form>
 </div>
 </div>
-${smallPrint(app, v.redirectHost)}`);
+${smallPrint(app, v.redirectHost, v.autoLog)}`);
 }
 
 interface KeyView {
@@ -566,6 +577,7 @@ interface KeyView {
   key: string;
   requestToken: string;
   grant: string;
+  autoLog?: boolean;
 }
 
 /**
@@ -594,7 +606,8 @@ ${requestField(v.requestToken)}
 </form>
 <footer class="foot">
 <p>${signedInAs(v.account)}</p>
-<p>Continue returns you to ${escapeHtml(v.appName || "the app")} at <code>${escapeHtml(v.redirectHost)}</code>.</p>
+<p>Continue returns you to ${escapeHtml(v.appName || "the app")} at <code>${escapeHtml(v.redirectHost)}</code>.</p>${v.autoLog ? `
+${loggingConsent(escapeHtml(v.appName || "the app"), "p")}` : ""}
 </footer>`);
 }
 
@@ -987,6 +1000,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       ...(o.error ? { error: o.error } : {}),
       ...(o.keyOpen ? { keyOpen: true } : {}),
       ...(fromChat(request) ? { oneClick: true } : {}),
+      ...(options.autoLog ? { autoLog: true } : {}),
     }));
   }
 
@@ -1197,6 +1211,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         key: created.key,
         requestToken,
         grant,
+        ...(options.autoLog ? { autoLog: true } : {}),
       }));
       return;
     }
