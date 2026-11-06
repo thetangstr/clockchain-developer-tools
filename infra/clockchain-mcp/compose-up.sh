@@ -555,13 +555,14 @@ read_optional_env SHADOW_ANON_PER_MINUTE /clockchain/mcp/SHADOW_ANON_PER_MINUTE
 # Logging on by default for connected accounts (absent = off) and its limits (absent = the code's defaults).
 read_optional_env SHADOW_AUTO_LOG /clockchain/mcp/SHADOW_AUTO_LOG
 read_optional_env SHADOW_ANCHORS_PER_DAY /clockchain/mcp/SHADOW_ANCHORS_PER_DAY
-read_optional_env SHADOW_NETWORK /clockchain/mcp/SHADOW_NETWORK
-read_optional_env MCP_MAINNET_FREE_TOKENS /clockchain/mcp/MCP_MAINNET_FREE_TOKENS
-read_optional_env SHADOW_IDLE_CLOSE_HOURS /clockchain/mcp/SHADOW_IDLE_CLOSE_HOURS
 read_optional_env SHADOW_ANCHORS_PER_SESSION /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION
 read_optional_env SHADOW_LOG_STEPS_PER_MIN /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN
 # The hand-added preview endpoints, logging on by default (absent = no such paths; the listed paths never follow it).
 read_optional_env SHADOW_PREVIEW_AUTO_LOG /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG
+# The network (absent = testnet) and how long an open session waits before closing by itself.
+read_optional_env SHADOW_NETWORK /clockchain/mcp/SHADOW_NETWORK
+read_optional_env MCP_MAINNET_FREE_TOKENS /clockchain/mcp/MCP_MAINNET_FREE_TOKENS
+read_optional_env SHADOW_IDLE_CLOSE_HOURS /clockchain/mcp/SHADOW_IDLE_CLOSE_HOURS
 # Shadow's own writer on the ledger (absent = the delegated client below).
 read_optional_env SHADOW_LEDGER_CLIENT_ID /clockchain/mcp/SHADOW_LEDGER_CLIENT_ID
 read_optional_env SHADOW_LEDGER_WALLET_ID /clockchain/mcp/SHADOW_LEDGER_WALLET_ID

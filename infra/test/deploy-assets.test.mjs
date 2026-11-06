@@ -174,6 +174,9 @@ const expectedContractEnv = {
   SHADOW_ANCHORS_PER_SESSION: "shadow-anchors-per-session\n",
   SHADOW_LOG_STEPS_PER_MIN: "shadow-log-steps-per-min\n",
   SHADOW_PREVIEW_AUTO_LOG: "shadow-preview-auto-log\n",
+  SHADOW_NETWORK: "shadow-network\n",
+  MCP_MAINNET_FREE_TOKENS: "mainnet-free-tokens\n",
+  SHADOW_IDLE_CLOSE_HOURS: "shadow-idle-close-hours\n",
   SHADOW_LEDGER_CLIENT_ID: "shadow-ledger-client\n",
   SHADOW_LEDGER_WALLET_ID: "shadow-ledger-wallet\n",
   OPENAI_APPS_CHALLENGE_TOKEN: "openai-challenge\n",
@@ -485,6 +488,9 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION) value=$'shadow-anchors-per-session\\n' ;;
   /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN) value=$'shadow-log-steps-per-min\\n' ;;
   /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG) value=$'shadow-preview-auto-log\\n' ;;
+  /clockchain/mcp/SHADOW_NETWORK) value=$'shadow-network\\n' ;;
+  /clockchain/mcp/MCP_MAINNET_FREE_TOKENS) value=$'mainnet-free-tokens\\n' ;;
+  /clockchain/mcp/SHADOW_IDLE_CLOSE_HOURS) value=$'shadow-idle-close-hours\\n' ;;
   /clockchain/mcp/SHADOW_LEDGER_CLIENT_ID) value=$'shadow-ledger-client\\n' ;;
   /clockchain/mcp/SHADOW_LEDGER_WALLET_ID) value=$'shadow-ledger-wallet\\n' ;;
   /clockchain/mcp/OPENAI_APPS_CHALLENGE_TOKEN) value=$'openai-challenge\\n' ;;
