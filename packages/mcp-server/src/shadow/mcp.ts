@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { VERSION } from "./recorder.js";
+import { ACTION_TYPE_HELP, INTENT_TYPE_HELP } from "./intent.js";
 import { SUMMARY_CSP } from "./lib/summary.js";
 import { ShadowError, type ShadowService } from "./service.js";
 import { connectInstructions } from "./discovery.js";
@@ -202,6 +203,10 @@ function toolError(e: unknown) {
 const sessionId = z.string().describe("The session_id from shadow_start_session.");
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
 const READ = { readOnlyHint: true, openWorldHint: false } as const;
+const declaredInput = {
+  action_type: z.string().optional().describe(ACTION_TYPE_HELP),
+  intent_type: z.string().optional().describe(INTENT_TYPE_HELP),
+};
 
 /**
  * One McpServer per request, bound to the authenticated owner (stateless, like /mcp). `ownerId` null is the chat
@@ -236,6 +241,7 @@ export function buildShadowServer(
       kind: z.enum(["task", "prompt", "message", "tool_call", "tool_result", "file", "note"]).describe("task (the person's first request; starts a run), prompt (a later message from the person), message (what you show), tool_call ({tool, args}), tool_result ({tool, result, is_error}), file ({path, content}), note."),
       content: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).describe("The step as it happened: text, or JSON. At most 32 KB. Replace passwords, API keys and other secrets with [redacted]. Never include hidden reasoning."),
       agent: z.string().optional().describe("Which agent took the step. Leave it out unless several agents share the session."),
+      ...declaredInput,
     };
     const sessionInput = {
       session_id: z.string().optional().describe("The session_id from your earlier log call in this conversation. Omit it only on the first step: that starts a session."),
@@ -306,6 +312,7 @@ export function buildShadowServer(
       kind: z.enum(["task", "prompt", "message", "tool_call", "tool_result", "file", "note"]).describe("The kind of step."),
       content: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).describe("The step itself: text, or JSON. At most 32 KB."),
       run_id: z.string().optional().describe("Optional. A task step starts a run (returned as run_id); other steps join the agent's latest open run unless you pass one."),
+      ...(autoLog ? declaredInput : {}),
     },
     annotations: WRITE,
   }, run(async (a) => {
