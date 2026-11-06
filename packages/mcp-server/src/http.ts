@@ -589,6 +589,10 @@ export async function runHttp(): Promise<Server> {
     );
   }
 
+  let openMcpStreams = 0;
+  const maxStreamsRaw = Number(process.env.MCP_MAX_OPEN_STREAMS ?? "");
+  const maxOpenMcpStreams = Number.isInteger(maxStreamsRaw) && maxStreamsRaw > 0 ? maxStreamsRaw : 200;
+
   const perMin = Number(process.env.MCP_RATE_PER_MIN ?? "0");
   const limiter = createRateLimiter(Number.isFinite(perMin) ? perMin : 0);
 
@@ -2061,6 +2065,16 @@ export async function runHttp(): Promise<Server> {
           return token;
         });
       }
+      // A held-open GET costs about 0.5 MB until it closes, so enough of them would exhaust the heap.
+      if (req.method === "GET") {
+        if (openMcpStreams >= maxOpenMcpStreams) {
+          res.writeHead(503, { "content-type": "application/json", "retry-after": "30" });
+          res.end(JSON.stringify({ error: "too_many_streams", message: "Too many open streams right now. Tool calls still work; try the stream again later." }));
+          return;
+        }
+        openMcpStreams += 1;
+        res.on("close", () => { openMcpStreams -= 1; });
+      }
       const server = buildServer(
         byo,
         gate,
@@ -2086,6 +2100,13 @@ export async function runHttp(): Promise<Server> {
     }
   });
 
+  // A reading every 10 minutes, because a crash from a full heap leaves no history of how it got there.
+  const memoryLog = setInterval(() => {
+    const m = process.memoryUsage();
+    console.error(JSON.stringify({ event: "process_memory", heapUsedMb: Math.round(m.heapUsed / 1048576), rssMb: Math.round(m.rss / 1048576), openMcpStreams }));
+  }, 10 * 60_000);
+  memoryLog.unref();
+  httpServer.on("close", () => clearInterval(memoryLog));
   httpServer.on("close", () => shadowService?.stop());
   await new Promise<void>((resolve) => {
     httpServer.listen(port, () => {

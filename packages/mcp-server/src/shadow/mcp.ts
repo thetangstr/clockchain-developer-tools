@@ -712,6 +712,11 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     return view ? link(req, res, "summary", view[1]) : link(req, res, "packet", packet![1]);
   };
 
+  // A held-open GET holds memory until it closes, so these are capped as /mcp's are.
+  let openStreams = 0;
+  const maxStreamsRaw = Number(process.env.MCP_MAX_OPEN_STREAMS ?? "");
+  const maxOpenStreams = Number.isInteger(maxStreamsRaw) && maxStreamsRaw > 0 ? maxStreamsRaw : 200;
+
   async function mcp(req: IncomingMessage, res: ServerResponse, path: string, chat?: NonNullable<ShadowHttpDeps["chat"]>): Promise<void> {
     // Logging on by default is this endpoint's, not the process's: anywhere else, the tools for it don't exist.
     const autoLog = deps.autoLog?.paths.has(path) ? deps.autoLog : undefined;
@@ -799,6 +804,15 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
   }
 
   async function serve(req: IncomingMessage, res: ServerResponse, body: unknown, server: McpServer): Promise<void> {
+    if (req.method === "GET") {
+      if (openStreams >= maxOpenStreams) {
+        res.writeHead(503, { "content-type": "application/json", "retry-after": "30" });
+        res.end(JSON.stringify({ error: "too_many_streams", message: "Too many open streams right now. Tool calls still work; try the stream again later." }));
+        return;
+      }
+      openStreams += 1;
+      res.on("close", () => { openStreams -= 1; });
+    }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();

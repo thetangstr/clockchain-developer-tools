@@ -561,6 +561,7 @@ read_optional_env SHADOW_LOG_STEPS_PER_MIN /clockchain/mcp/SHADOW_LOG_STEPS_PER_
 read_optional_env SHADOW_PREVIEW_AUTO_LOG /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG
 # The network (absent = testnet) and how long an open session waits before closing by itself.
 read_optional_env SHADOW_NETWORK /clockchain/mcp/SHADOW_NETWORK
+read_optional_env MCP_MAX_OPEN_STREAMS /clockchain/mcp/MCP_MAX_OPEN_STREAMS
 read_optional_env MCP_MAINNET_FREE_TOKENS /clockchain/mcp/MCP_MAINNET_FREE_TOKENS
 read_optional_env SHADOW_IDLE_CLOSE_HOURS /clockchain/mcp/SHADOW_IDLE_CLOSE_HOURS
 # Shadow's own writer on the ledger (absent = the delegated client below).

@@ -509,6 +509,10 @@ Not rehearsed: no mainnet endpoint exists yet to test against. Do these in order
 
 **Rollback:** set `SHADOW_NETWORK` and `CLOCKCHAIN_ENDPOINT` back and restart. Sessions started on mainnet then behave the same way in reverse.
 
+### Memory
+
+The server logs `process_memory` every 10 minutes: heap, resident memory and open `/mcp` streams. Production ran out of heap once, at 03:15 UTC on 6 November, after 18 hours up with about 350 MB still live, and restarted itself in about a second. **The cause isn't known.** Measured leaks explain about 1/70 of it, so if `heapUsedMb` climbs steadily, take a heap snapshot before it dies, or add `--heapsnapshot-near-heap-limit=1` with a `--diagnostic-dir` on the state volume, which needs spare memory and disk. `/mcp` allows `MCP_MAX_OPEN_STREAMS` held-open GETs at once (default 200, about 0.5 MB each) and answers 503 past that.
+
 ### Sessions that close by themselves
 
 With logging on by default nobody asks to close, so an open session with no new step closes after `SHADOW_IDLE_CLOSE_HOURS` (default 24 when logging by default is on, otherwise off; `off` turns it off). The check runs with the hourly sweep and not at start-up, at most 200 sessions a pass, oldest first, and each spends one anchor from that account's daily limit. If the anchor can't land, because the gateway is down or the limit is used up, later passes retry it. It is on by default wherever logging by default is on, so deploying this build turns it on for production. Sessions from before this build count from their metadata file's last write. At the open-session limit, a session idle for over an hour closes to make room. A later step on a closed session gets `SHADOW_SESSION_CLOSED`, and the log tools tell the agent to start a new session. Logs: `shadow_idle_closed`, `shadow_idle_close_failed`.

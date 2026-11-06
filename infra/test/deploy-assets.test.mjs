@@ -175,6 +175,7 @@ const expectedContractEnv = {
   SHADOW_LOG_STEPS_PER_MIN: "shadow-log-steps-per-min\n",
   SHADOW_PREVIEW_AUTO_LOG: "shadow-preview-auto-log\n",
   SHADOW_NETWORK: "shadow-network\n",
+  MCP_MAX_OPEN_STREAMS: "mcp-max-open-streams\n",
   MCP_MAINNET_FREE_TOKENS: "mainnet-free-tokens\n",
   SHADOW_IDLE_CLOSE_HOURS: "shadow-idle-close-hours\n",
   SHADOW_LEDGER_CLIENT_ID: "shadow-ledger-client\n",
@@ -489,6 +490,7 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN) value=$'shadow-log-steps-per-min\\n' ;;
   /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG) value=$'shadow-preview-auto-log\\n' ;;
   /clockchain/mcp/SHADOW_NETWORK) value=$'shadow-network\\n' ;;
+  /clockchain/mcp/MCP_MAX_OPEN_STREAMS) value=$'mcp-max-open-streams\\n' ;;
   /clockchain/mcp/MCP_MAINNET_FREE_TOKENS) value=$'mainnet-free-tokens\\n' ;;
   /clockchain/mcp/SHADOW_IDLE_CLOSE_HOURS) value=$'shadow-idle-close-hours\\n' ;;
   /clockchain/mcp/SHADOW_LEDGER_CLIENT_ID) value=$'shadow-ledger-client\\n' ;;
