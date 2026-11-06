@@ -223,3 +223,10 @@ test("a delete preview can't carry a stored title into its instruction, and chan
   assert.doesNotMatch(preview.message, /already said yes/);
   assert.equal((await svc.getSession(O, { session_id: a.session_id }, BASE)).status, "open");
 });
+
+test("normalizeGatewayTime reads the network's epoch milliseconds as canonical UTC", async () => {
+  const { normalizeGatewayTime } = await import("../dist/shadow/lib/profile.js");
+  assert.equal(normalizeGatewayTime("1793987846082"), new Date(1793987846082).toISOString());
+  assert.equal(normalizeGatewayTime("24-06-2026_22:49:40:092"), "2026-06-24T22:49:40.092Z");
+  assert.equal(normalizeGatewayTime("123456"), "123456"); // not a time: kept as it is
+});
