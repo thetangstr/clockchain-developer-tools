@@ -101,6 +101,21 @@ check(distinct("ledger_id") === steps && results.every((r) => r.ledger_id), "eac
 check(results.every((r) => r.block_height), "each step has a block height");
 check(results.every((r) => r.anchored_hash && r.anchored_hash !== r.hash && r.covers_steps === r.seq), "each anchor is a checkpoint over the steps up to and including that step");
 console.log("\nFooter from the last step:\n" + hide(results.at(-1).show_user) + "\n");
+const lastFooter = results.at(-1).show_user;
+const tableRows = lastFooter.split("\n").filter((l) => l.startsWith("| ") && !l.startsWith("| What happened"));
+check(lastFooter.includes("| What happened | Step hash | Ledger hash | Block | Ledger ID |"), "the footer has the turn's table");
+const turnStart = results.findLastIndex((r) => r.kind === "task" || r.kind === "prompt");
+const turn = results.slice(Math.max(turnStart, results.length - 30));
+check(tableRows.length === turn.length, `the table shows this turn's ${turn.length} rows (${tableRows.length})`);
+const unmatched = tableRows.filter((row, i) => {
+  const r = turn[i];
+  const bare = (h) => h.replace(/^sha256:/, "").slice(0, 12);
+  return !(row.includes(bare(r.hash)) && row.includes(bare(r.anchored_hash)) && row.includes(String(r.block_height)) && row.includes(r.ledger_id));
+});
+check(unmatched.length === 0, `every table row matches its step's own result (${unmatched.length} don't)`);
+const logOpen = await fetch(`${results.at(-1).viewer}/summary?format=json`);
+const logOpenJson = await logOpen.json();
+check(logOpen.status === 200 && logOpenJson.status === "open" && logOpenJson.steps.length === steps, `summary link while open: HTTP ${logOpen.status}, ${logOpenJson.steps?.length} steps`);
 
 const viewerOpen = await fetch(results.at(-1).viewer);
 const viewerHtml = await viewerOpen.text();
@@ -111,6 +126,18 @@ check(shown === steps, `viewer shows hash and ledger ID for ${shown} of ${steps}
 let t = performance.now();
 const closed = await tool("shadow_close_session", { session_id: sessionId, status: "succeeded" });
 check(closed.status === "closed" && closed.final_checkpoint.status === "anchored", `closed in ${Math.round(performance.now() - t)} ms; final checkpoint ${closed.final_checkpoint.status}, block ${closed.final_checkpoint.block ?? "-"}`);
+console.log("\nClose summary:\n" + hide(closed.summary) + "\n");
+check(typeof closed.summary === "string" && /in full/.test(closed.summary_note ?? ""), "close returns the summary, and says to show it in full");
+const summaryMisses = results.filter((r) => !closed.summary.includes(`Step hash \`${r.hash}\`. Ledger hash \`${r.anchored_hash}\`. Block ${r.block_height}. Ledger ID \`${r.ledger_id}\`.`));
+check(steps > 50 || summaryMisses.length === 0, `the close summary matches every step's result (${summaryMisses.length} don't)`);
+const logClosedRes = await fetch(closed.links.summary);
+const logClosedText = await logClosedRes.text();
+check(logClosedRes.status === 200 && logClosedText.includes(`${steps} steps: ${steps} anchored, 0 pending`), `summary link when closed: HTTP ${logClosedRes.status}, ${logClosedText.length} bytes`);
+const logClosed = await (await fetch(`${closed.links.summary}?format=json`)).json();
+const onLedger = logClosed.steps.filter((row, i) => row.step_hash === results[i].hash && row.ledger_hash === results[i].anchored_hash && row.block === results[i].block_height && row.ledger_id === results[i].ledger_id).length;
+check(onLedger === steps, `summary JSON matches the anchors for ${onLedger} of ${steps} steps`);
+const gone = await fetch(closed.links.summary.replace(/[A-Za-z0-9_-]{22}\/summary$/, `${"A".repeat(22)}/summary`));
+check(gone.status === 404, `unknown capability: HTTP ${gone.status}`);
 t = performance.now();
 const verified = await tool("shadow_verify", { session_id: sessionId });
 console.log(`shadow_verify in ${Math.round(performance.now() - t)} ms: ${verified.result}. ${verified.online}`);
