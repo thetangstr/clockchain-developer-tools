@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { VERSION } from "./recorder.js";
 import { ACTION_TYPE_HELP, INTENT_TYPE_HELP } from "./intent.js";
+import { LOG_LEVELS, LOG_LEVEL_HELP } from "./log-level.js";
 import { SUMMARY_CSP } from "./lib/summary.js";
 import { MAX_PERSON_MESSAGES, ShadowError, type ShadowService } from "./service.js";
 import { connectInstructions } from "./discovery.js";
@@ -281,6 +282,7 @@ const TOOL_META = {
   shadow_log_step: tool("Log one step", false, false, false, true),
   shadow_log_turn: tool("Log a whole reply (fallback)", false, false, false, true),
   clockchain_logging: tool("Turn logging on or off", false, true, true, false),
+  clockchain_log_level: tool("Set the logging level", false, true, true, false),
   shadow_start_session: tool("Start a Shadow session", false, true, false, true),
   shadow_record: tool("Record a step", false, false, false, true),
   shadow_checkpoint: tool("Anchor a checkpoint", false, true, false, true),
@@ -343,6 +345,7 @@ export function buildShadowServer(
     const sessionInput = {
       session_id: z.string().optional().describe("The session_id from your earlier log call in this conversation. Omit it only on the first step: that starts a session."),
       title: z.string().optional().describe("Optional, for a new session: what this conversation is about, up to 200 characters."),
+      log_level: z.enum(LOG_LEVELS).optional().describe(LOG_LEVEL_HELP),
     };
     server.registerTool("shadow_log_step", {
       ...TOOL_META.shadow_log_step,
@@ -387,9 +390,21 @@ export function buildShadowServer(
       agents: z.array(z.object({
         id: z.string().describe('A short id, e.g. "researcher". Letters, digits and . _ : @ -.'),
         role: z.string().optional().describe("What this agent does (kept on this server, never sent to Clockchain)."),
+        purpose: z.string().optional().describe("Optional. What this agent is for, up to 200 characters, as you report it (kept on this server and hashed in the record, never sent to Clockchain)."),
+        accountable_owner: z.string().optional().describe("Optional. The person or team answerable for this agent, up to 100 characters, as you report it (kept on this server and hashed in the record, never sent to Clockchain)."),
       })).optional().describe('Who will act in this session. Default: one agent with id "agent".'),
+      log_level: z.enum(LOG_LEVELS).optional().describe(LOG_LEVEL_HELP),
     },
   }, run((a) => service.startSession(owner, a, base)));
+
+  server.registerTool("clockchain_log_level", {
+    ...TOOL_META.clockchain_log_level,
+    description:
+      "Sets how much detail Shadow anchors for this Clockchain account, in all its chats, until it is changed. step: each step gets its own anchor. turn: one anchor per turn. milestone: anchors at tasks, checkpoints and the close. " +
+      "Steps are recorded on this server at each level; the level decides when their hash goes to Clockchain. An agent can choose more detail for a session, not less. Open sessions at a coarser level move to the new level on their next step. " +
+      "This is the person's own setting, changed at their request.",
+    inputSchema: { level: z.enum(LOG_LEVELS).describe("step, turn or milestone.") },
+  }, run(async (a) => service.setLogLevel(owner, a.level)));
 
   server.registerTool("shadow_record", {
     ...TOOL_META.shadow_record,
@@ -499,10 +514,11 @@ function registerWhoami(server: McpServer, accounts: AccountStore, ownerId: stri
     if (!account) throw new ShadowError("ACCOUNT_REQUIRED", "This connection's Clockchain account no longer exists. Connect with sign-in again.");
     const view = accountView(account);
     const logging = service?.loggingEnabled(acct);
+    const logLevel = service?.logLevelOf(acct) ?? null;
     return {
       status: "signed_in",
       account: view,
-      ...(logging === undefined ? {} : { logging: { enabled: logging } }),
+      ...(logging === undefined ? {} : { logging: { enabled: logging, ...(logLevel ? { level: logLevel } : {}) } }),
       message: (view.named
         ? `This connection uses the Clockchain account ${accountLine(view)}.`
         : canName

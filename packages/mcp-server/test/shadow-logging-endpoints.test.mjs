@@ -26,7 +26,7 @@ const PREVIEW = "/shadow/preview/mcp";
 const PREVIEW_CHAT = "/shadow/preview/chat/mcp";
 const CB = "https://claude.ai/api/mcp/auth_callback";
 const ENV_KEYS = ["PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS", "MCP_REQUIRE_AUTH", "MCP_RATE_PER_MIN", "MCP_STATE_DIR", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_LAZY_AUTH", "SHADOW_AUTO_LOG", "SHADOW_PREVIEW_AUTO_LOG", "MCP_LOG_BUDGET", "MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR", "MCP_OAUTH_APPROVALS_PER_HOUR"];
-const SESSION_TOOLS = ["clockchain_delete_account", "shadow_checkpoint", "shadow_close_session", "shadow_delete_session", "shadow_get_session", "shadow_list_sessions", "shadow_record", "shadow_revoke_links", "shadow_start_session", "shadow_verify"];
+const SESSION_TOOLS = ["clockchain_delete_account", "clockchain_log_level", "shadow_checkpoint", "shadow_close_session", "shadow_delete_session", "shadow_get_session", "shadow_list_sessions", "shadow_record", "shadow_revoke_links", "shadow_start_session", "shadow_verify"];
 const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_signup_help", "clockchain_whoami"];
 const LOG_TOOLS = ["clockchain_logging", "clockchain_whoami", "shadow_log_step", "shadow_log_turn"];
 /** What a directory's checklist rejects, or what makes a listed tool read as logging by default or across chats. */
@@ -220,6 +220,35 @@ for (const [label, env] of [["with no logging flag", {}], ["with SHADOW_PREVIEW_
 }
 
 // ---- the preview endpoints ----------------------------------------------------------------------------------------------
+
+test("the logging level: one setting for the account from any endpoint, and an agent's choice at the start of a session", async () => {
+  const s = await boot({ SHADOW_PREVIEW_AUTO_LOG: "1" });
+  try {
+    const a = await signUp(s.url, PLAIN);
+    for (const p of [PLAIN, CHAT, PREVIEW, PREVIEW_CHAT]) {
+      const tool_ = (await toolsOf(s.url, p, a.token)).find((t) => t.name === "clockchain_log_level");
+      assert.ok(tool_, p);
+      assert.deepEqual(tool_.inputSchema.properties.level.enum, ["step", "turn", "milestone"], p);
+      assert.doesNotMatch(tool_.description, NOT_ON_A_LISTED_ENDPOINT, p);
+      assert.doesNotMatch(tool_.description, /Never |do not |must |always /i, `${p}: says what it does, with no rules for the model`);
+      const start = (await toolsOf(s.url, p, a.token)).find((t) => t.name === "shadow_start_session");
+      assert.ok(start.inputSchema.properties.log_level, p);
+      const agent = start.inputSchema.properties.agents.items.properties;
+      assert.ok(agent.purpose && agent.accountable_owner, p);
+    }
+    const chosen = await tool(s.url, PREVIEW, a.token, "shadow_log_step", { kind: "task", content: "hello", log_level: "turn" });
+    assert.equal(chosen.value.anchor_status, "deferred");
+    assert.equal(chosen.value.log_level, "turn");
+    assert.equal((await tool(s.url, PLAIN, a.token, "clockchain_log_level", { level: "milestone" })).value.log_level, "milestone");
+    const started = await tool(s.url, PREVIEW_CHAT, a.token, "shadow_start_session", { title: "t" });
+    assert.equal(started.value.log_level, "milestone", "set on one endpoint, it holds on the others");
+    assert.equal((await tool(s.url, PREVIEW, a.token, "clockchain_whoami", {})).value.logging.level, "milestone");
+    assert.equal((await tool(s.url, PLAIN, a.token, "clockchain_log_level", { level: "sometimes" })).isError, true);
+    assert.equal((await post(s.url, PLAIN, "tools/call", { name: "clockchain_log_level", arguments: { level: "turn" } })).status, 401);
+  } finally {
+    await s.close();
+  }
+});
 
 test("preview endpoints: logging on by default, said on their own sign-in pages, with the same footer and stop", async () => {
   const s = await boot({ SHADOW_PREVIEW_AUTO_LOG: "1" });

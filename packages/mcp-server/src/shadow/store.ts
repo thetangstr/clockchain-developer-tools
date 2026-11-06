@@ -15,6 +15,7 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, ran
 import { closeSync, existsSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { appendDurableLine, cleanStaleFiles, createDurableJsonFile } from "../handshake-core/durable-store.js";
+import { isLogLevel, type LogLevel } from "./log-level.js";
 import type { KeyProvider } from "./lib/keys.js";
 import type { Checkpoint, CheckpointBody, Network, ShadowEvent } from "./lib/types.js";
 
@@ -63,13 +64,16 @@ export type AnchorInfo = {
   submittedAt: string | null;
 };
 
+/** Who acts in a session. purpose and accountableOwner are what the agent reported; older sessions don't have them. */
+export type AgentEntry = { id: string; role: string | null; purpose?: string; accountableOwner?: string };
+
 export type SessionMeta = {
   v: 1;
   sessionId: string;
   ownerKey: string;
   operatorId: string;
   title: string;
-  agents: { id: string; role: string | null }[];
+  agents: AgentEntry[];
   network: Network;
   state: "open" | "closed";
   createdAt: string;
@@ -94,10 +98,14 @@ export type SessionMeta = {
   lastStepAt?: string;
   /** Closed by the server after no new steps, not by the person or the agent. */
   closedIdle?: true;
+  /** How much detail this session anchors. Older sessions, and sessions at the default, don't have it, and read as "step". */
+  logLevel?: LogLevel;
+  logLevelBy?: "person" | "agent";
 };
 
 export type Operator = { operatorId: string; keys: KeyProvider };
 
+type OwnerSettings = { loggingOff: boolean; logLevel?: LogLevel };
 type KeyFile = { operatorId: string; privateKeyPem: string; createdAt: string };
 type UsageFile = { day: string; anchors: number; starts?: number };
 export type DailyCounter = "anchors" | "starts";
@@ -203,26 +211,47 @@ export class ShadowStore {
 
   // ---- the owner's logging setting (SHADOW_AUTO_LOG) ------------------------------------------------------------
 
-  private settingsFile(ownerKey: string, current: () => { loggingOff: boolean }) {
-    return createDurableJsonFile<{ loggingOff: boolean }>({
+  private settingsFile(ownerKey: string, current: () => OwnerSettings) {
+    return createDurableJsonFile<OwnerSettings>({
       path: join(this.ownerDir(ownerKey), "settings.json"),
       schema: "shadow-settings-v1",
       snapshot: current,
       validate: (v) => {
-        if (!isObj(v) || typeof v.loggingOff !== "boolean") throw new Error("bad settings file");
-        return { loggingOff: v.loggingOff };
+        if (!isObj(v) || typeof v.loggingOff !== "boolean" || (v.logLevel !== undefined && !isLogLevel(v.logLevel))) throw new Error("bad settings file");
+        return { loggingOff: v.loggingOff, ...(v.logLevel ? { logLevel: v.logLevel as LogLevel } : {}) };
       },
       maxBytes: SMALL_MAX_BYTES,
     });
   }
 
+  private settings(ownerKey: string): OwnerSettings {
+    return this.settingsFile(ownerKey, () => ({ loggingOff: false })).load() ?? { loggingOff: false };
+  }
+
   /** True once the owner turned logging off. Default false. Throws if the file cannot be read (callers fail closed). */
   loggingOff(ownerKey: string): boolean {
-    return this.settingsFile(ownerKey, () => ({ loggingOff: false })).load()?.loggingOff === true;
+    return this.settings(ownerKey).loggingOff === true;
   }
 
   setLoggingOff(ownerKey: string, loggingOff: boolean): void {
-    this.settingsFile(ownerKey, () => ({ loggingOff })).save("now");
+    // Turning logging off must work even with an unreadable file, so a level that can't be read is left behind.
+    let logLevel: LogLevel | undefined;
+    try {
+      logLevel = this.settings(ownerKey).logLevel;
+    } catch {
+      logLevel = undefined;
+    }
+    this.settingsFile(ownerKey, () => ({ loggingOff, ...(logLevel ? { logLevel } : {}) })).save("now");
+  }
+
+  /** The level the person set for this account, or null. Throws if the file cannot be read (callers fail closed). */
+  logLevel(ownerKey: string): LogLevel | null {
+    return this.settings(ownerKey).logLevel ?? null;
+  }
+
+  setLogLevel(ownerKey: string, logLevel: LogLevel): void {
+    const { loggingOff } = this.settings(ownerKey);
+    this.settingsFile(ownerKey, () => ({ loggingOff, logLevel })).save("now");
   }
 
   // ---- per-owner daily anchor count ---------------------------------------------------------------------------
