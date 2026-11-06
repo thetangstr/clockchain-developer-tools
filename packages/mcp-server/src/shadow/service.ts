@@ -13,6 +13,7 @@ import { clip, parseStrict } from "./lib/profile.js";
 import { verifyPacket } from "./lib/verify.js";
 import { summarize } from "./lib/summary.js";
 import { redactSecrets, redactText } from "./redact.js";
+import { declaredFields, declaredOf, declaredText, withDeclared, type DeclaredInput } from "./intent.js";
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, ShadowEvent } from "./lib/types.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
@@ -349,8 +350,8 @@ const loggingOff = () => new ShadowError("LOGGING_OFF", "Logging is off for this
 
 // ---- automatic logging: results ----------------------------------------------------------------------------------
 
-type LogStepInput = { agent?: unknown; kind?: unknown; content?: unknown };
-type LoggedStep = { seq: number; hash: string; kind: RecordKind; runId: string | null; summary: string };
+type LogStepInput = { agent?: unknown; kind?: unknown; content?: unknown } & DeclaredInput;
+type LoggedStep = { seq: number; hash: string; kind: RecordKind; runId: string | null; summary: string; declared: ReturnType<typeof declaredFields> };
 type LogAnchor = {
   block_height: string | null; ledger_id: string | null; block_time: string | null; anchored_hash: string | null; covers_steps: number | null;
   anchor_status: "anchored" | "pending" | "failed" | "over_limit" | "not_anchored"; anchor_reason?: string;
@@ -367,8 +368,8 @@ function stepSummary(kind: RecordKind, content: unknown): string {
   return (chars.length > 80 ? chars.slice(0, 79).join("") + "…" : text).toWellFormed();
 }
 
-/** One step as the tables and summaries show it: its kind and a short title, never its content. */
-type StepRow = { seq: number; kind: string; title: string; hash: string };
+/** One step as the tables and summaries show it: its kind, a short title and what it declares, never its content. */
+type StepRow = { seq: number; kind: string; title: string; hash: string; declared: ReturnType<typeof declaredFields>; declaredNote: string };
 
 const MAX_TURN_ROWS = 30;
 const MAX_SUMMARY_ROWS = 50;
@@ -396,7 +397,8 @@ function stepRow(e: ShadowEvent): StepRow {
           : e.body.kind === "agent.tool.call" ? ["tool_call", shownName(p.tool, "a tool")]
             : e.body.kind === "agent.tool.result" ? ["tool_result", `${shownName(p.tool, "a tool")}${p.isError === true ? " (error)" : ""}`]
               : ["file", shownName(typeof p.path === "string" ? p.path.split(/[\\/]/).pop() : undefined, "a file")];
-  return { seq: e.body.seq, kind, title, hash: e.hash };
+  const declared = declaredOf(e.body.payload);
+  return { seq: e.body.seq, kind, title, hash: e.hash, declared: declaredFields(declared), declaredNote: declaredText(declared) };
 }
 
 /**
@@ -441,7 +443,7 @@ function turnTable(meta: SessionMeta, turn: { rows: StepRow[]; earlier: number }
   const rows = turn.rows.map((r) => {
     const { anchor: a, status } = cover(r.seq);
     const anchored = a ? `\`${cell(bareHash(a.hash).slice(0, 12))}\` | ${cell(a.blockHeight)} | \`${cell(a.ledgerId)}\`` : status === "pending" ? "pending | pending | pending" : "not anchored | not anchored | not anchored";
-    return `| ${r.kind}: ${r.title} | \`${bareHash(r.hash).slice(0, 12)}\` | ${anchored} |`;
+    return `| ${r.kind}: ${r.title}${r.declaredNote ? ` (${r.declaredNote})` : ""} | \`${bareHash(r.hash).slice(0, 12)}\` | ${anchored} |`;
   });
   const n = turn.earlier;
   return [
@@ -451,12 +453,12 @@ function turnTable(meta: SessionMeta, turn: { rows: StepRow[]; earlier: number }
   ].join("\n");
 }
 
-/** The whole session as hashes and metadata, from its own record. No step content, and nothing a caller can supply. */
+/** The whole session as hashes and metadata, from its own record. No step content; the only values a caller supplies are the declared types, which are checked. */
 function sessionLog(meta: SessionMeta, events: ShadowEvent[]) {
   const cover = coverage(meta);
   const steps = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map(stepRow).map((r) => {
     const { anchor: a, status } = cover(r.seq);
-    return { seq: r.seq, kind: r.kind, title: r.title, step_hash: r.hash, status, ledger_hash: a?.hash ?? null, block: a?.blockHeight ?? null, ledger_id: a?.ledgerId ?? null };
+    return { seq: r.seq, kind: r.kind, title: r.title, ...r.declared, ...(r.declaredNote ? { declared_note: r.declaredNote } : {}), step_hash: r.hash, status, ledger_hash: a?.hash ?? null, block: a?.blockHeight ?? null, ledger_id: a?.ledgerId ?? null };
   });
   const anchored = steps.filter((s) => s.status === "anchored");
   // Every record this session has on the ledger, as the footer counts them: its start and closing anchors too.
@@ -482,7 +484,7 @@ function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number;
   const shown = cap ? log.steps.slice(0, cap.max) : log.steps;
   const lines = shown.map((s, i) => {
     const ledger = s.status === "anchored" ? `Ledger hash \`${cell(s.ledger_hash)}\`. Block ${cell(s.block)}. Ledger ID \`${cell(s.ledger_id)}\`.` : s.status === "pending" ? "Ledger hash pending. Block pending. Ledger ID pending." : "Not anchored, so no ledger hash, block or ledger ID.";
-    return `${i + 1}. ${s.kind}: ${s.title}. Step hash \`${s.step_hash}\`. ${ledger}`;
+    return `${i + 1}. ${s.kind}: ${s.title}${s.declared_note ? ` (${s.declared_note})` : ""}. Step hash \`${s.step_hash}\`. ${ledger}`;
   });
   const blocks = t.first_block === null ? "Nothing on Clockchain yet." : `On Clockchain: first block ${cell(t.first_block)}, last block ${cell(t.last_block)}, ${t.ledger_records} ledger ${t.ledger_records === 1 ? "record" : "records"}, counting any start or closing anchor.`;
   return [
@@ -900,7 +902,7 @@ export class ShadowService {
     return out;
   }
 
-  async record(ownerId: string, input: { session_id?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown }) {
+  async record(ownerId: string, input: { session_id?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown } & DeclaredInput) {
     const sessionId = sessionIdOf(input.session_id);
     if (typeof input.kind !== "string" || !(RECORD_KINDS as readonly string[]).includes(input.kind))
       throw bad(`kind must be one of ${RECORD_KINDS.join(", ")}.`);
@@ -931,7 +933,7 @@ export class ShadowService {
         throw new ShadowError("SHADOW_STORAGE_FULL", "Shadow's storage is full right now, so no more steps can be recorded. Close this session; its record is kept.");
       let spec;
       try {
-        spec = stepFor(kind, content);
+        spec = withDeclared(stepFor(kind, content), input);
       } catch (e) {
         if (e instanceof RecordError) throw new ShadowError(e.code, e.message);
         throw bad(`${(e as Error).message}.`);
@@ -939,7 +941,7 @@ export class ShadowService {
       const runId = this.runFor(meta, kind, agent, runInput);
       const event = this.appendStep(meta, spec.kind, agent, spec.payload, { boundary: spec.boundary, agentRunId: runId }, true);
       this.store.writeMeta(meta);
-      return { seq: event.body.seq, hash: event.hash, kind: spec.kind, run_id: runId };
+      return { seq: event.body.seq, hash: event.hash, kind: spec.kind, run_id: runId, ...declaredFields(declaredOf(event.body.payload)) };
     });
   }
 
@@ -989,7 +991,7 @@ export class ShadowService {
   }
 
   /** One step: appended and anchored in this call, with its own hash, and the block and ledger id of its own anchor. */
-  async logStep(ownerId: string, input: { session_id?: unknown; title?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown }, base: string) {
+  async logStep(ownerId: string, input: { session_id?: unknown; title?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown } & DeclaredInput, base: string) {
     if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
       throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
     const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, steps: [input], runInput: typeof input.run_id === "string" ? input.run_id : null, maxSteps: 1, table: input.kind === "message" || input.kind === "note" }, base);
@@ -999,6 +1001,7 @@ export class ShadowService {
       seq: step.seq,
       hash: step.hash,
       kind: step.kind,
+      ...step.declared,
       ...(step.runId ? { run_id: step.runId } : {}),
       ...r.anchor,
       viewer: r.viewer,
@@ -1016,7 +1019,7 @@ export class ShadowService {
       shared_anchor: true,
       anchor_note: "These steps share one anchor: one block and one ledger record for the whole call, not one per step. Use shadow_log_step to give each step its own.",
       evidence: {
-        logged: r.steps.map((s) => ({ seq: s.seq, kind: s.kind, hash: s.hash, summary: s.summary })),
+        logged: r.steps.map((s) => ({ seq: s.seq, kind: s.kind, hash: s.hash, summary: s.summary, ...s.declared })),
         ...r.anchor,
         viewer: r.viewer,
       },
@@ -1082,7 +1085,7 @@ export class ShadowService {
           const agent = s.agent ?? meta.agents[0].id;
           const runId = this.runFor(meta, s.kind, agent, input.runInput);
           const event = this.appendStep(meta, s.spec.kind, agent, s.spec.payload, { boundary: s.spec.boundary, agentRunId: runId }, true);
-          made.steps.push({ seq: event.body.seq, hash: event.hash, kind: s.kind, runId, summary: s.summary });
+          made.steps.push({ seq: event.body.seq, hash: event.hash, kind: s.kind, runId, summary: s.summary, declared: declaredFields(declaredOf(event.body.payload)) });
           // This call's own steps, in case the record can't be read back below.
           made.turn.rows = [...made.turn.rows, stepRow(event)].slice(-MAX_TURN_ROWS);
         }
@@ -1111,7 +1114,7 @@ export class ShadowService {
   }
 
   private prepareStep(raw: LogStepInput) {
-    if (!isObj(raw)) throw bad("Each step is {kind, content} with an optional agent.");
+    if (!isObj(raw)) throw bad("Each step is {kind, content} with an optional agent, action_type and intent_type.");
     if (typeof raw.kind !== "string" || !(RECORD_KINDS as readonly string[]).includes(raw.kind)) throw bad(`kind must be one of ${RECORD_KINDS.join(", ")}.`);
     const kind = raw.kind as RecordKind;
     if (raw.content === undefined) throw bad("content is required: a string, or JSON.");
@@ -1126,7 +1129,7 @@ export class ShadowService {
     const content = redactSecrets(raw.content);
     let spec;
     try {
-      spec = stepFor(kind, content);
+      spec = withDeclared(stepFor(kind, content), raw);
     } catch (e) {
       if (e instanceof RecordError) throw new ShadowError(e.code, e.message);
       throw bad(`${(e as Error).message}.`);
