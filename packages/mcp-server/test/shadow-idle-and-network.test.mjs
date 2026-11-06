@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { ownerKeyOf } from "../dist/shadow/store.js";
 import { ShadowService, ShadowError, loadShadowConfig } from "../dist/shadow/service.js";
 import { createLogBudget } from "../dist/budget.js";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
@@ -108,10 +110,7 @@ test("after the switch to mainnet a testnet session keeps its network: no new st
   assert.equal(after.svc.store.readMeta(ownerKeyFor(after, fresh.session_id), fresh.session_id).network, "clockchain-mainnet");
 });
 
-function ownerKeyFor({ svc }, sessionId) {
-  for (const owner of svc.store.idleOpenSessions(Number.MAX_SAFE_INTEGER, 1000)) if (owner.sessionId === sessionId) return owner.ownerKey;
-  throw new Error("no such open session");
-}
+const ownerKeyFor = () => ownerKeyOf(O);
 
 // The pages read the switch when the process starts, so each side runs in its own process.
 function pages(env) {
@@ -137,4 +136,80 @@ test("one setting moves the pages: mainnet makes no free-testnet promise, and te
   assert.match(m.html, /Mainnet/);
   const free = pages({ SHADOW_NETWORK: "mainnet", MCP_MAINNET_FREE_TOKENS: "1" });
   assert.match(free.html, /Get a trial token/);
+});
+
+function probe(env) {
+  const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "helpers", "mainnet-auth-probe.mjs");
+  return JSON.parse(execFileSync(process.execPath, [script], { env: { ...process.env, SHADOW_NETWORK: "", MCP_MAINNET_FREE_TOKENS: "", ...env }, encoding: "utf8" }));
+}
+const WRITER = { SHADOW_LEDGER_CLIENT_ID: "shadow-writer", SHADOW_LEDGER_WALLET_ID: "shadow-wallet" };
+
+test("the network switch stops anonymous keys and leaves signed-in accounts working on Shadow", () => {
+  assert.deepEqual(probe({}), { account: { shadow: 200, chat: 200, mcp: 200 }, anonymous: { mcp: 200 }, static: { mcp: 200 }, token_route: 200 });
+  assert.deepEqual(probe({ SHADOW_NETWORK: "mainnet", ...WRITER }), { account: { shadow: 200, chat: 200, mcp: 403 }, anonymous: { mcp: 401 }, static: { mcp: 200 }, token_route: 503 });
+  assert.deepEqual(probe({ SHADOW_NETWORK: "mainnet", MCP_MAINNET_FREE_TOKENS: "1", ...WRITER }), { account: { shadow: 200, chat: 200, mcp: 200 }, anonymous: { mcp: 200 }, static: { mcp: 200 }, token_route: 200 });
+});
+
+test("a mistyped network, or mainnet with no writer of Shadow's own, refuses to start", () => {
+  const env = { SHADOW_ENABLED: "1", SHADOW_STATE_DIR: "/tmp/x" };
+  assert.match(loadShadowConfig({ ...env, SHADOW_NETWORK: "Mainnet" }).problem, /SHADOW_NETWORK must be/);
+  assert.match(loadShadowConfig({ ...env, SHADOW_NETWORK: "mainnet" }).problem, /needs SHADOW_LEDGER_CLIENT_ID/);
+  assert.equal(loadShadowConfig({ ...env, SHADOW_NETWORK: "mainnet", ...WRITER }).problem, undefined);
+  assert.equal(loadShadowConfig({ ...env, SHADOW_NETWORK: "testnet" }).network, "clockchain-testnet");
+  assert.throws(() => probe({ SHADOW_NETWORK: "Mainnet" }));
+});
+
+test("a session from before this build counts from its last write, not its start, and a restart closes nothing", async () => {
+  const { svc, clock, stateDir } = service();
+  clock.now = Date.now() - 3 * 24 * HOUR;
+  const a = await svc.logStep(O, { kind: "task", content: "Old but busy" }, BASE);
+  const file = path.join(stateDir, "owners", ownerKeyOf(O), "sessions", a.session_id, "meta.json");
+  const raw = JSON.parse(readFileSync(file, "utf8"));
+  const strip = (v) => { if (v && typeof v === "object") { delete v.lastStepAt; Object.values(v).forEach(strip); } };
+  strip(raw);
+  writeFileSync(file, JSON.stringify(raw));
+  clock.now = Date.now(); // Started three days ago; the file was written just now.
+  assert.equal(await svc.closeIdle(), 0, "written recently, so it stays open");
+  utimesSync(file, new Date(Date.now() - 3 * 24 * HOUR), new Date(Date.now() - 3 * 24 * HOUR));
+  svc.start();
+  svc.stop();
+  await new Promise((r) => setImmediate(r));
+  assert.equal((await svc.getSession(O, { session_id: a.session_id }, BASE)).status, "open", "starting up doesn't close it");
+  assert.equal(await svc.closeIdle(), 1, "the next pass does, as nothing has been written for three days");
+});
+
+test("an anchor a self-closed session still owes is retried by later passes", async () => {
+  const { svc, fake, clock } = service();
+  const a = await svc.logStep(O, { kind: "task", content: "Nobody comes back to this" }, BASE);
+  clock.now += 25 * HOUR;
+  fake.down = true;
+  assert.equal(await svc.closeIdle(), 1);
+  const writes = fake.writes.length;
+  await svc.closeIdle();
+  fake.down = false;
+  await svc.closeIdle();
+  assert.ok(fake.writes.length > writes, "the final checkpoint reached the ledger once it was back");
+  assert.equal((await svc.getSession(O, { session_id: a.session_id }, BASE)).pending_anchors.length, 0);
+});
+
+test("at the limit, a start that would be refused anyway closes nothing, and an expired session isn't in the way", async () => {
+  const { svc, clock } = service({ limits: { maxOpenSessionsPerOwner: 1, maxSessionStartsPerOwnerPerDay: 1 } });
+  const a = await svc.startSession(O, { title: "only" }, BASE);
+  clock.now += 2 * HOUR;
+  await assert.rejects(svc.startSession(O, { title: "next" }, BASE), (e) => e.code === "SHADOW_LIMIT_SESSION_STARTS");
+  assert.equal((await svc.getSession(O, { session_id: a.session_id }, BASE)).status, "open");
+});
+
+test("a start waiting behind an account's delete doesn't recreate anything", async () => {
+  const { svc } = service();
+  await svc.startSession(O, { title: "before" }, BASE);
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const deleting = svc.deleteOwner(O, () => {});
+  const late = svc.startSession(O, { title: "after" }, BASE).then(() => "started", (e) => e.code);
+  release();
+  await held;
+  await deleting;
+  assert.equal(await late, "SHADOW_ACCOUNT_DELETED");
+  assert.deepEqual(svc.store.sessionIds(ownerKeyOf(O)), []);
 });

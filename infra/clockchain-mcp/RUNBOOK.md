@@ -362,9 +362,9 @@ Only the logging tools, the instructions, the footer and the sign-in wording are
 - **Disable Shadow:** set `SHADOW_ENABLED` to `0`, then deploy. Every `/shadow` path stops, including viewer links. Records
   stay on the volume. **The retention sweep stops with it,** and so does the 30-day deletion we promise, so run the purge
   below daily until Shadow is back. The same is true while a bad setting keeps Shadow from starting.
-- **Disable sign-in:** set `MCP_OAUTH` to `0`, then deploy. Accounts and replay state stay on the volume. Nobody can reach
-  Shadow, as it takes signed-in accounts only, but its sweep goes on. Tokens already issued still work on `/mcp` until they
-  expire.
+- **Disable sign-in:** set `MCP_OAUTH` to `0`, then deploy. Accounts and replay state stay on the volume. Nobody new can sign
+  in, but tokens already issued still work on Shadow and `/mcp` until they expire, and so do those of deleted accounts,
+  because nothing checks the deleted list while sign-in is off. Its sweep goes on.
 - **Stop logging by default:** set `SHADOW_AUTO_LOG` and `SHADOW_PREVIEW_AUTO_LOG` to `0`, then deploy. Nothing is deleted.
 
 ### Rollback with state present
@@ -496,14 +496,14 @@ Unset, the path answers like any other unknown path. One hostname serves one plu
 Not rehearsed: no mainnet endpoint exists yet to test against. Do these in order, on staging first.
 
 1. Get from the network team: the mainnet endpoint, the keys and writer identity, whether the ledger API and receipts match the testnet's, and what credits cost.
-2. Decide free use. On mainnet the anonymous key from `POST /token` stops working, for tokens already issued too, unless `MCP_MAINNET_FREE_TOKENS=1`. It spends the server's own credits.
+2. Decide free use. On mainnet the anonymous key from `POST /token` and trial tokens stop working, those already issued too, unless `MCP_MAINNET_FREE_TOKENS=1`. Signed-in accounts keep working on Shadow, within their limits, but `/mcp` refuses them with 403 unless that setting is on, because writes there spend the server's own credits with no per-account limit. **`/connect/mcp` and `/handshake/mcp` also write with the delegated key and take no account of this setting.** Decide before the switch whether they stay on, since they're frozen and aren't changed here.
 3. Lower `SHADOW_ANCHORS_PER_DAY`, `MCP_RATE_PER_MIN` and the free-key limit to what the credits can pay for.
-4. Set `CLOCKCHAIN_ENDPOINT`, `CLOCKCHAIN_SUBSTRATE`, the writer identity and `SHADOW_NETWORK=mainnet` together, then deploy with `--full-restart`, because the settings are read at start. Tell the travel orchestrator first.
+4. Set `CLOCKCHAIN_ENDPOINT`, `CLOCKCHAIN_SUBSTRATE`, the writer identity (`SHADOW_LEDGER_CLIENT_ID` and `SHADOW_LEDGER_WALLET_ID`, required on mainnet, and not an email address) and `SHADOW_NETWORK=mainnet` together. Nothing checks that the endpoint and the network name agree, and any value other than `testnet` or `mainnet` refuses to start, then deploy with `--full-restart`, because the settings are read at start. Tell the travel orchestrator first.
 5. Run the public end-to-end check, then one session from real Claude Code, and look its last anchor up on the new ledger.
 
 **What the switch changes:** the sign-in pages, `/shadow/connect`, the landing and status pages and the server instructions, none of which promise free use on mainnet. New sessions are recorded as `clockchain-mainnet`.
 
-**What it doesn't change yet:** the clock tools' descriptions on `/mcp` and the receipts' `assurance` text in `packages/core` still say testnet and single validator. They need the network's real facts first, so write them then. The landing page's disclaimer also needs rewriting. `/handshake/*`, `/next/handshake/*` and `/acm4/*` are frozen and not touched.
+**What it doesn't change yet:** the clock tools' descriptions on `/mcp` and the receipts' `assurance` text in `packages/core` still say testnet and single validator. They need the network's real facts first, so write them then. The landing page's disclaimer also needs rewriting. `/handshake/*`, `/next/handshake/*` and `/acm4/*` are frozen and not touched, except that the handshake guide page's text uses the same network label.
 
 **Sessions from before the switch** keep their network. They take no new steps (a log tool tells the agent to start a new session), and nothing they still owe goes to the new ledger. They can still close, signed but not anchored. `shadow_verify` checks them offline and says why, and the result is indeterminate rather than a pass when the check needs the ledger. Their packets and viewer links keep working until they expire. To check them online, the old gateway has to stay readable; there's no setting for that yet.
 
@@ -511,7 +511,7 @@ Not rehearsed: no mainnet endpoint exists yet to test against. Do these in order
 
 ### Sessions that close by themselves
 
-With logging on by default nobody asks to close, so an open session with no new step closes after `SHADOW_IDLE_CLOSE_HOURS` (default 24 when logging by default is on, otherwise off; `off` turns it off). The check runs with the hourly sweep, at most 200 sessions a pass, oldest first, and each spends one anchor from that account's daily limit. If the limit is used up, the session closes signed but not anchored. At the open-session limit, a session idle for over an hour closes to make room. A later step on a closed session gets `SHADOW_SESSION_CLOSED`, and the log tools tell the agent to start a new session. Logs: `shadow_idle_closed`, `shadow_idle_close_failed`.
+With logging on by default nobody asks to close, so an open session with no new step closes after `SHADOW_IDLE_CLOSE_HOURS` (default 24 when logging by default is on, otherwise off; `off` turns it off). The check runs with the hourly sweep and not at start-up, at most 200 sessions a pass, oldest first, and each spends one anchor from that account's daily limit. If the anchor can't land, because the gateway is down or the limit is used up, later passes retry it. It is on by default wherever logging by default is on, so deploying this build turns it on for production. Sessions from before this build count from their metadata file's last write. At the open-session limit, a session idle for over an hour closes to make room. A later step on a closed session gets `SHADOW_SESSION_CLOSED`, and the log tools tell the agent to start a new session. Logs: `shadow_idle_closed`, `shadow_idle_close_failed`.
 
 ### Publishing to the MCP registry
 

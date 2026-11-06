@@ -1,4 +1,4 @@
-import { FREE_TOKENS } from "./network.js";
+import { FREE_TOKENS, NETWORK_PROBLEM, ON_MAINNET } from "./network.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
@@ -539,11 +539,11 @@ export function writeMcpUnauthorized(res: ServerResponse, challenge?: Record<str
       auth: {
         // Two co-equal credential types — using the wrong header is the #1
         // cause of a 401 here (a Clockchain key sent as x-api-key is rejected).
-        mcpToken: {
+        ...(FREE_TOKENS ? { mcpToken: {
           header: "x-api-key",
           getToken: "POST https://mcp.clockchain.network/token",
-          note: "instant self-serve testnet token (shared pool) — POST /token to mint one",
-        },
+          note: `instant self-serve ${ON_MAINNET ? "trial" : "testnet"} token (shared pool) — POST /token to mint one`,
+        } } : {}),
         bringYourOwnKey: {
           headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
           note:
@@ -600,7 +600,8 @@ export async function runHttp(): Promise<Server> {
   // unauthenticated, so keying on it would let an attacker rotate `sub` to escape
   // the ceiling and drain the shared budget (per-user auth).
   const signingSecret = process.env.MCP_TOKEN_SIGNING_SECRET ?? "";
-  const selfServeEnabled = signingSecret.length > 0 && FREE_TOKENS;
+  if (NETWORK_PROBLEM) throw new Error(NETWORK_PROBLEM);
+  const selfServeEnabled = signingSecret.length > 0;
   const mintPerHour = Number(process.env.MCP_TOKEN_MINT_PER_HOUR ?? "10");
   const mintLimiter = createRateLimiter(
     Number.isFinite(mintPerHour) ? mintPerHour : 10,
@@ -1113,8 +1114,11 @@ export async function runHttp(): Promise<Server> {
     const v1 = verifyToken(signingSecret, presented);
     // A token is signed and holds no state, so a deleted account's token is refused by name, on every surface.
     if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
+    // Off with free keys (network.ts): a token with no account behind it spends the server's own credits. Accounts' tokens keep working.
+    if (v1.valid && !FREE_TOKENS && !v1.payload.acct) return { ok: false };
     if (v1.valid) return { ok: true, reason: "demo_token_v1", payload: v1.payload };
     const v2 = verifyTrialToken(signingSecret, presented);
+    if (v2.valid && !FREE_TOKENS) return { ok: false };
     if (v2.valid) return { ok: true, trial: v2.payload };
     const v3 = verifyHandshakeSessionToken(signingSecret, presented);
     if (v3.valid) return { ok: true, scope: v3.payload };
@@ -1182,7 +1186,7 @@ export async function runHttp(): Promise<Server> {
     res.end(JSON.stringify({
       error: "unauthorized",
       message:
-        "Hosted Shadow needs a signed-in Clockchain account (free, no email). Add this endpoint to your MCP client as a " +
+        `Hosted Shadow needs a signed-in Clockchain account (${ON_MAINNET ? "" : "free, "}no email). Add this endpoint to your MCP client as a ` +
         "connector or remote MCP server with OAuth sign-in; the client starts sign-in from this response's " +
         "WWW-Authenticate header. A key from POST /token or an MCP token does not work here.",
       endpoint: `${base}${pathOf(req.url)}`,
@@ -1253,6 +1257,7 @@ export async function runHttp(): Promise<Server> {
       // SHADOW_LINK_CONCURRENCY). A malformed one, or a global cap above half the state filesystem's free space,
       // keeps Shadow from starting: every /shadow path then answers 503 and the reason is logged.
       if (shadowConfig.problem) throw Object.assign(new Error(shadowConfig.problem), { name: "ShadowConfigError" });
+      if (!shadowLedgerIdentity()) console.error(JSON.stringify({ event: "shadow_writer_is_delegated", note: "SHADOW_LEDGER_CLIENT_ID and SHADOW_LEDGER_WALLET_ID are unset, so Shadow's ledger entries carry the delegated client and wallet." }));
       const service = new ShadowService({
         stateDir: shadowConfig.stateDir,
         network: shadowConfig.network,
@@ -1742,7 +1747,7 @@ export async function runHttp(): Promise<Server> {
     // token that grants the shared delegated key, so a brand-new user can connect
     // without their own Clockchain key. Off if no signing secret.
     if (req.method === "POST" && pathOf(req.url) === "/token") {
-      if (!selfServeEnabled) {
+      if (!selfServeEnabled || !FREE_TOKENS) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({
           error: "self_serve_disabled",
@@ -1932,6 +1937,13 @@ export async function runHttp(): Promise<Server> {
       }
     }
 
+    // With free keys off, /mcp's delegated writes aren't open to free accounts either: they spend the server's credits, with no per-account limit there.
+    if (!FREE_TOKENS && !byo && auth.ok && "reason" in auth && auth.reason === "demo_token_v1") {
+      res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "account_not_enabled_here", message: "On this network a signed-in account works on Shadow (/shadow/mcp). The clock tools here need your own Clockchain key." }));
+      return;
+    }
+
     // Per-tester rate limit (after auth so the key is the validated token). For a
     // self-serve token the key is its (already-verified) jti, so distinct tokens
     // get distinct buckets and a shared-egress public app isn't throttled as one
@@ -2074,7 +2086,7 @@ export async function runHttp(): Promise<Server> {
       console.error(`[clockchain-mcp] http server listening on :${port}`);
       console.error(
         `[clockchain-mcp] self-serve tokens: ${
-          selfServeEnabled
+          selfServeEnabled && FREE_TOKENS
             ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
             : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
         }`,

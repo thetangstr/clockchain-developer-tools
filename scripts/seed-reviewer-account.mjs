@@ -77,6 +77,8 @@ export function parseArgs(argv) {
     return { error: `not a URL: ${opts.base}` };
   }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return { error: "--base must be a plain http or https URL" };
+  // The account key goes in this request, so never over plain HTTP past this machine.
+  if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) return { error: "--base must use https unless it is this machine" };
   opts.base = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
   return opts;
 }
@@ -189,7 +191,7 @@ export async function topUpSamples(call, { refreshDays, nowMs = Date.now(), log 
       added++;
     } else kept++;
     for (const stale of copies.filter((s) => !fresh.includes(s))) {
-      const gone = await call("shadow_delete_session", { session_id: stale.session_id });
+      const gone = await call("shadow_delete_session", { session_id: stale.session_id, confirm: true });
       if (gone.status !== "deleted") throw new Failed(`shadow_delete_session: ${gone.error ?? "not deleted"}`);
       removed++;
     }

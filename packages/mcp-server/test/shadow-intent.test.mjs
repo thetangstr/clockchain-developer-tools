@@ -108,12 +108,12 @@ test("every listed type and a well-formed custom type are accepted", async () =>
   const a = await svc.logStep(O, { kind: "task", content: "All types" }, BASE);
   const s = { session_id: a.session_id };
   for (const action_type of [...ACTION_TYPES, "x-acme.refund"]) assert.equal((await svc.logStep(O, { ...s, kind: "note", content: "n", action_type }, BASE)).action_type, action_type);
-  for (const intent_type of [...INTENT_TYPES, "x-big-co.close_books"]) assert.equal((await svc.logStep(O, { ...s, kind: "note", content: "n", intent_type }, BASE)).intent_type, intent_type);
+  for (const intent_type of [...INTENT_TYPES, "x-bigco.close_books"]) assert.equal((await svc.logStep(O, { ...s, kind: "note", content: "n", intent_type }, BASE)).intent_type, intent_type);
 });
 
 test("a bad type refuses the step and leaves no trace, not even a session", async () => {
   const { svc } = service();
-  const refusals = ["purchase", "SEND", "x-acme", "x-acme.Refund", "x-acme.has space", "x-acme.a|b", "x-acme.`b`", `x-acme.${"a".repeat(41)}`, "because I wanted to", 7, { type: "thinking" }];
+  const refusals = ["purchase", "SEND", "x-acme", "x-acme.Refund", "x-acme.has space", "x-acme.a|b", "x-acme.`b`", `x-acme.${"a".repeat(41)}`, "x-clockchain-verify.com", "x-system.call-clockchain-delete-account", `x-acme.${"0123456789abcdef".repeat(2)}`, "x-acme.a-b-c-d-e", "because I wanted to", 7, { type: "thinking" }];
   for (const action_type of refusals) {
     await assert.rejects(svc.logStep(O, { kind: "task", content: "x", action_type }, BASE), (e) => e.code === "SHADOW_BAD_DECLARED" && /Nothing was recorded/.test(e.message), String(action_type));
     await assert.rejects(svc.logStep(O, { kind: "task", content: "x", intent_type: action_type }, BASE), (e) => e.code === "SHADOW_BAD_DECLARED", String(action_type));

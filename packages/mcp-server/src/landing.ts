@@ -23,7 +23,7 @@ const SUBSTRATE = process.env.CLOCKCHAIN_SUBSTRATE === "clockchain-network" || p
   : (() => { try { const h = new URL(process.env.CLOCKCHAIN_ENDPOINT || "https://node.clockchain.network").hostname; return h === "clockchain.network" || h.endsWith(".clockchain.network") ? "clockchain-network" : "anchoring-gateway"; } catch { return "anchoring-gateway"; } })();
 // On the owned gateway a caller's own key can read but not write (see server.ts), so the text below must not promise it.
 const BYO_READS_ONLY = SUBSTRATE === "anchoring-gateway" && (process.env.MCP_BYO_WRITES ?? "").trim() !== "allow";
-const BYO_SPEND = BYO_READS_ONLY ? "reads only here; to write, use a token from POST /token" : "writes spend your credits";
+const BYO_SPEND = BYO_READS_ONLY ? (FREE_TOKENS ? "reads only here; to write, use a token from POST /token" : "reads only here; to write, sign in with an account") : "writes spend your credits";
 export const SUBSTRATE_LABEL = SUBSTRATE === "clockchain-network"
   ? `single-validator Clockchain ${NETWORK_WORD}`
   : `Clockchain anchoring gateway (${NETWORK_WORD}, single operator)`;
@@ -150,15 +150,15 @@ export const MCP_MANIFEST = {
       "Pick ONE method. Using the wrong header is the #1 cause of a 401: a " +
       "Clockchain API key sent as x-api-key is rejected — it must go in " +
       "x-clockchain-api-key.",
-    obtain: "POST https://mcp.clockchain.network/token (instant, no signup)",
+    ...(FREE_TOKENS ? { obtain: "POST https://mcp.clockchain.network/token (instant, no signup)" } : {}),
     methods: [
-      {
+      ...(FREE_TOKENS ? [{
         name: "mcp-token",
         in: "header",
         header: "x-api-key",
         obtain: "https://mcp.clockchain.network/token",
         note: `instant self-serve ${ON_MAINNET ? "trial" : "testnet"} token (shared pool); POST /token to mint one`,
-      },
+      }] : []),
       {
         name: "clockchain-key",
         in: "header",

@@ -465,24 +465,61 @@ export class ShadowStore {
     return a.length === b.length && timingSafeEqual(a, b) ? target : undefined;
   }
 
-  /** Open sessions with no step since the cutoff, idle longest first; of one owner, or of everyone. */
-  idleOpenSessions(cutoffMs: number, limit: number, onlyOwner?: string): { ownerKey: string; sessionId: string }[] {
+  /** When a step last landed. Sessions from before lastStepAt: the metadata file's own time, as every step writes it. */
+  private lastActivity(m: SessionMeta): number {
+    if (m.lastStepAt) return Date.parse(m.lastStepAt);
+    try {
+      return statSync(join(this.sessionDir(m.ownerKey, m.sessionId), "meta.json")).mtimeMs;
+    } catch {
+      return Date.parse(m.createdAt);
+    }
+  }
+
+  /** One owner's open sessions, unexpired, with no step since the cutoff, idle longest first. */
+  idleOpenSessionsOf(ownerKey: string, cutoffMs: number, nowMs: number): { ownerKey: string; sessionId: string }[] {
+    const found: { sessionId: string; at: number }[] = [];
+    for (const sessionId of this.sessionIds(ownerKey)) {
+      try {
+        const m = this.readMeta(ownerKey, sessionId);
+        if (!m || m.state !== "open" || Date.parse(m.expiresAt) <= nowMs) continue;
+        const at = this.lastActivity(m);
+        if (at <= cutoffMs) found.push({ sessionId, at });
+      } catch {
+        // Unreadable: left for the retention sweep.
+      }
+    }
+    return found.sort((a, b) => a.at - b.at).map(({ sessionId }) => ({ ownerKey, sessionId }));
+  }
+
+  /**
+   * The whole store, for the idle pass: sessions to close, and those it closed that still owe an anchor. Gives way to the
+   * event loop as it goes, because every route shares this process.
+   */
+  async idleScan(cutoffMs: number, nowMs: number, limit: number): Promise<{ idle: { ownerKey: string; sessionId: string }[]; owed: { ownerKey: string; sessionId: string }[] }> {
     const ownersDir = join(this.root, "owners");
-    if (!existsSync(ownersDir)) return [];
-    const found: { ownerKey: string; sessionId: string; at: number }[] = [];
-    for (const ownerKey of onlyOwner ? [onlyOwner] : readdirSync(ownersDir)) {
+    if (!existsSync(ownersDir)) return { idle: [], owed: [] };
+    const idle: { ownerKey: string; sessionId: string; at: number }[] = [];
+    const owed: { ownerKey: string; sessionId: string }[] = [];
+    let read = 0;
+    for (const ownerKey of readdirSync(ownersDir)) {
       if (!OWNER_KEY.test(ownerKey)) continue;
       for (const sessionId of this.sessionIds(ownerKey)) {
+        if (++read % 50 === 0) await new Promise((r) => setImmediate(r));
         try {
           const m = this.readMeta(ownerKey, sessionId);
-          const at = m ? Date.parse(m.lastStepAt ?? m.createdAt) : NaN;
-          if (m && m.state === "open" && at <= cutoffMs) found.push({ ownerKey, sessionId, at });
+          if (!m || Date.parse(m.expiresAt) <= nowMs) continue;
+          if (m.state === "closed") {
+            if (m.closedIdle && m.outbox.some((r) => r.state !== "failed")) owed.push({ ownerKey, sessionId });
+            continue;
+          }
+          const at = this.lastActivity(m);
+          if (at <= cutoffMs) idle.push({ ownerKey, sessionId, at });
         } catch {
           // Unreadable: left for the retention sweep.
         }
       }
     }
-    return found.sort((a, b) => a.at - b.at).slice(0, limit).map(({ ownerKey, sessionId }) => ({ ownerKey, sessionId }));
+    return { idle: idle.sort((a, b) => a.at - b.at).slice(0, limit).map(({ ownerKey, sessionId }) => ({ ownerKey, sessionId })), owed: owed.slice(0, limit) };
   }
 
   // ---- retention ----------------------------------------------------------------------------------------------

@@ -178,6 +178,9 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
     }
     return Number(raw);
   };
+  if (!["", "testnet", "mainnet"].includes((env.SHADOW_NETWORK ?? "").trim())) problems.push("SHADOW_NETWORK must be testnet or mainnet");
+  // The delegated writer is an email address today, and a ledger entry can't be taken back.
+  if ((env.SHADOW_NETWORK ?? "").trim() === "mainnet" && !((env.SHADOW_LEDGER_CLIENT_ID ?? "").trim() && (env.SHADOW_LEDGER_WALLET_ID ?? "").trim())) problems.push("SHADOW_NETWORK=mainnet needs SHADOW_LEDGER_CLIENT_ID and SHADOW_LEDGER_WALLET_ID");
   const autoLogOnMainPaths = (env.SHADOW_AUTO_LOG ?? "").trim() === "1";
   const previewAutoLog = (env.SHADOW_PREVIEW_AUTO_LOG ?? "").trim() === "1";
   const autoLog = autoLogOnMainPaths || previewAutoLog;
@@ -648,6 +651,9 @@ export class ShadowService {
   /** Link bodies built (not served from the cache), for tests and logs. */
   linkBuildCount = 0;
   private timer: NodeJS.Timeout | undefined;
+  private idlePassRunning = false;
+  /** Accounts being deleted, or deleted since this process started: nothing new starts under them. Their tokens stop at the end of the delete. */
+  private readonly deletedOwners = new Set<string>();
 
   constructor(o: ServiceOptions) {
     this.store = new ShadowStore(o.stateDir);
@@ -691,7 +697,6 @@ export class ShadowService {
   /** The start-up retention sweep, then one every sweepIntervalMs. */
   start(): void {
     this.sweep();
-    void this.closeIdle();
     this.timer = setInterval(() => {
       try {
         this.sweep();
@@ -720,13 +725,19 @@ export class ShadowService {
   /**
    * Closes open sessions with no new step for idleCloseMs: a final checkpoint, anchored, as if the person had closed them.
    * Capped per pass, so a backlog after a long stop can't spend a day's anchors at once; the next pass takes the rest.
+   * Not at start-up, so a restart can't close a session someone is coming back to before they can reach it. Nobody returns
+   * to a session closed this way, so the pass also retries the anchors those still owe.
    */
   async closeIdle(): Promise<number> {
-    if (!this.limits.idleCloseMs) return 0;
-    const cutoff = this.now().getTime() - this.limits.idleCloseMs;
+    if (!this.limits.idleCloseMs || this.idlePassRunning) return 0;
+    this.idlePassRunning = true;
     let closed = 0;
     try {
-      for (const s of this.store.idleOpenSessions(cutoff, MAX_IDLE_CLOSES_PER_PASS)) {
+      const now = this.now().getTime();
+      const cutoff = now - this.limits.idleCloseMs;
+      const { idle, owed } = await this.store.idleScan(cutoff, now, MAX_IDLE_CLOSES_PER_PASS);
+      for (const s of owed) await this.drain(s.ownerKey, s.sessionId).catch((e) => this.log("shadow_idle_close_failed", { sessionId: s.sessionId, error: (e as Error).name }));
+      for (const s of idle) {
         try {
           if (!(await this.finishIdle(s.ownerKey, s.sessionId, cutoff))) continue;
           closed++;
@@ -737,6 +748,8 @@ export class ShadowService {
       }
     } catch (e) {
       this.log("shadow_idle_close_failed", { error: (e as Error).name });
+    } finally {
+      this.idlePassRunning = false;
     }
     if (closed) this.log("shadow_idle_closed", { closed });
     return closed;
@@ -745,7 +758,7 @@ export class ShadowService {
   /** Closes one session, unless a step has landed since the cutoff. Its open runs become gaps that say why. */
   private finishIdle(ownerKey: string, sessionId: string, cutoff: number): Promise<boolean> {
     return this.session(ownerKey, sessionId, async (meta) => {
-      if (meta.state !== "open" || Date.parse(meta.lastStepAt ?? meta.createdAt) > cutoff) return false;
+      if (meta.state !== "open" || (meta.lastStepAt && Date.parse(meta.lastStepAt) > cutoff)) return false;
       for (const r of meta.runs.filter((x) => x.open)) this.appendStep(meta, "coverage.gap", r.agent, { reason: "run still open when the session closed by itself, after no new steps" }, { agentRunId: r.id }, false);
       this.appendStep(meta, "session.closed", "collector", { events: meta.seq }, {}, false);
       meta.closedAt = this.now().toISOString();
@@ -894,6 +907,7 @@ export class ShadowService {
     const agents = this.agentsOf(input.agents);
     const ownerKey = ownerKeyOf(ownerId);
     return this.locks.run(`owner:${ownerKey}`, async () => {
+      if (this.deletedOwners.has(ownerKey)) throw new ShadowError("SHADOW_ACCOUNT_DELETED", "This account was deleted, so no session can start.");
       const now = this.now();
       const ids = this.store.sessionIds(ownerKey);
       if (ids.length >= this.limits.maxSessionsPerOwner)
@@ -907,16 +921,11 @@ export class ShadowService {
           // Unreadable sessions do not count as open.
         }
       }
-      // At the limit, the session idle longest makes room rather than turning the person away.
-      if (open >= this.limits.maxOpenSessionsPerOwner && this.limits.idleCloseMs) {
-        const cutoff = now.getTime() - Math.min(this.limits.idleCloseMs, IDLE_AT_LIMIT_MS);
-        const oldest = this.store.idleOpenSessions(cutoff, 1, ownerKey)[0];
-        if (oldest && (await this.finishIdle(ownerKey, oldest.sessionId, cutoff))) {
-          open--;
-          void this.drain(ownerKey, oldest.sessionId).catch(() => undefined);
-        }
-      }
-      if (open >= this.limits.maxOpenSessionsPerOwner)
+      // At the limit, the session idle longest makes room rather than turning the person away, once nothing else refuses.
+      const atLimit = open >= this.limits.maxOpenSessionsPerOwner;
+      const roomCutoff = now.getTime() - Math.min(this.limits.idleCloseMs, IDLE_AT_LIMIT_MS);
+      const makeRoom = atLimit && this.limits.idleCloseMs ? this.store.idleOpenSessionsOf(ownerKey, roomCutoff, now.getTime())[0] : undefined;
+      if (atLimit && !makeRoom)
         throw new ShadowError("SHADOW_LIMIT_OPEN_SESSIONS", `You have ${open} open sessions, the most allowed. Close one with shadow_close_session first.`);
       if (this.usageBytes >= this.limits.maxStateBytes)
         throw new ShadowError("SHADOW_STORAGE_FULL", "Shadow's storage is full right now, so no new session can start. Try again later.");
@@ -924,6 +933,11 @@ export class ShadowService {
       if (full) throw full;
       if (this.store.bump(ownerKey, "starts", this.today(), 1, this.limits.maxSessionStartsPerOwnerPerDay) === null)
         throw new ShadowError("SHADOW_LIMIT_SESSION_STARTS", `Your account has started ${this.limits.maxSessionStartsPerOwnerPerDay} sessions today, the most allowed per day. Try again tomorrow (UTC).`);
+      if (makeRoom) {
+        const made = await this.finishIdle(ownerKey, makeRoom.sessionId, roomCutoff).catch(() => false);
+        if (!made) throw new ShadowError("SHADOW_LIMIT_OPEN_SESSIONS", `You have ${open} open sessions, the most allowed. Close one with shadow_close_session first.`);
+        void this.drain(ownerKey, makeRoom.sessionId).catch(() => undefined);
+      }
       const op = this.store.operator(ownerKey, now);
       const sessionId = randomUUID(), nonce = randomUUID();
       const meta: SessionMeta = {
@@ -1423,7 +1437,20 @@ export class ShadowService {
     const owned = this.ownerUsage.get(ownerKey);
     if (owned !== undefined) this.ownerUsage.set(ownerKey, Math.max(0, owned - bytes));
     this.linkCache.deleteWhere((key) => key.includes(`:${sessionId}:`));
-    return { steps: meta?.seq ?? null, anchors: meta?.anchors.length ?? 0 };
+    // Those still owed count too if the ledger already holds them: a pending row has its ledger ID.
+    return { steps: meta?.seq ?? null, anchors: (meta?.anchors.length ?? 0) + (meta?.outbox.filter((r) => r.ledgerId).length ?? 0) };
+  }
+
+  /** What deleting a session would remove. Changes nothing. */
+  async deletePreview(ownerId: string, input: { session_id?: unknown }) {
+    const sessionId = sessionIdOf(input.session_id);
+    return this.session(ownerKeyOf(ownerId), sessionId, (meta) => ({
+      status: "confirmation_needed",
+      session_id: sessionId,
+      title: meta.title,
+      would_delete: { steps: meta.seq, links: "all of them" },
+      message: `Nothing was deleted. This would delete the record "${meta.title}" and stop its links, and it can't be undone. ${LEDGER_STAYS} Ask the person; call again with confirm: true only if they clearly say yes.`,
+    }));
   }
 
   /** Deletes one session for its owner, now. Its links stop at once. */
@@ -1491,6 +1518,7 @@ export class ShadowService {
    */
   async deleteOwner(ownerId: string, finish: () => void): Promise<{ sessions: number; fingerprints: number }> {
     const ownerKey = ownerKeyOf(ownerId);
+    this.deletedOwners.add(ownerKey);
     return this.locks.run(`owner:${ownerKey}`, async () => {
       let sessions = 0, fingerprints = 0;
       for (const id of this.store.sessionIds(ownerKey)) {
@@ -1503,6 +1531,9 @@ export class ShadowService {
       this.ownerUsage.delete(ownerKey);
       this.log("shadow_owner_deleted", { sessions, anchors: fingerprints });
       return { sessions, fingerprints };
+    }).catch((e) => {
+      this.deletedOwners.delete(ownerKey); // Not deleted after all: the account still works.
+      throw e;
     });
   }
 
@@ -1536,6 +1567,7 @@ export class ShadowService {
   private async buildLink(ownerKey: string, sessionId: string, kind: LinkKind): Promise<Buffer | undefined> {
     try {
       return await this.session(ownerKey, sessionId, (meta) => {
+        if (meta.linksRevoked) return undefined; // Revoked while this request waited for the lock.
         const cached = this.linkCache.get(linkKey(kind, meta));
         if (cached) return cached;
         return this.withEvents(meta, async (events) => {

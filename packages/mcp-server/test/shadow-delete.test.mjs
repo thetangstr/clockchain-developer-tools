@@ -118,7 +118,9 @@ test("shadow_delete_session: the record and links go at once, the hashes stay an
     assert.equal(refused.value.error, "SHADOW_NOT_FOUND");
     assert.equal(await statusOf(session.viewer), 200);
 
-    const done = await tool(s.url, a.token, "shadow_delete_session", { session_id: session.id });
+    const preview = await tool(s.url, a.token, "shadow_delete_session", { session_id: session.id });
+    assert.equal(preview.value.status, "confirmation_needed", "without confirm it changes nothing");
+    const done = await tool(s.url, a.token, "shadow_delete_session", { session_id: session.id, confirm: true });
     assert.equal(done.isError, false);
     assert.equal(done.value.status, "deleted");
     assert.equal(done.value.links, "stopped");
@@ -134,7 +136,7 @@ test("shadow_delete_session: the record and links go at once, the hashes stay an
     assert.equal(s.fake.writes.length, writes, "deleting writes nothing to the ledger");
 
     // A repeat has no further effect.
-    assert.equal((await tool(s.url, a.token, "shadow_delete_session", { session_id: session.id })).value.error, "SHADOW_NOT_FOUND");
+    assert.equal((await tool(s.url, a.token, "shadow_delete_session", { session_id: session.id, confirm: true })).value.error, "SHADOW_NOT_FOUND");
     // The other session is untouched, and nothing of the deleted one is left on disk.
     assert.equal(await statusOf(other.viewer), 200);
     const shadowDir = path.join(s.stateDir, "shadow");

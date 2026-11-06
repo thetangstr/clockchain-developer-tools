@@ -297,7 +297,7 @@ export class ReservedReferenceError extends Error {
 
 /** Throws {@link ReservedReferenceError} for a reference hosted Shadow owns. */
 export function refuseReservedReference(reference: string): void {
-  if (RESERVED_REFERENCE.test(reference)) throw new ReservedReferenceError();
+  if (RESERVED_REFERENCE.test(reference.replace(/\p{Cf}/gu, ""))) throw new ReservedReferenceError();
 }
 
 /**

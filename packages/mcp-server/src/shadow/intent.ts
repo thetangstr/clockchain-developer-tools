@@ -8,8 +8,12 @@ import { redactText } from "./redact.js";
 export const ACTION_TYPES = ["read", "search", "create", "update", "delete", "send", "execute", "decide", "approve", "transact", "other"] as const;
 export const INTENT_TYPES = ["fulfill_request", "gather_information", "produce_output", "change_state", "communicate", "verify", "delegate", "recover", "other"] as const;
 
-/** An organization's own type, such as x-acme.refund. Short and plain, so it is safe in a table and can't hold a sentence. */
-const CUSTOM = /^x-[a-z0-9-]{1,20}\.[a-z0-9_-]{1,40}$/;
+/**
+ * An organization's own type, such as x-acme.refund: short and plain, safe in a table, with no room for a sentence, a key
+ * or a hostname. It can still hold a word or two the agent chose, so it is shown as the agent's own claim.
+ */
+const CUSTOM = /^x-[a-z0-9]{1,20}\.[a-z0-9]+(?:[_-][a-z0-9]+){0,2}$/;
+const customOk = (v: string) => CUSTOM.test(v) && v.length <= 47 && v.slice(v.indexOf(".") + 1).length <= 24 && !/[a-z0-9]{16,}/.test(v.slice(2)) && (v.match(/\d/g)?.length ?? 0) <= 6;
 
 export const CUSTOM_TYPE_HINT = "your own as x-<org>.<name>";
 export const ACTION_TYPE_HELP = `Optional. What kind of act this step is, as you report it: ${ACTION_TYPES.join(", ")}, or ${CUSTOM_TYPE_HINT}. Hashed with the step, not written to Clockchain.`;
@@ -19,7 +23,7 @@ export type Declared = { actionType?: string; intentType?: string };
 export type DeclaredInput = { action_type?: unknown; intent_type?: unknown };
 
 const isValid = (v: unknown, known: readonly string[]): v is string =>
-  typeof v === "string" && (known.includes(v) || (CUSTOM.test(v) && redactText(v) === v));
+  typeof v === "string" && (known.includes(v) || (customOk(v) && redactText(v) === v));
 
 function checked(field: string, v: unknown, known: readonly string[]): string | undefined {
   if (v === undefined || v === null || v === "") return undefined;

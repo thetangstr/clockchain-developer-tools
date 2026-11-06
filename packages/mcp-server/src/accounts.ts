@@ -176,6 +176,19 @@ export class AccountStore {
         rmSync(`${path}.bak`, { force: true });
       } else this.deleted.add(name.slice(0, -".json".length));
     }
+    // A delete that stopped after its mark: finish it, so the key can't come back when the mark ages out.
+    for (const acct of this.deleted) {
+      const path = join(this.accountsDir, `${acct}.json`);
+      if (!existsSync(path)) continue;
+      try {
+        const hash = this.accountFile(acct).load()?.keyHash;
+        if (hash) for (const f of [join(this.keysDir, `${hash}.json`), join(this.keysDir, `${hash}.json.bak`)]) rmSync(f, { force: true });
+      } catch {
+        // Unreadable, so its key can't be found from here; the record still goes.
+      }
+      rmSync(path, { force: true });
+      rmSync(`${path}.bak`, { force: true });
+    }
     this.total = readdirSync(this.accountsDir).filter((name) => ACCOUNT_FILE.test(name)).length;
   }
 

@@ -3,7 +3,7 @@
 //
 // http.ts serves these only when a person can really use Shadow (SHADOW_ENABLED=1, it started, sign-in is on).
 // Otherwise it serves landing.ts's INSTALL_TXT and MCP_MANIFEST, which this module never changes.
-import { ON_MAINNET } from "../network.js";
+import { FREE_TOKENS, ON_MAINNET } from "../network.js";
 import { INSTALL_TXT, MCP_MANIFEST, SUBSTRATE_LABEL } from "../landing.js";
 
 const SHADOW_PATH = "/shadow/mcp";
@@ -138,11 +138,11 @@ export function manifestWithShadow(base: string, chatPath?: string, autoLog = fa
         type: "oauth",
         accountRequired: true,
         account: `${ON_MAINNET ? "Clockchain account" : "Free Clockchain testnet account"}, no email. Created on the sign-in page; the account key is shown once.`,
-        freeKey: {
+        ...(FREE_TOKENS ? { freeKey: {
           obtain: `POST ${base}/token`,
           worksOn: `${base}/mcp`,
           onShadow: "refused with 403 account_required",
-        },
+        } } : {}),
       },
       clients: {
         claudeAi: chat

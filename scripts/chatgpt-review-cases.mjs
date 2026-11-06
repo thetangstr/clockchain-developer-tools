@@ -143,7 +143,7 @@ export async function runCases(base, key) {
     await run("negative", name, checks.negative[name]);
   }
   // Leave the account as it was: only its samples.
-  for (const id of created) await call("shadow_delete_session", { session_id: id });
+  for (const id of created) await call("shadow_delete_session", { session_id: id, confirm: true });
   return rows;
 }
 
