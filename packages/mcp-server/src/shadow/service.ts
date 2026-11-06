@@ -759,6 +759,8 @@ export class ShadowService {
   private finishIdle(ownerKey: string, sessionId: string, cutoff: number): Promise<boolean> {
     return this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state !== "open" || (meta.lastStepAt && Date.parse(meta.lastStepAt) > cutoff)) return false;
+      // Busy now is the common reason a close would stop halfway, so find out before anything is written; the next pass tries again.
+      await this.withEvents(meta, () => undefined);
       for (const r of meta.runs.filter((x) => x.open)) this.appendStep(meta, "coverage.gap", r.agent, { reason: "run still open when the session closed by itself, after no new steps" }, { agentRunId: r.id }, false);
       this.appendStep(meta, "session.closed", "collector", { events: meta.seq }, {}, false);
       meta.closedAt = this.now().toISOString();
@@ -1449,7 +1451,7 @@ export class ShadowService {
       session_id: sessionId,
       title: meta.title,
       would_delete: { steps: meta.seq, links: "all of them" },
-      message: `Nothing was deleted. This would delete the record "${meta.title}" and stop its links, and it can't be undone. ${LEDGER_STAYS} Ask the person; call again with confirm: true only if they clearly say yes.`,
+      message: `Nothing was deleted. This would delete this record and stop its links, and it can't be undone. ${LEDGER_STAYS} Ask the person; call again with confirm: true only if they clearly say yes.`,
     }));
   }
 

@@ -44,6 +44,7 @@ const out = {
   anonymous: { mcp: await rpc("/mcp", anon) },
   static: { mcp: await rpc("/mcp", "static-test-token") },
   token_route: (await fetch(`${base}/token`, { method: "POST" })).status,
+  connect_off: (await fetch(`${base}/connect/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status === 503,
 };
 process.stdout.write(JSON.stringify(out));
 process.exit(0);

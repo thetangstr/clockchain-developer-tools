@@ -405,7 +405,7 @@ export function buildShadowServer(
       kind: z.enum(["task", "prompt", "message", "tool_call", "tool_result", "file", "note"]).describe("The kind of step."),
       content: z.union([z.string(), z.record(z.unknown()), z.array(z.unknown())]).describe("The step itself: text, or JSON. At most 32 KB."),
       run_id: z.string().optional().describe("Optional. A task step starts a run (returned as run_id); other steps join the agent's latest open run unless you pass one."),
-      ...(autoLog ? declaredInput : {}),
+      ...declaredInput,
     },
   }, run(async (a) => {
     if (autoLog) service.assertLogging(owner);

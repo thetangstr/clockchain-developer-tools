@@ -23,7 +23,7 @@ const SUBSTRATE = process.env.CLOCKCHAIN_SUBSTRATE === "clockchain-network" || p
   : (() => { try { const h = new URL(process.env.CLOCKCHAIN_ENDPOINT || "https://node.clockchain.network").hostname; return h === "clockchain.network" || h.endsWith(".clockchain.network") ? "clockchain-network" : "anchoring-gateway"; } catch { return "anchoring-gateway"; } })();
 // On the owned gateway a caller's own key can read but not write (see server.ts), so the text below must not promise it.
 const BYO_READS_ONLY = SUBSTRATE === "anchoring-gateway" && (process.env.MCP_BYO_WRITES ?? "").trim() !== "allow";
-const BYO_SPEND = BYO_READS_ONLY ? (FREE_TOKENS ? "reads only here; to write, use a token from POST /token" : "reads only here; to write, sign in with an account") : "writes spend your credits";
+const BYO_SPEND = BYO_READS_ONLY ? (FREE_TOKENS ? "reads only here; to write, use a token from POST /token" : "reads only here") : "writes spend your credits";
 export const SUBSTRATE_LABEL = SUBSTRATE === "clockchain-network"
   ? `single-validator Clockchain ${NETWORK_WORD}`
   : `Clockchain anchoring gateway (${NETWORK_WORD}, single operator)`;

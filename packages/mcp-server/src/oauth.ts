@@ -1,4 +1,4 @@
-import { NETWORK_WORD, ON_MAINNET } from "./network.js";
+import { ON_MAINNET } from "./network.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -515,7 +515,7 @@ function smallPrint(app: string, redirectHost: string, autoLog?: boolean, shadow
 <ul>${autoLog ? `
 <li>Once connected, ${app} is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off. Some apps only start when you ask. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}${!autoLog && shadowAsked ? `
 <li>Shadow records a task only when you ask for it, in that chat.</li>` : ""}
-<li>${app} can use Clockchain’s ${NETWORK_WORD} tools on this account: recording, anchoring and timestamps.</li>
+<li>${app} can use Clockchain’s ${ON_MAINNET ? "tools on this account: recording and anchoring" : "testnet tools on this account: recording, anchoring and timestamps"}.</li>
 <li>${app} can read, add to and delete every Shadow record in this account, including records made from other apps, and can delete the account.</li>
 ${ON_MAINNET ? "" : "<li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>\n"}<li>Shadow keeps the records of your agents’ work for 30 days. You can delete a record or your account sooner, from the chat.</li>
 <li>Only fingerprints go on the Clockchain ledger, never the content itself.</li>

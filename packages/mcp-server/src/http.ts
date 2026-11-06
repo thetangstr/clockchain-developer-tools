@@ -1597,6 +1597,12 @@ export async function runHttp(): Promise<Server> {
     }
 
     if (pathOf(req.url) === "/connect/mcp") {
+      // Needs no token and writes with the delegated key, so with free keys off it is off too.
+      if (!FREE_TOKENS) {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_enabled_here", message: "Handshake from this path isn't enabled on this network." }));
+        return;
+      }
       try {
         await getStandaloneHandshakeHandler()(req, res);
       } catch {
@@ -1859,7 +1865,7 @@ export async function runHttp(): Promise<Server> {
     // secret or allowlist) before production — anyone with a valid claim can flip
     // an account in demo mode. Off entirely when self-serve is disabled.
     if (req.method === "POST" && pathOf(req.url) === "/promote") {
-      if (!selfServeEnabled) {
+      if (!selfServeEnabled || !FREE_TOKENS) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({
           error: "self_serve_disabled",
@@ -1940,7 +1946,7 @@ export async function runHttp(): Promise<Server> {
     // With free keys off, /mcp's delegated writes aren't open to free accounts either: they spend the server's credits, with no per-account limit there.
     if (!FREE_TOKENS && !byo && auth.ok && "reason" in auth && auth.reason === "demo_token_v1") {
       res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
-      res.end(JSON.stringify({ error: "account_not_enabled_here", message: "On this network a signed-in account works on Shadow (/shadow/mcp). The clock tools here need your own Clockchain key." }));
+      res.end(JSON.stringify({ error: "account_not_enabled_here", message: "On this network a signed-in account works on Shadow (/shadow/mcp), not on these tools." }));
       return;
     }
 

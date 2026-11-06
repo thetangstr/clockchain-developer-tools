@@ -9,8 +9,9 @@ export const ACTION_TYPES = ["read", "search", "create", "update", "delete", "se
 export const INTENT_TYPES = ["fulfill_request", "gather_information", "produce_output", "change_state", "communicate", "verify", "delegate", "recover", "other"] as const;
 
 /**
- * An organization's own type, such as x-acme.refund: short and plain, safe in a table, with no room for a sentence, a key
- * or a hostname. It can still hold a word or two the agent chose, so it is shown as the agent's own claim.
+ * An organization's own type, such as x-acme.refund: short and plain, safe in a table, with no room for a sentence and
+ * no shape of a known key. It can still hold a few characters the agent chose, even a secret someone typed there, so it is
+ * shown in code style, as the agent's own claim. The same goes for any other field an agent fills in.
  */
 const CUSTOM = /^x-[a-z0-9]{1,20}\.[a-z0-9]+(?:[_-][a-z0-9]+){0,2}$/;
 const customOk = (v: string) => CUSTOM.test(v) && v.length <= 47 && v.slice(v.indexOf(".") + 1).length <= 24 && !/[a-z0-9]{16,}/.test(v.slice(2)) && (v.match(/\d/g)?.length ?? 0) <= 6;
@@ -51,7 +52,9 @@ export function declaredOf(payload: unknown): Declared {
 
 /** "declared: action send, intent communicate", or "" when the step declares nothing. */
 export function declaredText(d: Declared): string {
-  const parts = [...(d.actionType ? [`action ${d.actionType}`] : []), ...(d.intentType ? [`intent ${d.intentType}`] : [])];
+  // In code style, a custom type can't turn into a link in the person's chat.
+  const shown = (v: string) => (v.startsWith("x-") ? `\`${v}\`` : v);
+  const parts = [...(d.actionType ? [`action ${shown(d.actionType)}`] : []), ...(d.intentType ? [`intent ${shown(d.intentType)}`] : [])];
   return parts.length ? `declared: ${parts.join(", ")}` : "";
 }
 

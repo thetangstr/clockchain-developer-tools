@@ -200,8 +200,11 @@ test("through MCP with auto-log on: the log tools list the fields, and they reac
   assert.equal(JSON.parse(refused.content[0].text).error, "SHADOW_BAD_DECLARED");
 });
 
-test("with auto-log off, shadow_record's schema is unchanged", async () => {
+test("the listed path, with logging by default off, offers the labels too, and they stay optional", async () => {
   const { tools } = await client({});
-  assert.equal("action_type" in tools.shadow_record.inputSchema.properties, false);
-  assert.equal("intent_type" in tools.shadow_record.inputSchema.properties, false);
+  const schema = tools.shadow_record.inputSchema;
+  assert.equal("action_type" in schema.properties, true);
+  assert.equal("intent_type" in schema.properties, true);
+  assert.equal((schema.required ?? []).includes("action_type"), false);
+  assert.equal((schema.required ?? []).includes("intent_type"), false);
 });
