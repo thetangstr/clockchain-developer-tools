@@ -1002,7 +1002,7 @@ export class ClockchainClient {
     ];
     const events: IdentityHistory["events"] = [];
     for (const { type, ref } of refs) {
-      const records = await this.searchAsset(ref).catch(() => []);
+      const records = await this.searchIdentityRef(ref);
       for (const record of records) {
         const time = await this.consensusTimeFor(record.blockHeight);
         events.push(this.toIdentityEvent(type, record, time));
@@ -1011,9 +1011,9 @@ export class ClockchainClient {
     // Delegations are keyed by `did:delegate:${did}:${child}`; searchAsset is
     // exact-match, so a child-agnostic prefix search is not available. We try the
     // self-delegation ref as a best-effort (full enumeration is backend-gated).
-    const delegateRecords = await this.searchAsset(
+    const delegateRecords = await this.searchIdentityRef(
       `did:delegate:${did}:${did}`,
-    ).catch(() => []);
+    );
     for (const record of delegateRecords) {
       const time = await this.consensusTimeFor(record.blockHeight);
       events.push(this.toIdentityEvent("delegate", record, time));
@@ -1130,20 +1130,35 @@ export class ClockchainClient {
     blockHeight: string | number,
     ledgerId: string,
   ): Promise<ChainRecord | null> {
-    const res = await this.keylessRequest<{
-      blockHeight?: string;
-      transactions?: string[];
-    }>(
+    const res = await this.keylessRequest<unknown>(
       `/searchAssetFromChain?blockHeight=${encodeURIComponent(String(blockHeight))}`,
     ).catch(() => null);
-    for (const t of res?.transactions ?? []) {
+    const wrapped = res as { blockHeight?: string; transactions?: string[] } | null;
+    for (const t of wrapped?.transactions ?? []) {
       const id = (String(t).match(/ledgerId=([^,]+)/) || [])[1];
       if (id === ledgerId) {
         return {
           assetHash: (String(t).match(/assetHash=([0-9a-fx]+)/) || [])[1] ?? "",
           assetReferenceId:
             (String(t).match(/assetReferenceId=([^,]+)/) || [])[1] ?? "",
-          blockHeight: String(res?.blockHeight ?? blockHeight),
+          blockHeight: String(wrapped?.blockHeight ?? blockHeight),
+        };
+      }
+    }
+    // The network's staging API answers with the record itself (or a list of
+    // them) rather than a block carrying stringified transactions. A record that
+    // names a different height is not in this block, so it never counts.
+    for (const r of Array.isArray(res) ? res : [res]) {
+      const rec = r as { ledgerId?: unknown; assetHash?: unknown; assetReferenceId?: unknown; blockHeight?: unknown } | null;
+      if (
+        rec?.ledgerId === ledgerId &&
+        typeof rec.assetHash === "string" &&
+        String(rec.blockHeight) === String(blockHeight)
+      ) {
+        return {
+          assetHash: rec.assetHash,
+          assetReferenceId: typeof rec.assetReferenceId === "string" ? rec.assetReferenceId : "",
+          blockHeight: String(blockHeight),
         };
       }
     }
@@ -1200,6 +1215,21 @@ export class ClockchainClient {
   }
 
   // --- internals ---
+
+  /**
+   * Identity records under one reference. Only "not found" means there are none.
+   * Any other failure is thrown: reading a failed search as an empty history would
+   * tell a counterparty a live identity never existed, or that a revoked one is
+   * still valid.
+   */
+  private async searchIdentityRef(ref: string): Promise<LedgerRecord[]> {
+    try {
+      return await this.searchAsset(ref);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return [];
+      throw error;
+    }
+  }
 
   /**
    * Best-effort consensus (block) time for a height — null when pending or on

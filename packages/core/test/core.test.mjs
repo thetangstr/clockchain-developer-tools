@@ -424,3 +424,30 @@ test("substrate: explicit CLOCKCHAIN_SUBSTRATE wins, else derived from the endpo
   const d = new ClockchainClient({ apiKey: "k", clientId: "c", walletId: "w", endpoint: "http://x.internal", substrate: "clockchain-network" });
   assert.equal(d.substrate(), "clockchain-network", "explicit config overrides the heuristic");
 });
+
+test("getChainRecord reads the network's flat record, and never one from another block or ledger id", async () => {
+  const record = { ledgerId: "L1", assetHash: "ab".repeat(32), assetReferenceId: "r", blockHeight: "148" };
+  routeFetch([["/searchAssetFromChain", { body: record }]]);
+  const client = new ClockchainClient(cfg);
+  assert.deepEqual(await client.getChainRecord("148", "L1"), { assetHash: "ab".repeat(32), assetReferenceId: "r", blockHeight: "148" });
+  assert.equal(await client.getChainRecord("148", "L2"), null);
+  assert.equal(await client.getChainRecord("149", "L1"), null);
+
+  routeFetch([["/searchAssetFromChain", { body: [{ ...record, ledgerId: "L0" }, record] }]]);
+  assert.equal((await client.getChainRecord("148", "L1")).assetHash, "ab".repeat(32));
+
+  routeFetch([["/searchAssetFromChain", { body: { ledgerId: "L1", blockHeight: "148" } }]]);
+  assert.equal(await client.getChainRecord("148", "L1"), null);
+});
+
+test("identity history treats 'not found' as empty but a failed search as a failure", async () => {
+  routeFetch([["/searchAsset", { status: 404, body: { message: "not found" } }]]);
+  assert.deepEqual((await new ClockchainClient(cfg).getIdentityHistory("did:x")).events, []);
+
+  routeFetch([["/searchAsset", { status: 401, body: { message: "MISSING_TOKEN" } }]]);
+  await assert.rejects(new ClockchainClient(cfg).getIdentityHistory("did:x"), AuthError);
+  await assert.rejects(new ClockchainClient(cfg).verifyIdentityAt("did:x", "2026-11-06T00:00:00Z"), AuthError);
+
+  routeFetch([["/searchAsset", { status: 500, body: { message: "boom" } }]]);
+  await assert.rejects(new ClockchainClient(cfg).getIdentityHistory("did:x"), ApiError);
+});
