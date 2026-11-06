@@ -491,6 +491,28 @@ OpenAI's portal gives a token to serve as plain text at `/.well-known/openai-app
 `/clockchain/mcp/OPENAI_APPS_CHALLENGE_TOKEN` to it and deploy. Check with `curl -s https://mcp.clockchain.network/.well-known/openai-apps-challenge`.
 Unset, the path answers like any other unknown path. One hostname serves one plugin's token, so a second plugin here needs the parent domain.
 
+### Moving to mainnet
+
+Not rehearsed: no mainnet endpoint exists yet to test against. Do these in order, on staging first.
+
+1. Get from the network team: the mainnet endpoint, the keys and writer identity, whether the ledger API and receipts match the testnet's, and what credits cost.
+2. Decide free use. On mainnet the anonymous key from `POST /token` stops working, for tokens already issued too, unless `MCP_MAINNET_FREE_TOKENS=1`. It spends the server's own credits.
+3. Lower `SHADOW_ANCHORS_PER_DAY`, `MCP_RATE_PER_MIN` and the free-key limit to what the credits can pay for.
+4. Set `CLOCKCHAIN_ENDPOINT`, `CLOCKCHAIN_SUBSTRATE`, the writer identity and `SHADOW_NETWORK=mainnet` together, then deploy with `--full-restart`, because the settings are read at start. Tell the travel orchestrator first.
+5. Run the public end-to-end check, then one session from real Claude Code, and look its last anchor up on the new ledger.
+
+**What the switch changes:** the sign-in pages, `/shadow/connect`, the landing and status pages and the server instructions, none of which promise free use on mainnet. New sessions are recorded as `clockchain-mainnet`.
+
+**What it doesn't change yet:** the clock tools' descriptions on `/mcp` and the receipts' `assurance` text in `packages/core` still say testnet and single validator. They need the network's real facts first, so write them then. The landing page's disclaimer also needs rewriting. `/handshake/*`, `/next/handshake/*` and `/acm4/*` are frozen and not touched.
+
+**Sessions from before the switch** keep their network. They take no new steps (a log tool tells the agent to start a new session), and nothing they still owe goes to the new ledger. They can still close, signed but not anchored. `shadow_verify` checks them offline and says why, and the result is indeterminate rather than a pass when the check needs the ledger. Their packets and viewer links keep working until they expire. To check them online, the old gateway has to stay readable; there's no setting for that yet.
+
+**Rollback:** set `SHADOW_NETWORK` and `CLOCKCHAIN_ENDPOINT` back and restart. Sessions started on mainnet then behave the same way in reverse.
+
+### Sessions that close by themselves
+
+With logging on by default nobody asks to close, so an open session with no new step closes after `SHADOW_IDLE_CLOSE_HOURS` (default 24 when logging by default is on, otherwise off; `off` turns it off). The check runs with the hourly sweep, at most 200 sessions a pass, oldest first, and each spends one anchor from that account's daily limit. If the limit is used up, the session closes signed but not anchored. At the open-session limit, a session idle for over an hour closes to make room. A later step on a closed session gets `SHADOW_SESSION_CLOSED`, and the log tools tell the agent to start a new session. Logs: `shadow_idle_closed`, `shadow_idle_close_failed`.
+
 ### Publishing to the MCP registry
 
 There's no publish script: `scripts/` has none, and `.github` doesn't do it. It's done by hand, from a person's machine. Nothing has been

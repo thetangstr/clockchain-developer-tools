@@ -90,6 +90,10 @@ export type SessionMeta = {
   linksRevoked?: true;
   /** Set at close when the assistant gave a count of the person's messages. Older sessions don't have it. */
   capture?: { person_messages_reported: number; person_messages_logged: number; missing: number };
+  /** When the last step landed. Older sessions don't have it, and count from createdAt. */
+  lastStepAt?: string;
+  /** Closed by the server after no new steps, not by the person or the agent. */
+  closedIdle?: true;
 };
 
 export type Operator = { operatorId: string; keys: KeyProvider };
@@ -459,6 +463,26 @@ export class ShadowStore {
     if (!meta) return undefined;
     const a = Buffer.from(meta.cap), b = Buffer.from(cap);
     return a.length === b.length && timingSafeEqual(a, b) ? target : undefined;
+  }
+
+  /** Open sessions with no step since the cutoff, idle longest first; of one owner, or of everyone. */
+  idleOpenSessions(cutoffMs: number, limit: number, onlyOwner?: string): { ownerKey: string; sessionId: string }[] {
+    const ownersDir = join(this.root, "owners");
+    if (!existsSync(ownersDir)) return [];
+    const found: { ownerKey: string; sessionId: string; at: number }[] = [];
+    for (const ownerKey of onlyOwner ? [onlyOwner] : readdirSync(ownersDir)) {
+      if (!OWNER_KEY.test(ownerKey)) continue;
+      for (const sessionId of this.sessionIds(ownerKey)) {
+        try {
+          const m = this.readMeta(ownerKey, sessionId);
+          const at = m ? Date.parse(m.lastStepAt ?? m.createdAt) : NaN;
+          if (m && m.state === "open" && at <= cutoffMs) found.push({ ownerKey, sessionId, at });
+        } catch {
+          // Unreadable: left for the retention sweep.
+        }
+      }
+    }
+    return found.sort((a, b) => a.at - b.at).slice(0, limit).map(({ ownerKey, sessionId }) => ({ ownerKey, sessionId }));
   }
 
   // ---- retention ----------------------------------------------------------------------------------------------

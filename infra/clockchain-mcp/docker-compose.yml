@@ -85,6 +85,10 @@ services:
       SHADOW_ACCOUNT_MAX_BYTES: "${SHADOW_ACCOUNT_MAX_BYTES:-}"
       SHADOW_SESSION_STARTS_PER_DAY: "${SHADOW_SESSION_STARTS_PER_DAY:-}"
       SHADOW_LINK_CONCURRENCY: "${SHADOW_LINK_CONCURRENCY:-}"
+      # The network: SHADOW_NETWORK=mainnet changes the pages and new sessions; see the RUNBOOK before setting it.
+      SHADOW_NETWORK: "${SHADOW_NETWORK:-}"
+      MCP_MAINNET_FREE_TOKENS: "${MCP_MAINNET_FREE_TOKENS:-}"
+      SHADOW_IDLE_CLOSE_HOURS: "${SHADOW_IDLE_CLOSE_HOURS:-}"
       # Sign-up from the chat (claude.ai "Sign in when needed"): SHADOW_LAZY_AUTH=1 adds /shadow/chat/mcp, which
       # connects and lists tools before sign-in. "" = off (no such path; /shadow/mcp is unchanged either way).
       SHADOW_LAZY_AUTH: "${SHADOW_LAZY_AUTH:-}"

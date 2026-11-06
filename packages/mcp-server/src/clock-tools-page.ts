@@ -3,6 +3,7 @@
 // in both renderings — every argument name, bound and field below is the one the tool
 // schemas in tools.ts publish, and the example numbers are from real runs against
 // production (GATES.md, eval/reports).
+import { NETWORK_LABEL, NETWORK_WORD } from "./network.js";
 import { BASE_CSS, LOGO_SVG, SUBSTRATE_LABEL } from "./landing.js";
 
 const ENDPOINT = "https://mcp.clockchain.network/mcp";
@@ -97,7 +98,7 @@ timer_cancel { "id": "797070c9-…" }
 const LIMITS = [
   ["Rate", "30 tool calls per minute per token; the MCP handshake and tools/list are free."],
   ["Triggers", "Up to 20 active timers/alarms per caller; a fire is 1 s … 30 days out; intervals ≥ 60 s."],
-  ["Credits", "Each anchor spends one testnet log credit: two per stopwatch measurement, one per timer/alarm fire. Reads and verification are free."],
+  ["Credits", `Each anchor spends one ${NETWORK_WORD} log credit: two per stopwatch measurement, one per timer/alarm fire. Reads and verification are free.`],
   ["Webhooks", "Optional webhook_url on timer_set / alarm_set. Each fire is POSTed with Standard-Webhooks headers (webhook-id, webhook-timestamp, webhook-signature = HMAC-SHA256 with the per-caller secret returned once at registration). Destinations are DNS-pinned and allow-listed on this deployment — ask to have a host added."],
   ["Honest claims", `Fires are anchored on the ${SUBSTRATE_LABEL}: the event hash, block anchor and block time are real and keyless-verifiable, and receipts say so in attestation.substrate. Multi-validator attestation activates at mainnet.`],
 ] as const;
@@ -213,7 +214,7 @@ ${BASE_CSS}
 </head>
 <body>
 <nav><div class="wrap nav-in">
-  <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">Testnet</span></div>
+  <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">${NETWORK_LABEL}</span></div>
   <div class="nav-links">
     <a href="#stopwatch">Stopwatch</a>
     <a href="#timer">Timer</a>

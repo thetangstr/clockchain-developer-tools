@@ -1,3 +1,4 @@
+import { FREE_TOKENS } from "./network.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
@@ -599,7 +600,7 @@ export async function runHttp(): Promise<Server> {
   // unauthenticated, so keying on it would let an attacker rotate `sub` to escape
   // the ceiling and drain the shared budget (per-user auth).
   const signingSecret = process.env.MCP_TOKEN_SIGNING_SECRET ?? "";
-  const selfServeEnabled = signingSecret.length > 0;
+  const selfServeEnabled = signingSecret.length > 0 && FREE_TOKENS;
   const mintPerHour = Number(process.env.MCP_TOKEN_MINT_PER_HOUR ?? "10");
   const mintLimiter = createRateLimiter(
     Number.isFinite(mintPerHour) ? mintPerHour : 10,

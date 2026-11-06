@@ -11,6 +11,7 @@ import { ACTION_TYPE_HELP, INTENT_TYPE_HELP } from "./intent.js";
 import { SUMMARY_CSP } from "./lib/summary.js";
 import { MAX_PERSON_MESSAGES, ShadowError, type ShadowService } from "./service.js";
 import { connectInstructions } from "./discovery.js";
+import { ON_MAINNET } from "../network.js";
 import { accountCreatedDay, AccountUnavailableError, cleanAccountName, displayAccountName, looksLikeAccountKey, shortAccountId, type Account, type AccountStore } from "../accounts.js";
 
 export const SHADOW_INSTRUCTIONS = [
@@ -79,7 +80,7 @@ export const ASKED_INSTRUCTIONS = [
 /** Added on the chat sign-in endpoint (SHADOW_LAZY_AUTH), which also carries the three account tools. */
 export const ACCOUNT_INSTRUCTIONS = [
   "",
-  "Clockchain account: Shadow records belong to a free Clockchain account (testnet, no email needed).",
+  `Clockchain account: Shadow records belong to a ${ON_MAINNET ? "Clockchain account (no email needed)" : "free Clockchain account (testnet, no email needed)"}.`,
   "- When the person asks to create or set up a Clockchain account (for example \"create a Clockchain account for",
   "  Acme\"), call clockchain_create_account {name: \"Acme\"}. If this connection is not signed in yet, the person is",
   "  asked to connect: they click Create account in the Clockchain window, save their account key there, and the",
@@ -599,7 +600,7 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
   }, withAccount(() => ({
     status: "help",
     message: [
-      service ? "Clockchain accounts are free (testnet) and need no email." : "Clockchain accounts are on testnet and need no email.",
+      ON_MAINNET ? "Clockchain accounts need no email." : service ? "Clockchain accounts are free (testnet) and need no email." : "Clockchain accounts are on testnet and need no email.",
       "To get one from this chat: ask for it (for example \"create a Clockchain account for Acme\"). A Connect button appears; in the Clockchain window that opens, click Create account. The window shows the account key once, with a Download key file link: save it there. Then the chat carries on and names the account.",
       "The account key is shown only in that window. It never appears in this chat, and nobody should ask for it here. It signs you in on another device or app: choose \"I have an account key\" in the Clockchain window.",
       "Already have an account? When the Clockchain window opens, choose \"I have an account key\", or click Allow if it shows your account.",

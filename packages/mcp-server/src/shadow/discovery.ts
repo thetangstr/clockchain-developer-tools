@@ -3,6 +3,7 @@
 //
 // http.ts serves these only when a person can really use Shadow (SHADOW_ENABLED=1, it started, sign-in is on).
 // Otherwise it serves landing.ts's INSTALL_TXT and MCP_MANIFEST, which this module never changes.
+import { ON_MAINNET } from "../network.js";
 import { INSTALL_TXT, MCP_MANIFEST, SUBSTRATE_LABEL } from "../landing.js";
 
 const SHADOW_PATH = "/shadow/mcp";
@@ -18,7 +19,7 @@ const ABOUT = [
 ];
 
 const KEPT_RECORD = "On this server, deleted 30 days after the session starts. Until then anyone with a viewer or packet link can read all of it, unless the person revokes the link. The person can delete a record, or the whole account, at any time, through tools.";
-const KEPT_LEDGER = `Hashes only, on the ${SUBSTRATE_LABEL}. They stay after the record is deleted. Writes come from a shared testnet pool, so ledger entries show the pool's client and wallet, not yours.`;
+const KEPT_LEDGER = `Hashes only, on the ${SUBSTRATE_LABEL}. They stay after the record is deleted. ${ON_MAINNET ? "Writes come from a shared Clockchain client and wallet, so ledger entries show those, not yours." : "Writes come from a shared testnet pool, so ledger entries show the pool's client and wallet, not yours."}`;
 const KEPT_ACCOUNT = "No email. A lost account key plus cleared cookies loses the account.";
 const CHATGPT_NOTE = "Not yet confirmed in a real ChatGPT account. Some plans may block write tools.";
 const CLAUDE_CODE_NOTE = "Not yet confirmed with a real Claude Code sign-up.";
@@ -44,10 +45,12 @@ function guideLines(base: string, chatPath: string | undefined, autoLog: boolean
     "",
     ...wrap(autoLog ? LOGGING_ON : LOGGING_ASKED).map((l) => l.replace(/^ {2}/, "")),
     "",
-    "An account is required. It is free, on testnet, and needs no email. The free",
-    "key from the command below works on /mcp only. Shadow refuses it with 403",
-    "account_required.",
-    `  curl -X POST ${base}/token`,
+    ...(ON_MAINNET ? ["An account is required. It needs no email."] : [
+      "An account is required. It is free, on testnet, and needs no email. The free",
+      "key from the command below works on /mcp only. Shadow refuses it with 403",
+      "account_required.",
+      `  curl -X POST ${base}/token`,
+    ]),
     "",
     ...(chat
       ? [
@@ -134,7 +137,7 @@ export function manifestWithShadow(base: string, chatPath?: string, autoLog = fa
       authentication: {
         type: "oauth",
         accountRequired: true,
-        account: "Free Clockchain testnet account, no email. Created on the sign-in page; the account key is shown once.",
+        account: `${ON_MAINNET ? "Clockchain account" : "Free Clockchain testnet account"}, no email. Created on the sign-in page; the account key is shown once.`,
         freeKey: {
           obtain: `POST ${base}/token`,
           worksOn: `${base}/mcp`,

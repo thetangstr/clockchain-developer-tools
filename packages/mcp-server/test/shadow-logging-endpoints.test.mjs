@@ -244,7 +244,7 @@ test("preview endpoints: logging on by default, said on their own sign-in pages,
     assert.equal(step.isError, false);
     assert.equal(step.value.anchor_status, "anchored");
     assert.match(step.value.show_user, /^---\n\n\*\*Clockchain Shadow:\*\* 1 step logged so far\./);
-    assert.match(step.value.show_user, /Logging is on\. Say 'stop logging' to turn it off\.$/);
+    assert.match(step.value.show_user, /Logging is on\. Saying 'stop logging' turns it off\.$/);
 
     await tool(s.url, PREVIEW_CHAT, a.token, "clockchain_logging", { enabled: false });
     assert.equal((await tool(s.url, PREVIEW, a.token, "shadow_log_step", { kind: "note", content: "x" })).value.error, "LOGGING_OFF");

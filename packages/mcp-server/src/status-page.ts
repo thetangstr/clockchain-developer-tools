@@ -3,6 +3,7 @@
 // stylesheet and chrome as the landing/SOP pages. The page is generated per
 // request from the cached StatusReport — every number carries its observation
 // time, and the observation window is labeled honestly ("since process start").
+import { NETWORK_LABEL } from "./network.js";
 import { BASE_CSS, LOGO_SVG, SUBSTRATE_LABEL } from "./landing.js";
 import type { ComponentState, OverallState, StatusReport } from "./status.js";
 
@@ -145,7 +146,7 @@ ${CSS}</style>
 </head>
 <body>
 <nav><div class="wrap nav-in">
-  <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">Testnet</span></div>
+  <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">${NETWORK_LABEL}</span></div>
   <div class="nav-links">
     <a href="/">Overview</a>
     <a href="/clock-tools">Clock tools</a>

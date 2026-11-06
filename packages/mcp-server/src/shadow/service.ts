@@ -56,6 +56,8 @@ export type ShadowLimits = {
   maxSessionStartsPerOwnerPerDay: number;
   /** Built link bodies (packets and summaries) kept in memory and shared by every reader, in bytes. */
   linkCacheBytes: number;
+  /** An open session with no new step for this long closes by itself. 0: never. */
+  idleCloseMs: number;
 };
 
 export const DEFAULT_SHADOW_LIMITS: ShadowLimits = {
@@ -76,6 +78,7 @@ export const DEFAULT_SHADOW_LIMITS: ShadowLimits = {
   maxBytesPerOwner: 40 * 1024 * 1024,
   maxSessionStartsPerOwnerPerDay: 30,
   linkCacheBytes: 48 * 1024 * 1024,
+  idleCloseMs: 0,
 };
 
 const RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out", "unknown"] as const;
@@ -98,6 +101,8 @@ const ONLINE_CONCURRENCY = 8;
 const MAX_TURN_STEPS = 100;
 const MAX_TURN_BYTES = 900 * 1024;
 const CREDENTIAL_AGENT = "An agent id can't hold a key or token, and nothing was recorded. Use a plain name, or leave agent out.";
+const MAX_IDLE_CLOSES_PER_PASS = 200;
+const IDLE_AT_LIMIT_MS = 60 * 60_000;
 const START_NEW = "Call again without session_id to start a new session; keep logging there.";
 const NEW_SESSION_NOTE = "This session_id goes with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed; shadow_close_session and shadow_verify are for when the person asks to finish or verify.";
 /** shadow_close_session's person_messages: well beyond any conversation, and small enough to read as a count. */
@@ -141,7 +146,7 @@ export const SHADOW_ENV_DEFAULTS = {
  * Defaults when SHADOW_AUTO_LOG=1: an anchor per step has to fit tasks of 50 steps and more. At 300 anchors a session's
  * metadata stays under the 256 KB limit of the build before this flag, so a rollback can still read it.
  */
-export const AUTO_LOG_DEFAULTS = { anchorsPerDay: 400, anchorsPerSession: 300, logStepsPerMinute: 90, accountBytes: 5 * 1024 * 1024 } as const;
+export const AUTO_LOG_DEFAULTS = { idleCloseHours: 24, anchorsPerDay: 400, anchorsPerSession: 300, logStepsPerMinute: 90, accountBytes: 5 * 1024 * 1024 } as const;
 /** meta.anchors keeps about 260 bytes per anchor, and the metadata file holds at most META_MAX_BYTES. */
 const MAX_ANCHORS_PER_SESSION = 1500;
 
@@ -189,6 +194,10 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) problems.push(`${name} must be letters, digits and . _ - (it goes on a public ledger, so not an email address)`);
     if (value.toLowerCase() === (delegated ?? "").trim().toLowerCase()) problems.push(`${name} must differ from the delegated client and wallet`);
   }
+  // With logging on by default nobody asks to close, so sessions would pile up open: viewers stuck on "indeterminate", and
+  // the account refused at its open-session limit. "off" or 0 keeps them open until they expire.
+  const idleRaw = (env.SHADOW_IDLE_CLOSE_HOURS ?? "").trim();
+  const idleHours = idleRaw === "off" || idleRaw === "0" ? 0 : whole("SHADOW_IDLE_CLOSE_HOURS", autoLog ? AUTO_LOG_DEFAULTS.idleCloseHours : 0);
   const logStepsPerMinute = autoLog ? whole("SHADOW_LOG_STEPS_PER_MIN", AUTO_LOG_DEFAULTS.logStepsPerMinute) : undefined;
   return {
     enabled: true,
@@ -202,6 +211,7 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
       ...(anchorsPerSession !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession ? { maxAnchorsPerSession: anchorsPerSession } : {}),
       // Every receipt is checked online, however many a session has (a start marker plus the session's anchors).
       ...(autoLog ? { onlineVerifyMaxReceipts: anchorsPerSession + 1 } : {}),
+      ...(idleHours ? { idleCloseMs: idleHours * 3_600_000 } : {}),
     },
     linkConcurrency: whole("SHADOW_LINK_CONCURRENCY", SHADOW_ENV_DEFAULTS.linkConcurrency),
     ...(autoLog ? { autoLog: true as const, logStepsPerMinute } : {}),
@@ -462,6 +472,7 @@ function turnTable(meta: SessionMeta, turn: { rows: StepRow[]; earlier: number }
 function captureNote(meta: SessionMeta): string {
   if (meta.state === "open") return "This session is still open, so it can't yet say whether any turn is missing.";
   const c = meta.capture;
+  if (meta.closedIdle) return "This session closed by itself after no new steps, so nobody counted the person's messages, and this record can't say whether any turn is missing.";
   if (!c) return "No count of the person's messages was given when this session closed, so this record can't say whether any turn is missing.";
   const reported = `${c.person_messages_reported} ${c.person_messages_reported === 1 ? "message" : "messages"} from the person`;
   const own = "That is the assistant's own count, and this server can't see a call that was blocked before it arrived.";
@@ -680,12 +691,14 @@ export class ShadowService {
   /** The start-up retention sweep, then one every sweepIntervalMs. */
   start(): void {
     this.sweep();
+    void this.closeIdle();
     this.timer = setInterval(() => {
       try {
         this.sweep();
       } catch (e) {
         this.log("shadow_sweep_failed", { error: (e as Error).name });
       }
+      void this.closeIdle();
     }, this.limits.sweepIntervalMs);
     this.timer.unref();
   }
@@ -702,6 +715,47 @@ export class ShadowService {
     this.ownerUsage.clear();
     this.log("shadow_sweep", { removed: r.removed, bytes: r.bytes });
     return r;
+  }
+
+  /**
+   * Closes open sessions with no new step for idleCloseMs: a final checkpoint, anchored, as if the person had closed them.
+   * Capped per pass, so a backlog after a long stop can't spend a day's anchors at once; the next pass takes the rest.
+   */
+  async closeIdle(): Promise<number> {
+    if (!this.limits.idleCloseMs) return 0;
+    const cutoff = this.now().getTime() - this.limits.idleCloseMs;
+    let closed = 0;
+    try {
+      for (const s of this.store.idleOpenSessions(cutoff, MAX_IDLE_CLOSES_PER_PASS)) {
+        try {
+          if (!(await this.finishIdle(s.ownerKey, s.sessionId, cutoff))) continue;
+          closed++;
+          await this.drain(s.ownerKey, s.sessionId);
+        } catch (e) {
+          this.log("shadow_idle_close_failed", { sessionId: s.sessionId, error: (e as Error).name });
+        }
+      }
+    } catch (e) {
+      this.log("shadow_idle_close_failed", { error: (e as Error).name });
+    }
+    if (closed) this.log("shadow_idle_closed", { closed });
+    return closed;
+  }
+
+  /** Closes one session, unless a step has landed since the cutoff. Its open runs become gaps that say why. */
+  private finishIdle(ownerKey: string, sessionId: string, cutoff: number): Promise<boolean> {
+    return this.session(ownerKey, sessionId, async (meta) => {
+      if (meta.state !== "open" || Date.parse(meta.lastStepAt ?? meta.createdAt) > cutoff) return false;
+      for (const r of meta.runs.filter((x) => x.open)) this.appendStep(meta, "coverage.gap", r.agent, { reason: "run still open when the session closed by itself, after no new steps" }, { agentRunId: r.id }, false);
+      this.appendStep(meta, "session.closed", "collector", { events: meta.seq }, {}, false);
+      meta.closedAt = this.now().toISOString();
+      meta.closedIdle = true;
+      const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
+      meta.checkpoint = cp;
+      this.queueCheckpoint(meta, cp);
+      this.store.writeMeta(meta);
+      return true;
+    });
   }
 
   /** For /metrics: totals only, and read from memory, so a scrape never walks the disk. */
@@ -792,6 +846,7 @@ export class ShadowService {
     if (meta.eventsBytes + bytes > (agent ? this.agentEventsMax : this.eventsMax))
       throw new ShadowError("SHADOW_LIMIT_SESSION_SIZE", `This session is full (${Math.round(this.limits.maxSessionBytes / 1048576)} MB on disk). Close it and start a new one.`);
     this.store.appendLine(meta, line, this.eventsMax);
+    meta.lastStepAt = this.now().toISOString();
     this.usageBytes += bytes;
     const owned = this.ownerUsage.get(meta.ownerKey);
     if (owned !== undefined) this.ownerUsage.set(meta.ownerKey, owned + bytes);
@@ -816,6 +871,7 @@ export class ShadowService {
 
   /** Queues `cp` for Clockchain unless it already is, or the session's anchor allowance is used up. */
   private queueCheckpoint(meta: SessionMeta, cp: Checkpoint): { code: string; message: string } | null {
+    if (meta.network !== this.network) return { code: "SHADOW_OTHER_NETWORK", message: `This session is on ${meta.network}, and this server now writes to ${this.network}, so the checkpoint is signed but not anchored.` };
     if (meta.anchors.some((a) => a.hash === cp.hash) || meta.outbox.some((r) => r.hash === cp.hash)) return null;
     if (meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession)
       return { code: "SHADOW_LIMIT_SESSION_ANCHORS", message: `This session has used its ${this.limits.maxAnchorsPerSession} anchors; the checkpoint is signed but not sent to Clockchain.` };
@@ -849,6 +905,15 @@ export class ShadowService {
           if (m && m.state === "open" && Date.parse(m.expiresAt) > now.getTime()) open++;
         } catch {
           // Unreadable sessions do not count as open.
+        }
+      }
+      // At the limit, the session idle longest makes room rather than turning the person away.
+      if (open >= this.limits.maxOpenSessionsPerOwner && this.limits.idleCloseMs) {
+        const cutoff = now.getTime() - Math.min(this.limits.idleCloseMs, IDLE_AT_LIMIT_MS);
+        const oldest = this.store.idleOpenSessions(cutoff, 1, ownerKey)[0];
+        if (oldest && (await this.finishIdle(ownerKey, oldest.sessionId, cutoff))) {
+          open--;
+          void this.drain(ownerKey, oldest.sessionId).catch(() => undefined);
         }
       }
       if (open >= this.limits.maxOpenSessionsPerOwner)
@@ -943,6 +1008,7 @@ export class ShadowService {
     if (this.autoLog) content = redactSecrets(content);
     return this.session(ownerKeyOf(ownerId), sessionId, (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is closed. Start a new session to record more.");
+      if (meta.network !== this.network) throw new ShadowError("SHADOW_OTHER_NETWORK", `This session is on ${meta.network}, and this server now writes to ${this.network}, so nothing was recorded. Start a new session to record more.`);
       if (!meta.agents.some((a) => a.id === agent))
         throw new ShadowError("SHADOW_UNKNOWN_AGENT", `"${agent}" is not one of this session's agents (${meta.agents.map((a) => a.id).join(", ")}).`);
       if (meta.agentSteps >= this.limits.maxStepsPerSession)
@@ -1083,6 +1149,7 @@ export class ShadowService {
     const made: { steps: LoggedStep[]; target: string | null; refused: { code: string; message: string } | null; turn: { rows: StepRow[]; earlier: number } } = { steps: [], target: null, refused: null, turn: { rows: [], earlier: 0 } };
     await this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", `This session is closed, so nothing was recorded. ${START_NEW}`);
+      if (meta.network !== this.network) throw new ShadowError("SHADOW_OTHER_NETWORK", `This session is on ${meta.network}, and this server now writes to ${this.network}, so nothing was recorded. ${START_NEW}`);
       if (meta.agentSteps + steps.length > this.limits.maxStepsPerSession || meta.seq + steps.length + 3 > this.maxEvents)
         throw new ShadowError("SHADOW_LIMIT_STEPS", `This session has ${meta.agentSteps} steps and can't take ${steps.length} more, so nothing was recorded. ${START_NEW}`);
       // The last anchor is kept for shadow_close_session, so a full session can still anchor its final checkpoint.
@@ -1299,7 +1366,7 @@ export class ShadowService {
     const sessionId = sessionIdOf(input.session_id);
     const ownerKey = ownerKeyOf(ownerId);
     // Online reads happen before the events are loaded, against what the metadata says landed.
-    const ledgerIds = await this.session(ownerKey, sessionId, (meta) => meta.anchors.map((a) => a.ledgerId));
+    const { ledgerIds, other } = await this.session(ownerKey, sessionId, (meta) => ({ ledgerIds: meta.anchors.map((a) => a.ledgerId), other: meta.network === this.network ? null : meta.network }));
     let online: Awaited<ReturnType<typeof prefetchOnline>> | undefined;
     let onlineNote: string;
     let receipts: { checked: number; total: number } | undefined;
@@ -1307,6 +1374,7 @@ export class ShadowService {
       onlineNote = `Checked offline: this session has ${ledgerIds.length} Clockchain receipts, more than the ${this.limits.onlineVerifyMaxReceipts} checked online here. Run shadow-verify packet.json --pin pin.json --online to confirm them all.`;
     } else {
       try {
+        if (other) throw new Error("other network");
         online = await prefetchOnline(this.ledger(), { network: this.network, referenceId: referenceId(sessionId), ledgerIds, timeoutMs: ONLINE_TIMEOUT_MS, concurrency: this.autoLog ? ONLINE_CONCURRENCY : 1 });
         onlineNote = "Checked online against the Clockchain ledger, from this server.";
         if (this.autoLog) {
@@ -1314,12 +1382,12 @@ export class ShadowService {
           if (receipts.checked < receipts.total) onlineNote = `Checked ${receipts.checked} of ${receipts.total} Clockchain receipts online in the time allowed; the rest were not checked, so witness stays indeterminate. Run shadow_verify again, or shadow-verify packet.json --pin pin.json --online.`;
         }
       } catch {
-        onlineNote = "Checked offline: Clockchain could not be reached.";
+        onlineNote = other ? `Checked offline: this session's receipts are on ${other}, which this server no longer reads.` : "Checked offline: Clockchain could not be reached.";
       }
     }
     return this.session(ownerKey, sessionId, (meta) => this.withEvents(meta, async (events) => {
       const cp = this.latest(meta, events);
-      const packet = buildPacket(meta, cp, events, this.network, this.now());
+      const packet = buildPacket(meta, cp, events, meta.network, this.now());
       const pin = buildPin(meta, cp);
       // Verified as a relying party would: strictly parsed from its JSON.
       // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too.
@@ -1480,7 +1548,7 @@ export class ShadowService {
             return body;
           }
           const cp = this.latest(meta, events);
-          const packet = buildPacket(meta, cp, events, this.network, this.now());
+          const packet = buildPacket(meta, cp, events, meta.network, this.now());
           const pin = buildPin(meta, cp);
           let body: Buffer;
           if (kind === "packet") {
@@ -1560,6 +1628,12 @@ export class ShadowService {
       const job = await this.session(ownerKey, sessionId, (meta) => {
         const row = meta.outbox.find((r) => r.state !== "failed" && !tried.has(r.id));
         if (!row) return null;
+        // Owed on a network this server has left: never written to the new one.
+        if (meta.network !== this.network) {
+          for (const r of meta.outbox) if (r.state !== "failed") Object.assign(r, { state: "failed", lastErrorKind: "Permanent", lastErrorCode: "other_network" });
+          this.store.writeMeta(meta);
+          return null;
+        }
         // Never write to Clockchain a receipt the record has no room to keep.
         if (meta.seq + 2 > this.maxEvents || meta.eventsBytes + 64 * 1024 > this.eventsMax) {
           row.state = "failed";

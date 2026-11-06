@@ -5,6 +5,7 @@
 // #f5f5f7), ink #1d1d1f, green accent (#0a9d44 / #00cc00), Space Grotesk display
 // + Inter body + JetBrains Mono. Clean, modern, generous whitespace.
 
+import { FREE_TOKENS, NETWORK_LABEL, NETWORK_WORD, ON_MAINNET } from "./network.js";
 import { CLASSIFIED_TOOLS } from "./entitlement.js";
 
 // HTML-escape so snippets with <…> placeholders render as text, not tags.
@@ -24,8 +25,10 @@ const SUBSTRATE = process.env.CLOCKCHAIN_SUBSTRATE === "clockchain-network" || p
 const BYO_READS_ONLY = SUBSTRATE === "anchoring-gateway" && (process.env.MCP_BYO_WRITES ?? "").trim() !== "allow";
 const BYO_SPEND = BYO_READS_ONLY ? "reads only here; to write, use a token from POST /token" : "writes spend your credits";
 export const SUBSTRATE_LABEL = SUBSTRATE === "clockchain-network"
-  ? "single-validator Clockchain testnet"
-  : "Clockchain anchoring gateway (testnet, single operator)";
+  ? `single-validator Clockchain ${NETWORK_WORD}`
+  : `Clockchain anchoring gateway (${NETWORK_WORD}, single operator)`;
+
+const TOKEN_WORD = ON_MAINNET ? "trial" : "testnet";
 
 const CMD_CLAUDE =
   'claude mcp add clockchain --transport http https://mcp.clockchain.network/mcp --header "x-api-key: <YOUR_TOKEN>"';
@@ -75,10 +78,10 @@ TWO-PERSON STAKEHOLDER HANDSHAKE — separate public surface:
   signatures stay local in Codex or Claude Code.
 
 AUTH — pick ONE (using the wrong header is the #1 cause of a 401):
-  (a) Testnet token (shared testnet pool) — get one INSTANTLY, no signup:
+${FREE_TOKENS ? `  (a) ${ON_MAINNET ? "Trial token (shared pool)" : "Testnet token (shared testnet pool)"} — get one INSTANTLY, no signup:
         curl -X POST https://mcp.clockchain.network/token
       then send it as:  x-api-key: <YOUR_TOKEN>
-  (b) Your own Clockchain API key — if you already have one (${BYO_READS_ONLY ? "reads only here;\n      to write, use a token" : "writes spend YOUR\n      credits"}). Do NOT put a Clockchain key in x-api-key; use these three headers:
+` : ""}  (b) Your own Clockchain API key — if you already have one (${BYO_READS_ONLY ? "reads only here;\n      to write, use a token" : "writes spend YOUR\n      credits"}). Do NOT put a Clockchain key in x-api-key; use these three headers:
         x-clockchain-api-key:   <YOUR_CLOCKCHAIN_KEY>
         x-clockchain-client-id: <you@example.com>
         x-clockchain-wallet-id: <you@example.com>
@@ -137,7 +140,7 @@ export const MCP_MANIFEST = {
   type: "http",
   transport: "streamable-http",
   endpoint: "https://mcp.clockchain.network/mcp",
-  network: "testnet",
+  network: NETWORK_WORD,
   // No package to install — this is a remote server. Flags exist so tooling
   // doesn't go hunting a registry for a nonexistent npm/pip package.
   remote: true,
@@ -154,7 +157,7 @@ export const MCP_MANIFEST = {
         in: "header",
         header: "x-api-key",
         obtain: "https://mcp.clockchain.network/token",
-        note: "instant self-serve testnet token (shared pool); POST /token to mint one",
+        note: `instant self-serve ${ON_MAINNET ? "trial" : "testnet"} token (shared pool); POST /token to mint one`,
       },
       {
         name: "clockchain-key",
@@ -370,7 +373,7 @@ ${BASE_CSS}</style>
 </head>
 <body>
 <nav><div class="wrap nav-in">
-  <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">Testnet</span></div>
+  <div class="nav-left"><a class="brand" href="/">${LOGO_SVG}Clockchain</a><span class="tnet">${NETWORK_LABEL}</span></div>
   <div class="nav-links">
     <a href="#demo">Demo</a>
     <a href="#services">Services</a>
@@ -384,7 +387,7 @@ ${BASE_CSS}</style>
 </div></nav>
 
 <header class="hero"><div class="wrap">
-  <span class="eyebrow">Model Context Protocol · Testnet</span>
+  <span class="eyebrow">Model Context Protocol · ${NETWORK_LABEL}</span>
   <h1>Time your agents can <span class="green">prove.</span></h1>
   <p class="sub">Trusted time, proof, identity, handshakes and commitments for any AI agent — ${SERVICE_WORD} services behind one MCP endpoint.</p>
   <div class="cta">
@@ -401,14 +404,14 @@ ${BASE_CSS}</style>
   <div class="stat"><div class="k">Services</div><div class="v">${SERVICE_COUNT}</div></div>
   <div class="stat"><div class="k">Tools</div><div class="v">${TOOL_COUNT}</div></div>
   <div class="stat"><div class="k">Transport</div><div class="v">StreamableHTTP</div></div>
-  <div class="stat"><div class="k">Network</div><div class="v">Testnet</div></div>
+  <div class="stat"><div class="k">Network</div><div class="v">${NETWORK_LABEL}</div></div>
 </div></div>
 
 <section id="demo"><div class="wrap">
   <div class="head">
     <span class="eyebrow">See it work</span>
     <h2>Anchor, verify, tamper-detect — live</h2>
-    <p>An agent acts, the action is anchored on a real testnet block, the receipt verifies — and a one-byte change is rejected.</p>
+    <p>An agent acts, the action is anchored on a real ${NETWORK_WORD} block, the receipt verifies — and a one-byte change is rejected.</p>
   </div>
   <div class="demo-frame">
     <video id="demoVideo" src="/assets/mcp-demo.mp4" poster="/assets/mcp-demo-poster.png" loop muted playsinline preload="metadata"></video>
@@ -464,9 +467,9 @@ ${BASE_CSS}</style>
     <li class="step">
       <span class="sn">1</span>
       <div class="sbody">
-        <h4>Get a testnet token</h4>
-        <p>Click for an instant <b>testnet token</b> (delegated — writes spend our testnet credits, easiest for a quick test). Or bring your own <b>Clockchain API key</b> (${BYO_SPEND}) — <a href="https://clockchain.network" target="_blank" rel="noopener">how to get one →</a></p>
-        <p><button class="cpy" id="getTokenBtn" onclick="getToken(this)" style="cursor:pointer">Get a testnet token</button></p>
+        <h4>${FREE_TOKENS ? `Get a ${TOKEN_WORD} token` : "Get a Clockchain API key"}</h4>
+        <p>${FREE_TOKENS ? `Click for an instant <b>${TOKEN_WORD} token</b> (delegated — writes spend our ${ON_MAINNET ? "" : "testnet "}credits, easiest for a quick test). Or bring` : "Bring"} your own <b>Clockchain API key</b> (${BYO_SPEND}) — <a href="https://clockchain.network" target="_blank" rel="noopener">how to get one →</a></p>
+        ${FREE_TOKENS ? `<p><button class="cpy" id="getTokenBtn" onclick="getToken(this)" style="cursor:pointer">Get a ${TOKEN_WORD} token</button></p>` : ""}
         <div class="code" id="tokenOut" hidden><button class="cpy" onclick="copyEl(this)">Copy</button><pre><code id="tokenVal"></code></pre></div>
         <p class="hint" id="tokenHint" hidden></p>
       </div>
@@ -536,7 +539,7 @@ ${BASE_CSS}</style>
         document.getElementById('tokenVal').textContent = res.j.token;
         document.getElementById('tokenOut').hidden = false;
         var hint = document.getElementById('tokenHint');
-        hint.textContent = 'Testnet token — expires ' + (res.j.expires_at || '').slice(0,10) + '. Use it as x-api-key in the config below.';
+        hint.textContent = '${ON_MAINNET ? "Trial" : "Testnet"} token — expires ' + (res.j.expires_at || '').slice(0,10) + '. Use it as x-api-key in the config below.';
         hint.hidden = false;
         btn.textContent = 'New token';
         btn.disabled = false;
