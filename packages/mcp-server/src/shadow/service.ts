@@ -493,7 +493,7 @@ function anchoringOf(meta: SessionMeta, events: ShadowEvent[]): Anchoring {
     reason: [
       left.length ? `${left.length} of ${steps.length} recorded ${steps.length === 1 ? "step has" : "steps have"} no checkpoint with a Clockchain receipt.` : "",
       ending.length ? `The session's ending (${ending.length} ${ending.length === 1 ? "step" : "steps"}: how runs ended, and the close) has none${left.length ? " either" : ""}.` : "",
-      waiting && liveRow ? `A checkpoint still waiting covers ${waiting} of these ${owed.length}: ${reasonOf(liveRow) ?? "it hasn't been sent to Clockchain yet."}` : "",
+      waiting && liveRow ? `A checkpoint still waiting covers ${waiting} of these ${owed.length}: ${reasonOf(liveRow) ?? "It hasn't been sent to Clockchain yet."}` : "",
       failed && lostRow ? `A checkpoint that was not anchored covers ${failed} of these ${owed.length}: ${reasonOf(lostRow) ?? "Clockchain did not accept it."}` : "",
       nothing ? `${nothing} of these ${owed.length} ${nothing === 1 ? "has" : "have"} nothing on its way${meta.state === "open" ? " yet" : ", and this session is closed"}.` : "",
     ].filter(Boolean).join(" "),
@@ -520,16 +520,20 @@ function nextRow(meta: SessionMeta, tried: Set<string>, now: number | null): Out
   return [...checkpoints.slice(0, 1), ...live.filter((r) => r.kind === "start"), ...checkpoints.slice(1).filter((r) => r.ledgerId)].find(due);
 }
 
-/** A person's retry of a closed session brings back rows that gave up on anything but a permanent refusal. */
+/**
+ * Rows a person's retry of a closed session can bring back: gave up on anything but a permanent refusal, and reaching past what
+ * is already anchored. One that reaches no further would cost an anchor to add nothing, and change a good pin.
+ */
+function revivable(meta: SessionMeta): OutboxRow[] {
+  const covered = Math.max(0, ...meta.anchors.map((a) => a.count ?? 0));
+  return meta.outbox.filter((r) => r.state === "failed" && r.lastErrorKind !== "Permanent" && (r.body?.count ?? 0) > covered);
+}
+
 function revive(meta: SessionMeta): boolean {
-  const rows = meta.outbox.filter((r) => r.state === "failed" && r.lastErrorKind !== "Permanent");
+  const rows = revivable(meta);
   for (const r of rows) r.state = "queued";
   return rows.length > 0;
 }
-
-/** Whether a closed session's pin is about to change: each receipt that lands is a step, and the pin names the record's head. */
-const pinWillChange = (meta: SessionMeta) => meta.state === "closed" && meta.outbox.some((r) => r.state !== "failed");
-const PIN_CHANGES = "This pin is for the record as it stands now. A Clockchain receipt is still to come, and it adds a step, so the pin changes when it lands and this one will no longer match. shadow_get_session and the packet link give the current one.";
 
 /**
  * The verifier's report with the anchoring counts in it. Its own checks stay as they are; a pass becomes indeterminate if any
@@ -838,9 +842,9 @@ const NOT_PROVIDED = "Not provided";
 const agentView = (a: AgentEntry, reported: Pick<ReportedAgent, "purpose" | "accountable_owner"> | undefined) => ({ id: a.id, role: a.role, purpose: reported?.purpose ?? NOT_PROVIDED, accountable_owner: reported?.accountable_owner ?? NOT_PROVIDED });
 
 /** The session's logging level and who acts in it, as reported, above what the record shows. Every value is escaped. */
-function withSessionDetails(html: string, meta: SessionMeta, facts: SessionFacts, anchoring: Anchoring): string {
+function withSessionDetails(html: string, meta: SessionMeta, facts: SessionFacts, anchoring: Anchoring, pinNote: string | null): string {
   const rows = meta.agents.map((a) => agentView(a, facts.agents.get(a.id))).map((a) => `<tr><td>${escHtml(a.id)}</td><td>${escHtml(a.purpose)}</td><td>${escHtml(a.accountable_owner)}</td></tr>`).join("");
-  const details = `<h2>Session details</h2><p class="meta">Logging level: ${escHtml(facts.level)}.${escHtml(changesText(facts.changes))} Purpose and accountable owner are what the agent reported; this record doesn't show they are true.</p><p class="meta">Anchoring: ${escHtml(anchoredOf(anchoring))}. ${escHtml(anchoring.reason)}</p>${pinWillChange(meta) ? `<p class="meta">${escHtml(PIN_CHANGES)}</p>` : ""}<table><tr><th>Agent ID</th><th>Purpose</th><th>Accountable owner</th></tr>${rows}</table>`;
+  const details = `<h2>Session details</h2><p class="meta">Logging level: ${escHtml(facts.level)}.${escHtml(changesText(facts.changes))} Purpose and accountable owner are what the agent reported; this record doesn't show they are true.</p><p class="meta">Anchoring: ${escHtml(anchoredOf(anchoring))}. ${escHtml(anchoring.reason)}</p>${pinNote ? `<p class="meta">${escHtml(pinNote)}</p>` : ""}<table><tr><th>Agent ID</th><th>Purpose</th><th>Accountable owner</th></tr>${rows}</table>`;
   return html.replace("<h2>What this record shows</h2>", () => `${details}<h2>What this record shows</h2>`);
 }
 
@@ -1197,7 +1201,8 @@ export class ShadowService {
           ? `This session has used all ${max} of its anchors, so the checkpoint is signed but not sent to Clockchain.`
           : `This session has used the ${max - 1} anchors it can spend before the close, so the checkpoint is signed but not sent to Clockchain. The last anchor is kept for the close.`,
       };
-    if (!closing && meta.outbox.length >= MAX_OUTBOX)
+    // A parked row isn't waiting its turn, so it holds no place in the queue.
+    if (!closing && meta.outbox.filter((r) => r.lastErrorCode !== "search_refused").length >= MAX_OUTBOX)
       return { code: "SHADOW_ANCHOR_BACKLOG", message: "Too many anchors are still waiting for Clockchain; the checkpoint is signed but not queued. Try again later." };
     meta.outbox.push(this.row("checkpoint", cp.hash, cp));
     return null;
@@ -1213,6 +1218,17 @@ export class ShadowService {
       closeCanAnchor: used < max,
       blocked: trouble.some((r) => r.lastErrorCode === "anchor_limit") ? "day_limit" : trouble.some((r) => r.lastErrorCode === "log_budget") ? "budget" : trouble.length ? "outage" : null,
     };
+  }
+
+  /**
+   * Said wherever a closed session's pin is given, while its pin can still change: each receipt that lands is a step, and the
+   * pin names the record's head. That covers a row in the queue, one a retry can bring back, and a final checkpoint still owed.
+   */
+  private pinNote(meta: SessionMeta): string | null {
+    if (meta.state !== "closed") return null;
+    const coming = meta.outbox.some((r) => r.state !== "failed") || revivable(meta).length > 0 || (finalOwed(meta) && meta.network === this.network && this.outlook(meta).closeCanAnchor);
+    if (!coming) return null;
+    return `This pin is for the record as it stands now. A Clockchain receipt may still land. Each one adds a step, so the pin changes when it does, and this one will no longer match. ${meta.linksRevoked ? "shadow_get_session gives" : "shadow_get_session and the packet link give"} the current one.`;
   }
 
   /** Steps a close may still need room for: the count, a receipt or gap per open run, session.closed, the receipts owed, and the rule that a receipt needs a spare place. */
@@ -1808,7 +1824,7 @@ export class ShadowService {
         final_checkpoint: this.anchorView(meta, made.target, made.refused),
         anchoring,
         pin,
-        ...(pinWillChange(meta) ? { pin_note: PIN_CHANGES } : {}),
+        ...(this.pinNote(meta) ? { pin_note: this.pinNote(meta) } : {}),
         links,
         links_note: meta.linksRevoked ? LINKS_REVOKED_NOTE : LINKS_NOTE,
         share: meta.linksRevoked ? "This session's links were revoked, so there is nothing to share." : "The viewer or packet link is for whoever should check this record; the pin goes by a different channel.",
@@ -1856,7 +1872,7 @@ export class ShadowService {
         time_windows: windowsView(windows(events)),
         links: this.links(meta, base),
         links_note: meta.linksRevoked ? LINKS_REVOKED_NOTE : LINKS_NOTE,
-        ...(pin ? { pin, ...(pinWillChange(meta) ? { pin_note: PIN_CHANGES } : {}) } : { pin_note: "The pin is issued when the session is closed." }),
+        ...(pin ? { pin, ...(this.pinNote(meta) ? { pin_note: this.pinNote(meta) } : {}) } : { pin_note: "The pin is issued when the session is closed." }),
       };
     }));
   }
@@ -2098,7 +2114,7 @@ export class ShadowService {
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
             const shown = this.autoLog ? withAnchoring(ownPinReport(report), anchoring) : ownPinReport(report);
-            const html = withServerSteps(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring), anchoring), events);
+            const html = withServerSteps(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events);
             body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }
           this.linkBuildCount++;
@@ -2273,7 +2289,7 @@ export class ShadowService {
     const a = meta.anchors.find((x) => x.hash === hash);
     if (a) return { status: "anchored", checkpoint_hash: hash, covers_steps: a.count, ledger_id: a.ledgerId, block: a.blockHeight, block_time: a.blockTime, submitted_at: a.submittedAt };
     const r = meta.outbox.find((x) => x.hash === hash);
-    if (r) return { status: r.state === "failed" ? "failed" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
+    if (r) return { status: r.state === "failed" ? "failed" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : r.lastErrorCode === "search_refused" ? "Signed and recorded. Whether it reached Clockchain isn't known." : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
     if (refused) return { status: "not_anchored", checkpoint_hash: hash, covers_steps: meta.checkpoint?.body.count ?? null, code: refused.code, reason: refused.message };
     return { status: "not_anchored", checkpoint_hash: hash };
   }
@@ -2301,6 +2317,7 @@ function anchorFrom(e: ShadowEvent): AnchorInfo | null {
 function reasonOf(r: OutboxRow): string | null {
   if (r.lastErrorCode === "search_refused") return "It may already be on Clockchain, and the ledger refused the search that would show it, so it hasn't been sent again.";
   if (r.lastErrorCode === "superseded") return "A later anchor covers these steps, so this one wasn't sent again.";
+  if (!r.lastErrorKind && r.state !== "pending" && r.sendStarted !== false) return "A send was started, and whether it reached Clockchain isn't known yet. The ledger is asked before it is sent again.";
   if (!r.lastErrorKind) return r.state === "pending" ? "Written to Clockchain; waiting for its block." : null;
   if (r.lastErrorCode === "anchor_limit") return "Today's anchor limit for your account is used up; it will be anchored on a later call.";
   if (r.lastErrorCode === "log_budget") return "The server's Clockchain write budget is used up; it will be anchored once it is raised.";

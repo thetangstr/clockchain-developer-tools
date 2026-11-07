@@ -1630,7 +1630,9 @@ test("a ledger that refuses search: an interrupted row isn't paid blindly, doesn
   const v = await b.svc.verify(O, { session_id: id }, BASE);
   assert.equal(v.result, "indeterminate");
   assert.equal(check(v, "witness").status, "indeterminate");
-  assert.match(check(v, "witness").reason, /could not be reached for every receipt/);
+  assert.match(check(v, "witness").reason, /All \d+ receipts match the Clockchain ledger, but the ledger search for this session did not return them/);
+  assert.doesNotMatch(check(v, "witness").reason, /could not be reached/);
+  assert.match(v.online, /Checked online/);
   assert.deepEqual(v.checks.filter((c) => c.status === "fail"), []);
   assert.equal(check(v, "anchoring"), undefined, "no anchoring gap");
   assert.equal(viewerResult(await viewer(b.svc, id)), "pass", "the viewer checks offline");
@@ -1727,17 +1729,17 @@ test("a pin given before the close's anchor lands says it will change, and where
   fake.confirm = false;
   const closed = await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
   assert.equal(closed.final_checkpoint.status, "pending");
-  assert.match(closed.pin_note, /the pin changes when it lands/);
+  assert.match(closed.pin_note, /the pin changes when it does/);
   assert.match(closed.pin_note, /shadow_get_session and the packet link give the current one/);
-  assert.match((await svc.getSession(O, { session_id: id }, BASE)).pin_note, /the pin changes when it lands/);
-  assert.match(await viewer(svc, id), /the pin changes when it lands/);
+  assert.match((await svc.getSession(O, { session_id: id }, BASE)).pin_note, /the pin changes when it does/);
+  assert.match(await viewer(svc, id), /the pin changes when it does/);
   fake.confirm = true;
   fake.confirmPending();
   await svc.closeIdle();
   assert.equal(metaOf(svc, id).outbox.length, 0, "the server lands it unprompted");
   const got = await svc.getSession(O, { session_id: id }, BASE);
   assert.equal("pin_note" in got, false);
-  assert.doesNotMatch(await viewer(svc, id), /the pin changes when it lands/);
+  assert.doesNotMatch(await viewer(svc, id), /the pin changes when it does/);
   assert.notEqual(got.pin.checkpointHash, closed.pin.checkpointHash, "the note was true");
   const { packet } = JSON.parse(await svc.packetForCap(metaOf(svc, id).cap));
   assert.equal((await verifyPacket(packet, { pin: closed.pin })).checks.find((c) => c.name === "trust").status, "fail");
@@ -1814,4 +1816,175 @@ test("the owed list takes turns: one account's stuck sessions can't keep another
   assert.equal(hogs.filter((id) => seen.has(id)).length, 6, "and the list moved on through the stuck ones");
   const none = await svc.store.idleScan(-Infinity, Date.now(), 3);
   assert.equal(none.owed.length, 0, "rows backing off aren't due");
+});
+
+// ---- fourth review ---------------------------------------------------------------------------------------------------
+
+/** A gateway that answers an empty search with a 404. */
+function notFoundWhenEmpty(fake) {
+  const search = fake.searchAsset.bind(fake);
+  fake.searchAsset = async (ref) => {
+    const found = await search(ref);
+    if (!found.length) throw new ApiError("Clockchain request failed: 404", 404, null);
+    return found;
+  };
+}
+
+/** A session whose final anchor landed, and an older row that gave up while it was open. */
+async function finishedWithOldFailedRow() {
+  const { svc, fake } = service();
+  const a = await svc.logStep(O, { kind: "task", content: "go" }, BASE);
+  await svc.logStep(O, { session_id: a.session_id, kind: "message", content: "done" }, BASE);
+  fake.down = true;
+  await svc.logStep(O, { session_id: a.session_id, kind: "tool_call", content: { tool: "x" } }, BASE);
+  for (let i = 0; i < 11; i++) await svc.checkpoint(O, { session_id: a.session_id });
+  fake.down = false;
+  assert.equal(metaOf(svc, a.session_id).outbox[0].state, "failed");
+  assert.notEqual(metaOf(svc, a.session_id).outbox[0].lastErrorKind, "Permanent");
+  await svc.close(O, { session_id: a.session_id, status: "succeeded" }, BASE);
+  return { svc, fake, id: a.session_id };
+}
+
+test("a 404 from search means none found: a short session inside an outage settles on a healthy ledger", async () => {
+  let now = Date.parse("2026-11-07T10:00:00Z");
+  const { svc, fake } = service({ now: () => new Date(now) });
+  notFoundWhenEmpty(fake);
+  fake.down = true;
+  const s = await svc.startSession(O, { title: "t", log_level: "turn" }, BASE);
+  await svc.record(O, { session_id: s.session_id, agent: "agent", kind: "message", content: "m" });
+  await svc.close(O, { session_id: s.session_id, status: "succeeded" }, BASE);
+  fake.down = false;
+  assert.ok(metaOf(svc, s.session_id).outbox.every((r) => r.sendStarted === true), "the writes were tried, so the rows are marked");
+  for (let i = 0; i < 8; i++) { now += 3_600_000; await svc.closeIdle(); }
+  assert.deepEqual(metaOf(svc, s.session_id).outbox, [], "nothing parked, nothing left");
+  const v = await svc.verify(O, { session_id: s.session_id }, BASE);
+  assert.equal(v.anchoring.closing_unanchored, 0);
+  assert.equal(check(v, "witness").status, "pass", check(v, "witness").reason);
+  assert.equal(fake.writes.length, 2, "and each paid once");
+});
+
+test("a refused search isn't reported as unreachable, and doesn't turn into a pass", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  const healthy = await svc.verify(O, { session_id: id }, BASE);
+  assert.equal(healthy.result, "pass");
+  refuseSearch(fake);
+  const v = await svc.verify(O, { session_id: id }, BASE);
+  assert.equal(v.result, "indeterminate");
+  assert.equal(check(v, "witness").status, "indeterminate");
+  assert.match(check(v, "witness").reason, /did not return them/);
+  assert.match(check(v, "witness").reason, /cannot be ruled out/);
+  // An outage is still an outage.
+  fake.searchAsset = async () => { throw new TypeError("fetch failed"); };
+  assert.match(check(await svc.verify(O, { session_id: id }, BASE), "witness").reason, /could not be reached/);
+  // With no receipts there is nothing to match, and the verifier must not go on to speak for the ledger.
+  const bare = service();
+  bare.fake.down = true;
+  const s = await bare.svc.startSession(O, { title: "t" }, BASE);
+  await bare.svc.close(O, { session_id: s.session_id }, BASE);
+  bare.fake.down = false;
+  bare.fake.log = async () => { throw new TypeError("fetch failed"); };
+  refuseSearch(bare.fake);
+  const none = await bare.svc.verify(O, { session_id: s.session_id }, BASE);
+  assert.equal(none.result, "indeterminate");
+  assert.doesNotMatch(check(none, "witness").reason, /holds no record/);
+});
+
+test("a retry on a finished session leaves its old rows and its pin alone", async () => {
+  for (const retry of ["checkpoint", "close"]) {
+    const { svc, fake, id } = await finishedWithOldFailedRow();
+    const before = await svc.getSession(O, { session_id: id }, BASE);
+    assert.equal("pin_note" in before, false, "nothing is coming");
+    assert.equal((await svc.verify(O, { session_id: id }, BASE)).result, "pass");
+    const writes = fake.writes.length;
+    if (retry === "checkpoint") await svc.checkpoint(O, { session_id: id });
+    else await assert.rejects(svc.close(O, { session_id: id }, BASE), (e) => e.code === "SHADOW_SESSION_CLOSED");
+    assert.equal(fake.writes.length, writes, retry);
+    const after = await svc.getSession(O, { session_id: id }, BASE);
+    assert.deepEqual(after.pin, before.pin, `${retry}: the pin holds`);
+    const { packet } = JSON.parse(await svc.packetForCap(metaOf(svc, id).cap));
+    assert.equal((await verifyPacket(packet, { pin: before.pin })).result, "pass");
+  }
+});
+
+test("a failed row a retry can bring back is a pin that can change, and the note says so", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  fake.down = true;
+  await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  fake.down = false;
+  const meta = metaOf(svc, id);
+  Object.assign(meta.outbox[0], { state: "failed", lastErrorKind: "Transient", lastErrorCode: "network", attempts: 10 });
+  svc.store.writeMeta(meta);
+  assert.match((await svc.getSession(O, { session_id: id }, BASE)).pin_note, /the pin changes when it does/);
+  assert.match(await viewer(svc, id), /the pin changes when it does/);
+
+  // So is a final checkpoint still owed, unless the session has no anchor left to send it with.
+  const owed = service();
+  const other = await deferredSession(owed.svc, 1);
+  owed.fake.down = true;
+  await owed.svc.close(O, { session_id: other, status: "succeeded" }, BASE);
+  owed.fake.down = false;
+  const m = metaOf(owed.svc, other);
+  m.outbox = [];
+  owed.svc.store.writeMeta(m);
+  assert.match((await owed.svc.getSession(O, { session_id: other }, BASE)).pin_note, /the pin changes when it does/);
+  const full = service({ limits: { maxAnchorsPerSession: 1 } });
+  const s = await full.svc.startSession(O, { title: "t" }, BASE);
+  await full.svc.close(O, { session_id: s.session_id }, BASE);
+  assert.equal("pin_note" in await full.svc.getSession(O, { session_id: s.session_id }, BASE), false, "refused at the limit: no receipt can come");
+});
+
+test("parked rows hold no place in the backlog", async () => {
+  const { svc } = service();
+  const a = await svc.logStep(O, { kind: "task", content: "go" }, BASE);
+  const meta = metaOf(svc, a.session_id);
+  const nextTryAt = new Date(Date.now() + 3_600_000).toISOString();
+  for (let i = 0; i < 20; i++) meta.outbox.push({ id: `parked-${i}`, kind: "checkpoint", hash: `${i}`.padStart(64, "0"), body: { count: 1 }, state: "queued", attempts: 1, ledgerId: null, submittedAt: null, lastErrorKind: "Auth", lastErrorCode: "search_refused", createdAt: nextTryAt, sendStarted: true, nextTryAt });
+  svc.store.writeMeta(meta);
+  const r = await svc.logStep(O, { session_id: a.session_id, kind: "tool_call", content: { tool: "x" } }, BASE);
+  assert.equal(r.anchor_status, "anchored");
+});
+
+test("a parked close row says only what is known, and sends nobody to a retry that can't help", async () => {
+  const a = service();
+  const id = await deferredSession(a.svc, 2);
+  const restore = dieAfterWrite(a);
+  await a.svc.close(O, { session_id: id, status: "succeeded" }, BASE).catch(() => {});
+  restore();
+  refuseSearch(a.fake);
+  const b = service({ stateDir: a.stateDir, ledger: () => a.fake });
+  // Before anyone has asked the ledger.
+  const first = await b.svc.getSession(O, { session_id: id }, BASE);
+  assert.doesNotMatch(first.anchoring.reason, /hasn't been sent/);
+  assert.match(first.anchoring.reason, /whether it reached Clockchain isn't known yet/);
+  assert.doesNotMatch(first.pin_note, /still to come/);
+  assert.match(first.pin_note, /A Clockchain receipt may still land/);
+  const retry = await b.svc.close(O, { session_id: id }, BASE);
+  assert.equal(retry.final_checkpoint.status, "pending");
+  assert.doesNotMatch(retry.final_checkpoint.note, /shadow_checkpoint/);
+  assert.match(retry.final_checkpoint.note, /Whether it reached Clockchain isn't known/);
+  assert.doesNotMatch(retry.anchoring.reason, /hasn't been sent to Clockchain yet/);
+  // Still no blind re-send, however often it is asked.
+  const paid = a.fake.writes.length;
+  for (let i = 0; i < 3; i++) await b.svc.close(O, { session_id: id }, BASE);
+  assert.equal(a.fake.writes.length, paid);
+  // A row nothing was ever sent for may say so.
+  const { svc, fake } = service();
+  const other = await deferredSession(svc, 1);
+  fake.degraded = true;
+  const closed = await svc.close(O, { session_id: other, status: "succeeded" }, BASE);
+  assert.match(closed.final_checkpoint.note, /call shadow_checkpoint again later/);
+});
+
+test("after links are revoked the pin note names only what is left", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  fake.confirm = false;
+  await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  await svc.revokeLinks(O, { session_id: id });
+  const { pin_note } = await svc.getSession(O, { session_id: id }, BASE);
+  assert.match(pin_note, /shadow_get_session gives the current one/);
+  assert.doesNotMatch(pin_note, /packet link/);
 });

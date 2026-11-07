@@ -168,6 +168,16 @@ async function settle(ledger: ShadowLedger, rec: LedgerRecord, hash: string): Pr
   return { kind: "anchored", receipt: { ledgerId, blockHeight, blockTime: normalizeGatewayTime(block.blockTime), submittedAt } };
 }
 
+/** The records under a reference. The gateway answers "none" with a 404, as the core client reads it too; anything else is thrown. */
+async function searchRecords(ledger: ShadowLedger, referenceId: string): Promise<LedgerRecord[]> {
+  try {
+    return await ledger.searchAsset(referenceId);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return [];
+    throw e;
+  }
+}
+
 /**
  * One anchoring pass with a few in-call retries for transient failures. After any uncertain attempt the session
  * reference is searched first and a record that already carries the hash is adopted, so a retry never pays twice.
@@ -184,7 +194,7 @@ export async function anchorHash(o: AnchorRequest): Promise<AnchorOutcome> {
       if (uncertain) {
         let records: LedgerRecord[];
         try {
-          records = await o.ledger.searchAsset(o.referenceId);
+          records = await searchRecords(o.ledger, o.referenceId);
         } catch (e) {
           // A refusal isn't an outage: trying again in this call won't change it, and it says nothing about this hash.
           const refused = classifyFailure(e);
@@ -284,12 +294,18 @@ export async function prefetchOnline(
     }
   }
   let found: { ledgerId: string; assetHash: string | null }[] | undefined;
+  let refused = false;
   try {
-    found = (await withDeadline(ledger.searchAsset(o.referenceId), deadline)).map((r) => ({ ledgerId: String(r.ledgerId), assetHash: str(r.assetHash) }));
-  } catch {
+    found = (await withDeadline(searchRecords(ledger, o.referenceId), deadline)).map((r) => ({ ledgerId: String(r.ledgerId), assetHash: str(r.assetHash) }));
+  } catch (e) {
     found = undefined;
+    const { kind } = classifyFailure(e);
+    refused = kind === "Auth" || kind === "Permanent";
   }
   const unreachable = () => Promise.reject(new Error("Clockchain could not be reached"));
+  // Refused isn't unreachable. With no search on the client the verifier says what really happened, and witness stays
+  // indeterminate. Only with receipts: with none, it would go on to say the ledger holds no record for this session.
+  const noSearch = refused && o.ledgerIds.length > 0;
   return {
     receiptsChecked: entries.size,
     network: o.network,
@@ -298,6 +314,6 @@ export async function prefetchOnline(
       return e ? Promise.resolve(e) : unreachable();
     },
     confirmPackage: (id) => (id === last && pkg ? Promise.resolve(pkg) : unreachable()),
-    search: (ref) => (ref === o.referenceId && found ? Promise.resolve(found) : unreachable()),
+    ...(noSearch ? {} : { search: (ref: string) => (ref === o.referenceId && found ? Promise.resolve(found) : unreachable()) }),
   };
 }
