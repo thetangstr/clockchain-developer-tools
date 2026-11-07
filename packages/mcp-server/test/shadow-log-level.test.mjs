@@ -2,7 +2,7 @@
 // session runs at the finer of the two, budgets move only when an anchor really happens, and nothing a reader sees says a
 // step is anchored, or that it will be, unless that is true. Level and agent details come from hashed server notes.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync, readdirSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,7 +13,7 @@ import { anchorsNow, deferredReason, effectiveLevel, finer, levelSetBy, LOG_LEVE
 import { stepFor } from "../dist/shadow/recorder.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { createLogBudget } from "../dist/budget.js";
-import { ApiError } from "@clockchain/core";
+import { ApiError, AuthError } from "@clockchain/core";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 
 const O = "acct_AAAAAAAAAAAAAAAAAAAAAA";
@@ -462,7 +462,7 @@ test("the same with Clockchain down for the close, however many retries fail", a
   await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
   for (let i = 0; i < 12; i++) await svc.checkpoint(O, { session_id: id });
   fake.down = false;
-  assert.equal(metaOf(svc, id).outbox.find((r) => r.kind === "checkpoint").state, "failed");
+  assert.equal(metaOf(svc, id).outbox.filter((r) => r.kind === "checkpoint").length, 1);
   assertNotPass(await svc.verify(O, { session_id: id }, BASE), await viewer(svc, id), { recorded: 51, anchored: 1 });
 });
 
@@ -953,7 +953,9 @@ test("a viewer built during a failure doesn't outlive it: the cached page follow
   fake.down = true;
   await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
   assert.match(await viewer(svc, id), /still waiting/);
-  for (let i = 0; i < 12; i++) await svc.checkpoint(O, { session_id: id });
+  fake.down = false;
+  fake.failNextLog = permanent();
+  await svc.checkpoint(O, { session_id: id });
   assert.match(await viewer(svc, id), /was not anchored/);
 });
 
@@ -1187,6 +1189,7 @@ test("the packet wrapper and the viewer say what the verify command can't see, a
   assert.match(wrapper.verify, /shadow-verify packet\.json --pin pin\.json --online/);
   assert.match(wrapper.verify, /doesn't check anchoring/);
   assert.match(wrapper.verify, /1 of 4 recorded steps has a checkpoint with a Clockchain receipt, and 3 do not/);
+  assert.match(wrapper.verify, /this server's own count and isn't signed\. It can be recounted from the packet's events/);
   assert.equal("anchoring" in wrapper.packet, false, "nothing new inside the packet");
   const offline = await verifyPacket(wrapper.packet, { pin: wrapper.pin });
   assert.equal(offline.result, "pass", "which is exactly what the caveat is for");
@@ -1229,7 +1232,7 @@ test("a crash after the start note lands and before the metadata does: the start
   await b.svc.getSession(O, { session_id: id }, BASE);
   const rows = metaOf(b.svc, id).outbox.filter((r) => r.kind === "start");
   assert.equal(rows.length, 1, "seq is 2, and the row is there");
-  assert.equal(rows[0].attempts, 1, "it may have been written, so the ledger is searched first");
+  assert.equal(rows[0].sendStarted, true, "it may have been written, so the ledger is searched first");
   assert.equal(serverNotes(b.svc, id).length, 1, "the note isn't written twice");
   await b.svc.logStep(O, { session_id: id, kind: "task", content: "go" }, BASE);
   await b.svc.logStep(O, { session_id: id, kind: "message", content: "done" }, BASE);
@@ -1255,14 +1258,17 @@ test("a crash during the repair of an interrupted start is repaired the same way
 
 test("the server retries what a person-closed session owes, within the same limits", async () => {
   for (const limits of [{}, { idleCloseMs: 3_600_000 }]) {
-    const { svc, fake } = service({ limits });
+    let now = Date.parse("2026-11-07T10:00:00Z");
+    const { svc, fake } = service({ limits, now: () => new Date(now) });
     const id = await deferredSession(svc, 3);
     fake.down = true;
     assert.equal((await svc.close(O, { session_id: id, status: "succeeded" }, BASE)).final_checkpoint.status, "pending");
     assert.match((await svc.getSession(O, { session_id: id }, BASE)).anchoring.reason, /still waiting/);
+    now += 3_600_000;
     await svc.closeIdle();
     assert.equal(metaOf(svc, id).outbox.length, 1, "still down");
     fake.down = false;
+    now += 3_600_000;
     await svc.closeIdle();
     assert.equal(metaOf(svc, id).outbox.length, 0);
     const got = await svc.getSession(O, { session_id: id }, BASE);
@@ -1312,11 +1318,9 @@ test("at one anchor left, the close takes it, not the rows behind it", async () 
   assert.equal(closed.anchoring.unanchored_steps, 0);
   assert.equal(closed.anchoring.closing_unanchored, 0);
   const rows = metaOf(svc, a.session_id).outbox;
-  assert.equal(rows.length, 1, "the row that was tried may have been written, so it stays accounted for; the two never tried go");
-  assert.ok(rows.every((r) => r.state === "failed" && r.lastErrorCode === "superseded" && r.attempts > 0));
+  assert.equal(rows.length, 0, "the pool refused before any write, so none of them can be on the ledger");
   await svc.closeIdle();
   assert.equal(fake.writes.length, 3, "and they are never paid for");
-  assert.match(JSON.stringify((await svc.getSession(O, { session_id: a.session_id }, BASE)).pending_anchors), /A later anchor covers these steps/);
   assert.equal((await svc.verify(O, { session_id: a.session_id }, BASE)).result, "pass");
 });
 
@@ -1331,9 +1335,11 @@ test("a replaced row whose write did land stays accounted for, so the online che
   fake.log = log;
   fake.down = false;
   const written = metaOf(svc, a.session_id).outbox[0];
-  assert.ok(written.attempts > 0);
+  assert.equal(written.sendStarted, true);
   assert.equal(fake.writes.filter((w) => w.assetHash === written.hash).length, 1);
   await svc.close(O, { session_id: a.session_id, status: "succeeded" }, BASE);
+  assert.equal(metaOf(svc, a.session_id).outbox.find((r) => r.hash === written.hash).lastErrorCode, "superseded");
+  assert.match(JSON.stringify((await svc.getSession(O, { session_id: a.session_id }, BASE)).pending_anchors), /A later anchor covers these steps/);
   const v = await svc.verify(O, { session_id: a.session_id }, BASE);
   assert.equal(check(v, "witness").status, "pass", check(v, "witness").reason);
   assert.equal(v.result, "pass", v.summary);
@@ -1371,7 +1377,7 @@ test("corrupt settings: setting a level is the way back on every path, and no me
   const file = findSettings(listedDir);
   rmSync(`${file}.bak`, { force: true });
   writeFileSync(file, "not json");
-  await assert.rejects(listed.svc.startSession(O, { title: "t" }, BASE), (e) => e.code === "SHADOW_UNAVAILABLE" && /clockchain_log_level resets it/.test(e.message));
+  await assert.rejects(listed.svc.startSession(O, { title: "t" }, BASE), (e) => e.code === "SHADOW_UNAVAILABLE" && /ask the person whether to set the account's level/.test(e.message));
   const reset = listed.svc.setLogLevel(O, "milestone", false);
   assert.equal(reset.settings_reset, true);
   assert.match(reset.message, /couldn't be read, so they were reset, and sessions can start again/);
@@ -1402,7 +1408,7 @@ test("corrupt settings: setting a level is the way back on every path, and no me
   on.svc.setLogging(O, false);
   const said_ = on.svc.setLogging(O, true);
   assert.deepEqual(said_.logging, { enabled: true, level_readable: false });
-  assert.match(said_.message, /steps are still refused\. Setting a level with clockchain_log_level ends that/);
+  assert.match(said_.message, /steps are still refused\. Ask the person whether to set the account's level/);
   assert.doesNotMatch(said_.message, /logged from now on/);
   await assert.rejects(on.svc.logStep(O, { kind: "note", content: "x" }, BASE), (e) => e.code === "SHADOW_UNAVAILABLE");
   on.svc.setLogLevel(O, "step");
@@ -1455,4 +1461,357 @@ test("on an open session a later anchor replaces nothing: an earlier row that fa
   assert.ok(metaOf(svc, a.session_id).anchors.some((x) => (x.count ?? 0) > first.body.count), "with a later anchor landed");
   await svc.checkpoint(O, { session_id: a.session_id });
   assert.equal(fake.writes.filter((w) => w.assetHash === first.hash).length, 1);
+});
+
+// ---- third review ----------------------------------------------------------------------------------------------------
+
+/** The process dies with a ledger write landed and its receipt not saved: nothing later reaches the disk or the ledger. */
+function dieAfterWrite({ svc, fake }) {
+  const log = fake.log.bind(fake), append = svc.store.appendLine.bind(svc.store), write = svc.store.writeMeta.bind(svc.store);
+  let dead = false;
+  fake.log = async (entry) => { await log(entry); dead = true; throw new Dead(); };
+  svc.store.appendLine = (...a) => { if (dead) throw new Dead(); return append(...a); };
+  svc.store.writeMeta = (...a) => { if (dead) throw new Dead(); return write(...a); };
+  return () => { fake.log = log; };
+}
+
+const refuseSearch = (fake) => { fake.searchAsset = async () => { throw new AuthError("no", 401); }; };
+const allowSearch = (fake) => { delete fake.searchAsset; };
+
+test("a crash after a ledger write, before its receipt, then the close: the row stays accounted for, and verify doesn't fail", async () => {
+  for (const how of ["close", "idle"]) {
+    let now = Date.parse("2026-11-07T10:00:00Z");
+    const o = { now: () => new Date(now), limits: { idleCloseMs: 3_600_000 } };
+    const a = service(o);
+    const id = await deferredSession(a.svc, 3);
+    const restore = dieAfterWrite(a);
+    await a.svc.checkpoint(O, { session_id: id }).catch(() => {});
+    restore();
+    const rowHash = metaOf(a.svc, id).outbox[0].hash;
+    assert.equal(metaOf(a.svc, id).outbox[0].sendStarted, true, "saved before the network call");
+    assert.equal(metaOf(a.svc, id).outbox[0].attempts, 0, "and nothing else says it was sent");
+    const b = service({ ...o, stateDir: a.stateDir, ledger: () => a.fake });
+    if (how === "close") await b.svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+    else { now += 2 * 3_600_000; await b.svc.closeIdle(); }
+    assert.equal(a.fake.writes.filter((w) => w.assetHash === rowHash).length, 1, `${how}: not paid twice`);
+    const v = await b.svc.verify(O, { session_id: id }, BASE);
+    assert.equal(check(v, "witness").status, "pass", `${how}: ${check(v, "witness").reason}`);
+    assert.notEqual(v.result, "fail", v.summary);
+    const packet = JSON.parse(await b.svc.packetForCap(metaOf(b.svc, id).cap)).packet;
+    assert.ok(packet.pendingCheckpoints.some((p) => p.hash === rowHash), `${how}: the packet accounts for it`);
+  }
+});
+
+test("the mark is on disk before the network call, and it stops the crash double pay", async () => {
+  const a = service();
+  const id = await deferredSession(a.svc, 1);
+  const log = a.fake.log.bind(a.fake);
+  let seen;
+  a.fake.log = async (e) => { seen = metaOf(a.svc, id).outbox.find((r) => r.hash === e.assetHash)?.sendStarted; return log(e); };
+  await a.svc.checkpoint(O, { session_id: id });
+  a.fake.log = log;
+  assert.equal(seen, true);
+  const restore = dieAfterWrite(a);
+  await a.svc.logStep(O, { session_id: id, kind: "task", content: "again" }, BASE).catch(() => {});
+  restore();
+  const hash = metaOf(a.svc, id).outbox[0].hash;
+  const b = service({ stateDir: a.stateDir, ledger: () => a.fake });
+  await b.svc.checkpoint(O, { session_id: id });
+  assert.equal(a.fake.writes.filter((w) => w.assetHash === hash).length, 1, "the ledger was asked, and the record adopted");
+  assert.equal(metaOf(b.svc, id).outbox.length, 0);
+  assert.ok(metaOf(b.svc, id).anchors.some((x) => x.hash === hash));
+});
+
+test("a start interrupted after its write isn't paid for twice, with or without a note", async () => {
+  for (const input of [{ title: "t" }, { title: "t", log_level: "turn" }]) {
+    const a = service();
+    dieAfterWrite(a);
+    await a.svc.startSession(O, input, BASE).catch(() => {});
+    a.fake.log = FakeLedger.prototype.log.bind(a.fake);
+    const id = a.svc.store.sessionIds(ownerKeyOf(O))[0];
+    const b = service({ stateDir: a.stateDir, ledger: () => a.fake });
+    await b.svc.logStep(O, { session_id: id, kind: "task", content: "go" }, BASE);
+    const { startHash } = metaOf(b.svc, id);
+    assert.equal(a.fake.writes.filter((w) => w.assetHash === startHash).length, 1, JSON.stringify(input));
+    assert.ok(metaOf(b.svc, id).anchors.some((x) => x.marker === "start"));
+  }
+});
+
+test("what can't have been written loses its mark, what may have keeps it, through our own limits too", async () => {
+  // Refused before any write: no mark, so no search, and a later anchor can drop it.
+  const a = service();
+  const id = await deferredSession(a.svc, 1);
+  a.fake.degraded = true;
+  await a.svc.checkpoint(O, { session_id: id });
+  a.fake.degraded = false;
+  assert.equal(metaOf(a.svc, id).outbox[0].sendStarted, false);
+  refuseSearch(a.fake);
+  await a.svc.checkpoint(O, { session_id: id });
+  assert.equal(metaOf(a.svc, id).outbox.length, 0, "sent with no search needed");
+
+  // Written, then the retry stops at the day's limit: its attempts stay at 0 and it may still be on the ledger.
+  const b = service({ limits: { maxAnchorsPerOwnerPerDay: 3 } });
+  const sid = await deferredSession(b.svc, 1); // The start and the task spend two.
+  const restore = dieAfterWrite(b); // The third.
+  await b.svc.checkpoint(O, { session_id: sid }).catch(() => {});
+  restore();
+  // The dying call's refund ran here, as a real crash's wouldn't, so the limit comes down to what a crash would leave.
+  const c = service({ stateDir: b.stateDir, ledger: () => b.fake, limits: { maxAnchorsPerOwnerPerDay: 2 } });
+  b.fake.searchAsset = async () => [];
+  await c.svc.checkpoint(O, { session_id: sid });
+  const [row] = metaOf(c.svc, sid).outbox;
+  assert.equal(row.lastErrorCode, "anchor_limit");
+  assert.equal(row.attempts, 0);
+  assert.equal(row.sendStarted, true);
+});
+
+test("a row from before the mark counts as maybe written", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  fake.down = true;
+  await svc.checkpoint(O, { session_id: id });
+  fake.down = false;
+  const meta = metaOf(svc, id);
+  delete meta.outbox[0].sendStarted;
+  meta.outbox[0].attempts = 0;
+  svc.store.writeMeta(meta);
+  const { hash } = meta.outbox[0];
+  await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  const row = metaOf(svc, id).outbox.find((r) => r.hash === hash);
+  assert.equal(row?.lastErrorCode, "superseded", "kept, and never paid");
+  assert.equal(fake.writes.filter((w) => w.assetHash === hash).length, 0);
+});
+
+test("a row from before the mark is searched for before it is paid for", async () => {
+  const a = service();
+  const id = await deferredSession(a.svc, 1);
+  const restore = dieAfterWrite(a);
+  await a.svc.checkpoint(O, { session_id: id }).catch(() => {});
+  restore();
+  const b = service({ stateDir: a.stateDir, ledger: () => a.fake });
+  const meta = metaOf(b.svc, id);
+  const { hash } = meta.outbox[0];
+  delete meta.outbox[0].sendStarted;
+  b.svc.store.writeMeta(meta);
+  await b.svc.checkpoint(O, { session_id: id });
+  assert.equal(a.fake.writes.filter((w) => w.assetHash === hash).length, 1);
+  assert.ok(metaOf(b.svc, id).anchors.some((x) => x.hash === hash), "adopted");
+});
+
+test("a ledger that refuses search: an interrupted row isn't paid blindly, doesn't fail, and blocks nothing", async () => {
+  const a = service();
+  const id = await deferredSession(a.svc, 2);
+  const restore = dieAfterWrite(a);
+  await a.svc.checkpoint(O, { session_id: id }).catch(() => {});
+  restore();
+  const hash = metaOf(a.svc, id).outbox[0].hash;
+  let searches = 0;
+  a.fake.searchAsset = async () => { searches++; throw new AuthError("no", 401); };
+  const b = service({ stateDir: a.stateDir, ledger: () => a.fake });
+  const waiting = await b.svc.logStep(O, { session_id: id, kind: "tool_call", content: { tool: "w" } }, BASE);
+  assert.match(waiting.anchor_reason, /A later anchor covers this/, "a refused search isn't an outage");
+  assert.equal(searches, 1);
+  // The next anchor goes straight past it, and the row isn't asked about again until it is due.
+  const next = await b.svc.logStep(O, { session_id: id, kind: "task", content: "more" }, BASE);
+  assert.equal(next.anchor_status, "anchored");
+  assert.equal(searches, 1, "it backs off");
+  const parked = metaOf(b.svc, id).outbox.find((r) => r.hash === hash);
+  assert.equal(parked.state, "queued");
+  assert.equal(parked.lastErrorCode, "search_refused");
+  assert.equal(a.fake.writes.filter((w) => w.assetHash === hash).length, 1, "not paid again");
+  assert.match(JSON.stringify((await b.svc.getSession(O, { session_id: id }, BASE)).pending_anchors), /refused the search that would show it/);
+  await b.svc.logStep(O, { session_id: id, kind: "tool_call", content: { tool: "x" } }, BASE);
+  const closed = await b.svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  assert.equal(closed.final_checkpoint.status, "anchored", "the close isn't held up");
+  assert.equal(closed.anchoring.unanchored_steps, 0);
+  assert.equal(closed.anchoring.closing_unanchored, 0);
+  assert.equal(metaOf(b.svc, id).outbox.find((r) => r.hash === hash).lastErrorCode, "superseded");
+  // What the session reads as while search stays refused.
+  const v = await b.svc.verify(O, { session_id: id }, BASE);
+  assert.equal(v.result, "indeterminate");
+  assert.equal(check(v, "witness").status, "indeterminate");
+  assert.match(check(v, "witness").reason, /could not be reached for every receipt/);
+  assert.deepEqual(v.checks.filter((c) => c.status === "fail"), []);
+  assert.equal(check(v, "anchoring"), undefined, "no anchoring gap");
+  assert.equal(viewerResult(await viewer(b.svc, id)), "pass", "the viewer checks offline");
+  allowSearch(a.fake);
+  const healthy = await b.svc.verify(O, { session_id: id }, BASE);
+  assert.equal(healthy.result, "pass", "and the kept row accounts for the record the search then finds");
+});
+
+test("the close's own row, interrupted with search refused, stays honest and settles when search comes back", async () => {
+  const a = service();
+  const id = await deferredSession(a.svc, 2);
+  const restore = dieAfterWrite(a);
+  await a.svc.close(O, { session_id: id, status: "succeeded" }, BASE).catch(() => {});
+  restore();
+  const hash = metaOf(a.svc, id).outbox.find((r) => r.kind === "checkpoint").hash;
+  refuseSearch(a.fake);
+  const b = service({ stateDir: a.stateDir, ledger: () => a.fake });
+  const retry = await b.svc.close(O, { session_id: id }, BASE);
+  assert.equal(retry.final_checkpoint.status, "pending");
+  assert.match(retry.final_checkpoint.reason, /refused the search/);
+  assert.equal(a.fake.writes.filter((w) => w.assetHash === hash).length, 1);
+  const v = await b.svc.verify(O, { session_id: id }, BASE);
+  assert.equal(v.result, "indeterminate");
+  assert.match(v.anchoring.reason, /A checkpoint still waiting covers 4 of these 4: It may already be on Clockchain/);
+  allowSearch(a.fake);
+  assert.equal((await b.svc.close(O, { session_id: id }, BASE)).final_checkpoint.status, "anchored", "adopted, not paid again");
+  assert.equal(a.fake.writes.filter((w) => w.assetHash === hash).length, 1);
+  assert.equal((await b.svc.verify(O, { session_id: id }, BASE)).result, "pass");
+});
+
+test("hours of outage don't end a close's row: it backs off, the ledger's return lands it, and a person's retry needn't wait", async () => {
+  for (const back of ["pass", "close", "checkpoint"]) {
+    let now = Date.parse("2026-11-07T10:00:00Z");
+    const { svc, fake } = service({ now: () => new Date(now) });
+    const id = await deferredSession(svc, 2);
+    fake.down = true;
+    await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+    for (let hour = 0; hour < 72; hour++) { now += 3_600_000; await svc.closeIdle(); }
+    const [row] = metaOf(svc, id).outbox;
+    assert.notEqual(row.state, "failed", "three days on, past the ten passes an open session gets");
+    assert.ok(row.attempts > 10 && row.attempts < 20, `it backed off: ${row.attempts} tries in 72 hours`);
+    fake.down = false;
+    if (back === "pass") { now += 6 * 3_600_000; await svc.closeIdle(); }
+    else if (back === "close") assert.equal((await svc.close(O, { session_id: id }, BASE)).final_checkpoint.status, "anchored");
+    else await svc.checkpoint(O, { session_id: id });
+    assert.equal(metaOf(svc, id).outbox.length, 0, back);
+    assert.equal((await svc.verify(O, { session_id: id }, BASE)).result, "pass", back);
+  }
+});
+
+test("a pool or credit failure backs off the same way, and a row a pass isn't due for is left alone", async () => {
+  let now = Date.parse("2026-11-07T10:00:00Z");
+  const { svc, fake } = service({ now: () => new Date(now) });
+  const id = await deferredSession(svc, 1);
+  fake.degraded = true;
+  await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  const after = metaOf(svc, id).outbox[0];
+  assert.ok(Date.parse(after.nextTryAt) > now);
+  await svc.closeIdle();
+  assert.equal(metaOf(svc, id).outbox[0].attempts, after.attempts, "not due yet");
+  now = Date.parse(after.nextTryAt);
+  await svc.closeIdle();
+  assert.equal(metaOf(svc, id).outbox[0].attempts, after.attempts + 1, "due");
+});
+
+test("a row an earlier build gave up on is brought back by a person's retry, unless the refusal was permanent", async () => {
+  for (const [retry, kind, code, lands] of [["close", "Transient", "network", true], ["checkpoint", "Auth", "http_401", true], ["checkpoint", "Permanent", "http_400", false]]) {
+    const { svc, fake } = service();
+    const id = await deferredSession(svc, 1);
+    fake.down = true;
+    await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+    fake.down = false;
+    const meta = metaOf(svc, id);
+    Object.assign(meta.outbox[0], { state: "failed", lastErrorKind: kind, lastErrorCode: code, attempts: 10 });
+    svc.store.writeMeta(meta);
+    if (retry === "close") assert.equal((await svc.close(O, { session_id: id }, BASE)).final_checkpoint.status, "anchored");
+    else await svc.checkpoint(O, { session_id: id });
+    assert.equal(metaOf(svc, id).outbox.length === 0, lands, `${kind}`);
+    assert.equal((await svc.verify(O, { session_id: id }, BASE)).result, lands ? "pass" : "indeterminate", kind);
+  }
+});
+
+test("an open session's row still gives up after its passes, as before", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  fake.down = true;
+  for (let i = 0; i < 11; i++) await svc.checkpoint(O, { session_id: id });
+  assert.equal(metaOf(svc, id).outbox[0].state, "failed");
+});
+
+test("a pin given before the close's anchor lands says it will change, and where the current one is", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  fake.confirm = false;
+  const closed = await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  assert.equal(closed.final_checkpoint.status, "pending");
+  assert.match(closed.pin_note, /the pin changes when it lands/);
+  assert.match(closed.pin_note, /shadow_get_session and the packet link give the current one/);
+  assert.match((await svc.getSession(O, { session_id: id }, BASE)).pin_note, /the pin changes when it lands/);
+  assert.match(await viewer(svc, id), /the pin changes when it lands/);
+  fake.confirm = true;
+  fake.confirmPending();
+  await svc.closeIdle();
+  assert.equal(metaOf(svc, id).outbox.length, 0, "the server lands it unprompted");
+  const got = await svc.getSession(O, { session_id: id }, BASE);
+  assert.equal("pin_note" in got, false);
+  assert.doesNotMatch(await viewer(svc, id), /the pin changes when it lands/);
+  assert.notEqual(got.pin.checkpointHash, closed.pin.checkpointHash, "the note was true");
+  const { packet } = JSON.parse(await svc.packetForCap(metaOf(svc, id).cap));
+  assert.equal((await verifyPacket(packet, { pin: closed.pin })).checks.find((c) => c.name === "trust").status, "fail");
+  assert.equal((await verifyPacket(packet, { pin: got.pin })).checks.find((c) => c.name === "trust").status, "pass");
+  const plain = service();
+  const other = await deferredSession(plain.svc, 1);
+  assert.equal("pin_note" in await plain.svc.close(O, { session_id: other, status: "succeeded" }, BASE), false);
+});
+
+test("a corrupt main settings file doesn't fall back to an older .bak: logging that was turned off stays off", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "level-bak-"));
+  const { svc } = service({ stateDir });
+  svc.setLogging(O, true);
+  svc.setLogging(O, false); // The .bak now says on.
+  const file = findSettings(stateDir);
+  assert.match(readFileSync(`${file}.bak`, "utf8"), /"loggingOff":false/);
+  writeFileSync(file, "not json");
+  assert.throws(() => svc.loggingEnabled(O), (e) => e.code === "SHADOW_UNAVAILABLE");
+  await assert.rejects(svc.logStep(O, { kind: "note", content: "x" }, BASE), (e) => e.code === "SHADOW_UNAVAILABLE");
+  const reset = svc.setLogLevel(O, "turn");
+  assert.equal(reset.settings_reset, true);
+  assert.equal(svc.loggingEnabled(O), false, "the level doesn't bring logging back");
+  await assert.rejects(svc.logStep(O, { kind: "note", content: "x" }, BASE), (e) => e.code === "LOGGING_OFF");
+  // The same tests as the durable file's: a file others can read is refused, not fallen back from.
+  svc.setLogging(O, false);
+  chmodSync(file, 0o644);
+  assert.throws(() => svc.loggingEnabled(O), (e) => e.code === "SHADOW_UNAVAILABLE");
+  chmodSync(file, 0o600);
+  // A crash in the middle of a save leaves only the .bak, and that still reads.
+  svc.setLogging(O, true);
+  rmSync(file);
+  assert.equal(svc.loggingEnabled(O), false, "the value before the save that never finished");
+});
+
+test("a read that merely fails isn't corruption: the healthy file stays as it is", async () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "level-read-"));
+  const { svc } = service({ stateDir });
+  svc.setLogLevel(O, "turn");
+  const file = findSettings(stateDir);
+  const before = readFileSync(file, "utf8");
+  chmodSync(file, 0o000);
+  try {
+    assert.throws(() => svc.setLogLevel(O, "step"), (e) => e.code === "SHADOW_UNAVAILABLE" && /stays as it was/.test(e.message));
+    assert.throws(() => svc.setLogging(O, true), (e) => e.code === "SHADOW_UNAVAILABLE" && /stays as it was/.test(e.message));
+  } finally {
+    chmodSync(file, 0o600);
+  }
+  assert.equal(readFileSync(file, "utf8"), before);
+  assert.equal(svc.logLevelOf(O), "turn");
+});
+
+test("the owed list takes turns: one account's stuck sessions can't keep another's off, and every session gets its go", async () => {
+  const later = Date.now() + 2 * 86_400_000;
+  const limits = { maxSessionStartsPerOwnerPerDay: 100, maxOpenSessionsPerOwner: 100, maxAnchorsPerOwnerPerDay: 1000 };
+  const { svc, fake } = service({ limits });
+  const [hog, victim] = [O, O2].sort((x, y) => ownerKeyOf(x).localeCompare(ownerKeyOf(y)));
+  const close = async (owner) => {
+    const s = await svc.startSession(owner, { title: "t" }, BASE);
+    fake.down = true;
+    await svc.close(owner, { session_id: s.session_id }, BASE);
+    fake.down = false;
+    return s.session_id;
+  };
+  const hogs = [];
+  for (let i = 0; i < 6; i++) hogs.push(await close(hog));
+  const mine = await close(victim);
+  const seen = new Set();
+  for (let pass = 0; pass < 3; pass++) {
+    const { owed } = await svc.store.idleScan(-Infinity, later, 3);
+    assert.equal(owed.length, 3);
+    assert.ok(owed.some((s) => s.sessionId === mine), `pass ${pass}: the other account is on the list`);
+    for (const s of owed) seen.add(s.sessionId);
+  }
+  assert.equal(hogs.filter((id) => seen.has(id)).length, 6, "and the list moved on through the stuck ones");
+  const none = await svc.store.idleScan(-Infinity, Date.now(), 3);
+  assert.equal(none.owed.length, 0, "rows backing off aren't due");
 });

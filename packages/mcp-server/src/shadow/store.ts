@@ -24,6 +24,9 @@ export const META_MAX_BYTES = 512 * 1024;
 const KEY_MAX_BYTES = 8 * 1024;
 const SMALL_MAX_BYTES = 4 * 1024;
 
+/** The owner's settings file holds what can't be read back: its value is unknown, so nothing may fall back to an older one. */
+class CorruptSettings extends Error {}
+
 const OWNER_KEY = /^[0-9a-f]{32}$/;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const CAP = /^[A-Za-z0-9_-]{22}$/;
@@ -50,6 +53,14 @@ export type OutboxRow = {
   lastErrorKind: string | null;
   lastErrorCode: string | null;
   createdAt: string;
+  /**
+   * Whether a send may have reached the ledger: saved before each network call, and cleared only when a failure shows no write
+   * was tried. Rows from before this field don't have it, and count as true. A row marked true is searched for before it is
+   * paid for, and is never dropped from the queue, because the packet has to account for it.
+   */
+  sendStarted?: boolean;
+  /** Not before this, unless a person's retry asks: how a row that keeps failing backs off. */
+  nextTryAt?: string;
 };
 
 /** A receipt that landed in the record (a session.opened receipt or a clockchain.anchored step). */
@@ -116,6 +127,13 @@ type CapFile = { ownerKey: string; sessionId: string };
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
+const SETTINGS_SCHEMA = "shadow-settings-v1";
+
+function validSettings(v: unknown): OwnerSettings {
+  if (!isObj(v) || typeof v.loggingOff !== "boolean" || (v.logLevel !== undefined && !isLogLevel(v.logLevel))) throw new Error("bad settings file");
+  return { loggingOff: v.loggingOff, ...(v.logLevel ? { logLevel: v.logLevel as LogLevel } : {}), ...(v.levelUnreadable === true ? { levelUnreadable: true as const } : {}) };
+}
+
 function validateMeta(v: unknown): SessionMeta {
   if (!isObj(v) || v.v !== 1 || !isSessionId(v.sessionId) || typeof v.ownerKey !== "string" || !OWNER_KEY.test(v.ownerKey) ||
     typeof v.operatorId !== "string" || !Array.isArray(v.agents) || (v.state !== "open" && v.state !== "closed") ||
@@ -166,6 +184,10 @@ export class ShadowStore {
   private readonly operators = new Map<string, Operator>();
   /** Sessions with anchors still owed, kept current by writeMeta and rebuilt by every sweep, so /metrics never walks the disk. */
   private readonly backlog = new Map<string, AnchorBacklog>();
+  /** How many idle passes have asked what is owed, so each starts where the last left off. */
+  private owedTurn = 0;
+  /** Where each owing account's next turn starts in its sessions. */
+  private owedNext = new Map<string, number>();
 
   constructor(root: string) {
     this.root = root;
@@ -218,18 +240,43 @@ export class ShadowStore {
 
   private settingsFile(ownerKey: string, current: () => OwnerSettings) {
     return createDurableJsonFile<OwnerSettings>({
-      path: join(this.ownerDir(ownerKey), "settings.json"),
-      schema: "shadow-settings-v1",
+      path: this.settingsPath(ownerKey),
+      schema: SETTINGS_SCHEMA,
       snapshot: current,
-      validate: (v) => {
-        if (!isObj(v) || typeof v.loggingOff !== "boolean" || (v.logLevel !== undefined && !isLogLevel(v.logLevel))) throw new Error("bad settings file");
-        return { loggingOff: v.loggingOff, ...(v.logLevel ? { logLevel: v.logLevel as LogLevel } : {}), ...(v.levelUnreadable === true ? { levelUnreadable: true as const } : {}) };
-      },
+      validate: validSettings,
       maxBytes: SMALL_MAX_BYTES,
     });
   }
 
+  private settingsPath(ownerKey: string): string {
+    return join(this.ownerDir(ownerKey), "settings.json");
+  }
+
+  /**
+   * The owner's settings. The durable file falls back to its .bak when the main file is corrupt, which is right for state that
+   * only grows, and wrong here: the .bak can hold an "on" from before the person said stop. So a corrupt main file is looked
+   * for first, by the same tests, and throws CorruptSettings. A .bak with no main file is a crash in the middle of a save,
+   * and reads as before. A read that fails for any other reason throws as it is: the file may be fine.
+   */
   private settings(ownerKey: string): OwnerSettings {
+    const path = this.settingsPath(ownerKey);
+    let raw: string | undefined;
+    try {
+      const link = lstatSync(path);
+      if (!link.isFile() || link.isSymbolicLink() || (link.mode & 0o077) !== 0 || link.size > SMALL_MAX_BYTES) throw new CorruptSettings();
+      raw = readFileSync(path, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+    if (raw !== undefined) {
+      try {
+        const parsed = JSON.parse(raw) as { schema?: unknown; value?: unknown } | null;
+        if (parsed?.schema !== SETTINGS_SCHEMA) throw new Error("unknown schema");
+        return validSettings(parsed.value);
+      } catch {
+        throw new CorruptSettings();
+      }
+    }
     return this.settingsFile(ownerKey, () => ({ loggingOff: false })).load() ?? { loggingOff: false };
   }
 
@@ -245,7 +292,9 @@ export class ShadowStore {
     try {
       const { logLevel, levelUnreadable } = this.settings(ownerKey);
       kept = { ...(logLevel ? { logLevel } : {}), ...(levelUnreadable ? { levelUnreadable } : {}) };
-    } catch {
+    } catch (e) {
+      // A read that merely failed may be of a healthy file: it isn't overwritten for that, unless logging is being turned off.
+      if (!(e instanceof CorruptSettings) && !loggingOff) throw e;
       kept = { levelUnreadable: true };
     }
     this.settingsFile(ownerKey, () => ({ loggingOff, ...kept })).save("now");
@@ -267,8 +316,8 @@ export class ShadowStore {
     try {
       ({ loggingOff } = this.settings(ownerKey));
       reset = false;
-    } catch {
-      // Unreadable: see above.
+    } catch (e) {
+      if (!(e instanceof CorruptSettings)) throw e; // The file may be fine: it stays as it is.
     }
     this.settingsFile(ownerKey, () => ({ loggingOff, logLevel })).save("now");
     return { reset };
@@ -541,14 +590,15 @@ export class ShadowStore {
   }
 
   /**
-   * The whole store, for the idle pass: sessions to close, and closed ones that still owe an anchor. Gives way to the
-   * event loop as it goes, because every route shares this process.
+   * The whole store, for the idle pass: sessions to close, and closed ones with an anchor due. Gives way to the event loop as
+   * it goes, because every route shares this process. `owed` takes turns: one session per account per round, and each pass
+   * starts further along, in accounts and in each account's sessions, so stuck sessions can't keep others off the list.
    */
   async idleScan(cutoffMs: number, nowMs: number, limit: number): Promise<{ idle: { ownerKey: string; sessionId: string }[]; owed: { ownerKey: string; sessionId: string }[] }> {
     const ownersDir = join(this.root, "owners");
     if (!existsSync(ownersDir)) return { idle: [], owed: [] };
     const idle: { ownerKey: string; sessionId: string; at: number }[] = [];
-    const owed: { ownerKey: string; sessionId: string }[] = [];
+    const owing = new Map<string, string[]>();
     let read = 0;
     for (const ownerKey of readdirSync(ownersDir)) {
       if (!OWNER_KEY.test(ownerKey)) continue;
@@ -558,7 +608,7 @@ export class ShadowStore {
           const m = this.readMeta(ownerKey, sessionId);
           if (!m || Date.parse(m.expiresAt) <= nowMs) continue;
           if (m.state === "closed") {
-            if (m.outbox.some((r) => r.state !== "failed")) owed.push({ ownerKey, sessionId });
+            if (m.outbox.some((r) => r.state !== "failed" && (!r.nextTryAt || Date.parse(r.nextTryAt) <= nowMs))) owing.set(ownerKey, [...(owing.get(ownerKey) ?? []), sessionId]);
             continue;
           }
           const at = this.lastActivity(m);
@@ -568,7 +618,28 @@ export class ShadowStore {
         }
       }
     }
-    return { idle: idle.sort((a, b) => a.at - b.at).slice(0, limit).map(({ ownerKey, sessionId }) => ({ ownerKey, sessionId })), owed: owed.slice(0, limit) };
+    return { idle: idle.sort((a, b) => a.at - b.at).slice(0, limit).map(({ ownerKey, sessionId }) => ({ ownerKey, sessionId })), owed: this.takeTurns(owing, limit) };
+  }
+
+  private takeTurns(owing: Map<string, string[]>, limit: number): { ownerKey: string; sessionId: string }[] {
+    const owners = [...owing.keys()].sort();
+    const first = this.owedTurn++ * limit;
+    const order = owners.map((_, i) => owners[(first + i) % owners.length]);
+    const taken = new Map(order.map((o) => [o, 0]));
+    const owed: { ownerKey: string; sessionId: string }[] = [];
+    for (let round = 0; owed.length < limit; round++) {
+      const before = owed.length;
+      for (const ownerKey of order) {
+        const list = owing.get(ownerKey)!.sort();
+        if (round >= list.length || owed.length >= limit) continue;
+        owed.push({ ownerKey, sessionId: list[((this.owedNext.get(ownerKey) ?? 0) + round) % list.length] });
+        taken.set(ownerKey, round + 1);
+      }
+      if (owed.length === before) break;
+    }
+    const next = new Map(order.map((o) => [o, (this.owedNext.get(o) ?? 0) + taken.get(o)!]));
+    this.owedNext = next; // Only accounts owing now, so this stays as small as the list.
+    return owed;
   }
 
   // ---- retention ----------------------------------------------------------------------------------------------

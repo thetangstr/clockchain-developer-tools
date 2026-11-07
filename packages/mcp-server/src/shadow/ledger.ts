@@ -126,7 +126,10 @@ const str = (v: unknown) => (v == null || v === "" ? null : String(v));
 export type AnchorOutcome =
   | { kind: "anchored"; receipt: WriteReceipt }
   | { kind: "pending"; ledgerId: string; submittedAt: string | null }
-  | { kind: "failed"; failure: Failure };
+  /** maybeWritten: a write was tried, now or on an earlier attempt, so this hash may be on the ledger. */
+  | { kind: "failed"; failure: Failure; maybeWritten: boolean }
+  /** This hash may be on the ledger and the ledger refused the search that would tell: nothing was paid, and paying blind could pay twice. */
+  | { kind: "unconfirmed"; failure: Failure };
 
 export type AnchorRequest = {
   ledger: ShadowLedger;
@@ -179,7 +182,16 @@ export async function anchorHash(o: AnchorRequest): Promise<AnchorOutcome> {
         return await settle(o.ledger, await o.ledger.waitForConfirmation(o.ledgerId, Math.min(o.waitMs, 3_000)), o.hash);
       }
       if (uncertain) {
-        const found = (await o.ledger.searchAsset(o.referenceId)).find((r) => r.assetHash === o.hash);
+        let records: LedgerRecord[];
+        try {
+          records = await o.ledger.searchAsset(o.referenceId);
+        } catch (e) {
+          // A refusal isn't an outage: trying again in this call won't change it, and it says nothing about this hash.
+          const refused = classifyFailure(e);
+          if (refused.kind === "Auth" || refused.kind === "Permanent") return { kind: "unconfirmed", failure: refused };
+          throw e;
+        }
+        const found = records.find((r) => r.assetHash === o.hash);
         if (found) {
           const rec = found.blockHeight != null ? found : await o.ledger.waitForConfirmation(String(found.ledgerId), o.waitMs).catch(() => found);
           return await settle(o.ledger, rec, o.hash);
@@ -208,7 +220,7 @@ export async function anchorHash(o: AnchorRequest): Promise<AnchorOutcome> {
       await o.sleep(last.kind === "RateLimited" && last.retryAfterSeconds ? last.retryAfterSeconds * 1000 : o.backoffMs[Math.min(attempt, o.backoffMs.length - 1)]);
     }
   }
-  return { kind: "failed", failure: last };
+  return { kind: "failed", failure: last, maybeWritten: uncertain };
 }
 
 function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {

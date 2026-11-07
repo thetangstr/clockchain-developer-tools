@@ -185,8 +185,10 @@ test("an anchor a self-closed session still owes is retried by later passes", as
   fake.down = true;
   assert.equal(await svc.closeIdle(), 1);
   const writes = fake.writes.length;
+  clock.now += 6 * HOUR; // A failed row backs off, so the passes that retry it are hours apart.
   await svc.closeIdle();
   fake.down = false;
+  clock.now += 6 * HOUR;
   await svc.closeIdle();
   assert.ok(fake.writes.length > writes, "the final checkpoint reached the ledger once it was back");
   assert.equal((await svc.getSession(O, { session_id: a.session_id }, BASE)).pending_anchors.length, 0);
