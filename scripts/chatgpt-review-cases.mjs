@@ -21,6 +21,8 @@ const KEY = /cck_[A-Za-z0-9_-]{32}/;
 /** Anything a tool could use to move value. Shadow has none, and a description can't suggest it. */
 const MONEY = /\b(transfer|payment|pay|wallet|purchase|trade|send (money|crypto|funds))\b/i;
 const VERDICT = /not a verdict on truth, compliance/i;
+/** A listed tool's text, about a setting that reaches past this chat. */
+export const CROSS_CHAT = /\b(all|every|each|any) (of )?(its |their |your )?chats?\b|across (all )?chats/i;
 
 const rpc = async (base, path, token, method, params) => {
   const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", accept: ACCEPT, ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
@@ -101,6 +103,8 @@ function caseChecks(base, call, created) {
         if (!/records a task only when the person asks/.test(instructions ?? "")) return "the instructions don't say that it records only when asked";
         const { tools } = await rpc(base, "/shadow/mcp", token, "tools/list", {});
         if (tools.some((t) => t.name.startsWith("shadow_log_") || t.name === "clockchain_logging")) return "this endpoint carries logging by default, which a listed endpoint must not";
+        const crossChat = tools.filter((t) => CROSS_CHAT.test(`${t.description} ${JSON.stringify(t.inputSchema)}`));
+        if (crossChat.length) return `tools that read as reaching across chats: ${crossChat.map((t) => t.name).join(", ")}`;
         return undefined;
       },
       "No money": async ({ token }) => {

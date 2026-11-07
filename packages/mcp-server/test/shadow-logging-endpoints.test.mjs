@@ -30,7 +30,10 @@ const SESSION_TOOLS = ["clockchain_delete_account", "clockchain_log_level", "sha
 const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_signup_help", "clockchain_whoami"];
 const LOG_TOOLS = ["clockchain_logging", "clockchain_whoami", "shadow_log_step", "shadow_log_turn"];
 /** What a directory's checklist rejects, or what makes a listed tool read as logging by default or across chats. */
-const NOT_ON_A_LISTED_ENDPOINT = /without being asked|from any connector|on by default|after every step|every tool call|stop logging|shadow_log_|clockchain_logging|agreed to this|\bfree\b/i;
+const NOT_ON_A_LISTED_ENDPOINT = /without being asked|from any connector|on by default|after every step|every tool call|stop logging|shadow_log_|clockchain_logging|agreed to this|\bfree\b|\b(all|every|each|any) (of )?(its |their |your )?chats?\b|across (all )?chats|step gets its own anchor|one anchor per turn/i;
+
+// The check itself catches what it is there for.
+for (const line of ["for this account, in all its chats", "in every chat", "across chats", "each step gets its own anchor", "one anchor per turn"]) assert.match(line, NOT_ON_A_LISTED_ENDPOINT);
 
 const tmp = (label) => mkdtempSync(path.join(tmpdir(), `logging-endpoints-${label}-`));
 const flat = (s) => s.replace(/\s+/g, " ");
@@ -124,7 +127,10 @@ async function assertListed(s, token) {
   ]) {
     const listed = await toolsOf(s.url, p, tok);
     assert.deepEqual(sorted(listed.map((t) => t.name)), tools, where);
-    for (const t of listed) assert.doesNotMatch(t.description, NOT_ON_A_LISTED_ENDPOINT, `${where} ${t.name}`);
+    for (const t of listed) {
+      assert.doesNotMatch(t.description, NOT_ON_A_LISTED_ENDPOINT, `${where} ${t.name}`);
+      assert.doesNotMatch(JSON.stringify(t.inputSchema), NOT_ON_A_LISTED_ENDPOINT, `${where} ${t.name}'s arguments`);
+    }
     const text = await instructionsOf(s.url, p, tok);
     assert.ok(text.startsWith(ASKED_INSTRUCTIONS), where);
     assert.doesNotMatch(text, NOT_ON_A_LISTED_ENDPOINT, where);
@@ -229,20 +235,49 @@ test("the logging level: one setting for the account from any endpoint, and an a
       const tool_ = (await toolsOf(s.url, p, a.token)).find((t) => t.name === "clockchain_log_level");
       assert.ok(tool_, p);
       assert.deepEqual(tool_.inputSchema.properties.level.enum, ["step", "turn", "milestone"], p);
-      assert.doesNotMatch(tool_.description, NOT_ON_A_LISTED_ENDPOINT, p);
+      if (p === PLAIN || p === CHAT) assert.doesNotMatch(tool_.description, NOT_ON_A_LISTED_ENDPOINT, p);
       assert.doesNotMatch(tool_.description, /Never |do not |must |always /i, `${p}: says what it does, with no rules for the model`);
       const start = (await toolsOf(s.url, p, a.token)).find((t) => t.name === "shadow_start_session");
       assert.ok(start.inputSchema.properties.log_level, p);
       const agent = start.inputSchema.properties.agents.items.properties;
       assert.ok(agent.purpose && agent.accountable_owner, p);
     }
-    const chosen = await tool(s.url, PREVIEW, a.token, "shadow_log_step", { kind: "task", content: "hello", log_level: "turn" });
+    for (const p of [PLAIN, CHAT]) {
+      const tools = await toolsOf(s.url, p, a.token);
+      const start = tools.find((t) => t.name === "shadow_start_session");
+      const level = tools.find((t) => t.name === "clockchain_log_level");
+      assert.doesNotMatch(start.inputSchema.properties.log_level.description, NOT_ON_A_LISTED_ENDPOINT, p);
+      assert.match(start.inputSchema.properties.log_level.description, /doesn't change when anchors happen/, p);
+      assert.match(level.description, /doesn't change when anchors happen/, p);
+      assert.doesNotMatch(`${level.description} ${start.inputSchema.properties.log_level.description}`, /chats?\b/i, `${p}: nothing here carries over from one chat to the next`);
+    }
+    for (const p of [PLAIN, CHAT, PREVIEW, PREVIEW_CHAT]) {
+      const { description } = (await toolsOf(s.url, p, a.token)).find((t) => t.name === "clockchain_log_level");
+      assert.doesNotMatch(description, /the person's own setting|person's level|can't go below|never less/i, `${p}: this server can't tell who called it`);
+      assert.match(description, /sessions on this account/, p);
+    }
+    for (const p of [PREVIEW, PREVIEW_CHAT]) {
+      const tools = await toolsOf(s.url, p, a.token);
+      const text = (n) => tools.find((t) => t.name === n).description;
+      for (const n of ["shadow_log_step", "shadow_log_turn", "shadow_record"]) assert.match(text(n), /deferred/, `${p} ${n} says a step can wait`);
+      assert.doesNotMatch(text("shadow_log_step"), /and anchors the record's hash on Clockchain with its own block/, p);
+      assert.doesNotMatch(text("shadow_log_turn"), /^[^.]*\. They share one block/, p);
+      assert.match(text("shadow_record"), /Nothing goes on the ledger from this call/, p);
+      assert.match(tools.find((t) => t.name === "shadow_start_session").inputSchema.properties.log_level.description, /each logging call gets its own anchor/, p);
+    }
+    assert.doesNotMatch(flat(AUTO_LOG_INSTRUCTIONS), /because each step gets its own anchor|gives each step its own hash, block height and ledger ID/);
+    assert.match(flat(AUTO_LOG_INSTRUCTIONS), /anchor_status deferred/);
+    const chosen = await tool(s.url, PREVIEW, a.token, "shadow_log_step", { kind: "prompt", content: "hello", log_level: "turn" });
     assert.equal(chosen.value.anchor_status, "deferred");
     assert.equal(chosen.value.log_level, "turn");
-    assert.equal((await tool(s.url, PLAIN, a.token, "clockchain_log_level", { level: "milestone" })).value.log_level, "milestone");
+    const set = await tool(s.url, PLAIN, a.token, "clockchain_log_level", { level: "milestone" });
+    assert.equal(set.value.log_level, "milestone");
+    assert.match(set.value.message, /doesn't change when anchors happen on this connection/, "said on a listed path");
+    assert.match((await tool(s.url, PREVIEW, a.token, "clockchain_log_level", { level: "milestone" })).value.message, /applies to sessions on this account/);
     const started = await tool(s.url, PREVIEW_CHAT, a.token, "shadow_start_session", { title: "t" });
     assert.equal(started.value.log_level, "milestone", "set on one endpoint, it holds on the others");
     assert.equal((await tool(s.url, PREVIEW, a.token, "clockchain_whoami", {})).value.logging.level, "milestone");
+    assert.equal((await tool(s.url, PREVIEW_CHAT, a.token, "clockchain_whoami", {})).value.logging.level, "milestone", "the chat endpoint says it too");
     assert.equal((await tool(s.url, PLAIN, a.token, "clockchain_log_level", { level: "sometimes" })).isError, true);
     assert.equal((await post(s.url, PLAIN, "tools/call", { name: "clockchain_log_level", arguments: { level: "turn" } })).status, 401);
   } finally {

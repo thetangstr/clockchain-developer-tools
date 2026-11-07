@@ -14,13 +14,13 @@ import { verifyPacket } from "./lib/verify.js";
 import { summarize } from "./lib/summary.js";
 import { redactSecrets, redactText } from "./redact.js";
 import { declaredFields, declaredOf, declaredText, withDeclared, type DeclaredInput } from "./intent.js";
-import { anchorsNow, deferredReason, effectiveLevel, finer, isLogLevel, levelNote, type LogLevel } from "./log-level.js";
+import { accountLevelNote, anchorsNow, deferredReason, effectiveLevel, finer, isLogLevel, levelNote, levelSetBy, recordedReason, type AnchorOutlook, type LevelSetBy, type LogLevel } from "./log-level.js";
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, ShadowEvent } from "./lib/types.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AgentEntry, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
   ANCHOR_LABEL, RECORD_KINDS, RecordError, START_LABEL, VERSION, LIBRARY, advance, buildEvent, buildPacket, buildPin,
-  checkpointOver, receiptPayload, referenceId, startHashOf, stepFor, type RecordKind,
+  checkpointOver, receiptPayload, referenceId, refuseThinkTag, startHashOf, stepFor, type RecordKind,
 } from "./recorder.js";
 import { AnchorLimitError, anchorHash, prefetchOnline, type AnchorOutcome, type ShadowLedger } from "./ledger.js";
 
@@ -328,12 +328,12 @@ class ByteLru {
   }
 }
 
-/** What a link body depends on: the steps (append-only, so the count), the checkpoint, and the queued checkpoints. */
+/** What a link body depends on: the steps (append-only, so the count), the checkpoint, and the queued checkpoints and how they stand. */
 type LinkKind = "packet" | "summary" | "log" | "log-json";
 
 function linkKey(kind: LinkKind, meta: SessionMeta): string {
   const cp = meta.checkpoint;
-  const queued = meta.outbox.filter((r) => r.kind === "checkpoint").map((r) => r.hash).join(",");
+  const queued = meta.outbox.filter((r) => r.kind === "checkpoint").map((r) => `${r.hash}/${r.state}/${r.lastErrorCode ?? ""}`).join(",");
   return `${kind}:${meta.sessionId}:${meta.seq}:${cp?.hash ?? "-"}:${cp?.body.count ?? -1}:${queued}`;
 }
 
@@ -353,6 +353,17 @@ function levelInput(v: unknown): LogLevel | null {
 /** An agent's own short claim about itself: redacted and cleaned, and empty when it isn't text. */
 const reported = (v: unknown, max: number): string => (typeof v === "string" ? cleanText(redactText(v.slice(0, 1000)), max) : "");
 
+/** Refuses hidden reasoning in a field an agent fills in, on its whole text: fields are cut to length only after this. */
+function refuseHidden(v: unknown, field: string): void {
+  if (typeof v !== "string") return;
+  try {
+    refuseThinkTag(v, field);
+  } catch (e) {
+    if (e instanceof RecordError) throw new ShadowError(e.code, e.message);
+    throw e;
+  }
+}
+
 /** A note step, with the same refusals as any recorded step. */
 function noteSpec(text: string) {
   try {
@@ -368,6 +379,119 @@ function agentProfileNote(agents: AgentEntry[]): string | null {
   const lines = agents.filter((a) => a.purpose || a.accountableOwner).map((a) =>
     `Agent ${a.id}: purpose ${a.purpose ?? NOT_PROVIDED}; accountable owner ${a.accountableOwner ?? NOT_PROVIDED}.`);
   return lines.length ? `As reported by the agent. ${lines.join(" ")}` : null;
+}
+
+/**
+ * A server note's facts, in the step's hashed payload. stepFor builds every agent step's payload from fixed keys, and nothing
+ * an agent sends becomes a top-level key, so no step kind can carry this field: that is what tells a server note from an
+ * agent's note with the same words. Readers take the session's level and each agent's purpose and owner from here, never
+ * from the metadata. All of it stays on this server: only hashes go to the ledger.
+ */
+type ReportedAgent = { agent: string; purpose?: string; accountable_owner?: string };
+type ServerNote = {
+  kind: "session_start" | "level_change";
+  log_level: LogLevel;
+  set_by?: LevelSetBy;
+  account_level?: LogLevel | null;
+  previous_account_level?: LogLevel | null;
+  agents?: ReportedAgent[];
+};
+
+/** The note that opens a session, when it has anything to say. Built from the metadata only before the first step is shown. */
+function startNote(meta: Pick<SessionMeta, "agents" | "logLevel" | "logLevelBy">): { text: string; note: ServerNote } | null {
+  const level = meta.logLevel ?? "step";
+  const by = meta.logLevelBy ?? null;
+  const profile = agentProfileNote(meta.agents);
+  if (level === "step" && !profile) return null;
+  const agents = meta.agents.filter((a) => a.purpose || a.accountableOwner).map((a) => ({ agent: a.id, ...(a.purpose ? { purpose: a.purpose } : {}), ...(a.accountableOwner ? { accountable_owner: a.accountableOwner } : {}) }));
+  return {
+    text: [level !== "step" && by ? levelNote(level, by) : "", profile ?? ""].filter(Boolean).join(" "),
+    note: { kind: "session_start", log_level: level, ...(level !== "step" && by ? { set_by: by } : {}), ...(agents.length ? { agents } : {}) },
+  };
+}
+
+/** A step's server note, or null for anything an agent or the collector wrote. */
+function serverNoteOf(e: ShadowEvent): Record<string, unknown> | null {
+  const p = e.body.payload as { note?: unknown; server_note?: unknown } | null | undefined;
+  return e.body.kind === "agent.message" && e.body.source.boundary === "transcript" && p?.note === true && isObj(p.server_note) ? p.server_note : null;
+}
+
+/** A step an agent recorded: not the server's own notes, and not the count it writes at close. */
+const isRecordedStep = (e: ShadowEvent) => AGENT_KINDS.has(e.body.kind) && !serverNoteOf(e) && !(e.body.payload as { capture?: unknown }).capture;
+
+type LevelChange = { seq: number; from: LogLevel; to: LogLevel; set_by: LevelSetBy | null; account_level: LogLevel | null };
+
+/** What the hashed record says about a session's level and agents. A record with no server notes is at step, with nothing reported. */
+function sessionFacts(events: ShadowEvent[]) {
+  let level: LogLevel = "step";
+  let setBy: LevelSetBy | null = null;
+  let accountLevel: LogLevel | null | undefined;
+  const changes: LevelChange[] = [];
+  const agents = new Map<string, ReportedAgent>();
+  for (const e of events) {
+    const note = serverNoteOf(e);
+    if (!note) continue;
+    const next: LogLevel = isLogLevel(note.log_level) ? note.log_level : level;
+    setBy = levelSetBy(note.set_by) ?? setBy;
+    if ("account_level" in note) accountLevel = isLogLevel(note.account_level) ? note.account_level : null;
+    if (note.kind === "level_change") changes.push({ seq: e.body.seq, from: level, to: next, set_by: setBy, account_level: accountLevel ?? null });
+    level = next;
+    for (const a of Array.isArray(note.agents) ? note.agents : []) if (isObj(a) && typeof a.agent === "string") agents.set(a.agent, a as ReportedAgent);
+  }
+  return { level, setBy, accountLevel, changes, agents };
+}
+type SessionFacts = ReturnType<typeof sessionFacts>;
+
+/** One change, in server-made words. */
+const changeText = (c: LevelChange) => c.from === c.to
+  ? `at step ${c.seq} the account's level became ${c.account_level ?? "none"}, and this session stayed at ${c.to}`
+  : `at step ${c.seq} this session moved from ${c.from} to ${c.to}${c.set_by ? `, set by the ${c.set_by}` : ""}`;
+const changesText = (changes: LevelChange[]) => (changes.length ? ` During this session: ${changes.map(changeText).join("; ")}.` : "");
+
+export type Anchoring = { recorded_steps: number; anchored_steps: number; unanchored_steps: number; reason: string };
+const anchoredOf = (a: Anchoring) => `${a.anchored_steps} of ${a.recorded_steps} recorded steps ${a.anchored_steps === 1 ? "has" : "have"} a checkpoint with a Clockchain receipt`;
+
+/**
+ * How many steps an agent recorded, and how many of those a checkpoint with a Clockchain receipt covers, from the record.
+ * Closing steps, collector steps and server notes aren't counted: the vendored verifier sees none of this, because its checks
+ * are about the record's integrity, so a record can pass them with most of its steps never anchored.
+ */
+function anchoringOf(meta: SessionMeta, events: ShadowEvent[]): Anchoring {
+  const steps = events.filter(isRecordedStep);
+  let covered = 0;
+  for (const e of events) {
+    const p = e.body.payload as { marker?: unknown; blockHeight?: unknown; checkpoint?: { count?: unknown } | null };
+    if (e.body.kind !== "clockchain.anchored" || e.body.source.boundary !== "collector" || p.marker !== "checkpoint" || !p.blockHeight) continue;
+    const count = p.checkpoint?.count;
+    if (typeof count === "number" && Number.isSafeInteger(count)) covered = Math.max(covered, count);
+  }
+  const left = steps.filter((e) => e.body.seq > covered);
+  const counts = { recorded_steps: steps.length, anchored_steps: steps.length - left.length, unanchored_steps: left.length };
+  if (!steps.length) return { ...counts, reason: "No steps have been recorded." };
+  if (!left.length) return { ...counts, reason: `All ${steps.length} recorded ${steps.length === 1 ? "step is" : "steps are"} covered by a checkpoint with a Clockchain receipt.` };
+  const said = `${left.length} of ${steps.length} recorded ${steps.length === 1 ? "step has" : "steps have"} no checkpoint with a Clockchain receipt.`;
+  const rows = meta.outbox.filter((r) => r.kind === "checkpoint" && (r.body?.count ?? 0) >= left[0].body.seq);
+  const waiting = rows.find((r) => r.state !== "failed");
+  if (waiting) return { ...counts, reason: `${said} A checkpoint for them is still waiting: ${reasonOf(waiting) ?? "it hasn't been sent to Clockchain yet."}` };
+  const failed = rows.at(-1);
+  if (failed) return { ...counts, reason: `${said} The checkpoint for them was not anchored: ${reasonOf(failed) ?? "Clockchain did not accept it."}` };
+  return { ...counts, reason: `${said} ${meta.state === "open" ? "No checkpoint for them has been sent yet." : "No checkpoint for them was sent, and this session is closed, so none is on its way."}` };
+}
+
+/**
+ * The verifier's report with the anchoring counts in it. Its own checks stay as they are; a pass becomes indeterminate if any
+ * recorded step has no anchored checkpoint, and fail and indeterminate keep their result and gain the counts.
+ */
+function withAnchoring<T extends { result: "pass" | "fail" | "indeterminate"; exitCode: 0 | 1 | 2; summary: string; indeterminate: string[]; checks: { name: string; status: string; reason: string }[] }>(report: T, a: Anchoring): T {
+  if (!a.unanchored_steps) return report;
+  const counts = `${anchoredOf(a)}, and ${a.unanchored_steps} ${a.unanchored_steps === 1 ? "does" : "do"} not.`;
+  return {
+    ...report,
+    ...(report.result === "pass" ? { result: "indeterminate" as const, exitCode: 2 as const } : {}),
+    summary: report.result === "pass" ? `No check failed, but not established: ${counts}` : `${report.summary} ${counts}`,
+    indeterminate: [...report.indeterminate, "anchoring"],
+    checks: [...report.checks, { name: "anchoring", status: "indeterminate", reason: a.reason }],
+  };
 }
 
 function cleanText(v: unknown, max: number): string {
@@ -433,10 +557,11 @@ function shownName(v: unknown, otherwise: string): string {
 
 function stepRow(e: ShadowEvent): StepRow {
   const p = (e.body.payload ?? {}) as { tool?: unknown; path?: unknown; isError?: unknown; note?: unknown; capture?: unknown };
+  const server = serverNoteOf(e) !== null;
   const [kind, title] =
     e.body.kind === "task.assigned" ? ["task", "the person's request"]
       : e.body.kind === "agent.prompt" ? ["prompt", "the person's message"]
-        : e.body.kind === "agent.message" ? (p.capture ? ["note", "count of the person's messages"] : p.note === true ? ["note", "agent's note"] : ["message", "message shown"])
+        : e.body.kind === "agent.message" ? (p.capture ? ["note", "count of the person's messages"] : server ? ["note", "server's note"] : p.note === true ? ["note", "agent's note"] : ["message", "message shown"])
           : e.body.kind === "agent.tool.call" ? ["tool_call", shownName(p.tool, "a tool")]
             : e.body.kind === "agent.tool.result" ? ["tool_result", `${shownName(p.tool, "a tool")}${p.isError === true ? " (error)" : ""}`]
               : ["file", shownName(typeof p.path === "string" ? p.path.split(/[\\/]/).pop() : undefined, "a file")];
@@ -515,21 +640,27 @@ function captureNote(meta: SessionMeta): string {
 /** The whole session as hashes and metadata, from its own record. No step content; the only values a caller supplies are the declared types, which are checked. */
 function sessionLog(meta: SessionMeta, events: ShadowEvent[]) {
   const cover = coverage(meta);
+  const facts = sessionFacts(events);
+  const agentStep = new Set(events.filter(isRecordedStep).map((e) => e.body.seq));
   const steps = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map(stepRow).map((r) => {
     const { anchor: a, status } = cover(r.seq);
     return { seq: r.seq, kind: r.kind, title: r.title, ...r.declared, ...(r.declaredNote ? { declared_note: r.declaredNote } : {}), step_hash: r.hash, status, ledger_hash: a?.hash ?? null, block: a?.blockHeight ?? null, ledger_id: a?.ledgerId ?? null };
   });
-  const anchored = steps.filter((s) => s.status === "anchored");
+  // The list shows the server's notes too; the totals count what agents recorded.
+  const recorded = steps.filter((s) => agentStep.has(s.seq));
+  const anchored = recorded.filter((s) => s.status === "anchored");
   // Every record this session has on the ledger, as the footer counts them: its start and closing anchors too.
   const onLedger = meta.anchors.filter((a) => a.blockHeight);
   const blocks = blockSpan(onLedger);
   return {
     session_id: meta.sessionId,
     status: meta.state,
-    log_level: meta.logLevel ?? "step",
+    log_level: facts.level,
+    log_level_changes: facts.changes,
+    anchoring: anchoringOf(meta, events),
     expires_at: meta.expiresAt,
     totals: {
-      steps: steps.length, anchored: anchored.length, pending: steps.filter((s) => s.status === "pending").length, not_anchored: steps.filter((s) => s.status === "not_anchored").length,
+      steps: recorded.length, anchored: anchored.length, pending: recorded.filter((s) => s.status === "pending").length, not_anchored: recorded.filter((s) => s.status === "not_anchored").length,
       ledger_records: onLedger.length,
       first_block: blocks.first, last_block: blocks.last,
     },
@@ -552,8 +683,9 @@ function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number;
   return [
     "**Clockchain Shadow: everything logged in this session**",
     log.capture_note,
-    log.log_level === "step" ? "" : `Logging level: ${log.log_level}. Each anchor covers every step up to it.`,
+    log.log_level === "step" && !log.log_level_changes.length ? "" : `Logging level: ${log.log_level}. Each anchor covers every step up to it.${changesText(log.log_level_changes)}`,
     `Session \`${log.session_id}\`, ${log.status}. ${t.steps} ${t.steps === 1 ? "step" : "steps"}: ${t.anchored} anchored, ${t.pending} pending${t.not_anchored ? `, ${t.not_anchored} not anchored` : ""}. ${blocks}`,
+    log.anchoring.unanchored_steps ? log.anchoring.reason : "",
     lines.join("\n"),
     ...(cap && log.steps.length > shown.length ? [`Showing the first ${shown.length} of ${log.steps.length} steps. ${cap.rest ? `The rest are at ${cap.rest}` : "This session's links were revoked, so the rest have no link."}`] : []),
     LEDGER_HASH_NOTE,
@@ -561,22 +693,22 @@ function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number;
 }
 
 /** The footer to end a reply with: only what the record really holds, in server-made values (no step content). */
-function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[]; logLevel?: LogLevel }, anchor: LogAnchor, viewer: string | null, table: string, turnSteps?: number): string {
+function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; ledgerId: string }[]; logLevel: LogLevel | null; levelChanged: boolean }, anchor: LogAnchor, viewer: string | null, table: string, turnSteps?: number): string {
   const count = (n: number) => `${n} ${n === 1 ? "step" : "steps"}`;
   const span = blockSpan(meta.anchors);
   const latest = meta.anchors.at(-1);
   const parts: string[] = [];
   if (turnSteps !== undefined) {
-    parts.push(anchor.anchor_status === "deferred"
-      ? `**Clockchain Shadow:** ${count(turnSteps)} logged in this reply, not anchored yet (${count(meta.agentSteps)} so far).`
-      : `**Clockchain Shadow:** ${count(turnSteps)} logged in this reply under one shared anchor, not one per step (${count(meta.agentSteps)} so far).`);
+    parts.push(anchor.anchor_status === "anchored" || anchor.anchor_status === "pending"
+      ? `**Clockchain Shadow:** ${count(turnSteps)} logged in this reply under one shared anchor, not one per step (${count(meta.agentSteps)} so far).`
+      : `**Clockchain Shadow:** ${count(turnSteps)} logged in this reply, not anchored so far (${count(meta.agentSteps)} so far).`);
     if (anchor.anchor_status === "anchored") parts.push(`Shared anchor: block ${anchor.block_height}, ledger ID \`${anchor.ledger_id}\`.`);
   } else {
     parts.push(`**Clockchain Shadow:** ${count(meta.agentSteps)} logged so far.`);
     if (span.first !== null) parts.push(`First block ${span.first}, last block ${span.last}.`);
     if (latest) parts.push(`Latest ledger ID: \`${latest.ledgerId}\`.`);
   }
-  if (meta.logLevel && meta.logLevel !== "step") parts.push(`Logging level: ${meta.logLevel}.`);
+  if (meta.logLevel && (meta.logLevel !== "step" || meta.levelChanged)) parts.push(`Logging level: ${meta.logLevel}.`);
   parts.push(viewer ? `Viewer: ${viewer}` : "Viewer link revoked.");
   const lines = ["---", ...(table ? [table] : []), parts.join(" ")];
   if (anchor.anchor_status !== "anchored") {
@@ -585,8 +717,8 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
       pending: one ? "its anchor is still pending" : "their anchor is still pending",
       over_limit: "an anchoring limit has been reached",
       failed: one ? "its anchor failed" : "their anchor failed",
-      not_anchored: one ? "it has no anchor yet" : "they have no anchor yet",
-      deferred: one ? "it has no anchor yet" : "they have no anchor yet",
+      not_anchored: one ? "it has no anchor so far" : "they have no anchor so far",
+      deferred: one ? "it has no anchor so far" : "they have no anchor so far",
     }[anchor.anchor_status];
     lines.push(`${one ? "The latest step is" : "These steps are"} recorded, but ${said}, so ${one ? "it has" : "they have"} no block or ledger ID. ${anchor.anchor_reason ?? ""}`.trim());
   }
@@ -635,21 +767,22 @@ function withStepAnchors(html: string, events: ShadowEvent[], cap: string): stri
   const rows = events.filter((e) => AGENT_KINDS.has(e.body.kind)).map((e) => {
     while (i < anchors.length && Number((anchors[i].body.payload as any).checkpoint?.count) < e.body.seq) i++;
     const p = anchors[i]?.body.payload as any;
-    return `<tr><td>${escHtml(e.body.seq)}</td><td>${escHtml(e.body.kind)}</td><td><code>${escHtml(e.hash)}</code></td><td>${p ? `<code>${escHtml(p.checkpointHash)}</code>` : "not anchored yet"}</td><td>${p ? escHtml(p.blockHeight) : "not anchored yet"}</td><td>${p ? `<code>${escHtml(p.ledgerId)}</code>` : "none"}</td></tr>`;
+    return `<tr><td>${escHtml(e.body.seq)}</td><td>${escHtml(e.body.kind)}</td><td><code>${escHtml(e.hash)}</code></td><td>${p ? `<code>${escHtml(p.checkpointHash)}</code>` : "not anchored"}</td><td>${p ? escHtml(p.blockHeight) : "not anchored"}</td><td>${p ? `<code>${escHtml(p.ledgerId)}</code>` : "none"}</td></tr>`;
   }).join("");
-  const table = `<h2>Steps and their anchors</h2><p class="meta">Each anchor is a checkpoint over every step up to it. Steps with the same ledger ID were logged in one call and share that anchor. A ledger lookup returns the ledger hash, not the step's own. <a href="${cap}/summary">Summary of every step</a> (<a href="${cap}/summary?format=json">JSON</a>).</p><div class="scroll"><table><tr><th>#</th><th>Step</th><th>Hash</th><th>Ledger hash</th><th>Block</th><th>Ledger ID</th></tr>${rows}</table></div>\n`;
+  const table = `<h2>Steps and their anchors</h2><p class="meta">Each anchor is a checkpoint over every step up to it. Steps with the same ledger ID share that anchor, whether or not they were logged in one call. A ledger lookup returns the ledger hash, not the step's own. <a href="${cap}/summary">Summary of every step</a> (<a href="${cap}/summary?format=json">JSON</a>).</p><div class="scroll"><table><tr><th>#</th><th>Step</th><th>Hash</th><th>Ledger hash</th><th>Block</th><th>Ledger ID</th></tr>${rows}</table></div>\n`;
   // Step content is escaped on the page, so this heading can only be the library's own.
   const at = html.indexOf("<h2>Clockchain receipts");
   return at < 0 ? html : html.slice(0, at) + table + html.slice(at);
 }
 
 const NOT_PROVIDED = "Not provided";
-const agentView = (a: AgentEntry) => ({ id: a.id, role: a.role, purpose: a.purpose ?? NOT_PROVIDED, accountable_owner: a.accountableOwner ?? NOT_PROVIDED });
+/** An agent as a reader sees it. Its purpose and owner come from the hashed record, so `reported` is what `facts.agents` holds. */
+const agentView = (a: AgentEntry, reported: Pick<ReportedAgent, "purpose" | "accountable_owner"> | undefined) => ({ id: a.id, role: a.role, purpose: reported?.purpose ?? NOT_PROVIDED, accountable_owner: reported?.accountable_owner ?? NOT_PROVIDED });
 
 /** The session's logging level and who acts in it, as reported, above what the record shows. Every value is escaped. */
-function withSessionDetails(html: string, meta: SessionMeta): string {
-  const rows = meta.agents.map(agentView).map((a) => `<tr><td>${escHtml(a.id)}</td><td>${escHtml(a.purpose)}</td><td>${escHtml(a.accountable_owner)}</td></tr>`).join("");
-  const details = `<h2>Session details</h2><p class="meta">Logging level: ${escHtml(meta.logLevel ?? "step")}. Purpose and accountable owner are what the agent reported; this record doesn't show they are true.</p><table><tr><th>Agent ID</th><th>Purpose</th><th>Accountable owner</th></tr>${rows}</table>`;
+function withSessionDetails(html: string, meta: SessionMeta, facts: SessionFacts, anchoring: Anchoring): string {
+  const rows = meta.agents.map((a) => agentView(a, facts.agents.get(a.id))).map((a) => `<tr><td>${escHtml(a.id)}</td><td>${escHtml(a.purpose)}</td><td>${escHtml(a.accountable_owner)}</td></tr>`).join("");
+  const details = `<h2>Session details</h2><p class="meta">Logging level: ${escHtml(facts.level)}.${escHtml(changesText(facts.changes))} Purpose and accountable owner are what the agent reported; this record doesn't show they are true.</p><p class="meta">Anchoring: ${escHtml(anchoredOf(anchoring))}. ${escHtml(anchoring.reason)}</p><table><tr><th>Agent ID</th><th>Purpose</th><th>Accountable owner</th></tr>${rows}</table>`;
   return html.replace("<h2>What this record shows</h2>", () => `${details}<h2>What this record shows</h2>`);
 }
 
@@ -811,7 +944,7 @@ export class ShadowService {
       meta.closedIdle = true;
       const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
       meta.checkpoint = cp;
-      this.queueCheckpoint(meta, cp);
+      this.queueCheckpoint(meta, cp, true);
       this.store.writeMeta(meta);
       return true;
     });
@@ -855,7 +988,7 @@ export class ShadowService {
       const m: SessionMeta = { ...meta, seq: 0, head: null, eventsBytes: 0, agentSteps: 0, runs: [], state: "open", anchors: [] };
       for (const e of events) {
         advance(m, e, 0);
-        if (AGENT_KINDS.has(e.body.kind)) m.agentSteps++;
+        if (isRecordedStep(e)) m.agentSteps++;
         if (e.body.kind === "session.closed") m.closedAt ??= e.body.collectedAt;
         const a = anchorFrom(e);
         if (a) m.anchors.push(a);
@@ -863,6 +996,21 @@ export class ShadowService {
       m.eventsBytes = bytes;
       const landed = new Set(m.anchors.map((a) => a.hash));
       m.outbox = meta.outbox.filter((r) => !landed.has(r.hash));
+      // The log wins over the metadata: a crash can land after a level note and before its metadata write.
+      if (m.accountLevelSeen !== undefined) {
+        const facts = sessionFacts(events);
+        if (facts.accountLevel !== undefined) m.accountLevelSeen = facts.accountLevel;
+        if (facts.changes.length) {
+          m.logLevel = facts.level;
+          if (facts.setBy) m.logLevelBy = facts.setBy;
+        }
+      }
+      // A crash can also land right after session.opened: its note, and the start marker's place in the queue, come now.
+      if (m.seq === 1 && m.accountLevelSeen !== undefined) {
+        const start = startNote(m);
+        if (start) this.appendNote(m, start.text, start.note);
+        if (!(events[0].body.payload as { receipt?: unknown }).receipt && !m.outbox.some((r) => r.kind === "start")) m.outbox.push(this.row("start", m.startHash, null, { attempts: 1 }));
+      }
       this.store.writeMeta(m);
       this.log("shadow_session_reconciled", { sessionId: m.sessionId, steps: m.seq });
       return m;
@@ -872,6 +1020,8 @@ export class ShadowService {
   /** A session whose start was interrupted before session.opened: open it now and queue the start marker. */
   private openUnanchored(meta: SessionMeta): void {
     this.appendStep(meta, "session.opened", "collector", this.openedPayload(meta, null, { errorKind: "Transient", errorCode: "interrupted" }), {}, false);
+    const start = startNote(meta);
+    if (start) this.appendNote(meta, start.text, start.note);
     if (!meta.outbox.some((r) => r.kind === "start")) meta.outbox.push(this.row("start", meta.startHash, null));
     this.store.writeMeta(meta);
   }
@@ -928,16 +1078,43 @@ export class ShadowService {
     return cp;
   }
 
-  /** Queues `cp` for Clockchain unless it already is, or the session's anchor allowance is used up. */
-  private queueCheckpoint(meta: SessionMeta, cp: Checkpoint): { code: string; message: string } | null {
+  /**
+   * Queues `cp` for Clockchain unless it already is, or the session's anchor allowance is used up. The last anchor is kept
+   * for the close (`closing`), which also doesn't wait behind a backlog: it comes once, and it is the one anchor that covers
+   * everything recorded.
+   */
+  private queueCheckpoint(meta: SessionMeta, cp: Checkpoint, closing = false): { code: string; message: string } | null {
     if (meta.network !== this.network) return { code: "SHADOW_OTHER_NETWORK", message: `This session is on ${meta.network}, and this server now writes to ${this.network}, so the checkpoint is signed but not anchored.` };
     if (meta.anchors.some((a) => a.hash === cp.hash) || meta.outbox.some((r) => r.hash === cp.hash)) return null;
-    if (meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession)
-      return { code: "SHADOW_LIMIT_SESSION_ANCHORS", message: `This session has used its ${this.limits.maxAnchorsPerSession} anchors; the checkpoint is signed but not sent to Clockchain.` };
-    if (meta.outbox.length >= MAX_OUTBOX)
+    const used = meta.anchors.length + meta.outbox.length, max = this.limits.maxAnchorsPerSession;
+    if (used >= (closing ? max : max - 1))
+      return {
+        code: "SHADOW_LIMIT_SESSION_ANCHORS",
+        message: used >= max
+          ? `This session has used all ${max} of its anchors, so the checkpoint is signed but not sent to Clockchain.`
+          : `This session has used the ${max - 1} anchors it can spend before the close, so the checkpoint is signed but not sent to Clockchain. The last anchor is kept for the close.`,
+      };
+    if (!closing && meta.outbox.length >= MAX_OUTBOX)
       return { code: "SHADOW_ANCHOR_BACKLOG", message: "Too many anchors are still waiting for Clockchain; the checkpoint is signed but not queued. Try again later." };
     meta.outbox.push(this.row("checkpoint", cp.hash, cp));
     return null;
+  }
+
+  /** What can still anchor this session's later steps. A failed row older than the latest anchor is history, not an outage. */
+  private outlook(meta: SessionMeta): AnchorOutlook {
+    const used = meta.anchors.length + meta.outbox.length, max = this.limits.maxAnchorsPerSession;
+    const latest = Math.max(0, ...meta.anchors.map((a) => a.count ?? 0));
+    const trouble = meta.outbox.filter((r) => r.lastErrorKind && (r.body?.count ?? 0) >= latest);
+    return {
+      canAnchor: used < max - 1,
+      closeCanAnchor: used < max,
+      blocked: trouble.some((r) => r.lastErrorCode === "anchor_limit") ? "day_limit" : trouble.some((r) => r.lastErrorCode === "log_budget") ? "budget" : trouble.length ? "outage" : null,
+    };
+  }
+
+  /** Steps a close may still need room for: the count, a receipt or gap per open run, session.closed, the receipts owed, and the rule that a receipt needs a spare place. */
+  private closeRoom(meta: SessionMeta): number {
+    return 4 + meta.runs.filter((r) => r.open).length + meta.outbox.length;
   }
 
   private links(meta: SessionMeta, base: string): Links {
@@ -949,11 +1126,13 @@ export class ShadowService {
 
   async startSession(ownerId: string, input: { title?: unknown; agents?: unknown; log_level?: unknown }, base: string) {
     if (typeof input.title !== "string" || !cleanText(input.title, 200)) throw bad("Give the session a title (up to 200 characters).");
+    refuseHidden(input.title, "title");
     const title = this.autoLog ? cleanText(redactText(input.title.slice(0, 1000)), 200) : cleanText(input.title, 200);
     const agents = this.agentsOf(input.agents);
     const agentLevel = levelInput(input.log_level);
     const ownerKey = ownerKeyOf(ownerId);
-    const { level, by } = effectiveLevel(this.personLevel(ownerKey), agentLevel);
+    const accountLevelSeen = this.accountLevel(ownerKey);
+    const { level, by } = effectiveLevel(accountLevelSeen, agentLevel);
     // Checked here, so a refused profile leaves no session behind.
     const profile = agentProfileNote(agents);
     if (profile) noteSpec(profile);
@@ -997,34 +1176,49 @@ export class ShadowService {
         cap: randomBytes(16).toString("base64url"), nonce, startHash: startHashOf(op.operatorId, sessionId, nonce),
         seq: 0, head: null, eventsBytes: 0, agentSteps: 0, runs: [], checkpoint: null, outbox: [], anchors: [],
         ...(level === "step" ? {} : { logLevel: level, logLevelBy: by }),
+        accountLevelSeen,
       };
       this.store.createSession(meta);
       this.usageBytes += 4096;
       const owned = this.ownerUsage.get(ownerKey);
       if (owned !== undefined) this.ownerUsage.set(ownerKey, owned + 4096);
-      // Openers wait for the start marker, as the library's openSession does: its receipt goes into session.opened.
       return this.session(ownerKey, sessionId, async (m) => {
-        const outcome = await this.anchorNetwork(ownerKey, m.sessionId, this.row("start", m.startHash, null), Date.now() + ANCHOR_BUDGET_MS);
-        let receipt: Record<string, unknown> | null = null;
-        let error: { errorKind: string; errorCode: string } | null = null;
-        if (outcome.kind === "anchored") receipt = receiptPayload(m.sessionId, outcome.receipt);
-        else if (outcome.kind === "pending") m.outbox.push(this.row("start", m.startHash, null, { state: "pending", ledgerId: outcome.ledgerId, submittedAt: outcome.submittedAt, attempts: 1 }));
-        else {
-          error = { errorKind: outcome.failure.kind, errorCode: outcome.failure.code };
-          const ours = outcome.failure.code === "anchor_limit" || outcome.failure.code === "log_budget";
-          m.outbox.push(this.row("start", m.startHash, null, { attempts: ours ? 0 : 1, lastErrorKind: outcome.failure.kind, lastErrorCode: outcome.failure.code }));
+        const deadline = Date.now() + ANCHOR_BUDGET_MS;
+        const start = startNote(m);
+        let outcome: AnchorOutcome;
+        if (start) {
+          // A session with something to note writes it before waiting on Clockchain, so a crash in the wait can't lose it. The
+          // start marker's receipt then goes in its own step rather than in session.opened. It commits to the session's start
+          // hash, not to any step, so the verifier reads it the same way; only the steps before it have no lower time bound.
+          const row = this.row("start", m.startHash, null, { attempts: 1 });
+          this.appendStep(m, "session.opened", "collector", this.openedPayload(m, null, null), {}, false);
+          this.appendNote(m, start.text, start.note);
+          m.outbox.push(row);
+          this.store.writeMeta(m);
+          outcome = await this.anchorNetwork(ownerKey, m.sessionId, { ...row, attempts: 0 }, deadline);
+          this.applyOutcome(m, row.id, outcome);
+        } else {
+          // Nothing to lose in the wait: openers wait for the start marker, as the library's openSession does.
+          outcome = await this.anchorNetwork(ownerKey, m.sessionId, this.row("start", m.startHash, null), deadline);
+          let receipt: Record<string, unknown> | null = null;
+          let error: { errorKind: string; errorCode: string } | null = null;
+          if (outcome.kind === "anchored") receipt = receiptPayload(m.sessionId, outcome.receipt);
+          else if (outcome.kind === "pending") m.outbox.push(this.row("start", m.startHash, null, { state: "pending", ledgerId: outcome.ledgerId, submittedAt: outcome.submittedAt, attempts: 1 }));
+          else {
+            error = { errorKind: outcome.failure.kind, errorCode: outcome.failure.code };
+            const ours = outcome.failure.code === "anchor_limit" || outcome.failure.code === "log_budget";
+            m.outbox.push(this.row("start", m.startHash, null, { attempts: ours ? 0 : 1, lastErrorKind: outcome.failure.kind, lastErrorCode: outcome.failure.code }));
+          }
+          const opened = this.appendStep(m, "session.opened", "collector", this.openedPayload(m, receipt, error), {}, false);
+          if (outcome.kind === "anchored") m.anchors.push({ marker: "start", seq: opened.body.seq, hash: m.startHash, count: null, ...anchorFields(outcome.receipt) });
+          this.store.writeMeta(m);
         }
-        const opened = this.appendStep(m, "session.opened", "collector", this.openedPayload(m, receipt, error), {}, false);
-        if (outcome.kind === "anchored") m.anchors.push({ marker: "start", seq: opened.body.seq, hash: m.startHash, count: null, ...anchorFields(outcome.receipt) });
-        if (level !== "step") this.appendNote(m, levelNote(level, by));
-        if (profile) this.appendNote(m, profile);
-        this.store.writeMeta(m);
         this.log("shadow_session_started", { sessionId: m.sessionId, agents: agents.length, startAnchor: outcome.kind });
         return {
           session_id: m.sessionId,
           title: m.title,
           status: "open",
-          agents: m.agents.map(agentView),
+          agents: m.agents.map((a) => agentView(a, { purpose: a.purpose, accountable_owner: a.accountableOwner })),
           ...(level === "step" ? {} : { log_level: level, log_level_set_by: by }),
           operator_id: m.operatorId,
           start_anchor: outcome.kind === "anchored"
@@ -1050,6 +1244,7 @@ export class ShadowService {
         throw bad('Each agent id is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
       if (this.autoLog && redactText(id) !== id) throw bad(CREDENTIAL_AGENT);
       if (out.some((x) => x.id === id)) throw bad(`Agent "${id}" is listed twice.`);
+      if (isObj(a)) for (const field of ["role", "purpose", "accountable_owner"]) refuseHidden(a[field], field);
       const roleText = isObj(a) && typeof a.role === "string" ? (this.autoLog ? redactText(a.role.slice(0, 1000)) : a.role) : "";
       const role = cleanText(roleText, 100) ? cleanText(roleText, 100) : null;
       const purpose = isObj(a) ? reported(a.purpose, 200) : "";
@@ -1097,11 +1292,17 @@ export class ShadowService {
         throw bad(`${(e as Error).message}.`);
       }
       const runId = this.runFor(meta, kind, agent, runInput);
-      const { level, tightened } = this.sessionLevel(meta);
-      if (tightened) this.tighten(meta, level);
+      const session = this.sessionLevel(meta);
+      // Server notes aren't counted as steps, so they can't use up the agent's: the whole session's room is what they share.
+      if (meta.seq + 1 + (kind === "task" ? 1 : 0) + (session.noteDue ? 1 : 0) + this.closeRoom(meta) > this.maxEvents)
+        throw new ShadowError("SHADOW_LIMIT_STEPS", `This session has ${meta.agentSteps} steps and no room for more. Close it and start a new one.`);
+      if (session.noteDue) this.noteAccountLevel(meta, session);
       const event = this.appendStep(meta, spec.kind, agent, spec.payload, { boundary: spec.boundary, agentRunId: runId }, true);
       this.store.writeMeta(meta);
-      return { seq: event.body.seq, hash: event.hash, kind: spec.kind, run_id: runId, ...declaredFields(declaredOf(event.body.payload)) };
+      return {
+        seq: event.body.seq, hash: event.hash, kind: spec.kind, run_id: runId, ...declaredFields(declaredOf(event.body.payload)),
+        ...(this.autoLog ? { anchor_status: "deferred" as const, anchor_reason: recordedReason(session.level, this.outlook(meta)) } : {}),
+      };
     });
   }
 
@@ -1145,8 +1346,8 @@ export class ShadowService {
     };
   }
 
-  /** The level the person set for this account, or null. A setting that cannot be read refuses rather than guessing. */
-  personLevel(ownerKey: string): LogLevel | null {
+  /** This account's level, or null. A setting that cannot be read refuses rather than guessing. */
+  accountLevel(ownerKey: string): LogLevel | null {
     try {
       return this.store.logLevel(ownerKey);
     } catch {
@@ -1154,12 +1355,13 @@ export class ShadowService {
     }
   }
 
-  /** The level the person set, by account id, for clockchain_whoami. */
+  /** This account's level, by account id, for clockchain_whoami. */
   logLevelOf(ownerId: string): LogLevel | null {
-    return this.personLevel(ownerKeyOf(ownerId));
+    return this.accountLevel(ownerKeyOf(ownerId));
   }
 
-  setLogLevel(ownerId: string, input: unknown) {
+  /** `logs`: whether this endpoint has the logging tools, which is the only place a level changes when anchors happen. */
+  setLogLevel(ownerId: string, input: unknown, logs: boolean = this.autoLog) {
     const level = levelInput(input);
     if (!level) throw bad("level must be step, turn or milestone.");
     const ownerKey = ownerKeyOf(ownerId);
@@ -1172,31 +1374,44 @@ export class ShadowService {
     this.log("shadow_log_level_set", { level });
     return {
       log_level: level,
-      message: `The logging level for this account is ${level}. New sessions start at this level or finer, and open sessions at a coarser level move to it on their next step.`,
+      message: logs
+        ? `The logging level for this account is ${level}. It applies to sessions on this account: a new session runs at this level or a finer one chosen when it starts, and an open session at a coarser level moves to it on its next step. Each open session notes the change in its record on its next step.`
+        : `The logging level for this account is ${level}. It is saved, and it doesn't change when anchors happen on this connection: anchors happen at the start, at shadow_checkpoint and at the close.`,
     };
   }
 
-  /** This session's level, and whether the person's level has since become finer than it. */
-  private sessionLevel(meta: SessionMeta): { level: LogLevel; tightened: boolean } {
+  /**
+   * This session's level, and whether the account's level has changed since the session last looked. A session from before
+   * hashed notes has no such note and reads as step, so it runs as step too: what it shows is what it does.
+   */
+  private sessionLevel(meta: SessionMeta): { level: LogLevel; account: LogLevel | null; noteDue: boolean } {
+    const account = this.accountLevel(meta.ownerKey);
+    if (meta.accountLevelSeen === undefined) return { level: "step", account, noteDue: false };
     const current = meta.logLevel ?? "step";
-    const person = this.personLevel(meta.ownerKey);
-    const level = person ? finer(current, person) : current;
-    return { level, tightened: level !== current };
+    const level = account ? finer(current, account) : current;
+    return { level, account, noteDue: level !== current || account !== meta.accountLevelSeen };
   }
 
-  /** Moves a session to a finer level the person set, as a step in the record. Saved at once: the note is on disk. */
-  private tighten(meta: SessionMeta, level: LogLevel): void {
-    meta.logLevel = level;
-    meta.logLevelBy = "person";
-    this.appendNote(meta, levelNote(level, "person"));
+  /** The account's level changed: says so in the record, in either direction, and moves the session if that makes it finer. Saved at once: the note is on disk. */
+  private noteAccountLevel(meta: SessionMeta, { level, account }: { level: LogLevel; account: LogLevel | null }): void {
+    const moved = level !== (meta.logLevel ?? "step");
+    const previous = meta.accountLevelSeen ?? null;
+    const setBy = moved ? "account" : meta.logLevelBy;
+    this.appendNote(meta, accountLevelNote(previous, account, level, moved), {
+      kind: "level_change", log_level: level, ...(setBy ? { set_by: setBy } : {}), account_level: account, previous_account_level: previous,
+    });
+    meta.accountLevelSeen = account;
+    if (moved) {
+      meta.logLevel = level;
+      meta.logLevelBy = "account";
+    }
     this.store.writeMeta(meta);
   }
 
-  /** A server-made line in the record, as a step: hashed like any other, and in no run, so it can't change coverage. */
-  private appendNote(meta: SessionMeta, text: string): void {
+  /** A server-made line in the record, as a step: hashed like any other, and in no run, so it can't change coverage. Not one of the agent's steps. */
+  private appendNote(meta: SessionMeta, text: string, note: ServerNote): void {
     const { kind, boundary, payload } = noteSpec(text);
-    this.appendStep(meta, kind, meta.agents[0].id, payload, { boundary, agentRunId: null }, false);
-    meta.agentSteps++;
+    this.appendStep(meta, kind, meta.agents[0].id, { ...payload, server_note: note }, { boundary, agentRunId: null }, false);
   }
 
   /** Refuses shadow_record and the logging tools once the owner turned logging off. */
@@ -1204,7 +1419,7 @@ export class ShadowService {
     if (!this.loggingEnabled(ownerId)) throw loggingOff();
   }
 
-  /** One step: appended and anchored in this call, with its own hash, and the block and ledger id of its own anchor. */
+  /** One step, with its own hash. Whether this call anchors it, with a block and ledger id of its own, is the session's level's to say. */
   async logStep(ownerId: string, input: { session_id?: unknown; title?: unknown; log_level?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown } & DeclaredInput, base: string) {
     if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
       throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
@@ -1218,7 +1433,8 @@ export class ShadowService {
       ...step.declared,
       ...(step.runId ? { run_id: step.runId } : {}),
       ...r.anchor,
-      ...(r.level === "step" ? {} : { log_level: r.level }),
+      ...(r.level && r.level !== "step" ? { log_level: r.level } : {}),
+      ...(r.levelNote ? { log_level_note: r.levelNote } : {}),
       viewer: r.viewer,
       show_user: logFooter(r.meta, r.anchor, r.viewer, r.table),
       ...(r.started ? { note: NEW_SESSION_NOTE } : {}),
@@ -1231,11 +1447,12 @@ export class ShadowService {
     const r = await this.logSteps(ownerId, { session_id: input.session_id, title: input.title, log_level: input.log_level, steps: input.steps as LogStepInput[], runInput: null, maxSteps: MAX_TURN_STEPS, table: true }, base);
     return {
       session_id: r.sessionId,
-      shared_anchor: r.anchor.anchor_status !== "deferred",
-      anchor_note: r.anchor.anchor_status === "deferred"
-        ? "These steps are recorded and have no anchor yet."
-        : "These steps share one anchor: one block and one ledger record for the whole call, not one per step. shadow_log_step gives each step its own.",
-      ...(r.level === "step" ? {} : { log_level: r.level }),
+      shared_anchor: r.anchor.anchor_status === "anchored" || r.anchor.anchor_status === "pending",
+      anchor_note: r.anchor.anchor_status === "anchored" || r.anchor.anchor_status === "pending"
+        ? "These steps share one anchor: one block and one ledger record for the whole call, not one per step. At the step level, shadow_log_step gives each call its own."
+        : "These steps are recorded and have no anchor so far.",
+      ...(r.level && r.level !== "step" ? { log_level: r.level } : {}),
+      ...(r.levelNote ? { log_level_note: r.levelNote } : {}),
       evidence: {
         logged: r.steps.map((s) => ({ seq: s.seq, kind: s.kind, hash: s.hash, summary: s.summary, ...s.declared })),
         ...r.anchor,
@@ -1273,6 +1490,7 @@ export class ShadowService {
       // Cut down before anything else looks at it: the title is the one field here with no other limit.
       const given = typeof input.title === "string" ? cleanText(redactText(input.title.slice(0, 1000)), 200) : "";
       const title = given || `Chat log, ${this.now().toISOString().slice(0, 16).replace("T", " ")} UTC`;
+      refuseHidden(input.title, "title");
       sessionId = (await this.startSession(ownerId, { title, ...(named.length ? { agents: named.map((id) => ({ id })) } : {}), ...(agentLevel ? { log_level: agentLevel } : {}) }, base)).session_id;
       started = true;
     } else {
@@ -1282,13 +1500,17 @@ export class ShadowService {
     await this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", `This session is closed, so nothing was recorded. ${START_NEW}`);
       if (meta.network !== this.network) throw new ShadowError("SHADOW_OTHER_NETWORK", `This session is on ${meta.network}, and this server now writes to ${this.network}, so nothing was recorded. ${START_NEW}`);
-      const { level, tightened } = this.sessionLevel(meta);
+      const session = this.sessionLevel(meta);
+      const { level } = session;
       const anchoring = anchorsNow(level, many, steps.map((s) => s.kind));
-      const extra = tightened ? 1 : 0;
-      if (meta.agentSteps + steps.length + extra > this.limits.maxStepsPerSession || meta.seq + steps.length + 3 + extra > this.maxEvents)
+      const extra = session.noteDue ? 1 : 0;
+      const tasks = steps.filter((s) => s.kind === "task").length;
+      if (meta.agentSteps + steps.length > this.limits.maxStepsPerSession || meta.seq + steps.length + tasks + extra + this.closeRoom(meta) > this.maxEvents)
         throw new ShadowError("SHADOW_LIMIT_STEPS", `This session has ${meta.agentSteps} steps and can't take ${steps.length} more, so nothing was recorded. ${START_NEW}`);
-      // The last anchor is kept for shadow_close_session, so a full session can still anchor its final checkpoint.
-      if (anchoring && meta.anchors.length + meta.outbox.length >= this.limits.maxAnchorsPerSession - 1)
+      // The last anchor is kept for shadow_close_session, so a full session can still anchor its final checkpoint. At the step
+      // level the session is over, since every step wants an anchor. At turn and milestone, steps were recorded on the
+      // promise of a later anchor, and refusing the reply would leave actions with no answer: it is recorded, and says it has no anchor.
+      if (anchoring && level === "step" && !this.outlook(meta).canAnchor)
         throw new ShadowError("SHADOW_LIMIT_SESSION_ANCHORS", `This session has used its ${this.limits.maxAnchorsPerSession} anchors, so nothing was recorded. ${START_NEW}`);
       if (meta.eventsBytes + totalBytes + steps.length * 1024 + 8192 > this.agentEventsMax)
         throw new ShadowError("SHADOW_LIMIT_SESSION_SIZE", `This session is full (${Math.round(this.limits.maxSessionBytes / 1048576)} MB on disk), so nothing was recorded. ${START_NEW}`);
@@ -1303,7 +1525,7 @@ export class ShadowService {
       }
       if (meta.runs.filter((r) => r.open).length + steps.filter((s) => s.kind === "task").length > this.limits.maxOpenRuns)
         throw new ShadowError("SHADOW_LIMIT_RUNS", `This session has too many open runs (${this.limits.maxOpenRuns} at most), so nothing was recorded. Use kind prompt for a later message from the person, or start a new session: ${START_NEW}`);
-      if (tightened) this.tighten(meta, level);
+      if (session.noteDue) this.noteAccountLevel(meta, session);
       try {
         for (const s of steps) {
           const agent = s.agent ?? meta.agents[0].id;
@@ -1337,12 +1559,15 @@ export class ShadowService {
       }
     });
     await this.drain(ownerKey, sessionId, { deadline: Math.max(budgetEnd, Date.now() + 2_000), stopOnFailure: true });
-    return this.session(ownerKey, sessionId, (meta) => {
+    return this.session(ownerKey, sessionId, async (meta) => {
       const anchor: LogAnchor = made.deferred
-        ? { block_height: null, ledger_id: null, block_time: null, anchored_hash: null, covers_steps: null, anchor_status: "deferred", anchor_reason: deferredReason(made.deferred) }
+        ? { block_height: null, ledger_id: null, block_time: null, anchored_hash: null, covers_steps: null, anchor_status: "deferred", anchor_reason: deferredReason(made.deferred, this.outlook(meta)) }
         : this.logAnchor(meta, made.target, made.refused);
-      const level = meta.logLevel ?? "step";
-      return { sessionId, started, steps: made.steps, anchor, level, table: input.table ? turnTable(meta, made.turn) : "", viewer: this.links(meta, base).viewer, meta: { agentSteps: meta.agentSteps, logLevel: level, anchors: meta.anchors.map((a) => ({ blockHeight: a.blockHeight, ledgerId: a.ledgerId })) } };
+      // From the hashed record. The steps are recorded by now, so if it can't be read back the result leaves the level out.
+      const facts = await this.withEvents(meta, (events) => sessionFacts(events)).catch(() => null);
+      const level = facts?.level ?? null;
+      const levelNote = !started && agentLevel ? "log_level applies when a session starts, so it had no effect on this open session." : null;
+      return { sessionId, started, steps: made.steps, anchor, level, levelNote, table: input.table ? turnTable(meta, made.turn) : "", viewer: this.links(meta, base).viewer, meta: { agentSteps: meta.agentSteps, logLevel: level, levelChanged: (facts?.changes.length ?? 0) > 0, anchors: meta.anchors.map((a) => ({ blockHeight: a.blockHeight, ledgerId: a.ledgerId })) } };
     });
   }
 
@@ -1429,13 +1654,13 @@ export class ShadowService {
       const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
       meta.checkpoint = cp;
       made.target = cp.hash;
-      made.refused = this.queueCheckpoint(meta, cp);
+      made.refused = this.queueCheckpoint(meta, cp, true);
       this.store.writeMeta(meta);
     });
     await this.drain(ownerKey, sessionId);
     return this.session(ownerKey, sessionId, async (meta) => {
       const links = this.links(meta, base);
-      const { pin, log } = await this.withEvents(meta, (events) => ({ pin: buildPin(meta, this.latest(meta, events)), log: this.autoLog ? sessionLog(meta, events) : null }));
+      const { pin, log, anchoring } = await this.withEvents(meta, (events) => ({ pin: buildPin(meta, this.latest(meta, events)), log: this.autoLog ? sessionLog(meta, events) : null, anchoring: anchoringOf(meta, events) }));
       this.log("shadow_session_closed", { sessionId, steps: meta.seq, anchors: meta.anchors.length, pending: meta.outbox.length });
       return {
         ...(log ? { summary: sessionLogText(log, { max: MAX_SUMMARY_ROWS, rest: links.summary ?? links.viewer }), summary_note: "This summary is for the person, in full, as it is.", capture: meta.capture ?? null, capture_note: captureNote(meta) } : {}),
@@ -1443,6 +1668,7 @@ export class ShadowService {
         status: "closed",
         steps: meta.seq,
         final_checkpoint: this.anchorView(meta, made.target, made.refused),
+        anchoring,
         pin,
         links,
         links_note: meta.linksRevoked ? LINKS_REVOKED_NOTE : LINKS_NOTE,
@@ -1461,7 +1687,6 @@ export class ShadowService {
     const capture = { person_messages_reported: reported, person_messages_logged: logged, missing: Math.max(0, reported - logged) };
     const { payload } = stepFor("note", `The assistant counted ${reported} messages from the person before the one asking to close; ${logged} are logged. This is the assistant's own count.`);
     this.appendStep(meta, "agent.message", meta.agents[0].id, { ...payload, capture }, { boundary: "transcript", agentRunId: null }, false);
-    meta.agentSteps++;
     meta.capture = capture;
   }
 
@@ -1469,15 +1694,20 @@ export class ShadowService {
     const sessionId = sessionIdOf(input.session_id);
     return this.session(ownerKeyOf(ownerId), sessionId, (meta) => this.withEvents(meta, (events) => {
       const pin = meta.state === "closed" ? buildPin(meta, this.latest(meta, events)) : null;
+      const facts = sessionFacts(events);
+      // A session from before hashed notes has only its metadata to say who set it, and it reads as step whatever that says.
+      const setBy = facts.setBy ?? (meta.accountLevelSeen === undefined ? meta.logLevelBy : null);
       return {
         session_id: meta.sessionId,
         title: meta.title,
         status: meta.state,
-        agents: meta.agents.map(agentView),
-        log_level: meta.logLevel ?? "step",
-        ...(meta.logLevelBy ? { log_level_set_by: meta.logLevelBy } : {}),
+        agents: meta.agents.map((a) => agentView(a, facts.agents.get(a.id))),
+        log_level: facts.level,
+        ...(setBy ? { log_level_set_by: setBy } : {}),
+        ...(facts.changes.length ? { log_level_changes: facts.changes } : {}),
         steps: meta.seq,
         recorded_steps: meta.agentSteps,
+        anchoring: anchoringOf(meta, events),
         open_runs: meta.state === "open" ? meta.runs.filter((r) => r.open).map((r) => ({ run_id: r.id, agent: r.agent })) : [],
         created_at: meta.createdAt,
         closed_at: meta.closedAt,
@@ -1539,12 +1769,15 @@ export class ShadowService {
       // Verified as a relying party would: strictly parsed from its JSON.
       // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too.
       const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog ? { requireOnline: true } : {}) });
-      const report = this.autoLog ? ownPinReport(checked) : checked;
+      const anchoring = anchoringOf(meta, events);
+      // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere the counts are reported, and the result stays the verifier's.
+      const report = this.autoLog ? withAnchoring(ownPinReport(checked), anchoring) : checked;
       return {
         session_id: sessionId,
         result: report.result,
         summary: report.summary,
         checks: report.checks,
+        anchoring,
         online: onlineNote,
         ...(receipts ? { receipts_checked_online: receipts.checked, receipts_total: receipts.total } : {}),
         interpretation: report.interpretation,
@@ -1723,7 +1956,9 @@ export class ShadowService {
             }, null, 1));
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
-            const html = withSessionDetails(hostedViewer(summarize(packet, ownPinReport(report), { packetFile: "packet.json", pinFile: "pin.json" }).html), meta);
+            const anchoring = anchoringOf(meta, events);
+            const shown = this.autoLog ? withAnchoring(ownPinReport(report), anchoring) : ownPinReport(report);
+            const html = withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring);
             body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }
           this.linkBuildCount++;
@@ -1862,7 +2097,7 @@ export class ShadowService {
     const a = meta.anchors.find((x) => x.hash === hash);
     if (a) return { status: "anchored", checkpoint_hash: hash, covers_steps: a.count, ledger_id: a.ledgerId, block: a.blockHeight, block_time: a.blockTime, submitted_at: a.submittedAt };
     const r = meta.outbox.find((x) => x.hash === hash);
-    if (r) return { status: r.state === "failed" ? "failed" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? "Not anchored. The record is intact; later checkpoints still bound it." : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
+    if (r) return { status: r.state === "failed" ? "failed" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
     if (refused) return { status: "not_anchored", checkpoint_hash: hash, covers_steps: meta.checkpoint?.body.count ?? null, code: refused.code, reason: refused.message };
     return { status: "not_anchored", checkpoint_hash: hash };
   }

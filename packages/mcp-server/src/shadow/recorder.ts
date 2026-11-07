@@ -112,6 +112,16 @@ function refuseReasoning(fn: () => void): void {
   }
 }
 
+/**
+ * THINK_TAG on a field of any length, in one pass (the regex rescans to the end from every "<think" with no ">" after it). A
+ * field such as a title is cut down after this, so this sees the tag whole, even with its ">" past the cut.
+ */
+const THINK_OPEN = /<\/?(?:think|thinking|reasoning)\b/i;
+export function refuseThinkTag(v: string, field: string): void {
+  const open = THINK_OPEN.exec(v);
+  if (open && v.indexOf(">", open.index) >= 0) refuseReasoning(() => { throw new Error(`Reasoning is never recorded (${field} has a <think> section)`); });
+}
+
 /** Run.text(): the content exactly as it will be serialised, checked for hidden reasoning, then clipped. */
 function text(v: unknown, tags = false): Clipped {
   const recorded = asRecorded(v);

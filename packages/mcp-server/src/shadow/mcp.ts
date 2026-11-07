@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { VERSION } from "./recorder.js";
 import { ACTION_TYPE_HELP, INTENT_TYPE_HELP } from "./intent.js";
-import { LOG_LEVELS, LOG_LEVEL_HELP } from "./log-level.js";
+import { LEVELS_EXPLAINED, LOG_LEVELS, LOG_LEVEL_HELP, LOG_LEVEL_HELP_ASKED } from "./log-level.js";
 import { SUMMARY_CSP } from "./lib/summary.js";
 import { MAX_PERSON_MESSAGES, ShadowError, type ShadowService } from "./service.js";
 import { connectInstructions } from "./discovery.js";
@@ -101,7 +101,9 @@ export const AUTO_LOG_INSTRUCTIONS = [
   "- shadow_log_step only appends to the person's own record: it can't change or delete anything. It adds one step, as the step happens, one call per step: the person's request (kind task",
   "  for the first in a conversation, kind prompt after that), each tool call (kind tool_call) and tool result (kind",
   "  tool_result), from any connector, each file written (kind file) and each message shown (kind message). Logging as",
-  "  it goes gives each step its own hash, block height and ledger ID.",
+  "  it goes gives each step its own hash. When a step gets a block height and ledger ID depends on the session's logging",
+  "  level: at step, each call gets its own; at turn and milestone, a step can wait for a later anchor, and its result says",
+  "  anchor_status deferred.",
   "- The first step of a conversation has no session_id. Later steps pass the session_id it returned.",
   "- show_user in a result is text for the person: this turn's steps as a table, on a message step, then a footer. A",
   "  reply usually logs its own text as a message step last and ends with that result's show_user, as written. If a",
@@ -109,7 +111,8 @@ export const AUTO_LOG_INSTRUCTIONS = [
   "- Never record hidden reasoning. Replace passwords, API keys and other secrets with [redacted] before recording.",
   "- If this connection is not signed in, the first call starts the normal connect flow, and is retried after it.",
   "- If a log call returns an error or is blocked, say plainly in your reply that the step was not logged, and invent nothing.",
-  "- shadow_log_step is the usual tool, because each step gets its own anchor. shadow_log_turn's steps share one anchor.",
+  "- shadow_log_step is the usual tool. At the step level each call gets its own anchor; the steps in one shadow_log_turn",
+  "  call share one. shadow_record writes nothing to the ledger at any level: its steps wait for the next anchor.",
   "",
   "Turning it off: when the person says \"stop logging\", call clockchain_logging {enabled: false}, and stop logging and",
   "showing the footer. When they say \"turn logging back on\", call clockchain_logging {enabled: true}. Change this only",
@@ -350,10 +353,10 @@ export function buildShadowServer(
     server.registerTool("shadow_log_step", {
       ...TOOL_META.shadow_log_step,
       description:
-        "Adds one step of this conversation to the person's own record on Clockchain Shadow, and anchors the record's hash on Clockchain with its own block and ledger ID. It only appends: it can't change or delete anything. " +
+        "Adds one step of this conversation to the person's own record on Clockchain Shadow. At the step logging level it also anchors the record's hash on Clockchain with this call's own block and ledger ID; at the turn and milestone levels the step can wait for a later anchor, and anchor_status says deferred. It only appends: it can't change or delete anything. " +
         "Logging is on by default once this connector is connected, and the person can turn it off with clockchain_logging. " +
         "A step is the person's request, a tool call or result, a file written or a message shown. " +
-        "Returns the step's hash, block_height, ledger_id, block_time, anchor_status, the checkpoint hash, the viewer link, session_id, and show_user, a table of this turn's steps for the person. block_height and ledger_id are null while an anchor is pending. " +
+        "Returns the step's hash, block_height, ledger_id, block_time, anchor_status (anchored, pending, deferred, failed, over_limit or not_anchored), anchor_reason when it has no anchor, the checkpoint hash, the viewer link, session_id, and show_user, a table of this turn's steps for the person. block_height and ledger_id are null unless anchor_status is anchored. " +
         `The server redacts common secret formats and refuses steps that contain hidden reasoning. ${RETENTION}`,
       inputSchema: { ...sessionInput, ...stepInput, run_id: z.string().optional().describe("Optional. A task step starts a run; other steps join the latest open run unless you pass one.") },
     }, async (a) => {
@@ -366,8 +369,8 @@ export function buildShadowServer(
     server.registerTool("shadow_log_turn", {
       ...TOOL_META.shadow_log_turn,
       description:
-        "Adds several steps to the person's own record on Clockchain Shadow in one call, up to 100 steps, 32 KB each and about 900 KB in all. They share one block and ledger ID, and each keeps its own hash; shadow_log_step gives each step its own block and ledger ID. It only appends: it can't change or delete anything. " +
-        "Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, viewer) and show_user, a table of these steps for the person. " +
+        "Adds several steps to the person's own record on Clockchain Shadow in one call, up to 100 steps, 32 KB each and about 900 KB in all. When the call anchors, its steps share one block and ledger ID, and each keeps its own hash. It anchors at the step and turn logging levels; at the milestone level it can wait for a later anchor, and anchor_status says deferred. It only appends: it can't change or delete anything. " +
+        "Returns session_id, evidence (logged steps, block_height, ledger_id, block_time, anchor_status, anchor_reason when it has no anchor, viewer) and show_user, a table of these steps for the person. block_height and ledger_id are null unless anchor_status is anchored. " +
         `The server redacts common secret formats and refuses steps that contain hidden reasoning. ${RETENTION}`,
       inputSchema: { ...sessionInput, steps: z.array(z.object(stepInput)).describe("The steps of this reply, in order, 100 at most.") },
     }, run((a) => service.logTurn(owner, a, base)));
@@ -393,27 +396,29 @@ export function buildShadowServer(
         purpose: z.string().optional().describe("Optional. What this agent is for, up to 200 characters, as you report it (kept on this server and hashed in the record, never sent to Clockchain)."),
         accountable_owner: z.string().optional().describe("Optional. The person or team answerable for this agent, up to 100 characters, as you report it (kept on this server and hashed in the record, never sent to Clockchain)."),
       })).optional().describe('Who will act in this session. Default: one agent with id "agent".'),
-      log_level: z.enum(LOG_LEVELS).optional().describe(LOG_LEVEL_HELP),
+      log_level: z.enum(LOG_LEVELS).optional().describe(autoLog ? LOG_LEVEL_HELP : LOG_LEVEL_HELP_ASKED),
     },
   }, run((a) => service.startSession(owner, a, base)));
 
   server.registerTool("clockchain_log_level", {
     ...TOOL_META.clockchain_log_level,
-    description:
-      "Sets how much detail Shadow anchors for this Clockchain account, in all its chats, until it is changed. step: each step gets its own anchor. turn: one anchor per turn. milestone: anchors at tasks, checkpoints and the close. " +
-      "Steps are recorded on this server at each level; the level decides when their hash goes to Clockchain. An agent can choose more detail for a session, not less. Open sessions at a coarser level move to the new level on their next step. " +
-      "This is the person's own setting, changed at their request.",
+    description: autoLog
+      ? `Sets this Clockchain account's logging level, which applies to sessions on this account until it is changed. ${LEVELS_EXPLAINED} ` +
+        "Steps are recorded on this server at each level; the level decides when their hash goes to Clockchain. A session runs at the finer of the account's level and the level chosen when it starts. An open session at a coarser level moves to the new level on its next step, and each open session notes the change in its record. " +
+        "Any connection signed in to this account can set it, so the record shows it as the account's level."
+      : "Saves a logging level for this Clockchain account: step, turn or milestone. It applies to sessions on this account and goes in their records, and it doesn't change when anchors happen here: steps are recorded on this server, and anchors happen at the start, at shadow_checkpoint and at the close. " +
+        "Any connection signed in to this account can set it, so the record shows it as the account's level.",
     inputSchema: { level: z.enum(LOG_LEVELS).describe("step, turn or milestone.") },
-  }, run(async (a) => service.setLogLevel(owner, a.level)));
+  }, run(async (a) => service.setLogLevel(owner, a.level, Boolean(autoLog))));
 
   server.registerTool("shadow_record", {
     ...TOOL_META.shadow_record,
     description:
-      (autoLog ? "Record one step, right after it happens. " : "Use only for a session the person asked to record. Adds one step to that record, on this server; nothing goes on the ledger. ") +
+      (autoLog ? "Record one step, right after it happens, on this server. Nothing goes on the ledger from this call, at any logging level: the next anchor covers the step, and anchor_status says deferred. " : "Use only for a session the person asked to record. Adds one step to that record, on this server; nothing goes on the ledger. ") +
       "kind: task (starts a run), prompt, message, tool_call ({tool, args}), " +
       "tool_result ({tool, result, is_error}), file ({path, content}), note. Never include hidden reasoning: a step with " +
       "a <think>/<thinking>/<reasoning> tag or a reasoning*, thinking* or thought* field is refused, whatever its kind. " +
-      "Returns seq and hash.",
+      (autoLog ? "Returns seq, hash, anchor_status and anchor_reason." : "Returns seq and hash."),
     inputSchema: {
       session_id: sessionId,
       agent: z.string().describe("Which declared agent took the step."),
@@ -429,13 +434,13 @@ export function buildShadowServer(
 
   server.registerTool("shadow_checkpoint", {
     ...TOOL_META.shadow_checkpoint,
-    description: `Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way).${asked(" The anchored hash can't be removed.")}`,
+    description: `Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way), or not_anchored if the session has only its last anchor left, which is kept for the close.${asked(" The anchored hash can't be removed.")}`,
     inputSchema: { session_id: sessionId },
   }, run((a) => service.checkpoint(owner, a)));
 
   server.registerTool("shadow_close_session", {
     ...TOOL_META.shadow_close_session,
-    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin and the links to share.${autoLog ? " Also returns summary, every step's hashes, block and ledger ID, for the person, in full, and how the person's messages compare with what was logged." : ""} No steps can be added afterwards.${asked(" The anchored hash can't be removed.")} ${RETENTION}`,
+    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin, the links to share, and anchoring: how many recorded steps have a checkpoint with a Clockchain receipt.${autoLog ? " Also returns summary, every step's hashes, block and ledger ID, for the person, in full, and how the person's messages compare with what was logged." : ""} No steps can be added afterwards.${asked(" The anchored hash can't be removed.")} ${RETENTION}`,
     inputSchema: {
       session_id: sessionId,
       status: z.enum(["succeeded", "failed", "cancelled", "timed_out", "unknown"]).optional()
@@ -446,7 +451,7 @@ export function buildShadowServer(
 
   server.registerTool("shadow_get_session", {
     ...TOOL_META.shadow_get_session,
-    description: `A session's status, step count, Clockchain anchors, time windows, and its viewer${autoLog ? ", packet and summary" : " and packet"} links (and its pin once closed). ${RETENTION}`,
+    description: `A session's status, logging level, step count, Clockchain anchors, anchoring (how many recorded steps have a checkpoint with a Clockchain receipt), time windows, and its viewer${autoLog ? ", packet and summary" : " and packet"} links (and its pin once closed). ${RETENTION}`,
     inputSchema: { session_id: sessionId },
   }, run((a) => service.getSession(owner, a, base)));
 
@@ -458,7 +463,7 @@ export function buildShadowServer(
 
   server.registerTool("shadow_verify", {
     ...TOOL_META.shadow_verify,
-    description: "Run the Shadow verifier on the session's evidence packet, online against Clockchain where possible. Returns pass, indeterminate or fail, with each check.",
+    description: `Run the Shadow verifier on the session's evidence packet, online against Clockchain where possible. Returns pass, indeterminate or fail, with each check, and anchoring: how many recorded steps have a checkpoint with a Clockchain receipt.${autoLog ? " A session with a recorded step no anchored checkpoint covers reads indeterminate, not pass." : ""}`,
     inputSchema: { session_id: sessionId },
   }, run((a) => service.verify(owner, a, base)));
 

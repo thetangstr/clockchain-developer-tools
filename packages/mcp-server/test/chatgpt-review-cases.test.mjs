@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { runHttp } from "../dist/http.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { __resetSharedLogBudget } from "../dist/budget.js";
-import { PLUGIN, runCases } from "../../../scripts/chatgpt-review-cases.mjs";
+import { CROSS_CHAT, PLUGIN, runCases } from "../../../scripts/chatgpt-review-cases.mjs";
 import { signIn, toolCaller, topUpSamples, SAMPLES } from "../../../scripts/seed-reviewer-account.mjs";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 
@@ -113,4 +113,9 @@ test("a server logging by default fails the first negative case: this is what a 
   } finally {
     await s.close();
   }
+});
+
+test("the no-recording case catches text that reaches across chats", () => {
+  for (const line of ["for this Clockchain account, in all its chats", "in every chat", "across all chats"]) assert.match(line, CROSS_CHAT);
+  for (const line of ["Use only when the person asks to record this task or chat.", "A request holds for this chat only."]) assert.doesNotMatch(line, CROSS_CHAT);
 });

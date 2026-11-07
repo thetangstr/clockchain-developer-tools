@@ -15,7 +15,7 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, ran
 import { closeSync, existsSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { appendDurableLine, cleanStaleFiles, createDurableJsonFile } from "../handshake-core/durable-store.js";
-import { isLogLevel, type LogLevel } from "./log-level.js";
+import { isLogLevel, levelSetBy, type LevelSetBy, type LogLevel } from "./log-level.js";
 import type { KeyProvider } from "./lib/keys.js";
 import type { Checkpoint, CheckpointBody, Network, ShadowEvent } from "./lib/types.js";
 
@@ -98,14 +98,17 @@ export type SessionMeta = {
   lastStepAt?: string;
   /** Closed by the server after no new steps, not by the person or the agent. */
   closedIdle?: true;
-  /** How much detail this session anchors. Older sessions, and sessions at the default, don't have it, and read as "step". */
+  /** How much detail this session anchors. Sessions at the default don't have it. What a reader sees comes from the hashed notes, not from here. */
   logLevel?: LogLevel;
-  logLevelBy?: "person" | "agent";
+  logLevelBy?: LevelSetBy;
+  /** The account's level when this session last looked, null for none. Sessions from before hashed notes don't have it: they read and run as "step". */
+  accountLevelSeen?: LogLevel | null;
 };
 
 export type Operator = { operatorId: string; keys: KeyProvider };
 
-type OwnerSettings = { loggingOff: boolean; logLevel?: LogLevel };
+/** levelUnreadable: logging was switched while the file couldn't be read, so its level is unknown, not gone. */
+type OwnerSettings = { loggingOff: boolean; logLevel?: LogLevel; levelUnreadable?: true };
 type KeyFile = { operatorId: string; privateKeyPem: string; createdAt: string };
 type UsageFile = { day: string; anchors: number; starts?: number };
 export type DailyCounter = "anchors" | "starts";
@@ -119,6 +122,8 @@ function validateMeta(v: unknown): SessionMeta {
     !Number.isSafeInteger(v.seq) || !Number.isSafeInteger(v.eventsBytes) || typeof v.cap !== "string" || !CAP.test(v.cap) ||
     !Array.isArray(v.runs) || !Array.isArray(v.outbox) || !Array.isArray(v.anchors) || typeof v.expiresAt !== "string")
     throw new Error("not a shadow session");
+  // Stored before the level became the account's: it meant the same thing.
+  if (v.logLevelBy !== undefined) v.logLevelBy = levelSetBy(v.logLevelBy) ?? undefined;
   return v as unknown as SessionMeta;
 }
 
@@ -218,7 +223,7 @@ export class ShadowStore {
       snapshot: current,
       validate: (v) => {
         if (!isObj(v) || typeof v.loggingOff !== "boolean" || (v.logLevel !== undefined && !isLogLevel(v.logLevel))) throw new Error("bad settings file");
-        return { loggingOff: v.loggingOff, ...(v.logLevel ? { logLevel: v.logLevel as LogLevel } : {}) };
+        return { loggingOff: v.loggingOff, ...(v.logLevel ? { logLevel: v.logLevel as LogLevel } : {}), ...(v.levelUnreadable === true ? { levelUnreadable: true as const } : {}) };
       },
       maxBytes: SMALL_MAX_BYTES,
     });
@@ -234,19 +239,23 @@ export class ShadowStore {
   }
 
   setLoggingOff(ownerKey: string, loggingOff: boolean): void {
-    // Turning logging off must work even with an unreadable file, so a level that can't be read is left behind.
-    let logLevel: LogLevel | undefined;
+    // Turning logging off must work even with an unreadable file. A level that can't be read stays unknown rather than
+    // becoming "none": readers keep failing closed until a level is set again.
+    let kept: Pick<OwnerSettings, "logLevel" | "levelUnreadable">;
     try {
-      logLevel = this.settings(ownerKey).logLevel;
+      const { logLevel, levelUnreadable } = this.settings(ownerKey);
+      kept = { ...(logLevel ? { logLevel } : {}), ...(levelUnreadable ? { levelUnreadable } : {}) };
     } catch {
-      logLevel = undefined;
+      kept = { levelUnreadable: true };
     }
-    this.settingsFile(ownerKey, () => ({ loggingOff, ...(logLevel ? { logLevel } : {}) })).save("now");
+    this.settingsFile(ownerKey, () => ({ loggingOff, ...kept })).save("now");
   }
 
-  /** The level the person set for this account, or null. Throws if the file cannot be read (callers fail closed). */
+  /** This account's level, or null. Throws if it cannot be read (callers fail closed). */
   logLevel(ownerKey: string): LogLevel | null {
-    return this.settings(ownerKey).logLevel ?? null;
+    const { logLevel, levelUnreadable } = this.settings(ownerKey);
+    if (levelUnreadable) throw new Error("the account's level could not be read");
+    return logLevel ?? null;
   }
 
   setLogLevel(ownerKey: string, logLevel: LogLevel): void {

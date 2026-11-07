@@ -269,7 +269,7 @@ test("flag off: no summary in the result or the links, no link on the viewer, an
   const s = await svc.startSession(O, { title: "off" }, BASE);
   await svc.record(O, { session_id: s.session_id, agent: "agent", kind: "task", content: "go" });
   const closed = await svc.close(O, { session_id: s.session_id, status: "succeeded" }, BASE);
-  assert.deepEqual(Object.keys(closed).sort(), ["final_checkpoint", "links", "links_note", "pin", "session_id", "share", "status", "steps"]);
+  assert.deepEqual(Object.keys(closed).sort(), ["anchoring", "final_checkpoint", "links", "links_note", "pin", "session_id", "share", "status", "steps"]);
   assert.deepEqual(Object.keys(closed.links).sort(), ["packet", "viewer"]);
   assert.deepEqual(Object.keys((await svc.getSession(O, { session_id: s.session_id }, BASE)).links).sort(), ["packet", "viewer"]);
   const html = await svc.summaryForCap(capOf(closed));
