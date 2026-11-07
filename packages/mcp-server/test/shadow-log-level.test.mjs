@@ -13,7 +13,8 @@ import { anchorsNow, deferredReason, effectiveLevel, finer, levelSetBy, LOG_LEVE
 import { stepFor } from "../dist/shadow/recorder.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { createLogBudget } from "../dist/budget.js";
-import { ApiError, AuthError } from "@clockchain/core";
+import { ApiError, AuthError, ClockchainClient, readConfigFromEnv } from "@clockchain/core";
+import { ShadowClockchainClient, __setShadowLedgerForTests, runtimeShadowLedger } from "../dist/shadow/ledger.js";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 
 const O = "acct_AAAAAAAAAAAAAAAAAAAAAA";
@@ -1987,4 +1988,189 @@ test("after links are revoked the pin note names only what is left", async () =>
   const { pin_note } = await svc.getSession(O, { session_id: id }, BASE);
   assert.match(pin_note, /shadow_get_session gives the current one/);
   assert.doesNotMatch(pin_note, /packet link/);
+});
+
+// ---- fifth review ----------------------------------------------------------------------------------------------------
+
+const notFound = () => new ApiError("Clockchain request failed: 404 Not Found", 404, null);
+
+/** Writes that fail after a refused search: every step leaves a parked row, as in the reviewer's run. */
+function parkEverything(fake) {
+  refuseSearch(fake);
+  const log = fake.log.bind(fake);
+  fake.log = async () => { throw new TypeError("fetch failed"); };
+  return () => { fake.log = log; };
+}
+
+test("parked rows have a cap, a truthful status past it, and a session that can always be closed and read", async () => {
+  const limits = { maxAnchorsPerSession: 300, maxAnchorsPerOwnerPerDay: 1e6, maxBytesPerOwner: 1e9 };
+  const a = service({ limits });
+  const { svc, fake, stateDir } = a;
+  const agent = "agent-with-a-long-identifier-0";
+  const s = await svc.startSession(O, { title: "t", agents: Array.from({ length: 16 }, (_, i) => ({ id: `agent-with-a-long-identifier-${i}` })) }, BASE);
+  const id = s.session_id;
+  const heal = parkEverything(fake);
+  const seen = {};
+  let last;
+  for (let i = 0; i < 170; i++) {
+    last = await svc.logStep(O, { session_id: id, agent, kind: "tool_call", content: { tool: `t${i}` } }, BASE);
+    seen[last.anchor_status] = (seen[last.anchor_status] ?? 0) + 1;
+  }
+  const parked = metaOf(svc, id).outbox.filter((r) => r.lastErrorCode === "search_refused");
+  assert.equal(parked.length, 40);
+  assert.ok(parked.every((r) => r.sendStarted === true), "each may have been written, and each is still here");
+  assert.equal(last.anchor_status, "not_anchored", JSON.stringify(seen));
+  assert.match(last.anchor_reason, /40 earlier anchors may be on Clockchain and can't be confirmed/);
+  assert.match(last.anchor_reason, /nothing already queued is dropped/);
+  assert.equal((await svc.getSession(O, { session_id: id }, BASE)).recorded_steps, 170, "every step is in the record");
+  heal();
+  const closed = await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  assert.equal(closed.final_checkpoint.status, "anchored");
+  assert.equal(closed.anchoring.unanchored_steps, 0);
+  const { svc: next } = service({ stateDir, ledger: () => fake, limits });
+  assert.equal((await next.getSession(O, { session_id: id }, BASE)).status, "closed", "and read after a restart");
+  const v = await next.verify(O, { session_id: id }, BASE);
+  assert.deepEqual(v.checks.filter((c) => c.status === "fail"), []);
+  const { packet } = JSON.parse(await next.packetForCap(metaOf(next, id).cap));
+  for (const r of parked) assert.ok(packet.pendingCheckpoints.some((p) => p.hash === r.hash), "accounted for");
+});
+
+test("at the parked cap a deferred step says only the close can anchor it, and the cap clears when the ledger answers", async () => {
+  const { svc, fake } = service({ limits: { maxAnchorsPerSession: 300, maxAnchorsPerOwnerPerDay: 1e6 } });
+  const a = await svc.logStep(O, { kind: "task", content: "go" }, BASE);
+  const heal = parkEverything(fake);
+  for (let i = 0; i < 41; i++) await svc.logStep(O, { session_id: a.session_id, kind: "tool_call", content: { tool: `t${i}` } }, BASE);
+  const m = metaOf(svc, a.session_id);
+  Object.assign(m, { logLevel: "milestone" });
+  svc.store.writeMeta(m);
+  const r = await svc.logStep(O, { session_id: a.session_id, kind: "tool_call", content: { tool: "x" } }, BASE);
+  assert.equal(r.anchor_status, "deferred");
+  assert.match(r.anchor_reason, /Earlier anchors can't be confirmed, so no more are sent until they can be, and only the close can still anchor this/);
+  heal();
+  allowSearch(fake);
+  await svc.checkpoint(O, { session_id: a.session_id });
+  assert.ok(metaOf(svc, a.session_id).outbox.filter((r2) => r2.lastErrorCode === "search_refused").length < 40);
+});
+
+test("the metadata keeps room for a close, whatever fills it", async () => {
+  const { svc, fake, stateDir } = service();
+  const a = await svc.logStep(O, { kind: "task", content: "go" }, BASE);
+  const meta = metaOf(svc, a.session_id);
+  meta.agents[0].purpose = "x".repeat(460 * 1024);
+  svc.store.writeMeta(meta);
+  const r = await svc.logStep(O, { session_id: a.session_id, kind: "tool_call", content: { tool: "x" } }, BASE);
+  assert.equal(r.anchor_status, "not_anchored");
+  assert.match(r.anchor_reason, /index is nearly full/);
+  assert.equal((await svc.close(O, { session_id: a.session_id, status: "succeeded" }, BASE)).final_checkpoint.status, "anchored");
+  const { svc: next } = service({ stateDir, ledger: () => fake });
+  assert.equal((await next.getSession(O, { session_id: a.session_id }, BASE)).status, "closed");
+});
+
+/** Shadow's own client with its own and the earlier client's answers set by the test. */
+function dualClient(own, earlier) {
+  const client = new ShadowClockchainClient(readConfigFromEnv({ CLOCKCHAIN_API_KEY: "k", CLOCKCHAIN_CLIENT_ID: "c", CLOCKCHAIN_WALLET_ID: "w" }), { searchAsset: earlier });
+  const original = ClockchainClient.prototype.searchAsset;
+  return async (ref) => {
+    ClockchainClient.prototype.searchAsset = own;
+    try {
+      return await client.searchAsset(ref);
+    } finally {
+      ClockchainClient.prototype.searchAsset = original;
+    }
+  };
+}
+
+test("two ledger clients: a 404 is empty per client, and a failed search under either is a failed search", async () => {
+  const record = (id) => ({ ledgerId: id, assetHash: "a" });
+  const fails = (e) => async () => { throw e; };
+  assert.deepEqual(await dualClient(async () => [record("1")], fails(notFound()))("r"), [record("1")], "the earlier client's normal answer");
+  assert.deepEqual(await dualClient(fails(notFound()), async () => [record("2")])("r"), [record("2")]);
+  assert.deepEqual(await dualClient(async () => [record("1")], async () => [record("1"), record("2")])("r"), [record("1"), record("2")]);
+  await assert.rejects(dualClient(async () => [record("1")], fails(new AuthError("no", 401)))("r"), (e) => e instanceof AuthError, "never a partial answer");
+  await assert.rejects(dualClient(fails(new ApiError("down", 503)), fails(notFound()))("r"), (e) => e.status === 503);
+  await assert.rejects(dualClient(fails(notFound()), fails(notFound()))("r"), (e) => e.status === 404, "nobody answered, and a reader may need to know");
+  await assert.rejects(dualClient(async () => [], fails(notFound()))("r"), (e) => e.status === 404);
+  assert.deepEqual(await dualClient(async () => [], async () => [])("r"), [], "a real empty answer");
+  // It is the client the server builds when Shadow has its own identity.
+  __setShadowLedgerForTests(undefined);
+  const env = { CLOCKCHAIN_API_KEY: "k", CLOCKCHAIN_CLIENT_ID: "c", CLOCKCHAIN_WALLET_ID: "w", SHADOW_LEDGER_CLIENT_ID: "shadow", SHADOW_LEDGER_WALLET_ID: "shadow-wallet" };
+  assert.ok(runtimeShadowLedger(env) instanceof ShadowClockchainClient);
+  __setShadowLedgerForTests(undefined);
+});
+
+test("with the earlier client answering 404: no second payment, a clean pass, and an extra record still fails", async () => {
+  const wire = (fake) => { const search = fake.searchAsset.bind(fake); fake.searchAsset = dualClient(search, async () => { throw notFound(); }); };
+  const a = service();
+  const id = await deferredSession(a.svc, 2);
+  wire(a.fake);
+  const restore = dieAfterWrite(a);
+  await a.svc.checkpoint(O, { session_id: id }).catch(() => {});
+  restore();
+  const { hash } = metaOf(a.svc, id).outbox[0];
+  const b = service({ stateDir: a.stateDir, ledger: () => a.fake });
+  await b.svc.logStep(O, { session_id: id, kind: "tool_call", content: { tool: "x" } }, BASE);
+  assert.equal(a.fake.writes.filter((w) => w.assetHash === hash).length, 1, "found under the session's own client");
+  await b.svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  const v = await b.svc.verify(O, { session_id: id }, BASE);
+  assert.equal(v.result, "pass", v.summary);
+  await a.fake.log({ assetHash: "e".repeat(64), assetReferenceId: `shadow:v1:${id}`, hashType: "SHA-256" });
+  assert.equal((await b.svc.verify(O, { session_id: id }, BASE)).result, "fail");
+});
+
+test("with no receipts a 404 or a refusal says nothing about the ledger, and a listed path doesn't pass on it", async () => {
+  for (const autoLog of [true, false]) {
+    for (const answer of ["404", "refused"]) {
+      const { svc, fake } = service({ autoLog });
+      fake.down = true;
+      const s = await svc.startSession(O, { title: "t" }, BASE);
+      await svc.record(O, { session_id: s.session_id, agent: "agent", kind: "message", content: "m" }, autoLog);
+      await svc.close(O, { session_id: s.session_id }, BASE);
+      fake.down = false;
+      fake.searchAsset = async () => { throw answer === "404" ? notFound() : new AuthError("no", 401); };
+      const v = await svc.verify(O, { session_id: s.session_id }, BASE);
+      assert.equal(v.result, "indeterminate", `autoLog ${autoLog}, ${answer}`);
+      assert.equal(check(v, "witness").status, "indeterminate");
+      assert.doesNotMatch(check(v, "witness").reason, /holds no record/, `autoLog ${autoLog}, ${answer}`);
+    }
+    // The ledger really says none: the text stands, and each path keeps its result.
+    const { svc, fake } = service({ autoLog });
+    fake.down = true;
+    const s = await svc.startSession(O, { title: "t" }, BASE);
+    await svc.record(O, { session_id: s.session_id, agent: "agent", kind: "message", content: "m" }, autoLog);
+    await svc.close(O, { session_id: s.session_id }, BASE);
+    fake.down = false;
+    fake.searchAsset = async () => [];
+    const v = await svc.verify(O, { session_id: s.session_id }, BASE);
+    assert.match(check(v, "witness").reason, /the ledger holds no record for this session that the packet leaves out/);
+    assert.equal(v.result, autoLog ? "indeterminate" : "pass");
+  }
+});
+
+test("with receipts a 404 is an empty list: nothing is claimed, and nothing passes on it", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  await svc.close(O, { session_id: id, status: "succeeded" }, BASE);
+  fake.searchAsset = async () => { throw notFound(); };
+  const v = await svc.verify(O, { session_id: id }, BASE);
+  assert.equal(v.result, "indeterminate");
+  assert.match(check(v, "witness").reason, /did not return them/);
+});
+
+test("a row from an older build says a send was started only if one was", async () => {
+  const { svc, fake } = service();
+  const id = await deferredSession(svc, 1);
+  fake.degraded = true;
+  await svc.checkpoint(O, { session_id: id });
+  fake.degraded = false;
+  const meta = metaOf(svc, id);
+  Object.assign(meta.outbox[0], { lastErrorKind: null, lastErrorCode: null });
+  delete meta.outbox[0].sendStarted;
+  svc.store.writeMeta(meta);
+  const { anchoring } = await svc.getSession(O, { session_id: id }, BASE);
+  assert.doesNotMatch(anchoring.reason, /A send was started/);
+  assert.doesNotMatch(anchoring.reason, /hasn't been sent/, "it can't say that either: nothing recorded whether one was");
+  assert.match(anchoring.reason, /waiting to go to Clockchain/);
+  meta.outbox[0].sendStarted = true;
+  svc.store.writeMeta(meta);
+  assert.match((await svc.getSession(O, { session_id: id }, BASE)).anchoring.reason, /A send was started/);
 });

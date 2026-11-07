@@ -87,6 +87,10 @@ const AGENT_KINDS = new Set(["task.assigned", "agent.prompt", "agent.message", "
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const MAX_OUTBOX = 20;
+/** Rows the ledger won't confirm or deny, kept on purpose: each holds a checkpoint body, a few KB, in the metadata. */
+const MAX_PARKED = 40;
+/** The metadata stops taking rows this far below its limit, so a close and its reads always fit. */
+const META_ROOM = 64 * 1024;
 const MAX_PASSES = 10;
 /** A closed session's row that keeps failing waits this many sweep intervals at most between tries. */
 const MAX_RETRY_WAIT_INTERVALS = 6;
@@ -493,7 +497,7 @@ function anchoringOf(meta: SessionMeta, events: ShadowEvent[]): Anchoring {
     reason: [
       left.length ? `${left.length} of ${steps.length} recorded ${steps.length === 1 ? "step has" : "steps have"} no checkpoint with a Clockchain receipt.` : "",
       ending.length ? `The session's ending (${ending.length} ${ending.length === 1 ? "step" : "steps"}: how runs ended, and the close) has none${left.length ? " either" : ""}.` : "",
-      waiting && liveRow ? `A checkpoint still waiting covers ${waiting} of these ${owed.length}: ${reasonOf(liveRow) ?? "It hasn't been sent to Clockchain yet."}` : "",
+      waiting && liveRow ? `A checkpoint still waiting covers ${waiting} of these ${owed.length}: ${reasonOf(liveRow) ?? "It is waiting to go to Clockchain."}` : "",
       failed && lostRow ? `A checkpoint that was not anchored covers ${failed} of these ${owed.length}: ${reasonOf(lostRow) ?? "Clockchain did not accept it."}` : "",
       nothing ? `${nothing} of these ${owed.length} ${nothing === 1 ? "has" : "have"} nothing on its way${meta.state === "open" ? " yet" : ", and this session is closed"}.` : "",
     ].filter(Boolean).join(" "),
@@ -1201,11 +1205,19 @@ export class ShadowService {
           ? `This session has used all ${max} of its anchors, so the checkpoint is signed but not sent to Clockchain.`
           : `This session has used the ${max - 1} anchors it can spend before the close, so the checkpoint is signed but not sent to Clockchain. The last anchor is kept for the close.`,
       };
+    if (!closing && this.parked(meta) >= MAX_PARKED)
+      return { code: "SHADOW_ANCHORS_UNCONFIRMED", message: `${this.parked(meta)} earlier anchors may be on Clockchain and can't be confirmed, so no more are sent until they can be. This checkpoint is signed but not sent. The close still has its anchor, and nothing already queued is dropped.` };
+    if (!closing && Buffer.byteLength(JSON.stringify(meta)) + META_ROOM > META_MAX_BYTES)
+      return { code: "SHADOW_ANCHOR_BACKLOG", message: "This session's index is nearly full, so the checkpoint is signed but not queued. The close still has its anchor." };
     // A parked row isn't waiting its turn, so it holds no place in the queue.
-    if (!closing && meta.outbox.filter((r) => r.lastErrorCode !== "search_refused").length >= MAX_OUTBOX)
+    if (!closing && meta.outbox.length - this.parked(meta) >= MAX_OUTBOX)
       return { code: "SHADOW_ANCHOR_BACKLOG", message: "Too many anchors are still waiting for Clockchain; the checkpoint is signed but not queued. Try again later." };
     meta.outbox.push(this.row("checkpoint", cp.hash, cp));
     return null;
+  }
+
+  private parked(meta: SessionMeta): number {
+    return meta.outbox.filter((r) => r.lastErrorCode === "search_refused").length;
   }
 
   /** What can still anchor this session's later steps. A failed row older than the latest anchor is history, not an outage. */
@@ -1216,7 +1228,7 @@ export class ShadowService {
     return {
       canAnchor: used < max - 1,
       closeCanAnchor: used < max,
-      blocked: trouble.some((r) => r.lastErrorCode === "anchor_limit") ? "day_limit" : trouble.some((r) => r.lastErrorCode === "log_budget") ? "budget" : trouble.length ? "outage" : null,
+      blocked: trouble.some((r) => r.lastErrorCode === "anchor_limit") ? "day_limit" : trouble.some((r) => r.lastErrorCode === "log_budget") ? "budget" : trouble.length ? "outage" : this.parked(meta) >= MAX_PARKED ? "unconfirmed" : null,
     };
   }
 
@@ -1922,8 +1934,9 @@ export class ShadowService {
       const packet = buildPacket(meta, cp, events, meta.network, this.now());
       const pin = buildPin(meta, cp);
       // Verified as a relying party would: strictly parsed from its JSON.
-      // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too.
-      const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog ? { requireOnline: true } : {}) });
+      // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too. So too
+      // anywhere for a record with no receipts when the ledger gave no answer: nothing says what it holds for this session.
+      const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog || online?.searchUnanswered ? { requireOnline: true } : {}) });
       const anchoring = anchoringOf(meta, events);
       // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere the counts are reported, and the result stays the verifier's.
       const report = this.autoLog ? withAnchoring(ownPinReport(checked), anchoring) : checked;
@@ -2317,7 +2330,7 @@ function anchorFrom(e: ShadowEvent): AnchorInfo | null {
 function reasonOf(r: OutboxRow): string | null {
   if (r.lastErrorCode === "search_refused") return "It may already be on Clockchain, and the ledger refused the search that would show it, so it hasn't been sent again.";
   if (r.lastErrorCode === "superseded") return "A later anchor covers these steps, so this one wasn't sent again.";
-  if (!r.lastErrorKind && r.state !== "pending" && r.sendStarted !== false) return "A send was started, and whether it reached Clockchain isn't known yet. The ledger is asked before it is sent again.";
+  if (!r.lastErrorKind && r.state !== "pending" && r.sendStarted === true) return "A send was started, and whether it reached Clockchain isn't known yet. The ledger is asked before it is sent again.";
   if (!r.lastErrorKind) return r.state === "pending" ? "Written to Clockchain; waiting for its block." : null;
   if (r.lastErrorCode === "anchor_limit") return "Today's anchor limit for your account is used up; it will be anchored on a later call.";
   if (r.lastErrorCode === "log_budget") return "The server's Clockchain write budget is used up; it will be anchored once it is raised.";

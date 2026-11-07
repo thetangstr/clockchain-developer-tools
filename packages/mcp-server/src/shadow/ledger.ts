@@ -42,6 +42,8 @@ let testLedger: ShadowLedger | undefined;
 let runtimeLedger: ShadowLedger | undefined;
 
 /** Test-only: route hosted Shadow's anchoring to a fake ledger (undefined restores the real client, built afresh). */
+const isNotFound = (e: unknown) => e instanceof ApiError && e.status === 404;
+
 export function __setShadowLedgerForTests(ledger: ShadowLedger | undefined): void {
   testLedger = ledger;
   runtimeLedger = undefined;
@@ -61,16 +63,25 @@ export function shadowLedgerIdentity(env: NodeJS.ProcessEnv = process.env): { cl
  * Writes under Shadow's own client. The ledger search is scoped to a client, so it also searches under the client that
  * earlier sessions were anchored under. Without that their online check would stop at indeterminate, and a retried anchor
  * could write again what the old client already wrote. A failed search under either is a failed search: never a partial
- * answer, which the verifier could read as "these records don't exist".
+ * answer, which the verifier could read as "these records don't exist". A 404 is each client's way of saying it has none,
+ * so it doesn't stand for the other's answer; but with nothing found at all the 404 goes on up, because a reader may need to
+ * know that no client really answered.
  */
-class ShadowClockchainClient extends ClockchainClient {
+export class ShadowClockchainClient extends ClockchainClient {
   constructor(config: ClockchainConfig, private readonly earlier: ClockchainClient) {
     super(config);
   }
   override async searchAsset(assetReferenceId: string): Promise<LedgerRecord[]> {
-    const [own, old] = await Promise.all([super.searchAsset(assetReferenceId), this.earlier.searchAsset(assetReferenceId)]);
-    const seen = new Set(own.map((r) => String(r.ledgerId)));
-    return [...own, ...old.filter((r) => !seen.has(String(r.ledgerId)))];
+    const read = (search: Promise<LedgerRecord[]>) => search.then((records) => ({ records, missed: null as unknown }), (e: unknown) => {
+      if (isNotFound(e)) return { records: [] as LedgerRecord[], missed: e };
+      throw e;
+    });
+    const [own, old] = await Promise.all([read(super.searchAsset(assetReferenceId)), read(this.earlier.searchAsset(assetReferenceId))]);
+    const seen = new Set(own.records.map((r) => String(r.ledgerId)));
+    const records = [...own.records, ...old.records.filter((r) => !seen.has(String(r.ledgerId)))];
+    const missed = own.missed ?? old.missed;
+    if (!records.length && missed) throw missed;
+    return records;
   }
 }
 
@@ -173,7 +184,7 @@ async function searchRecords(ledger: ShadowLedger, referenceId: string): Promise
   try {
     return await ledger.searchAsset(referenceId);
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) return [];
+    if (isNotFound(e)) return [];
     throw e;
   }
 }
@@ -255,7 +266,7 @@ function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {
 export async function prefetchOnline(
   ledger: ShadowLedger,
   o: { network: string; referenceId: string; ledgerIds: string[]; timeoutMs: number; concurrency?: number },
-): Promise<OnlineClient & { receiptsChecked: number }> {
+): Promise<OnlineClient & { receiptsChecked: number; searchUnanswered: boolean }> {
   const deadline = Date.now() + o.timeoutMs;
   const entries = new Map<string, { assetHash: string | null; blockHeight: string | null; blockTime: string | null; submittedAt: string | null }>();
   // A session with an anchor per step has hundreds of receipts: a few readers at once, one read per block.
@@ -295,9 +306,11 @@ export async function prefetchOnline(
   }
   let found: { ledgerId: string; assetHash: string | null }[] | undefined;
   let refused = false;
+  const receipts = o.ledgerIds.length > 0;
   try {
-    found = (await withDeadline(searchRecords(ledger, o.referenceId), deadline)).map((r) => ({ ledgerId: String(r.ledgerId), assetHash: str(r.assetHash) }));
+    found = (await withDeadline(ledger.searchAsset(o.referenceId), deadline)).map((r) => ({ ledgerId: String(r.ledgerId), assetHash: str(r.assetHash) }));
   } catch (e) {
+    // A 404 lands here too: it can mean none or a wrong route, so it is no answer, and can't vouch for what the ledger holds.
     found = undefined;
     const { kind } = classifyFailure(e);
     refused = kind === "Auth" || kind === "Permanent";
@@ -305,9 +318,11 @@ export async function prefetchOnline(
   const unreachable = () => Promise.reject(new Error("Clockchain could not be reached"));
   // Refused isn't unreachable. With no search on the client the verifier says what really happened, and witness stays
   // indeterminate. Only with receipts: with none, it would go on to say the ledger holds no record for this session.
-  const noSearch = refused && o.ledgerIds.length > 0;
+  const noSearch = refused && receipts;
   return {
     receiptsChecked: entries.size,
+    /** Nothing in the record to check, and the ledger gave no answer: the record can't be read as having nothing to find. */
+    searchUnanswered: refused && !receipts,
     network: o.network,
     logEntry: (id) => {
       const e = entries.get(id);
