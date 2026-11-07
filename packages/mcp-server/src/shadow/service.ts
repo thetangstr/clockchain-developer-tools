@@ -555,6 +555,13 @@ function withAnchoring<T extends { result: "pass" | "fail" | "indeterminate"; ex
   };
 }
 
+/**
+ * Whether the anchoring counts decide the result, not only sit beside it. With logging on by default they always do. On a listed
+ * connection the person chooses when to anchor, so a partly anchored record keeps the verifier's result; but one with nothing
+ * on the ledger at all doesn't pass, whether its close failed or hasn't landed yet: no receipt says anything about it.
+ */
+const anchoringDecides = (autoLog: boolean, a: Anchoring) => autoLog || (!a.anchored_steps && (a.unanchored_steps > 0 || a.closing_unanchored > 0));
+
 function cleanText(v: unknown, max: number): string {
   return String(v).replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, max).toWellFormed();
 }
@@ -1938,8 +1945,9 @@ export class ShadowService {
       // anywhere for a record with no receipts when the ledger gave no answer: nothing says what it holds for this session.
       const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog || online?.searchUnanswered ? { requireOnline: true } : {}) });
       const anchoring = anchoringOf(meta, events);
-      // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere the counts are reported, and the result stays the verifier's.
-      const report = this.autoLog ? withAnchoring(ownPinReport(checked), anchoring) : checked;
+      // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere it needs at least some of the record to be.
+      const own = this.autoLog ? ownPinReport(checked) : checked;
+      const report = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own;
       return {
         session_id: sessionId,
         result: report.result,
@@ -2126,7 +2134,7 @@ export class ShadowService {
             }, null, 1));
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
-            const shown = this.autoLog ? withAnchoring(ownPinReport(report), anchoring) : ownPinReport(report);
+            const shown = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(ownPinReport(report), anchoring) : ownPinReport(report);
             const html = withServerSteps(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events);
             body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }

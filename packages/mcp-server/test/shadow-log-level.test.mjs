@@ -540,7 +540,7 @@ test("server notes aren't recorded steps, so a note after the last anchor can't 
   assert.deepEqual({ ...got.anchoring, reason: "" }, { recorded_steps: 2, anchored_steps: 2, unanchored_steps: 0, closing_steps: 0, closing_unanchored: 0, reason: "" });
 });
 
-test("listed paths report the counts and keep today's result", async () => {
+test("a listed path doesn't pass a record with nothing on the ledger, in verify or the viewer", async () => {
   const { svc, fake } = service({ autoLog: false });
   const s = await svc.startSession(O, { title: "t", agents: [{ id: "a" }] }, BASE);
   await svc.record(O, { session_id: s.session_id, agent: "a", kind: "task", content: "x" });
@@ -550,13 +550,56 @@ test("listed paths report the counts and keep today's result", async () => {
   assert.equal(closed.anchoring.unanchored_steps, 2);
   assert.equal(closed.anchoring.closing_unanchored, 2, "reported here too");
   const v = await svc.verify(O, { session_id: s.session_id }, BASE);
-  assert.equal(v.result, "pass", "the result stays the verifier's here");
+  assert.equal(v.result, "indeterminate", v.summary);
   assert.equal(v.anchoring.anchored_steps, 0);
-  assert.equal(check(v, "anchoring"), undefined);
+  assert.equal(check(v, "anchoring").status, "indeterminate");
+  assert.match(v.summary, /0 of 2 recorded steps/);
   const html = await viewer(svc, s.session_id);
-  assert.equal(viewerResult(html), "pass");
+  assert.equal(viewerResult(html), "indeterminate", "the viewer says the same");
   assert.match(html, /Anchoring: 0 of 2 recorded steps/);
   assert.equal((await svc.getSession(O, { session_id: s.session_id }, BASE)).anchoring.recorded_steps, 2);
+});
+
+test("a listed path: a close that hasn't landed doesn't pass, and passes once it has", async () => {
+  const { svc, fake } = service({ autoLog: false });
+  const s = await svc.startSession(O, { title: "t", agents: [{ id: "a" }] }, BASE);
+  await svc.record(O, { session_id: s.session_id, agent: "a", kind: "task", content: "x" });
+  await svc.record(O, { session_id: s.session_id, agent: "a", kind: "message", content: "y" });
+  fake.down = true;
+  await svc.close(O, { session_id: s.session_id, status: "succeeded" }, BASE);
+  assert.equal((await svc.verify(O, { session_id: s.session_id }, BASE)).result, "indeterminate");
+  assert.equal(viewerResult(await viewer(svc, s.session_id)), "indeterminate");
+  fake.down = false;
+  await svc.checkpoint(O, { session_id: s.session_id });
+  const v = await svc.verify(O, { session_id: s.session_id }, BASE);
+  assert.equal(v.anchoring.anchored_steps, 2, v.anchoring.reason);
+  assert.equal(v.result, "pass", v.summary);
+  assert.equal(check(v, "anchoring"), undefined);
+  assert.equal(viewerResult(await viewer(svc, s.session_id)), "pass");
+});
+
+test("a listed path: a partly anchored record keeps the verifier's result and reports the counts", async () => {
+  const { svc, fake } = service({ autoLog: false });
+  const s = await svc.startSession(O, { title: "t", agents: [{ id: "a" }] }, BASE);
+  await svc.record(O, { session_id: s.session_id, agent: "a", kind: "task", content: "x" });
+  await svc.checkpoint(O, { session_id: s.session_id });
+  await svc.record(O, { session_id: s.session_id, agent: "a", kind: "message", content: "y" });
+  fake.failNextLog = permanent();
+  await svc.close(O, { session_id: s.session_id, status: "succeeded" }, BASE);
+  const v = await svc.verify(O, { session_id: s.session_id }, BASE);
+  assert.equal(v.anchoring.anchored_steps, 1);
+  assert.equal(v.anchoring.unanchored_steps, 1);
+  assert.equal(v.result, "pass", "the person chose when to anchor here, and some of it is on the ledger");
+  assert.equal(check(v, "anchoring"), undefined);
+  assert.equal(viewerResult(await viewer(svc, s.session_id)), "pass");
+});
+
+test("a listed session with nothing recorded and nothing owed isn't held to anchoring", async () => {
+  const { svc } = service({ autoLog: false });
+  const s = await svc.startSession(O, { title: "t" }, BASE);
+  const v = await svc.verify(O, { session_id: s.session_id }, BASE);
+  assert.equal(v.anchoring.recorded_steps, 0);
+  assert.equal(check(v, "anchoring"), undefined);
 });
 
 test("shadow_record on an auto-log path says it wrote nothing to the ledger, and the counts cover it", async () => {
@@ -2132,7 +2175,7 @@ test("with no receipts a 404 or a refusal says nothing about the ledger, and a l
       assert.equal(check(v, "witness").status, "indeterminate");
       assert.doesNotMatch(check(v, "witness").reason, /holds no record/, `autoLog ${autoLog}, ${answer}`);
     }
-    // The ledger really says none: the text stands, and each path keeps its result.
+    // The ledger really says none: the text stands, and with nothing anchored neither path passes.
     const { svc, fake } = service({ autoLog });
     fake.down = true;
     const s = await svc.startSession(O, { title: "t" }, BASE);
@@ -2142,7 +2185,8 @@ test("with no receipts a 404 or a refusal says nothing about the ledger, and a l
     fake.searchAsset = async () => [];
     const v = await svc.verify(O, { session_id: s.session_id }, BASE);
     assert.match(check(v, "witness").reason, /the ledger holds no record for this session that the packet leaves out/);
-    assert.equal(v.result, autoLog ? "indeterminate" : "pass");
+    assert.equal(v.result, "indeterminate", `autoLog ${autoLog}`);
+    assert.equal(check(v, "anchoring").status, "indeterminate", `autoLog ${autoLog}`);
   }
 });
 
