@@ -105,7 +105,7 @@ const CREDENTIAL_AGENT = "An agent id can't hold a key or token, and nothing was
 const MAX_IDLE_CLOSES_PER_PASS = 200;
 const IDLE_AT_LIMIT_MS = 60 * 60_000;
 const START_NEW = "Call again without session_id to start a new session; keep logging there.";
-const NEW_SESSION_NOTE = "This session_id goes with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed; shadow_close_session and shadow_verify are for when the person asks to finish or verify.";
+const NEW_SESSION_NOTE = "This session_id goes with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed and its anchors land; shadow_close_session and shadow_verify are for when the person asks to finish or verify.";
 /** shadow_close_session's person_messages: well beyond any conversation, and small enough to read as a count. */
 export const MAX_PERSON_MESSAGES = 10_000;
 
@@ -448,13 +448,17 @@ const changeText = (c: LevelChange) => c.from === c.to
   : `at step ${c.seq} this session moved from ${c.from} to ${c.to}${c.set_by ? `, set by the ${c.set_by}` : ""}`;
 const changesText = (changes: LevelChange[]) => (changes.length ? ` During this session: ${changes.map(changeText).join("; ")}.` : "");
 
-export type Anchoring = { recorded_steps: number; anchored_steps: number; unanchored_steps: number; reason: string };
+/** The steps that say how a session ended. An agent didn't record them, but "every run ended and it closed" rests on them. */
+const CLOSING_KINDS = new Set(["execution.receipt", "coverage.gap", "session.closed"]);
+
+export type Anchoring = { recorded_steps: number; anchored_steps: number; unanchored_steps: number; closing_steps: number; closing_unanchored: number; reason: string };
 const anchoredOf = (a: Anchoring) => `${a.anchored_steps} of ${a.recorded_steps} recorded steps ${a.anchored_steps === 1 ? "has" : "have"} a checkpoint with a Clockchain receipt`;
+const anchoringCounts = (a: Anchoring) => `${anchoredOf(a)}${a.unanchored_steps ? `, and ${a.unanchored_steps} ${a.unanchored_steps === 1 ? "does" : "do"} not` : ""}.${a.closing_unanchored ? " The session's ending has no such checkpoint, so how it ended isn't anchored." : ""}`;
 
 /**
- * How many steps an agent recorded, and how many of those a checkpoint with a Clockchain receipt covers, from the record.
- * Closing steps, collector steps and server notes aren't counted: the vendored verifier sees none of this, because its checks
- * are about the record's integrity, so a record can pass them with most of its steps never anchored.
+ * How many steps an agent recorded, and how many of those a checkpoint with a Clockchain receipt covers, from the record;
+ * and the same for the steps that say how it ended. Server notes and receipts aren't counted. The vendored verifier sees none
+ * of this, because its checks are about the record's integrity, so a record can pass them with most of it never anchored.
  */
 function anchoringOf(meta: SessionMeta, events: ShadowEvent[]): Anchoring {
   const steps = events.filter(isRecordedStep);
@@ -466,25 +470,60 @@ function anchoringOf(meta: SessionMeta, events: ShadowEvent[]): Anchoring {
     if (typeof count === "number" && Number.isSafeInteger(count)) covered = Math.max(covered, count);
   }
   const left = steps.filter((e) => e.body.seq > covered);
-  const counts = { recorded_steps: steps.length, anchored_steps: steps.length - left.length, unanchored_steps: left.length };
-  if (!steps.length) return { ...counts, reason: "No steps have been recorded." };
-  if (!left.length) return { ...counts, reason: `All ${steps.length} recorded ${steps.length === 1 ? "step is" : "steps are"} covered by a checkpoint with a Clockchain receipt.` };
-  const said = `${left.length} of ${steps.length} recorded ${steps.length === 1 ? "step has" : "steps have"} no checkpoint with a Clockchain receipt.`;
-  const rows = meta.outbox.filter((r) => r.kind === "checkpoint" && (r.body?.count ?? 0) >= left[0].body.seq);
-  const waiting = rows.find((r) => r.state !== "failed");
-  if (waiting) return { ...counts, reason: `${said} A checkpoint for them is still waiting: ${reasonOf(waiting) ?? "it hasn't been sent to Clockchain yet."}` };
-  const failed = rows.at(-1);
-  if (failed) return { ...counts, reason: `${said} The checkpoint for them was not anchored: ${reasonOf(failed) ?? "Clockchain did not accept it."}` };
-  return { ...counts, reason: `${said} ${meta.state === "open" ? "No checkpoint for them has been sent yet." : "No checkpoint for them was sent, and this session is closed, so none is on its way."}` };
+  const closing = events.filter((e) => CLOSING_KINDS.has(e.body.kind));
+  const ending = closing.filter((e) => e.body.seq > covered);
+  const counts = { recorded_steps: steps.length, anchored_steps: steps.length - left.length, unanchored_steps: left.length, closing_steps: closing.length, closing_unanchored: ending.length };
+  if (!left.length && !ending.length) {
+    const what = steps.length ? `All ${steps.length} recorded ${steps.length === 1 ? "step is" : "steps are"}` : closing.length ? "No steps were recorded, and the session's ending is" : "";
+    return { ...counts, reason: what ? `${what}${steps.length && closing.length ? ", with the session's ending," : ""} covered by a checkpoint with a Clockchain receipt.` : "No steps have been recorded." };
+  }
+  // Only what is true of these steps: a waiting checkpoint can reach some of them and not the rest.
+  const owed = [...left, ...ending];
+  const rows = meta.outbox.filter((r) => r.kind === "checkpoint" && (r.body?.count ?? 0) > covered);
+  const reach = (list: OutboxRow[]) => Math.max(0, ...list.map((r) => r.body?.count ?? 0));
+  const live = rows.filter((r) => r.state !== "failed"), lost = rows.filter((r) => r.state === "failed");
+  const waiting = owed.filter((e) => e.body.seq <= reach(live)).length;
+  const failed = owed.filter((e) => e.body.seq > reach(live) && e.body.seq <= reach(lost)).length;
+  const nothing = owed.length - waiting - failed;
+  const liveRow = live.find((r) => (r.body?.count ?? 0) === reach(live)), lostRow = lost.find((r) => (r.body?.count ?? 0) === reach(lost));
+  return {
+    ...counts,
+    reason: [
+      left.length ? `${left.length} of ${steps.length} recorded ${steps.length === 1 ? "step has" : "steps have"} no checkpoint with a Clockchain receipt.` : "",
+      ending.length ? `The session's ending (${ending.length} ${ending.length === 1 ? "step" : "steps"}: how runs ended, and the close) has none${left.length ? " either" : ""}.` : "",
+      waiting && liveRow ? `A checkpoint still waiting covers ${waiting} of these ${owed.length}: ${reasonOf(liveRow) ?? "it hasn't been sent to Clockchain yet."}` : "",
+      failed && lostRow ? `A checkpoint that was not anchored covers ${failed} of these ${owed.length}: ${reasonOf(lostRow) ?? "Clockchain did not accept it."}` : "",
+      nothing ? `${nothing} of these ${owed.length} ${nothing === 1 ? "has" : "have"} nothing on its way${meta.state === "open" ? " yet" : ", and this session is closed"}.` : "",
+    ].filter(Boolean).join(" "),
+  };
+}
+
+/** Whether a closed session's ending has no checkpoint at all: past the furthest one, anchored or queued, there is more than receipts. */
+function finalOwed(meta: SessionMeta): boolean {
+  if (meta.state !== "closed") return false;
+  const top = Math.max(0, ...meta.anchors.map((a) => a.count ?? 0), ...meta.outbox.filter((r) => r.kind === "checkpoint").map((r) => r.body?.count ?? 0));
+  return meta.seq - top > meta.anchors.filter((a) => a.seq > top).length;
+}
+
+/**
+ * The next row to send. Oldest first, except on a closed session: there the close's row covers everything, so it goes first,
+ * and older unpaid rows wait, because once it lands they aren't worth an anchor (see supersede). A row already written costs
+ * nothing to follow up.
+ */
+function nextRow(meta: SessionMeta, tried: Set<string>): OutboxRow | undefined {
+  const live = meta.outbox.filter((r) => r.state !== "failed");
+  if (meta.state !== "closed") return live.find((r) => !tried.has(r.id));
+  const checkpoints = live.filter((r) => r.kind === "checkpoint").sort((a, b) => (b.body?.count ?? 0) - (a.body?.count ?? 0));
+  return [...checkpoints.slice(0, 1), ...live.filter((r) => r.kind === "start"), ...checkpoints.slice(1).filter((r) => r.ledgerId)].find((r) => !tried.has(r.id));
 }
 
 /**
  * The verifier's report with the anchoring counts in it. Its own checks stay as they are; a pass becomes indeterminate if any
- * recorded step has no anchored checkpoint, and fail and indeterminate keep their result and gain the counts.
+ * recorded step, or the session's ending, has no anchored checkpoint, and fail and indeterminate keep their result and gain the counts.
  */
 function withAnchoring<T extends { result: "pass" | "fail" | "indeterminate"; exitCode: 0 | 1 | 2; summary: string; indeterminate: string[]; checks: { name: string; status: string; reason: string }[] }>(report: T, a: Anchoring): T {
-  if (!a.unanchored_steps) return report;
-  const counts = `${anchoredOf(a)}, and ${a.unanchored_steps} ${a.unanchored_steps === 1 ? "does" : "do"} not.`;
+  if (!a.unanchored_steps && !a.closing_unanchored) return report;
+  const counts = anchoringCounts(a);
   return {
     ...report,
     ...(report.result === "pass" ? { result: "indeterminate" as const, exitCode: 2 as const } : {}),
@@ -513,7 +552,9 @@ function sessionIdOf(v: unknown): string {
   return v;
 }
 
-const loggingOff = () => new ShadowError("LOGGING_OFF", "Logging is off for this Clockchain account, because the person turned it off. Nothing was recorded. Do not log this step and do not show a logging footer. If the person asks to turn logging back on, call clockchain_logging {enabled: true}.");
+const UNREADABLE_SETTING = "Clockchain can't read this account's logging setting right now, so nothing was logged. Do not show a logging footer. Setting the account's level with clockchain_log_level resets it.";
+
+const loggingOff = () => new ShadowError("LOGGING_OFF", "Logging is off for this Clockchain account. Nothing was recorded. Do not log this step and do not show a logging footer. If the person asks to turn logging back on, call clockchain_logging {enabled: true}.");
 
 // ---- automatic logging: results ----------------------------------------------------------------------------------
 
@@ -685,7 +726,7 @@ function sessionLogText(log: ReturnType<typeof sessionLog>, cap?: { max: number;
     log.capture_note,
     log.log_level === "step" && !log.log_level_changes.length ? "" : `Logging level: ${log.log_level}. Each anchor covers every step up to it.${changesText(log.log_level_changes)}`,
     `Session \`${log.session_id}\`, ${log.status}. ${t.steps} ${t.steps === 1 ? "step" : "steps"}: ${t.anchored} anchored, ${t.pending} pending${t.not_anchored ? `, ${t.not_anchored} not anchored` : ""}. ${blocks}`,
-    log.anchoring.unanchored_steps ? log.anchoring.reason : "",
+    log.anchoring.unanchored_steps || log.anchoring.closing_unanchored ? log.anchoring.reason : "",
     lines.join("\n"),
     ...(cap && log.steps.length > shown.length ? [`Showing the first ${shown.length} of ${log.steps.length} steps. ${cap.rest ? `The rest are at ${cap.rest}` : "This session's links were revoked, so the rest have no link."}`] : []),
     LEDGER_HASH_NOTE,
@@ -775,6 +816,8 @@ function withStepAnchors(html: string, events: ShadowEvent[], cap: string): stri
   return at < 0 ? html : html.slice(0, at) + table + html.slice(at);
 }
 
+const anchoringCaveat = (a: Anchoring) => `This command doesn't check anchoring, offline or online, so it can pass a record with steps no anchored checkpoint covers. This record: ${anchoringCounts(a)}`;
+
 const NOT_PROVIDED = "Not provided";
 /** An agent as a reader sees it. Its purpose and owner come from the hashed record, so `reported` is what `facts.agents` holds. */
 const agentView = (a: AgentEntry, reported: Pick<ReportedAgent, "purpose" | "accountable_owner"> | undefined) => ({ id: a.id, role: a.role, purpose: reported?.purpose ?? NOT_PROVIDED, accountable_owner: reported?.accountable_owner ?? NOT_PROVIDED });
@@ -784,6 +827,27 @@ function withSessionDetails(html: string, meta: SessionMeta, facts: SessionFacts
   const rows = meta.agents.map((a) => agentView(a, facts.agents.get(a.id))).map((a) => `<tr><td>${escHtml(a.id)}</td><td>${escHtml(a.purpose)}</td><td>${escHtml(a.accountable_owner)}</td></tr>`).join("");
   const details = `<h2>Session details</h2><p class="meta">Logging level: ${escHtml(facts.level)}.${escHtml(changesText(facts.changes))} Purpose and accountable owner are what the agent reported; this record doesn't show they are true.</p><p class="meta">Anchoring: ${escHtml(anchoredOf(anchoring))}. ${escHtml(anchoring.reason)}</p><table><tr><th>Agent ID</th><th>Purpose</th><th>Accountable owner</th></tr>${rows}</table>`;
   return html.replace("<h2>What this record shows</h2>", () => `${details}<h2>What this record shows</h2>`);
+}
+
+/** Says beside the verify command what it can't see. Step content is escaped on the page, so this sentence can only be the library's. */
+function withAnchoringCaveat(html: string, a: Anchoring): string {
+  return html.replace("Exit code 0 is pass, 2 indeterminate, 1 fail.</p>", () => `Exit code 0 is pass, 2 indeterminate, 1 fail.</p><p class="meta">${escHtml(anchoringCaveat(a))}</p>`);
+}
+
+/**
+ * Marks the server's own steps in the library's timeline, which prints every note alike. The mark is markup, and step content
+ * is escaped on the page, so an agent's note can use the same words and still not read as one.
+ */
+function withServerSteps(html: string, events: ShadowEvent[]): string {
+  const from = html.indexOf("<h2>Timeline</h2>"), to = html.indexOf("<h2>Clockchain receipts");
+  if (from < 0 || to < from) return html;
+  let timeline = html.slice(from, to);
+  for (const e of events) {
+    if (!AGENT_KINDS.has(e.body.kind) || isRecordedStep(e)) continue;
+    const row = `<tr><td>${e.body.seq}</td><td>${escHtml(e.body.actor)}</td><td>`;
+    timeline = timeline.replace(row, () => `${row}<b>Server's note.</b> `);
+  }
+  return html.slice(0, from) + timeline + html.slice(to);
 }
 
 // ---- the service ------------------------------------------------------------------------------------------------------
@@ -903,17 +967,18 @@ export class ShadowService {
    * Closes open sessions with no new step for idleCloseMs: a final checkpoint, anchored, as if the person had closed them.
    * Capped per pass, so a backlog after a long stop can't spend a day's anchors at once; the next pass takes the rest.
    * Not at start-up, so a restart can't close a session someone is coming back to before they can reach it. Nobody returns
-   * to a session closed this way, so the pass also retries the anchors those still owe.
+   * to a closed session, so the pass also retries the anchors closed sessions still owe, within the same limits.
    */
   async closeIdle(): Promise<number> {
-    if (!this.limits.idleCloseMs || this.idlePassRunning) return 0;
+    if (this.idlePassRunning) return 0;
     this.idlePassRunning = true;
     let closed = 0;
     try {
       const now = this.now().getTime();
-      const cutoff = now - this.limits.idleCloseMs;
+      // Without idle closing the pass still retries what closed sessions owe: nobody comes back to a closed session.
+      const cutoff = this.limits.idleCloseMs ? now - this.limits.idleCloseMs : -Infinity;
       const { idle, owed } = await this.store.idleScan(cutoff, now, MAX_IDLE_CLOSES_PER_PASS);
-      for (const s of owed) await this.drain(s.ownerKey, s.sessionId).catch((e) => this.log("shadow_idle_close_failed", { sessionId: s.sessionId, error: (e as Error).name }));
+      for (const s of owed) await this.drain(s.ownerKey, s.sessionId, { stopOnFailure: true }).catch((e) => this.log("shadow_idle_close_failed", { sessionId: s.sessionId, error: (e as Error).name }));
       for (const s of idle) {
         try {
           if (!(await this.finishIdle(s.ownerKey, s.sessionId, cutoff))) continue;
@@ -936,18 +1001,36 @@ export class ShadowService {
   private finishIdle(ownerKey: string, sessionId: string, cutoff: number): Promise<boolean> {
     return this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state !== "open" || (meta.lastStepAt && Date.parse(meta.lastStepAt) > cutoff)) return false;
-      // Busy now is the common reason a close would stop halfway, so find out before anything is written; the next pass tries again.
-      await this.withEvents(meta, () => undefined);
-      for (const r of meta.runs.filter((x) => x.open)) this.appendStep(meta, "coverage.gap", r.agent, { reason: "run still open when the session closed by itself, after no new steps" }, { agentRunId: r.id }, false);
-      this.appendStep(meta, "session.closed", "collector", { events: meta.seq }, {}, false);
-      meta.closedAt = this.now().toISOString();
-      meta.closedIdle = true;
-      const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
-      meta.checkpoint = cp;
-      this.queueCheckpoint(meta, cp, true);
-      this.store.writeMeta(meta);
+      await this.sealClose(meta, () => {
+        for (const r of meta.runs.filter((x) => x.open)) this.appendStep(meta, "coverage.gap", r.agent, { reason: "run still open when the session closed by itself, after no new steps" }, { agentRunId: r.id }, false);
+        this.appendStep(meta, "session.closed", "collector", { events: meta.seq }, {}, false);
+        meta.closedAt = this.now().toISOString();
+        meta.closedIdle = true;
+      });
       return true;
     });
+  }
+
+  /**
+   * Writes a session's ending and queues its final checkpoint under one hold of the heavy gate. Being busy can only refuse this
+   * before anything is written: once session.closed is on disk, nothing here waits for the gate.
+   */
+  private sealClose(meta: SessionMeta, ending: () => void): Promise<{ target: string; refused: { code: string; message: string } | null }> {
+    return this.heavy.run(() => {
+      ending();
+      const cp = checkpointOver(meta, this.store.readEvents(meta), this.store.operator(meta.ownerKey, this.now()).keys, this.now());
+      meta.checkpoint = cp;
+      const refused = this.queueCheckpoint(meta, cp, true);
+      this.store.writeMeta(meta);
+      return { target: cp.hash, refused };
+    });
+  }
+
+  /** Queues the final checkpoint of a closed session that has none, which a crash in the middle of a close leaves. The caller writes the metadata. */
+  private queueFinal(meta: SessionMeta, events: ShadowEvent[]): { target: string; refused: { code: string; message: string } | null } {
+    const cp = checkpointOver(meta, events, this.store.operator(meta.ownerKey, this.now()).keys, this.now());
+    meta.checkpoint = cp;
+    return { target: cp.hash, refused: this.queueCheckpoint(meta, cp, true) };
   }
 
   /** For /metrics: totals only, and read from memory, so a scrape never walks the disk. */
@@ -990,6 +1073,8 @@ export class ShadowService {
         advance(m, e, 0);
         if (isRecordedStep(e)) m.agentSteps++;
         if (e.body.kind === "session.closed") m.closedAt ??= e.body.collectedAt;
+        const { capture } = e.body.payload as { capture?: unknown };
+        if (e.body.kind === "agent.message" && isObj(capture)) m.capture = capture as SessionMeta["capture"];
         const a = anchorFrom(e);
         if (a) m.anchors.push(a);
       }
@@ -1005,12 +1090,14 @@ export class ShadowService {
           if (facts.setBy) m.logLevelBy = facts.setBy;
         }
       }
-      // A crash can also land right after session.opened: its note, and the start marker's place in the queue, come now.
-      if (m.seq === 1 && m.accountLevelSeen !== undefined) {
-        const start = startNote(m);
+      // What a crash in the middle of a start leaves undone: the start note, and the start marker's place in the queue.
+      if (events.length) {
+        const start = m.state === "open" && m.accountLevelSeen !== undefined && !events.some((e) => serverNoteOf(e)?.kind === "session_start") ? startNote(m) : null;
         if (start) this.appendNote(m, start.text, start.note);
-        if (!(events[0].body.payload as { receipt?: unknown }).receipt && !m.outbox.some((r) => r.kind === "start")) m.outbox.push(this.row("start", m.startHash, null, { attempts: 1 }));
+        if (!m.anchors.some((a) => a.marker === "start") && !m.outbox.some((r) => r.kind === "start")) m.outbox.push(this.row("start", m.startHash, null, { attempts: 1 }));
       }
+      // And in the middle of a close: session.closed landed, its checkpoint didn't.
+      if (finalOwed(m)) this.queueFinal(m, this.store.readEvents(m));
       this.store.writeMeta(m);
       this.log("shadow_session_reconciled", { sessionId: m.sessionId, steps: m.seq });
       return m;
@@ -1254,7 +1341,8 @@ export class ShadowService {
     return out;
   }
 
-  async record(ownerId: string, input: { session_id?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown } & DeclaredInput) {
+  /** `logs`: whether this endpoint has the logging tools. Anywhere else the result is what it always was, whatever the server's flags. */
+  async record(ownerId: string, input: { session_id?: unknown; agent?: unknown; kind?: unknown; content?: unknown; run_id?: unknown } & DeclaredInput, logs: boolean = this.autoLog) {
     const sessionId = sessionIdOf(input.session_id);
     if (typeof input.kind !== "string" || !(RECORD_KINDS as readonly string[]).includes(input.kind))
       throw bad(`kind must be one of ${RECORD_KINDS.join(", ")}.`);
@@ -1301,7 +1389,7 @@ export class ShadowService {
       this.store.writeMeta(meta);
       return {
         seq: event.body.seq, hash: event.hash, kind: spec.kind, run_id: runId, ...declaredFields(declaredOf(event.body.payload)),
-        ...(this.autoLog ? { anchor_status: "deferred" as const, anchor_reason: recordedReason(session.level, this.outlook(meta)) } : {}),
+        ...(logs ? { anchor_status: "deferred" as const, anchor_reason: recordedReason(session.level, this.outlook(meta)) } : {}),
       };
     });
   }
@@ -1331,18 +1419,27 @@ export class ShadowService {
     try {
       return !this.store.loggingOff(ownerKeyOf(ownerId));
     } catch {
-      throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't read this account's logging setting right now, so nothing was logged. Do not show a logging footer.");
+      throw new ShadowError("SHADOW_UNAVAILABLE", UNREADABLE_SETTING);
     }
   }
 
   setLogging(ownerId: string, enabled: boolean) {
-    this.store.setLoggingOff(ownerKeyOf(ownerId), !enabled);
+    const ownerKey = ownerKeyOf(ownerId);
+    this.store.setLoggingOff(ownerKey, !enabled);
     this.log("shadow_logging_set", { enabled });
+    let levelReadable = true;
+    try {
+      this.store.logLevel(ownerKey);
+    } catch {
+      levelReadable = false;
+    }
     return {
-      logging: { enabled },
-      message: enabled
-        ? "Logging is on for this account. Steps are logged from now on, and a reply usually ends with show_user from the last result."
-        : "Logging is off for this account. Do not log steps and do not show a logging footer until the person turns it back on.",
+      logging: { enabled, ...(levelReadable ? {} : { level_readable: false }) },
+      message: !enabled
+        ? "Logging is off for this account. Do not log steps and do not show a logging footer until the person turns it back on."
+        : levelReadable
+          ? "Logging is on for this account. Steps are logged from now on, and a reply usually ends with show_user from the last result."
+          : "Logging is on for this account, but its logging level can't be read, so steps are still refused. Setting a level with clockchain_log_level ends that.",
     };
   }
 
@@ -1351,7 +1448,7 @@ export class ShadowService {
     try {
       return this.store.logLevel(ownerKey);
     } catch {
-      throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't read this account's logging setting right now, so nothing was logged. Do not show a logging footer.");
+      throw new ShadowError("SHADOW_UNAVAILABLE", UNREADABLE_SETTING);
     }
   }
 
@@ -1366,17 +1463,22 @@ export class ShadowService {
     if (!level) throw bad("level must be step, turn or milestone.");
     const ownerKey = ownerKeyOf(ownerId);
     if (this.deletedOwners.has(ownerKey)) throw new ShadowError("SHADOW_ACCOUNT_DELETED", "This account was deleted, so nothing was changed.");
+    let reset = false;
     try {
-      this.store.setLogLevel(ownerKey, level);
+      ({ reset } = this.store.setLogLevel(ownerKey, level));
     } catch {
       throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't change this account's logging setting right now, so it stays as it was.");
     }
     this.log("shadow_log_level_set", { level });
+    const after = !reset ? "" : logs
+      ? " This account's settings couldn't be read, so they were reset: this level is kept, and logging is off until clockchain_logging turns it back on."
+      : " This account's settings couldn't be read, so they were reset, and sessions can start again.";
     return {
       log_level: level,
-      message: logs
+      ...(reset ? { settings_reset: true } : {}),
+      message: (logs
         ? `The logging level for this account is ${level}. It applies to sessions on this account: a new session runs at this level or a finer one chosen when it starts, and an open session at a coarser level moves to it on its next step. Each open session notes the change in its record on its next step.`
-        : `The logging level for this account is ${level}. It is saved, and it doesn't change when anchors happen on this connection: anchors happen at the start, at shadow_checkpoint and at the close.`,
+        : `The logging level for this account is ${level}. It is saved, and it doesn't change when anchors happen on this connection: anchors happen at the start, at shadow_checkpoint and at the close.`) + after,
     };
   }
 
@@ -1511,7 +1613,7 @@ export class ShadowService {
       // level the session is over, since every step wants an anchor. At turn and milestone, steps were recorded on the
       // promise of a later anchor, and refusing the reply would leave actions with no answer: it is recorded, and says it has no anchor.
       if (anchoring && level === "step" && !this.outlook(meta).canAnchor)
-        throw new ShadowError("SHADOW_LIMIT_SESSION_ANCHORS", `This session has used its ${this.limits.maxAnchorsPerSession} anchors, so nothing was recorded. ${START_NEW}`);
+        throw new ShadowError("SHADOW_LIMIT_SESSION_ANCHORS", `This session has used the ${this.limits.maxAnchorsPerSession - 1} anchors it can spend before the close, so nothing was recorded. ${START_NEW}`);
       if (meta.eventsBytes + totalBytes + steps.length * 1024 + 8192 > this.agentEventsMax)
         throw new ShadowError("SHADOW_LIMIT_SESSION_SIZE", `This session is full (${Math.round(this.limits.maxSessionBytes / 1048576)} MB on disk), so nothing was recorded. ${START_NEW}`);
       const full = this.accountFull(meta.ownerKey, totalBytes);
@@ -1613,7 +1715,13 @@ export class ShadowService {
     const ownerKey = ownerKeyOf(ownerId);
     const made: { target: string | null; refused: { code: string; message: string } | null } = { target: null, refused: null };
     await this.session(ownerKey, sessionId, async (meta) => {
-      if (meta.state === "closed") return; // Only retries what is still owed.
+      if (meta.state === "closed") { // Only retries what is still owed.
+        if (finalOwed(meta)) {
+          await this.withEvents(meta, (events) => this.queueFinal(meta, events));
+          this.store.writeMeta(meta);
+        }
+        return;
+      }
       const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
       meta.checkpoint = cp;
       made.target = cp.hash;
@@ -1642,20 +1750,28 @@ export class ShadowService {
     const ownerKey = ownerKeyOf(ownerId);
     const made: { target: string; refused: { code: string; message: string } | null } = { target: "", refused: null };
     await this.session(ownerKey, sessionId, async (meta) => {
-      if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is already closed.");
-      if (counted !== null) await this.recordCapture(meta, counted);
-      // Session.close(): runs still open become gaps, unless the agent reports how they ended (status); then session.closed.
-      for (const r of meta.runs.filter((x) => x.open)) {
-        if (status) this.appendStep(meta, "execution.receipt", r.agent, { status, facts: {} }, { agentRunId: r.id }, false);
-        else this.appendStep(meta, "coverage.gap", r.agent, { reason: clip("run still open when the session closed", 2000) }, { agentRunId: r.id }, false);
+      if (meta.state === "closed") {
+        // A retry finishes what an earlier close left: a final checkpoint never queued, or one still waiting. Otherwise it is over.
+        if (finalOwed(meta)) {
+          Object.assign(made, await this.withEvents(meta, (events) => this.queueFinal(meta, events)));
+          this.store.writeMeta(meta);
+          return;
+        }
+        const waiting = nextRow(meta, new Set());
+        if (waiting?.kind !== "checkpoint") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is already closed.");
+        made.target = waiting.hash;
+        return;
       }
-      this.appendStep(meta, "session.closed", "collector", { events: meta.seq }, {}, false);
-      meta.closedAt = this.now().toISOString();
-      const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
-      meta.checkpoint = cp;
-      made.target = cp.hash;
-      made.refused = this.queueCheckpoint(meta, cp, true);
-      this.store.writeMeta(meta);
+      Object.assign(made, await this.sealClose(meta, () => {
+        if (counted !== null) this.recordCapture(meta, counted);
+        // Session.close(): runs still open become gaps, unless the agent reports how they ended (status); then session.closed.
+        for (const r of meta.runs.filter((x) => x.open)) {
+          if (status) this.appendStep(meta, "execution.receipt", r.agent, { status, facts: {} }, { agentRunId: r.id }, false);
+          else this.appendStep(meta, "coverage.gap", r.agent, { reason: clip("run still open when the session closed", 2000) }, { agentRunId: r.id }, false);
+        }
+        this.appendStep(meta, "session.closed", "collector", { events: meta.seq }, {}, false);
+        meta.closedAt = this.now().toISOString();
+      }));
     });
     await this.drain(ownerKey, sessionId);
     return this.session(ownerKey, sessionId, async (meta) => {
@@ -1682,8 +1798,8 @@ export class ShadowService {
    * comparison is inside the tamper-evident record. It joins no run, so it can't change whether a run counts as covered,
    * and so can't change the verifier's verdict. Its `capture` field can't come from a logged step: stepFor builds those.
    */
-  private async recordCapture(meta: SessionMeta, reported: number): Promise<void> {
-    const logged = await this.withEvents(meta, (events) => events.filter((e) => e.body.kind === "task.assigned" || e.body.kind === "agent.prompt").length);
+  private recordCapture(meta: SessionMeta, reported: number): void {
+    const logged = this.store.readEvents(meta).filter((e) => e.body.kind === "task.assigned" || e.body.kind === "agent.prompt").length;
     const capture = { person_messages_reported: reported, person_messages_logged: logged, missing: Math.max(0, reported - logged) };
     const { payload } = stepFor("note", `The assistant counted ${reported} messages from the person before the one asking to close; ${logged} are logged. This is the assistant's own count.`);
     this.appendStep(meta, "agent.message", meta.agents[0].id, { ...payload, capture }, { boundary: "transcript", agentRunId: null }, false);
@@ -1948,17 +2064,18 @@ export class ShadowService {
           const cp = this.latest(meta, events);
           const packet = buildPacket(meta, cp, events, meta.network, this.now());
           const pin = buildPin(meta, cp);
+          const anchoring = anchoringOf(meta, events);
           let body: Buffer;
           if (kind === "packet") {
             body = Buffer.from(JSON.stringify({
               packet, pin,
-              verify: "Save packet and pin as packet.json and pin.json, then run: shadow-verify packet.json --pin pin.json --online. The pin is independent assurance only if it reached you separately from the packet.",
+              anchoring,
+              verify: `Save packet and pin as packet.json and pin.json, then run: shadow-verify packet.json --pin pin.json --online. The pin is independent assurance only if it reached you separately from the packet. ${anchoringCaveat(anchoring)}`,
             }, null, 1));
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
-            const anchoring = anchoringOf(meta, events);
             const shown = this.autoLog ? withAnchoring(ownPinReport(report), anchoring) : ownPinReport(report);
-            const html = withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring);
+            const html = withServerSteps(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring), anchoring), events);
             body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }
           this.linkBuildCount++;
@@ -2026,7 +2143,7 @@ export class ShadowService {
     for (;;) {
       if (Date.now() >= deadline) return; // What is left stays queued for the next call.
       const job = await this.session(ownerKey, sessionId, (meta) => {
-        const row = meta.outbox.find((r) => r.state !== "failed" && !tried.has(r.id));
+        const row = nextRow(meta, tried);
         if (!row) return null;
         // Owed on a network this server has left: never written to the new one.
         if (meta.network !== this.network) {
@@ -2066,6 +2183,7 @@ export class ShadowService {
       const ev = this.appendStep(meta, "clockchain.anchored", "collector", payload, {}, false);
       meta.outbox = meta.outbox.filter((r) => r.id !== row.id);
       meta.anchors.push({ marker: row.kind, seq: ev.body.seq, hash: row.hash, count: row.body?.count ?? null, ...anchorFields({ ...outcome.receipt, submittedAt: receipt.submittedAt as string | null }) });
+      if (meta.state === "closed" && row.body) this.supersede(meta, row.body.count);
     } else if (outcome.kind === "pending") {
       row.state = "pending";
       row.ledgerId = outcome.ledgerId;
@@ -2091,6 +2209,19 @@ export class ShadowService {
     this.store.writeMeta(meta);
     this.log("shadow_anchor", { sessionId: meta.sessionId, marker: row.kind, outcome: outcome.kind, ...(outcome.kind === "failed" ? { code: outcome.failure.code } : {}) });
     return halt;
+  }
+
+  /**
+   * After a closed session's anchor lands, older checkpoints aren't worth an anchor: it covers all they cover, and the record
+   * keeps every step's hash; what goes is the earlier block times they would have given those steps. A row never written is
+   * dropped. A row that may have been written stays in the queue, marked and never sent again, because the packet has to
+   * account for it: if that write did land, the ledger holds a record for this session, and the online check fails on one
+   * the packet leaves out. A row with a ledger ID is already paid for, and is followed up.
+   */
+  private supersede(meta: SessionMeta, count: number): void {
+    const older = (r: OutboxRow) => r.kind === "checkpoint" && (r.body?.count ?? 0) < count && !r.ledgerId;
+    meta.outbox = meta.outbox.filter((r) => !(older(r) && r.attempts === 0));
+    for (const r of meta.outbox) if (older(r) && r.state !== "failed") Object.assign(r, { state: "failed", lastErrorKind: "Permanent", lastErrorCode: "superseded" });
   }
 
   private anchorView(meta: SessionMeta, hash: string, refused: { code: string; message: string } | null) {
@@ -2123,6 +2254,7 @@ function anchorFrom(e: ShadowEvent): AnchorInfo | null {
 }
 
 function reasonOf(r: OutboxRow): string | null {
+  if (r.lastErrorCode === "superseded") return "A later anchor covers these steps, so this one wasn't sent again.";
   if (!r.lastErrorKind) return r.state === "pending" ? "Written to Clockchain; waiting for its block." : null;
   if (r.lastErrorCode === "anchor_limit") return "Today's anchor limit for your account is used up; it will be anchored on a later call.";
   if (r.lastErrorCode === "log_budget") return "The server's Clockchain write budget is used up; it will be anchored once it is raised.";

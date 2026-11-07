@@ -255,6 +255,7 @@ test("the logging level: one setting for the account from any endpoint, and an a
       const { description } = (await toolsOf(s.url, p, a.token)).find((t) => t.name === "clockchain_log_level");
       assert.doesNotMatch(description, /the person's own setting|person's level|can't go below|never less/i, `${p}: this server can't tell who called it`);
       assert.match(description, /sessions on this account/, p);
+      assert.match(description, /^Use only when the person asks to change the logging level\./, `${p}: as the other listed tools say it`);
     }
     for (const p of [PREVIEW, PREVIEW_CHAT]) {
       const tools = await toolsOf(s.url, p, a.token);
@@ -270,6 +271,12 @@ test("the logging level: one setting for the account from any endpoint, and an a
     const chosen = await tool(s.url, PREVIEW, a.token, "shadow_log_step", { kind: "prompt", content: "hello", log_level: "turn" });
     assert.equal(chosen.value.anchor_status, "deferred");
     assert.equal(chosen.value.log_level, "turn");
+    const recorded = async (p) => {
+      const opened = await tool(s.url, p, a.token, "shadow_start_session", { title: "t" });
+      return (await tool(s.url, p, a.token, "shadow_record", { session_id: opened.value.session_id, agent: "agent", kind: "note", content: "x" })).value;
+    };
+    assert.equal("anchor_status" in await recorded(PLAIN), false, "a listed path returns what its tool text says, whatever the server's flags");
+    assert.equal((await recorded(PREVIEW)).anchor_status, "deferred");
     const set = await tool(s.url, PLAIN, a.token, "clockchain_log_level", { level: "milestone" });
     assert.equal(set.value.log_level, "milestone");
     assert.match(set.value.message, /doesn't change when anchors happen on this connection/, "said on a listed path");

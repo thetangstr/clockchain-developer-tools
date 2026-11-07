@@ -258,9 +258,20 @@ export class ShadowStore {
     return logLevel ?? null;
   }
 
-  setLogLevel(ownerKey: string, logLevel: LogLevel): void {
-    const { loggingOff } = this.settings(ownerKey);
+  /**
+   * Sets the level, which is also the way back from a settings file that can't be read: then whether logging was off is
+   * unknown too, and it reads as off, as "off" must never silently turn back on. Returns whether that happened.
+   */
+  setLogLevel(ownerKey: string, logLevel: LogLevel): { reset: boolean } {
+    let loggingOff = true, reset = true;
+    try {
+      ({ loggingOff } = this.settings(ownerKey));
+      reset = false;
+    } catch {
+      // Unreadable: see above.
+    }
     this.settingsFile(ownerKey, () => ({ loggingOff, logLevel })).save("now");
+    return { reset };
   }
 
   // ---- per-owner daily anchor count ---------------------------------------------------------------------------
@@ -530,7 +541,7 @@ export class ShadowStore {
   }
 
   /**
-   * The whole store, for the idle pass: sessions to close, and those it closed that still owe an anchor. Gives way to the
+   * The whole store, for the idle pass: sessions to close, and closed ones that still owe an anchor. Gives way to the
    * event loop as it goes, because every route shares this process.
    */
   async idleScan(cutoffMs: number, nowMs: number, limit: number): Promise<{ idle: { ownerKey: string; sessionId: string }[]; owed: { ownerKey: string; sessionId: string }[] }> {
@@ -547,7 +558,7 @@ export class ShadowStore {
           const m = this.readMeta(ownerKey, sessionId);
           if (!m || Date.parse(m.expiresAt) <= nowMs) continue;
           if (m.state === "closed") {
-            if (m.closedIdle && m.outbox.some((r) => r.state !== "failed")) owed.push({ ownerKey, sessionId });
+            if (m.outbox.some((r) => r.state !== "failed")) owed.push({ ownerKey, sessionId });
             continue;
           }
           const at = this.lastActivity(m);

@@ -1,7 +1,8 @@
 // Hosted Shadow recorder: the step, checkpoint, packet and pin construction of the library's recorder
 // (clockchain-shadow/ts/src/recorder.ts, source sha256 6d7a94bf37b67156e44ec2dd605b5a918790022fba539bda18992046bd8d1210),
 // over the hosted store instead of SQLite. recorder.ts itself cannot be vendored (it imports node:sqlite), so the
-// pure helpers below (normalize, the hidden-reasoning checks, asRecorded) are copied from it verbatim, and the
+// pure helpers below (normalize, the hidden-reasoning checks, asRecorded) are copied from it verbatim (but for how a <think>
+// tag is found, marked there), and the
 // append, checkpoint, close, packet and pin rules follow its Session class line for line. scripts/sync-shadow-lib.mjs
 // warns when the library's recorder.ts no longer has the hash above, so this file is reviewed on every re-sync.
 //
@@ -73,14 +74,21 @@ export function normalize(v: unknown, depth = 0): Json {
 // Counts such as reasoningTokens are numbers and are allowed.
 const REASONING_KEY = /^(reasoning|thinking|thought)/i;
 const HIDDEN_TYPE = /(?:^|[._-])(?:thinking|reasoning)|^signature_delta$/i;
-const THINK_TAG = /<\/?(think|thinking|reasoning)\b[^>]*>/i;
+// Not verbatim: the library's THINK_TAG, /<\/?(think|thinking|reasoning)\b[^>]*>/i, rescans to the end of the text from every
+// "<think" with no ">" after it, and this process serves every route. Same matches, in one pass: a tag is an opening with a
+// ">" anywhere after it, and if the first opening has none, no later one does.
+const THINK_OPEN = /<\/?(?:think|thinking|reasoning)\b/i;
+function hasThinkTag(v: string): boolean {
+  const open = THINK_OPEN.exec(v);
+  return open !== null && v.indexOf(">", open.index) >= 0;
+}
 const isText = (x: unknown) => typeof x === "string" || (typeof x === "object" && x !== null);
 const isHiddenBlock = (x: unknown) =>
   typeof x === "object" && x !== null && !Array.isArray(x) && ((typeof (x as any).type === "string" && HIDDEN_TYPE.test((x as any).type)) || (x as any).thought === true);
 
 function rejectReasoning(v: unknown, path = "payload", tags = false) {
   if (typeof v === "string") {
-    if (tags && THINK_TAG.test(v)) throw new Error(`Reasoning is never recorded (${path} has a <think> section)`);
+    if (tags && hasThinkTag(v)) throw new Error(`Reasoning is never recorded (${path} has a <think> section)`);
     return;
   }
   if (!v || typeof v !== "object") return;
@@ -112,14 +120,9 @@ function refuseReasoning(fn: () => void): void {
   }
 }
 
-/**
- * THINK_TAG on a field of any length, in one pass (the regex rescans to the end from every "<think" with no ">" after it). A
- * field such as a title is cut down after this, so this sees the tag whole, even with its ">" past the cut.
- */
-const THINK_OPEN = /<\/?(?:think|thinking|reasoning)\b/i;
+/** The tag check on a field such as a title, which is cut down after this, so this sees a tag whole, even with its ">" past the cut. */
 export function refuseThinkTag(v: string, field: string): void {
-  const open = THINK_OPEN.exec(v);
-  if (open && v.indexOf(">", open.index) >= 0) refuseReasoning(() => { throw new Error(`Reasoning is never recorded (${field} has a <think> section)`); });
+  if (hasThinkTag(v)) refuseReasoning(() => { throw new Error(`Reasoning is never recorded (${field} has a <think> section)`); });
 }
 
 /** Run.text(): the content exactly as it will be serialised, checked for hidden reasoning, then clipped. */
