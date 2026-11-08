@@ -1265,7 +1265,7 @@ export class ShadowService {
   async startSession(ownerId: string, input: { title?: unknown; agents?: unknown; log_level?: unknown }, base: string) {
     if (typeof input.title !== "string" || !cleanText(input.title, 200)) throw bad("Give the session a title (up to 200 characters).");
     refuseHidden(input.title, "title");
-    const title = this.autoLog ? cleanText(redactText(input.title.slice(0, 1000)), 200) : cleanText(input.title, 200);
+    const title = cleanText(redactText(input.title.slice(0, 1000)), 200);
     const agents = this.agentsOf(input.agents);
     const agentLevel = levelInput(input.log_level);
     const ownerKey = ownerKeyOf(ownerId);
@@ -1381,10 +1381,10 @@ export class ShadowService {
       const id = isObj(a) ? a.id : a;
       if (typeof id !== "string" || !AGENT_ID.test(id) || id === "collector")
         throw bad('Each agent id is 1-64 letters, digits or . _ : @ -, starting with a letter or digit, and not "collector".');
-      if (this.autoLog && redactText(id) !== id) throw bad(CREDENTIAL_AGENT);
+      if (redactText(id) !== id) throw bad(CREDENTIAL_AGENT);
       if (out.some((x) => x.id === id)) throw bad(`Agent "${id}" is listed twice.`);
       if (isObj(a)) for (const field of ["role", "purpose", "accountable_owner"]) refuseHidden(a[field], field);
-      const roleText = isObj(a) && typeof a.role === "string" ? (this.autoLog ? redactText(a.role.slice(0, 1000)) : a.role) : "";
+      const roleText = isObj(a) && typeof a.role === "string" ? redactText(a.role.slice(0, 1000)) : "";
       const role = cleanText(roleText, 100) ? cleanText(roleText, 100) : null;
       const purpose = isObj(a) ? reported(a.purpose, 200) : "";
       const accountableOwner = isObj(a) ? reported(a.accountable_owner, 100) : "";
@@ -1410,8 +1410,9 @@ export class ShadowService {
     if (input.run_id !== undefined && input.run_id !== null && (typeof input.run_id !== "string" || !RUN_ID.test(input.run_id)))
       throw bad("run_id is 1-64 letters, digits or . _ : -, starting with a letter or digit.");
     const runInput = typeof input.run_id === "string" ? input.run_id : null;
-    // With logging on by default, the same backstop as the log tools. Size and depth are checked above.
-    if (this.autoLog) content = redactSecrets(content);
+    // The same backstop as the log tools, on every endpoint: a record can be read by anyone with its link. Size and depth
+    // are checked above.
+    content = redactSecrets(content);
     return this.session(ownerKeyOf(ownerId), sessionId, (meta) => {
       if (meta.state === "closed") throw new ShadowError("SHADOW_SESSION_CLOSED", "This session is closed. Start a new session to record more.");
       if (meta.network !== this.network) throw new ShadowError("SHADOW_OTHER_NETWORK", `This session is on ${meta.network}, and this server now writes to ${this.network}, so nothing was recorded. Start a new session to record more.`);

@@ -736,7 +736,7 @@ test("secrets: well-known credentials are replaced before they are recorded, and
   }
 });
 
-test("with the flag on, shadow_record and shadow_start_session redact too, and an agent id can't hold a key", async () => {
+test("shadow_record and shadow_start_session redact too, and an agent id can't hold a key", async () => {
   const key = `cck_${"K".repeat(32)}`;
   const { svc } = service();
   const s = await svc.startSession(O, { title: `Using ${key}`, agents: [{ id: "agent", role: `holds ${key}` }] }, BASE);
@@ -749,13 +749,16 @@ test("with the flag on, shadow_record and shadow_start_session redact too, and a
   await assert.rejects(svc.startSession(O, { title: "t", agents: [{ id: `cck_${"A".repeat(32)}` }] }, BASE), code);
   await assert.rejects(svc.logStep(O, { kind: "task", content: "x", agent: `cck_${"A".repeat(32)}` }, BASE), code);
   await assert.rejects(svc.logTurn(O, { steps: [{ kind: "task", content: "x", agent: `AKIAABCDEFGHIJKLMNOP` }] }, BASE), (e) => /agent id can't hold a key/.test(e.message));
-  // Without the flag, the record is what it was given.
+  // Without the flag (a server where the person asks per chat), the same filter runs: a record's link can still be shared.
   const fake = new FakeLedger();
   const plain = new ShadowService({ stateDir: tmp("noflag2"), ledger: () => fake, budget: () => createLogBudget({}), sleep: async () => {}, log: () => {} });
   plain.sweep();
-  const p = await plain.startSession(O, { title: "t" }, BASE);
-  await plain.record(O, { session_id: p.session_id, agent: "agent", kind: "note", content: "password=hunter2" });
-  assert.ok((await plain.packetForCap(new URL(p.links.packet).pathname.split("/").pop().replace(/\.json$/, ""))).includes("password=hunter2"));
+  const p = await plain.startSession(O, { title: `Using ${key}`, agents: [{ id: "agent", role: `holds ${key}` }] }, BASE);
+  await plain.record(O, { session_id: p.session_id, agent: "agent", kind: "note", content: { text: "password=hunter2", note: `key ${key} and sk_live_abcdefghijklmnop` } });
+  const plainDoc = await plain.packetForCap(new URL(p.links.packet).pathname.split("/").pop().replace(/\.json$/, ""));
+  for (const leak of [key, "hunter2", "sk_live_abcdefghijklmnop"]) assert.equal(plainDoc.includes(leak), false, leak);
+  assert.ok(plainDoc.includes("[redacted]"));
+  await assert.rejects(plain.startSession(O, { title: "t", agents: [{ id: `cck_${"A".repeat(32)}` }] }, BASE), code);
 });
 
 test("owner isolation: a session_id from another account is SHADOW_NOT_FOUND, and leaves that session as it was", async () => {
