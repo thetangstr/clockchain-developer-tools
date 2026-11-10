@@ -216,3 +216,31 @@ test("the verifier waits out the network's 429s on receipt and block reads inste
   assert.equal(online.receiptsChecked, 30, "every receipt read in the end");
   assert.equal((await online.search(REF)).length, 30);
 });
+
+test("a search or read that fails after the verifier's deadline doesn't become an unhandled rejection", async () => {
+  const seen = [];
+  const onUnhandled = (e) => seen.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const l = fakeLedger(host([]));
+    l.witnessSearch = () => new Promise((_, reject) => setTimeout(() => reject(new Error("late search failure")), 300));
+    l.getBlock = () => new Promise((_, reject) => setTimeout(() => reject(new Error("late block failure")), 300));
+    const online = await prefetchOnline(l, { network: "staging", referenceId: REF, ledgerIds: ["L1"], timeoutMs: 100 });
+    assert.equal(online.receiptsChecked, 0);
+    await new Promise((r) => setTimeout(r, 600));
+    assert.deepEqual(seen.map((e) => e.message), []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("a used-up allowance is not waited for: the read fails at once", async () => {
+  const l = fakeLedger(host([[rec("L1", { assetHash: "h" })]]));
+  let blockCalls = 0;
+  l.getBlock = async () => { blockCalls++; throw new RateLimitError("Rate limit exceeded", 429, { code: "FREE_QUOTA_EXHAUSTED" }); };
+  const t = Date.now();
+  const online = await prefetchOnline(l, { network: "staging", referenceId: REF, ledgerIds: ["L1"], timeoutMs: 10000 });
+  assert.equal(online.receiptsChecked, 0);
+  assert.equal(blockCalls, 1, "one try, no retries");
+  assert.ok(Date.now() - t < 2000);
+});

@@ -346,6 +346,9 @@ export async function anchorHash(o: AnchorRequest): Promise<AnchorOutcome> {
 }
 
 function withDeadline<T>(p: Promise<T>, deadline: number): Promise<T> {
+  // When the deadline wins, p is abandoned; if it fails later nobody awaits it, and an unhandled rejection stops the
+  // server. Its outcome no longer matters, so it is marked handled here.
+  p.catch(() => undefined);
   const left = deadline - Date.now();
   if (left <= 0) return Promise.reject(new Error("deadline"));
   let timer: NodeJS.Timeout | undefined;
@@ -383,7 +386,9 @@ export async function prefetchOnline(
       try {
         return await withDeadline(read(), deadline);
       } catch (e) {
-        if (!(e instanceof RateLimitError) || n >= 8) throw e;
+        // A used-up allowance (FREE_QUOTA_EXHAUSTED and the like) won't come back within this call: don't wait for it.
+        const code = String((e as { body?: { code?: unknown } })?.body?.code ?? "");
+        if (!(e instanceof RateLimitError) || /QUOTA_EXHAUSTED/i.test(code) || n >= 8) throw e;
         const wait = Math.min(e.retryAfter ? e.retryAfter * 1000 : 200 * 2 ** n, 4_000);
         if (Date.now() + wait >= deadline) throw e;
         await new Promise<void>((resolve) => setTimeout(resolve, wait).unref());
