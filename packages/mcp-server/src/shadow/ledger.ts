@@ -85,14 +85,83 @@ export class ShadowClockchainClient extends ClockchainClient {
   }
 }
 
+/** Largest page the network's ledger search serves, and how many pages one search may read before it gives up. */
+export const NETWORK_SEARCH_PAGE_SIZE = 100;
+export const NETWORK_SEARCH_MAX_PAGES = 20;
+const NETWORK_SEARCH_TIMEOUT_MS = 10_000;
+
+/** SHADOW_NETWORK_SEARCH_URL, the network's search host (for example https://stagingapi.clockchain.network). Only https. */
+export function networkSearchUrl(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = (env.SHADOW_NETWORK_SEARCH_URL ?? "").trim().replace(/\/+$/, "");
+  return /^https:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(raw) ? raw : undefined;
+}
+
+/**
+ * The network's own ledger search, GET <base>/search/ledger?message=&size=&page=. It needs no key, covers every client,
+ * and matches any field by substring, so only records whose reference is exactly this one and that were written under one
+ * of Shadow's own clients are kept. Every page is read: a failed or malformed page fails the whole search, never a partial
+ * answer. An empty list here really means none, unlike the old route's 404; and since a 404 from this route can only mean
+ * a wrong address, it is passed on as a 502 so no caller reads it as "none" and pays again.
+ */
+export async function searchNetworkLedger(o: {
+  baseUrl: string;
+  referenceId: string;
+  clientIds: readonly string[];
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}): Promise<LedgerRecord[]> {
+  const fetchImpl = o.fetchImpl ?? fetch;
+  const clients = new Set(o.clientIds.filter(Boolean));
+  const records: LedgerRecord[] = [];
+  const seen = new Set<string>();
+  for (let page = 0; page < NETWORK_SEARCH_MAX_PAGES; page++) {
+    const url = new URL(`${o.baseUrl}/search/ledger`);
+    url.searchParams.set("message", o.referenceId);
+    url.searchParams.set("size", String(NETWORK_SEARCH_PAGE_SIZE));
+    url.searchParams.set("page", String(page));
+    const res = await fetchImpl(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(o.timeoutMs ?? NETWORK_SEARCH_TIMEOUT_MS) });
+    const body: unknown = await res.json().catch(() => undefined);
+    if (!res.ok) throw new ApiError(`Ledger search failed (HTTP ${res.status})`, res.status === 404 ? 502 : res.status, body);
+    const shape = body as { content?: unknown; totalPages?: unknown } | undefined;
+    if (!shape || !Array.isArray(shape.content) || typeof shape.totalPages !== "number") {
+      throw new ApiError("Ledger search answered in an unexpected form", 502, body);
+    }
+    for (const r of shape.content as LedgerRecord[]) {
+      const id = String(r?.ledgerId ?? "");
+      if (!id || seen.has(id) || r.assetReferenceId !== o.referenceId || !clients.has(String(r.clientId))) continue;
+      seen.add(id);
+      records.push(r);
+    }
+    if (shape.content.length === 0 || page + 1 >= shape.totalPages) return records;
+  }
+  throw new ApiError(`Ledger search matched more than ${NETWORK_SEARCH_MAX_PAGES} pages`, 502, undefined);
+}
+
+/** Shadow's client when SHADOW_NETWORK_SEARCH_URL is set: writes as before, searches through the network's ledger search. */
+export class NetworkSearchShadowClient extends ClockchainClient {
+  constructor(config: ClockchainConfig, private readonly search: { baseUrl: string; clientIds: readonly string[]; fetchImpl?: typeof fetch }) {
+    super(config);
+  }
+  override async searchAsset(assetReferenceId: string): Promise<LedgerRecord[]> {
+    return searchNetworkLedger({ ...this.search, referenceId: assetReferenceId });
+  }
+}
+
 /** The delegated in-process client (CLOCKCHAIN_API_KEY / _CLIENT_ID / _WALLET_ID), or Shadow's own identity on it, built on first use. */
 export function runtimeShadowLedger(env: NodeJS.ProcessEnv = process.env): ShadowLedger {
   if (testLedger) return testLedger;
   if (!runtimeLedger) {
     const identity = shadowLedgerIdentity(env);
-    runtimeLedger = identity
-      ? new ShadowClockchainClient({ ...readConfigFromEnv(env), ...identity }, new ClockchainClient(readConfigFromEnv(env)))
-      : new ClockchainClient(readConfigFromEnv(env));
+    const base = readConfigFromEnv(env);
+    const searchUrl = networkSearchUrl(env);
+    if (searchUrl) {
+      const config = identity ? { ...base, ...identity } : base;
+      runtimeLedger = new NetworkSearchShadowClient(config, { baseUrl: searchUrl, clientIds: [...new Set([config.clientId, base.clientId])] });
+    } else {
+      runtimeLedger = identity
+        ? new ShadowClockchainClient({ ...readConfigFromEnv(env), ...identity }, new ClockchainClient(readConfigFromEnv(env)))
+        : new ClockchainClient(readConfigFromEnv(env));
+    }
   }
   return runtimeLedger;
 }
