@@ -74,7 +74,10 @@ export function logLabelEnvelope(
   return { envelope, canonical_json, anchored_hash: computeHash(canonical_json) };
 }
 
-const LOG_LABEL_NOTE = "Labels are hashed with the content and not written to Clockchain in plain text.";
+/** The hash names an asset_hash's hash_type may take with labels, keyed as log_action folds them (case and punctuation dropped). */
+const HASH_NAMES: Record<string, string> = { SHA256: "SHA-256", SHA1: "SHA-1", SHA224: "SHA-224", SHA384: "SHA-384", SHA512: "SHA-512", MD5: "MD5" };
+const LOG_LABEL_NOTE =
+  "Labels are hashed with the content, not written to Clockchain as text. They are bound to the record, not secret: anyone who has the content can test which labels were used.";
 
 /** Shared schema fragment: optional idempotency key for write tools. */
 const idempotencyKeySchema = z
@@ -705,7 +708,14 @@ export function registerTools(
     }) =>
       run("log_action", () => idempotent(idempotency_key, async () => {
         // Check the optional labels first: a bad one is refused before any read, write or budget use.
-        const labels = checkDeclared({ action_type, intent_type });
+        let labels: Declared;
+        try {
+          labels = checkDeclared({ action_type, intent_type });
+        } catch (e) {
+          // Shadow's wording ends "send the step again"; here it is this call that is sent again.
+          if (e instanceof Error) e.message = e.message.replace(/then send the step again\.$/, "then call log_action again.");
+          throw e;
+        }
         const labelled = Boolean(labels.actionType || labels.intentType);
         // The reference exactly as it will be stored (did folded in): never under hosted Shadow's `shadow:`.
         refuseReservedReference(did ? `${did}:${asset_reference_id}` : asset_reference_id);
@@ -718,6 +728,7 @@ export function registerTools(
         // accept a pre-computed `asset_hash` (validated against its digest length).
         let assetHash: string;
         let effectiveHashType = hash_type;
+        let labelledHashType = "SHA-256";
         if (content != null && content !== "") {
           assetHash = computeHash(content);
           effectiveHashType = "SHA-256";
@@ -731,6 +742,12 @@ export function registerTools(
             );
           }
           assetHash = asset_hash;
+          // With labels, hash_type goes into the envelope, so it must be one known name, written one way.
+          if (labelled) {
+            const name = HASH_NAMES[hashAlg];
+            if (!name) throw new Error(`With action_type or intent_type, hash_type must be one of ${Object.values(HASH_NAMES).join(", ")}.`);
+            labelledHashType = name;
+          }
         } else {
           throw new Error("Provide either `content` (the server hashes it) or a pre-computed `asset_hash`.");
         }
@@ -740,7 +757,7 @@ export function registerTools(
           ? logLabelEnvelope(
               content != null && content !== ""
                 ? { contentSha256: assetHash }
-                : { assetHash, hashType: hash_type ?? "SHA-256" },
+                : { assetHash, hashType: labelledHashType },
               labels,
             )
           : undefined;

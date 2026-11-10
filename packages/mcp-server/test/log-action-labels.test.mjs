@@ -159,9 +159,37 @@ test("custom x-<org>.<name> labels are accepted; secret-looking custom labels ar
 test("tool description and field help say labels are hashed, not written in plain text", () => {
   let config;
   registerTools({ registerTool: (name, c) => { if (name === "log_action") config = c; } }, cfg);
-  const note = /Labels are hashed with the content and not written to Clockchain in plain text\./;
+  const note = /Labels are hashed with the content, not written to Clockchain as text\. They are bound to the record, not secret: anyone who has the content can test which labels were used\./;
   assert.match(config.description, note);
   assert.match(config.inputSchema.action_type.description, note);
   assert.match(config.inputSchema.intent_type.description, note);
   assert.doesNotMatch(config.description, /\bmust\b.*(action_type|intent_type)|always (set|fill)/i);
+});
+
+test("labels with asset_hash: hash_type is written one way in the envelope, defaults to SHA-256, and unknown names are refused", async () => {
+  const anchored = async (hash_type) => {
+    const calls = stub();
+    const res = await collectTools().log_action({ asset_hash: HEX, ...(hash_type === undefined ? {} : { hash_type }), asset_reference_id: "r", action_type: "send" });
+    assert.ok(!res.isError, textOf(res));
+    return logBodies(calls)[0].assetHash;
+  };
+  const expected = sha(`{"v":1,"asset_hash":"${HEX}","hash_type":"SHA-256","action_type":"send"}`);
+  for (const t of [undefined, "SHA-256", "sha256", "sha-256", "SHA_256"]) assert.equal(await anchored(t), expected, String(t));
+  const calls = stub();
+  const res = await collectTools().log_action({ asset_hash: HEX, hash_type: "blake3", asset_reference_id: "r", action_type: "send" });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /hash_type must be one of SHA-256, SHA-1/);
+  assert.equal(logBodies(calls).length, 0);
+  // Without labels, hash_type passes through as before.
+  const plain = stub();
+  assert.ok(!(await collectTools().log_action({ asset_hash: HEX, hash_type: "sha256", asset_reference_id: "r" })).isError);
+  assert.equal(logBodies(plain)[0].hashType, "sha256");
+});
+
+test("a bad label's refusal speaks of log_action, not of a Shadow step", async () => {
+  stub();
+  const res = await collectTools().log_action({ content: "c", asset_reference_id: "r", intent_type: "nope" });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /then call log_action again\./);
+  assert.doesNotMatch(textOf(res), /send the step again/);
 });
