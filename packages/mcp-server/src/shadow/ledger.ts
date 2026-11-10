@@ -95,7 +95,7 @@ export class ShadowClockchainClient extends ClockchainClient {
 /** Largest page the network's ledger search serves; how many pages one read may need; how many full reads one search tries. */
 export const NETWORK_SEARCH_PAGE_SIZE = 100;
 export const NETWORK_SEARCH_MAX_PAGES = 20;
-export const NETWORK_SEARCH_MAX_PASSES = 3;
+export const NETWORK_SEARCH_MAX_PASSES = 4;
 const NETWORK_SEARCH_TIMEOUT_MS = 10_000;
 
 /** SHADOW_NETWORK_SEARCH_URL, the network's search host (for example https://stagingapi.clockchain.network). Only https. */
@@ -111,8 +111,9 @@ const incomplete = (why: string, body?: unknown) => new ApiError(`Ledger search 
  * matches any field by substring. Its order isn't stable from one request to the next, so paging can repeat one record and
  * skip another; and its count can differ between reads. So an answer counts only when every record the search says matches
  * has been seen: the distinct records across the pages read (before any filtering) must reach the reported total, with the
- * same total on every page of that read. It reads the whole result up to NETWORK_SEARCH_MAX_PASSES times, keeping what earlier
- * reads saw, and otherwise fails with a 502. Then only records whose reference is exactly this one, written under one of
+ * same total on every page of that read; and two reads in a row must agree, which catches a reader landing on a copy of the
+ * index that is behind. It reads the whole result up to NETWORK_SEARCH_MAX_PASSES times, keeping what earlier reads saw,
+ * and otherwise fails with a 502. Then only records whose reference is exactly this one, written under one of
  * Shadow's own clients, are kept. A 404 is passed on as a 502 and a 429 as a rate limit, so neither is read as an answer.
  */
 export async function searchNetworkLedger(o: {
@@ -144,6 +145,7 @@ export async function searchNetworkLedger(o: {
     }
     return { content: shape.content as LedgerRecord[], totalPages: shape.totalPages as number, totalElements: shape.totalElements as number };
   };
+  let agreed: number | undefined;
   for (let pass = 0; pass < NETWORK_SEARCH_MAX_PASSES; pass++) {
     let total: number | undefined;
     let pages = 1;
@@ -163,9 +165,11 @@ export async function searchNetworkLedger(o: {
         if (id) seen.set(id, rec);
       }
     }
-    if (steady && seen.size === total) {
+    const complete = steady && seen.size === total;
+    if (complete && agreed === total) {
       return [...seen.values()].filter((r) => r.assetReferenceId === o.referenceId && clients.has(String(r.clientId)));
     }
+    agreed = complete ? total : undefined;
   }
   throw incomplete("records shifted between pages");
 }

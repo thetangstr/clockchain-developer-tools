@@ -35,7 +35,7 @@ const search = (h, clientIds = ["own"]) => searchNetworkLedger({ baseUrl: BASE, 
 test("asks for the exact reference, the largest page, from page 0", async () => {
   const h = host([[rec("1")]]);
   assert.deepEqual(await search(h), [rec("1")]);
-  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls.length, 2, "two reads that agree");
   const u = h.calls[0];
   assert.equal(u.origin + u.pathname, `${BASE}/search/ledger`);
   assert.equal(u.searchParams.get("message"), REF);
@@ -59,7 +59,7 @@ test("keeps only this exact reference, under Shadow's own clients, once each", a
 test("reads every page, and stops at the last one", async () => {
   const h = host([[rec("1")], [rec("2", { clientId: "x" })], [rec("3")]]);
   assert.deepEqual((await search(h)).map((r) => r.ledgerId), ["1", "3"]);
-  assert.deepEqual(h.calls.map((u) => u.searchParams.get("page")), ["0", "1", "2"]);
+  assert.deepEqual(h.calls.map((u) => u.searchParams.get("page")), ["0", "1", "2", "0", "1", "2"]);
 });
 
 test("none is a real empty answer", async () => {
@@ -106,7 +106,7 @@ test("the order shifting between pages: one more read fills the gap, and a gap t
     return new Response(JSON.stringify({ totalPages: 2, totalElements: 4, content: read[page] }), { status: 200 });
   } };
   assert.deepEqual((await search(shifting)).map((r) => r.ledgerId).sort(), ["1", "2", "3", "4"]);
-  assert.equal(call, 4);
+  assert.equal(call, 6, "a gap-filling read, then one that agrees with it");
   // Always missing one: fails after the last read, never a short answer.
   const stuck = host([[rec("1"), rec("2")], [rec("1")]], { total: 3 });
   await assert.rejects(search(stuck), (e) => e.status === 502);
@@ -172,4 +172,24 @@ test("the verifier reads the network search; a none it can't vouch for is no ans
   const behind = await prefetchOnline(fakeLedger(host([[rec("L2")]])), { network: "staging", referenceId: REF, ledgerIds: ["L1"], timeoutMs: 5000 });
   assert.equal(behind.searchUnanswered, false);
   await assert.rejects(behind.search(REF), /could not be reached/, "it doesn't list a receipt, so it hasn't caught up");
+});
+
+test("a first read that is complete but behind is not enough: the next read must agree", async () => {
+  // Read 1 (a copy that is behind) shows 2 of 3; reads 2 and 3 show all 3. The answer is all 3.
+  let call = 0;
+  const lagging = { fetchImpl: async () => {
+    const content = call++ === 0 ? [rec("1"), rec("2")] : [rec("1"), rec("2"), rec("3")];
+    return new Response(JSON.stringify({ totalPages: 1, totalElements: content.length, content }), { status: 200 });
+  } };
+  assert.deepEqual((await search(lagging)).map((r) => r.ledgerId), ["1", "2", "3"]);
+  assert.equal(call, 3);
+  // Totals flipping between reads (370, 357, 370 seen live) never settle into an answer short of what was seen.
+  let n = 0;
+  const flipping = { fetchImpl: async () => {
+    const content = n++ % 2 === 0 ? [rec("1"), rec("2"), rec("3")] : [rec("1"), rec("2")];
+    return new Response(JSON.stringify({ totalPages: 1, totalElements: content.length, content }), { status: 200 });
+  } };
+  await assert.rejects(search(flipping), (e) => e.status === 502);
+  // A record with no ledgerId can never complete a read.
+  await assert.rejects(search(host([[rec("1"), { assetReferenceId: REF, clientId: "own" }]])), (e) => e.status === 502);
 });
