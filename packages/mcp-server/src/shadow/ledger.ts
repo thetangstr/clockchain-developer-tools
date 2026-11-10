@@ -39,7 +39,7 @@ export interface ShadowLedger {
    * that fails rather than answer in part. Only the verifier uses it. Retries keep searchAsset: this search is a separate
    * index that may lag a write, and a stale "none" there could pay for a write twice.
    */
-  witnessSearch?(assetReferenceId: string, deadline?: number): Promise<LedgerRecord[]>;
+  witnessSearch?(assetReferenceId: string, deadline?: number, alsoClientIds?: readonly string[]): Promise<LedgerRecord[]>;
   getBlock(height: string | number): Promise<BlockResponse>;
   buildEvidencePackage(ledgerId: string): Promise<EvidencePackage>;
   verifyPackage(pkg: EvidencePackage): Promise<PackageVerification>;
@@ -176,7 +176,8 @@ export async function searchNetworkLedger(o: {
 
 /** Gives Shadow's ledger the network's search for the verifier's completeness check; writes and retries are unchanged. */
 export function withNetworkWitness<T extends ShadowLedger>(ledger: T, o: { baseUrl: string; clientIds: readonly string[]; fetchImpl?: typeof fetch }): T {
-  ledger.witnessSearch = (referenceId, deadline) => searchNetworkLedger({ ...o, referenceId, deadline });
+  ledger.witnessSearch = (referenceId, deadline, alsoClientIds = []) =>
+    searchNetworkLedger({ ...o, clientIds: [...o.clientIds, ...alsoClientIds], referenceId, deadline });
   return ledger;
 }
 
@@ -371,6 +372,9 @@ export async function prefetchOnline(
   const entries = new Map<string, { assetHash: string | null; blockHeight: string | null; blockTime: string | null; submittedAt: string | null }>();
   // A session with an anchor per step has hundreds of receipts: a few readers at once, one read per block.
   const blocks = new Map<string, Promise<{ blockTime?: unknown }>>();
+  // The client each receipt was stored under, as the ledger reports it: the network may store a write under its own client
+  // for our key rather than the one we name, and the witness search must look under the client that really wrote them.
+  const writers = new Set<string>();
   let next = 0;
   const reader = async () => {
     while (next < o.ledgerIds.length && Date.now() < deadline) {
@@ -388,6 +392,8 @@ export async function prefetchOnline(
           blockTime = normalizeGatewayTime((await withDeadline(read, deadline)).blockTime as string);
         }
         entries.set(id, { assetHash: str(rec.assetHash), blockHeight, blockTime, submittedAt: normalizeGatewayTime(rec.createdTimestamp) });
+        const writer = str((rec as { clientId?: unknown }).clientId);
+        if (writer) writers.add(writer);
       } catch {
         // Unreachable for this receipt: the verifier reports witness as indeterminate.
       }
@@ -408,7 +414,7 @@ export async function prefetchOnline(
   let refused = false;
   const receipts = o.ledgerIds.length > 0;
   try {
-    const search = ledger.witnessSearch ? ledger.witnessSearch(o.referenceId, deadline) : ledger.searchAsset(o.referenceId);
+    const search = ledger.witnessSearch ? ledger.witnessSearch(o.referenceId, deadline, [...writers]) : ledger.searchAsset(o.referenceId);
     found = (await withDeadline(search, deadline)).map((r) => ({ ledgerId: String(r.ledgerId), assetHash: str(r.assetHash) }));
     // That index may not have caught up with a write yet, so for a record with no receipts its "none" is no answer either.
     if (ledger.witnessSearch && !found.length && !receipts) {
