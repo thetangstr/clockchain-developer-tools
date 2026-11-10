@@ -36,6 +36,45 @@ import type { KeeperGate } from "./entitlement.js";
 import { assertToolClassified, BYO_READ_TOOLS } from "./entitlement.js";
 import type { Keeper, Trigger } from "@clockchain/keeper";
 import { getRuntimeKeeper, keeperOwnerWebhookSecret, keeperWebhooksEnabled } from "./keeper-runtime.js";
+import { ACTION_TYPE_CHOICES, checkDeclared, INTENT_TYPE_CHOICES, type Declared } from "./shadow/intent.js";
+
+// ---- log_action step labels (envelope v1) -----------------------------------------
+// log_action takes the same optional labels as a Shadow step: `action_type` and `intent_type` (checked by
+// shadow/intent.ts: known values or x-<org>.<name>, secret-looking values refused). The labels are never sent to the
+// gateway as text. Instead the anchored assetHash commits to them together with the content:
+//
+//   anchored assetHash = hex(SHA-256(UTF-8(canonical_json)))     hashType "SHA-256"
+//   canonical_json     = JSON.stringify of, in exactly this key order, with no whitespace:
+//     with content:     {"v":1,"content_sha256":<hex SHA-256 of content>,"action_type":..,"intent_type":..}
+//     with asset_hash:  {"v":1,"asset_hash":<lowercase hex>,"hash_type":<hash_type, default "SHA-256">,"action_type":..,"intent_type":..}
+//   An absent label is left out (its key is omitted, never null).
+//
+// The response returns the envelope, its canonical JSON and the anchored hash, so anyone holding the content (or the
+// inner hash) and the labels can recompute and check the ledger entry. Without labels nothing changes: the content's
+// own SHA-256 (or the caller's asset_hash and hash_type) is anchored exactly as before and no envelope is returned.
+export const LOG_LABEL_ENVELOPE_VERSION = 1;
+
+export type LogLabelEnvelope =
+  | { v: 1; content_sha256: string; action_type?: string; intent_type?: string }
+  | { v: 1; asset_hash: string; hash_type: string; action_type?: string; intent_type?: string };
+
+/** The v1 envelope for labelled log_action content or a pre-computed hash. Key order is fixed; see above. */
+export function logLabelEnvelope(
+  inner: { contentSha256: string } | { assetHash: string; hashType: string },
+  labels: Declared,
+): { envelope: LogLabelEnvelope; canonical_json: string; anchored_hash: string } {
+  const tail = {
+    ...(labels.actionType ? { action_type: labels.actionType } : {}),
+    ...(labels.intentType ? { intent_type: labels.intentType } : {}),
+  };
+  const envelope: LogLabelEnvelope = "contentSha256" in inner
+    ? { v: LOG_LABEL_ENVELOPE_VERSION, content_sha256: inner.contentSha256, ...tail }
+    : { v: LOG_LABEL_ENVELOPE_VERSION, asset_hash: inner.assetHash.toLowerCase(), hash_type: inner.hashType, ...tail };
+  const canonical_json = JSON.stringify(envelope);
+  return { envelope, canonical_json, anchored_hash: computeHash(canonical_json) };
+}
+
+const LOG_LABEL_NOTE = "Labels are hashed with the content and not written to Clockchain in plain text.";
 
 /** Shared schema fragment: optional idempotency key for write tools. */
 const idempotencyKeySchema = z
@@ -585,7 +624,9 @@ export function registerTools(
         "Anchor content to the Clockchain ledger. Pass `content` (the server " +
         "SHA-256-hashes it — the content is hashed, never stored) OR a pre-computed " +
         "`asset_hash`. Returns a ledgerId; blockHeight is null (pending) until the " +
-        "leader writes the block ~0.6s later.",
+        "leader writes the block ~0.6s later. Optional `action_type` and `intent_type` " +
+        "label the action; " + LOG_LABEL_NOTE + " With labels, the response's " +
+        "label_envelope shows how the anchored hash was built.",
       inputSchema: {
         content: z
           .string()
@@ -635,6 +676,14 @@ export function registerTools(
           .positive()
           .optional()
           .describe("Max time to wait for confirmation, in ms. Default 15000. Only used when wait=true."),
+        action_type: z
+          .string()
+          .optional()
+          .describe(`Optional. What kind of act this is, as you report it: ${ACTION_TYPE_CHOICES}. ${LOG_LABEL_NOTE}`),
+        intent_type: z
+          .string()
+          .optional()
+          .describe(`Optional. What this act is for, as you report it: ${INTENT_TYPE_CHOICES}. ${LOG_LABEL_NOTE}`),
         idempotency_key: idempotencyKeySchema,
         allow_degraded: allowDegradedSchema,
       },
@@ -649,10 +698,15 @@ export function registerTools(
       did,
       wait,
       wait_ms,
+      action_type,
+      intent_type,
       idempotency_key,
       allow_degraded,
     }) =>
       run("log_action", () => idempotent(idempotency_key, async () => {
+        // Check the optional labels first: a bad one is refused before any read, write or budget use.
+        const labels = checkDeclared({ action_type, intent_type });
+        const labelled = Boolean(labels.actionType || labels.intentType);
         // The reference exactly as it will be stored (did folded in): never under hosted Shadow's `shadow:`.
         refuseReservedReference(did ? `${did}:${asset_reference_id}` : asset_reference_id);
         // Truthful anchoring: refuse the write up front if the pool is degraded (unless opted in).
@@ -680,6 +734,20 @@ export function registerTools(
         } else {
           throw new Error("Provide either `content` (the server hashes it) or a pre-computed `asset_hash`.");
         }
+        // With labels, anchor the v1 envelope's hash instead (see logLabelEnvelope); the labels themselves stay off
+        // the ledger: additional_info and the reference id are exactly what the caller passed.
+        const sealed = labelled
+          ? logLabelEnvelope(
+              content != null && content !== ""
+                ? { contentSha256: assetHash }
+                : { assetHash, hashType: hash_type ?? "SHA-256" },
+              labels,
+            )
+          : undefined;
+        if (sealed) {
+          assetHash = sealed.anchored_hash;
+          effectiveHashType = "SHA-256";
+        }
         // If a DID is provided, fold it into the reference id so the anchor is
         // attributable to the agent identity. (additionalInfo is plain-text-only
         // and sanitized server-side, so identity must not be stored there.)
@@ -703,9 +771,9 @@ export function registerTools(
             result.ledgerId,
             wait_ms ?? 15000,
           );
-          return okWrite(confirmed);
+          return sealed ? { ...okWrite(confirmed), label_envelope: sealed } : okWrite(confirmed);
         }
-        return okWrite(result);
+        return sealed ? { ...okWrite(result), label_envelope: sealed } : okWrite(result);
       })),
   );
 
