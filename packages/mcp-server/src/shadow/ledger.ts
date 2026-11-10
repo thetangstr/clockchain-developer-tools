@@ -376,17 +376,31 @@ export async function prefetchOnline(
   // for our key rather than the one we name, and the witness search must look under the client that really wrote them.
   const writers = new Set<string>();
   let next = 0;
+  // The network's API answers a burst of block reads with 429s: wait as it asks (or back off) and read again, within the
+  // deadline, rather than count a rate-limited receipt as unreachable.
+  const patient = async <T>(read: () => Promise<T>): Promise<T> => {
+    for (let n = 0; ; n++) {
+      try {
+        return await withDeadline(read(), deadline);
+      } catch (e) {
+        if (!(e instanceof RateLimitError) || n >= 8) throw e;
+        const wait = Math.min(e.retryAfter ? e.retryAfter * 1000 : 200 * 2 ** n, 4_000);
+        if (Date.now() + wait >= deadline) throw e;
+        await new Promise<void>((resolve) => setTimeout(resolve, wait).unref());
+      }
+    }
+  };
   const reader = async () => {
     while (next < o.ledgerIds.length && Date.now() < deadline) {
       const id = o.ledgerIds[next++];
       try {
-        const rec = await withDeadline(ledger.getLedgerEntry(id), deadline);
+        const rec = await patient(() => ledger.getLedgerEntry(id));
         const blockHeight = str(rec.blockHeight);
         let blockTime: string | null = null;
         if (blockHeight) {
           let read = blocks.get(blockHeight);
           if (!read) {
-            read = ledger.getBlock(blockHeight);
+            read = patient(() => ledger.getBlock(blockHeight));
             blocks.set(blockHeight, read);
           }
           blockTime = normalizeGatewayTime((await withDeadline(read, deadline)).blockTime as string);
