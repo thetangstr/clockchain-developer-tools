@@ -193,3 +193,12 @@ test("a first read that is complete but behind is not enough: the next read must
   // A record with no ledgerId can never complete a read.
   await assert.rejects(search(host([[rec("1"), { assetReferenceId: REF, clientId: "own" }]])), (e) => e.status === 502);
 });
+
+test("the verifier also searches under the client the ledger stored our receipts under", async () => {
+  // The network stored our write under its own shared client, not the one Shadow names.
+  const h = host([[rec("L1", { clientId: "network-shared", assetHash: "h" }), rec("L9", { clientId: "someone-else" })]]);
+  const l = fakeLedger(h);
+  l.getLedgerEntry = async () => ({ ledgerId: "L1", clientId: "network-shared", assetHash: "h", blockHeight: "5", createdTimestamp: "1794015120193" });
+  const online = await prefetchOnline(l, { network: "staging", referenceId: REF, ledgerIds: ["L1"], timeoutMs: 5000 });
+  assert.deepEqual((await online.search(REF)).map((r) => r.ledgerId), ["L1"]);
+});
