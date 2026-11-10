@@ -202,3 +202,17 @@ test("the verifier also searches under the client the ledger stored our receipts
   const online = await prefetchOnline(l, { network: "staging", referenceId: REF, ledgerIds: ["L1"], timeoutMs: 5000 });
   assert.deepEqual((await online.search(REF)).map((r) => r.ledgerId), ["L1"]);
 });
+
+test("the verifier waits out the network's 429s on receipt and block reads instead of calling the receipts unreachable", async () => {
+  const ids = Array.from({ length: 30 }, (_, i) => `L${i}`);
+  const h = host([ids.map((id) => rec(id, { assetHash: "h" + id }))]);
+  const l = fakeLedger(h);
+  let limited = 0;
+  const burst = () => { if (limited < 40 && Math.random() < 0.6) { limited++; throw new RateLimitError("Rate limit exceeded", 429, undefined, 0); } };
+  l.getLedgerEntry = async (id) => { burst(); return { ledgerId: id, clientId: "own", assetHash: "h" + id, blockHeight: id.slice(1), createdTimestamp: "1794015120193" }; };
+  l.getBlock = async () => { burst(); return { blockTime: "1794015120193" }; };
+  const online = await prefetchOnline(l, { network: "staging", referenceId: REF, ledgerIds: ids, timeoutMs: 15000, concurrency: 8 });
+  assert.ok(limited > 0, "the fake did rate-limit");
+  assert.equal(online.receiptsChecked, 30, "every receipt read in the end");
+  assert.equal((await online.search(REF)).length, 30);
+});
