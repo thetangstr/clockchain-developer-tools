@@ -9,6 +9,7 @@ import {
   AuthError,
   ClockchainClient,
   InsufficientCreditsError,
+  parseRetryAfter,
   PoolDegradedError,
   RateLimitError,
   readConfigFromEnv,
@@ -33,6 +34,12 @@ export interface ShadowLedger {
   getLedgerEntry(ledgerId: string): Promise<LedgerRecord>;
   waitForConfirmation(ledgerId: string, timeoutMs?: number): Promise<LedgerRecord>;
   searchAsset(assetReferenceId: string): Promise<LedgerRecord[]>;
+  /**
+   * The verifier's completeness check, when set (SHADOW_NETWORK_SEARCH_URL): every record under a reference, from a search
+   * that fails rather than answer in part. Only the verifier uses it. Retries keep searchAsset: this search is a separate
+   * index that may lag a write, and a stale "none" there could pay for a write twice.
+   */
+  witnessSearch?(assetReferenceId: string, deadline?: number): Promise<LedgerRecord[]>;
   getBlock(height: string | number): Promise<BlockResponse>;
   buildEvidencePackage(ledgerId: string): Promise<EvidencePackage>;
   verifyPackage(pkg: EvidencePackage): Promise<PackageVerification>;
@@ -85,9 +92,10 @@ export class ShadowClockchainClient extends ClockchainClient {
   }
 }
 
-/** Largest page the network's ledger search serves, and how many pages one search may read before it gives up. */
+/** Largest page the network's ledger search serves; how many pages one read may need; how many full reads one search tries. */
 export const NETWORK_SEARCH_PAGE_SIZE = 100;
 export const NETWORK_SEARCH_MAX_PAGES = 20;
+export const NETWORK_SEARCH_MAX_PASSES = 3;
 const NETWORK_SEARCH_TIMEOUT_MS = 10_000;
 
 /** SHADOW_NETWORK_SEARCH_URL, the network's search host (for example https://stagingapi.clockchain.network). Only https. */
@@ -96,12 +104,16 @@ export function networkSearchUrl(env: NodeJS.ProcessEnv = process.env): string |
   return /^https:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(raw) ? raw : undefined;
 }
 
+const incomplete = (why: string, body?: unknown) => new ApiError(`Ledger search gave an incomplete answer (${why})`, 502, body);
+
 /**
- * The network's own ledger search, GET <base>/search/ledger?message=&size=&page=. It needs no key, covers every client,
- * and matches any field by substring, so only records whose reference is exactly this one and that were written under one
- * of Shadow's own clients are kept. Every page is read: a failed or malformed page fails the whole search, never a partial
- * answer. An empty list here really means none, unlike the old route's 404; and since a 404 from this route can only mean
- * a wrong address, it is passed on as a 502 so no caller reads it as "none" and pays again.
+ * The network's own ledger search, GET <base>/search/ledger?message=&size=&page=. It needs no key, covers every client, and
+ * matches any field by substring. Its order isn't stable from one request to the next, so paging can repeat one record and
+ * skip another; and its count can differ between reads. So an answer counts only when every record the search says matches
+ * has been seen: the distinct records across the pages read (before any filtering) must reach the reported total, with the
+ * same total on every page of that read. It reads the whole result up to NETWORK_SEARCH_MAX_PASSES times, keeping what earlier
+ * reads saw, and otherwise fails with a 502. Then only records whose reference is exactly this one, written under one of
+ * Shadow's own clients, are kept. A 404 is passed on as a 502 and a 429 as a rate limit, so neither is read as an answer.
  */
 export async function searchNetworkLedger(o: {
   baseUrl: string;
@@ -109,42 +121,59 @@ export async function searchNetworkLedger(o: {
   clientIds: readonly string[];
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Wall-clock time (ms) after which no further request starts. */
+  deadline?: number;
 }): Promise<LedgerRecord[]> {
   const fetchImpl = o.fetchImpl ?? fetch;
   const clients = new Set(o.clientIds.filter(Boolean));
-  const records: LedgerRecord[] = [];
-  const seen = new Set<string>();
-  for (let page = 0; page < NETWORK_SEARCH_MAX_PAGES; page++) {
+  const seen = new Map<string, LedgerRecord>();
+  const readPage = async (page: number) => {
+    const left = o.deadline === undefined ? Infinity : o.deadline - Date.now();
+    if (left <= 0) throw incomplete("out of time");
     const url = new URL(`${o.baseUrl}/search/ledger`);
     url.searchParams.set("message", o.referenceId);
     url.searchParams.set("size", String(NETWORK_SEARCH_PAGE_SIZE));
     url.searchParams.set("page", String(page));
-    const res = await fetchImpl(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(o.timeoutMs ?? NETWORK_SEARCH_TIMEOUT_MS) });
+    const res = await fetchImpl(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(Math.min(o.timeoutMs ?? NETWORK_SEARCH_TIMEOUT_MS, left)) });
     const body: unknown = await res.json().catch(() => undefined);
+    if (res.status === 429) throw new RateLimitError("Ledger search rate limited", 429, body, parseRetryAfter(res.headers.get("retry-after")));
     if (!res.ok) throw new ApiError(`Ledger search failed (HTTP ${res.status})`, res.status === 404 ? 502 : res.status, body);
-    const shape = body as { content?: unknown; totalPages?: unknown } | undefined;
-    if (!shape || !Array.isArray(shape.content) || typeof shape.totalPages !== "number") {
-      throw new ApiError("Ledger search answered in an unexpected form", 502, body);
+    const shape = body as { content?: unknown; totalPages?: unknown; totalElements?: unknown } | undefined;
+    if (!shape || !Array.isArray(shape.content) || !Number.isSafeInteger(shape.totalPages) || !Number.isSafeInteger(shape.totalElements)) {
+      throw incomplete("unexpected form", body);
     }
-    for (const r of shape.content as LedgerRecord[]) {
-      const id = String(r?.ledgerId ?? "");
-      if (!id || seen.has(id) || r.assetReferenceId !== o.referenceId || !clients.has(String(r.clientId))) continue;
-      seen.add(id);
-      records.push(r);
+    return { content: shape.content as LedgerRecord[], totalPages: shape.totalPages as number, totalElements: shape.totalElements as number };
+  };
+  for (let pass = 0; pass < NETWORK_SEARCH_MAX_PASSES; pass++) {
+    let total: number | undefined;
+    let pages = 1;
+    let steady = true;
+    for (let page = 0; page < pages; page++) {
+      const r = await readPage(page);
+      if (total === undefined) {
+        total = r.totalElements;
+        pages = r.totalPages;
+        if (pages > NETWORK_SEARCH_MAX_PAGES) throw incomplete(`more than ${NETWORK_SEARCH_MAX_PAGES} pages`);
+      } else if (r.totalElements !== total || r.totalPages !== pages) {
+        steady = false;
+      }
+      if (r.content.length === 0 && page + 1 < pages) steady = false;
+      for (const rec of r.content) {
+        const id = String(rec?.ledgerId ?? "");
+        if (id) seen.set(id, rec);
+      }
     }
-    if (shape.content.length === 0 || page + 1 >= shape.totalPages) return records;
+    if (steady && seen.size === total) {
+      return [...seen.values()].filter((r) => r.assetReferenceId === o.referenceId && clients.has(String(r.clientId)));
+    }
   }
-  throw new ApiError(`Ledger search matched more than ${NETWORK_SEARCH_MAX_PAGES} pages`, 502, undefined);
+  throw incomplete("records shifted between pages");
 }
 
-/** Shadow's client when SHADOW_NETWORK_SEARCH_URL is set: writes as before, searches through the network's ledger search. */
-export class NetworkSearchShadowClient extends ClockchainClient {
-  constructor(config: ClockchainConfig, private readonly search: { baseUrl: string; clientIds: readonly string[]; fetchImpl?: typeof fetch }) {
-    super(config);
-  }
-  override async searchAsset(assetReferenceId: string): Promise<LedgerRecord[]> {
-    return searchNetworkLedger({ ...this.search, referenceId: assetReferenceId });
-  }
+/** Gives Shadow's ledger the network's search for the verifier's completeness check; writes and retries are unchanged. */
+export function withNetworkWitness<T extends ShadowLedger>(ledger: T, o: { baseUrl: string; clientIds: readonly string[]; fetchImpl?: typeof fetch }): T {
+  ledger.witnessSearch = (referenceId, deadline) => searchNetworkLedger({ ...o, referenceId, deadline });
+  return ledger;
 }
 
 /** The delegated in-process client (CLOCKCHAIN_API_KEY / _CLIENT_ID / _WALLET_ID), or Shadow's own identity on it, built on first use. */
@@ -152,15 +181,13 @@ export function runtimeShadowLedger(env: NodeJS.ProcessEnv = process.env): Shado
   if (testLedger) return testLedger;
   if (!runtimeLedger) {
     const identity = shadowLedgerIdentity(env);
-    const base = readConfigFromEnv(env);
+    runtimeLedger = identity
+      ? new ShadowClockchainClient({ ...readConfigFromEnv(env), ...identity }, new ClockchainClient(readConfigFromEnv(env)))
+      : new ClockchainClient(readConfigFromEnv(env));
     const searchUrl = networkSearchUrl(env);
     if (searchUrl) {
-      const config = identity ? { ...base, ...identity } : base;
-      runtimeLedger = new NetworkSearchShadowClient(config, { baseUrl: searchUrl, clientIds: [...new Set([config.clientId, base.clientId])] });
-    } else {
-      runtimeLedger = identity
-        ? new ShadowClockchainClient({ ...readConfigFromEnv(env), ...identity }, new ClockchainClient(readConfigFromEnv(env)))
-        : new ClockchainClient(readConfigFromEnv(env));
+      const ids = [identity?.clientId, readConfigFromEnv(env).clientId].filter((v): v is string => !!v);
+      withNetworkWitness(runtimeLedger, { baseUrl: searchUrl, clientIds: [...new Set(ids)] });
     }
   }
   return runtimeLedger;
@@ -377,7 +404,16 @@ export async function prefetchOnline(
   let refused = false;
   const receipts = o.ledgerIds.length > 0;
   try {
-    found = (await withDeadline(ledger.searchAsset(o.referenceId), deadline)).map((r) => ({ ledgerId: String(r.ledgerId), assetHash: str(r.assetHash) }));
+    const search = ledger.witnessSearch ? ledger.witnessSearch(o.referenceId, deadline) : ledger.searchAsset(o.referenceId);
+    found = (await withDeadline(search, deadline)).map((r) => ({ ledgerId: String(r.ledgerId), assetHash: str(r.assetHash) }));
+    // That index may not have caught up with a write yet, so for a record with no receipts its "none" is no answer either.
+    if (ledger.witnessSearch && !found.length && !receipts) {
+      found = undefined;
+      refused = true;
+    }
+    // A receipt it doesn't list shows it hasn't caught up: its answer can't vouch for what else the ledger holds.
+    const listed = new Set(found?.map((r) => r.ledgerId));
+    if (ledger.witnessSearch && found && o.ledgerIds.some((id) => !listed.has(id))) found = undefined;
   } catch (e) {
     // A 404 lands here too: it can mean none or a wrong route, so it is no answer, and can't vouch for what the ledger holds.
     found = undefined;
