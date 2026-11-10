@@ -1084,7 +1084,9 @@ test("CORS: * without credentials on metadata, register and token only; never on
 const SECURE_CLEAR = "__Host-cc_acct=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax";
 const keyHashOf = (key) => createHash("sha256").update(key).digest("hex");
 const codeOf = (res) => new URL(res.headers.get("location")).searchParams.get("code");
-const tokenAcct = (issued) => verifyToken(SECRET, issued.body.access_token).payload.acct;
+// Checks the signature and shape but not the expiry (nowSec 0): harness() runs on a fixed clock (2 Nov 2026), so its
+// 7-day tokens would read as expired against the real clock from 9 Nov 2026. Expiry has its own tests.
+const tokenAcct = (issued) => verifyToken(SECRET, issued.body.access_token, 0).payload.acct;
 
 test("accounts: a second app in the same browser, and a key sign-in from a new browser, get the same acct", async () => {
   const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
