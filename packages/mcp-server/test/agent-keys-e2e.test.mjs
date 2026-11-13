@@ -114,7 +114,8 @@ test("an agent onboards from the instructions alone: one token call, signed chec
       const joined = block.join("\n");
       for (const fact of ["Ed25519", "private half", "/oauth/token", "grant_type=client_credentials", `client_assertion_type=${JWT_BEARER}`, "client_assertion=",
         "token_endpoint", "/shadow/mcp", "sign.hash", "shadow_checkpoint", "shadow_close_session", "shadow_sign_checkpoint", "/agent-keys/<fingerprint>.json",
-        "never sees", "/replace", "new_key_assertion", "new_public_key", "/revoke"]) {
+        "never sees", "/replace", "new_key_assertion", "new_public_key", "/revoke", "sign.count", "sign.head",
+        "standard base64, 88 characters ending ==", "including its final newline", "under the issuer from the OAuth metadata", "8 to 128 characters"]) {
         assert.ok(joined.includes(fact), `${name} names ${fact}`);
       }
       assert.doesNotMatch(joined, /verified|independent|validator/i, name);
@@ -174,9 +175,12 @@ test("an agent onboards from the instructions alone: one token call, signed chec
     const s = await call("shadow_start_session", { title: "Find a flight", agents: [{ id: "planner" }] });
     await call("shadow_record", { session_id: s.session_id, agent: "planner", kind: "task", content: "Find a flight from Lisbon to Paris" });
     await call("shadow_record", { session_id: s.session_id, agent: "planner", kind: "tool_call", content: { tool: "search_flights", args: { from: "LIS", to: "CDG" } } });
-    await call("shadow_record", { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." });
+    const last = await call("shadow_record", { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." });
     const cp = await call("shadow_checkpoint", { session_id: s.session_id });
     assert.match(cp.sign.hash, /^[0-9a-f]{64}$/);
+    // As the instructions say: before signing, count and head match the agent's own record.
+    assert.equal(cp.sign.count, last.seq);
+    assert.equal(cp.sign.head, last.hash);
     const signed = await call("shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) });
     assert.equal(signed.checkpoint.status, "anchored", JSON.stringify(signed));
     const closed = await call("shadow_close_session", { session_id: s.session_id, status: "succeeded" });

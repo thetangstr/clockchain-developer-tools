@@ -38,11 +38,11 @@ function agentKeyLines(base: string, shadow: string): string[] {
     "Agents that run code can sign in with their own Ed25519 key instead, with no person and no account:",
     "1. Make an Ed25519 key and keep the private half. Clockchain never sees the private key.",
     `2. POST one form to ${base}/oauth/token: grant_type=client_credentials, client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer, client_assertion=<JWT>.`,
-    `   The JWT: alg EdDSA and your public key as jwk {kty:"OKP",crv:"Ed25519",x} in its header; iss and sub its RFC 7638 thumbprint, aud the token_endpoint from ${base}/.well-known/oauth-authorization-server, exp at most 300 s after iat, a new jti. There is no refresh token: sign a new assertion.`,
-    `3. Send the access_token as "Authorization: Bearer <access_token>" to ${shadow}.`,
-    "4. shadow_checkpoint and shadow_close_session return sign.hash. Sign its 32 bytes (the hex decoded) with your key and send session_id, hash and signature (base64) with shadow_sign_checkpoint.",
-    `Your key's public entry: ${keys}.json, where <fingerprint> is the sha256 hex of "shadow:public-key:v1", a NUL byte, and your SPKI PEM as a JSON string.`,
-    `Replace the key: POST ${keys}/replace {assertion (old key, claim new_key: the new fingerprint), new_public_key (SPKI PEM), new_key_assertion (new key, claim replaces: the old fingerprint)}. Cancel it: POST ${keys}/revoke {assertion}. Each assertion's aud is that URL.`,
+    `   The JWT: alg EdDSA and your public key as jwk {kty:"OKP",crv:"Ed25519",x} in its header; iss and sub its RFC 7638 thumbprint, aud the token_endpoint from ${base}/.well-known/oauth-authorization-server, exp at most 300 s after iat, a new jti of 8 to 128 characters. There is no refresh token: sign a new assertion.`,
+    `3. Send the access_token as "Authorization: Bearer <access_token>" to the MCP endpoint ${shadow} (streamable HTTP).`,
+    "4. shadow_checkpoint and shadow_close_session return sign.hash, sign.count and sign.head (the last step's hash): check count and head match your own record, and don't sign if they don't. Sign the hash's 32 bytes (the hex decoded) with your key and send session_id, hash and signature (standard base64, 88 characters ending ==) with shadow_sign_checkpoint.",
+    `Your key's public entry: ${keys}.json, where <fingerprint> is the sha256 hex of "shadow:public-key:v1", a NUL byte, and your SPKI PEM, including its final newline, as a JSON string.`,
+    `Replace the key: POST ${keys}/replace {assertion (old key, claim new_key: the new fingerprint), new_public_key (SPKI PEM), new_key_assertion (new key, claim replaces: the old fingerprint)}. Cancel it: POST ${keys}/revoke {assertion}. Each assertion's aud is that action's URL under the issuer from the OAuth metadata (<issuer>/agent-keys/<fingerprint>/replace or /revoke), whatever host served these instructions.`,
   ];
 }
 

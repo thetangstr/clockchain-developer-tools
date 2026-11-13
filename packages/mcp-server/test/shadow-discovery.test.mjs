@@ -250,6 +250,16 @@ test("how an agent signs in with its own key is shown only with agent keys on, i
     const block = lines.slice(at, lines.indexOf("", at));
     assert.ok(at > 0 && block.length <= 8, `${block.length} lines`);
     for (const u of block.join(" ").match(/https?:\/\/[^\s"{}]+/g)) assert.ok(u.startsWith(`${base}/`), u);
+    const joined = block.join("\n");
+    // Exact enough to follow with no person: the signature's encoding, the fingerprint's bytes, the change URLs' base,
+    // the jti's length, and the counts to compare before signing.
+    for (const fact of ["standard base64, 88 characters ending ==", "including its final newline", "under the issuer from the OAuth metadata",
+      "8 to 128 characters", "sign.count", "sign.head", "check count and head match your own record, and don't sign if they don't"]) {
+      assert.ok(joined.includes(fact), `names ${fact}`);
+    }
+    assert.doesNotMatch(joined, /base64url/);
+    // A period right after a URL reads as part of it.
+    assert.doesNotMatch(joined, /https?:\/\/\S*\.(?=\s|$)/m);
     lines.splice(at, block.length + 1);
     assert.equal(lines.join("\n"), off, "the rest is unchanged");
   }

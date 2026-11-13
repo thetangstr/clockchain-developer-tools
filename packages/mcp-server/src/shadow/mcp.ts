@@ -460,7 +460,7 @@ export function buildShadowServer(
       inputSchema: {
         session_id: sessionId,
         hash: z.string().describe("sign.hash, exactly as shadow_checkpoint or shadow_close_session returned it."),
-        signature: z.string().describe("Your Ed25519 signature over the hash's 32 bytes, in base64 (88 characters)."),
+        signature: z.string().describe("Your Ed25519 signature over the hash's 32 bytes, in standard base64 (88 characters ending ==)."),
       },
     }, run((a) => service.signCheckpoint(owner, o.agentKey, a)));
   }
