@@ -3,19 +3,23 @@
 import assert from "node:assert/strict";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import test from "node:test";
 
 import { runHttp } from "../dist/http.js";
-import { mintToken, mintTrialToken, mintHandshakeSessionToken } from "../dist/token.js";
+import { mintAgentToken, mintToken, mintTrialToken, mintHandshakeSessionToken } from "../dist/token.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
-import { ASKED_INSTRUCTIONS } from "../dist/shadow/mcp.js";
+import { ASKED_INSTRUCTIONS, shadowOwnerFromClaims } from "../dist/shadow/mcp.js";
+import { ownerKeyOf } from "../dist/shadow/store.js";
+import { AgentKeyBook } from "../dist/agent-keys/book.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
 import { parseStrict } from "../dist/shadow/lib/profile.js";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
+import { makeAgentKey } from "./helpers/agent-key.mjs";
 
 const SECRET = "shadow-http-test-secret";
 const STATIC = "static-shadow-token";
@@ -24,6 +28,7 @@ const ENV_KEYS = [
   "PORT", "MCP_PORT", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "MCP_AUTH_TOKENS", "MCP_TOKEN_SIGNING_SECRET", "MCP_RATE_PER_MIN", "MCP_SURFACE",
   "SHADOW_LINKS_PER_MINUTE", "SHADOW_ALLOW_NON_ACCT", "MCP_REQUIRE_AUTH", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_TRUSTED_PROXY",
   "SHADOW_LINK_CONCURRENCY", "SHADOW_LINK_PER_CLIENT", "SHADOW_LINK_IDLE_MS", "SHADOW_LINK_MAX_MS",
+  "MCP_STATE_DIR", "MCP_AGENT_KEYS", "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR",
 ];
 const SHADOW_TOOLS = ["clockchain_log_level", "shadow_start_session", "shadow_record", "shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_verify", "shadow_revoke_links", "shadow_delete_session"];
 
@@ -307,6 +312,229 @@ test("open mode (no MCP_AUTH_TOKENS, local use): a presented credential owns its
     assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: "someone-else" })).value.error, "SHADOW_NOT_FOUND");
     const signedOwner = mintToken(SECRET).token;
     assert.deepEqual((await call(app, "shadow_list_sessions", {}, { bearer: signedOwner })).value.sessions, []);
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+// ---- agent keys (MCP_AGENT_KEYS=1): an agent's own key owns its records by its root key, with Starter limits ----
+
+const PUBLIC = "https://mcp.example.test";
+const JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+const CANCELLED = "This agent key was cancelled or replaced; sign in again with your current key.";
+
+async function freeLoopbackPort() {
+  const probe = createServer().listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const { port } = probe.address();
+  await new Promise((r) => probe.close(r));
+  return port;
+}
+
+/** runHttp with OAuth, Shadow and (unless overridden) agent keys on; retries when another test takes the probed port. */
+async function bootAgentKeys(env = {}) {
+  const saved = {};
+  for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  const stateDir = mkdtempSync(path.join(tmpdir(), "shadow-ak-state-"));
+  const shadowDir = mkdtempSync(path.join(tmpdir(), "shadow-ak-"));
+  let server;
+  for (let attempt = 1; ; attempt++) {
+    Object.assign(process.env, {
+      MCP_PORT: String(await freeLoopbackPort()), MCP_AUTH_TOKENS: STATIC, MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: stateDir,
+      MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_AGENT_KEYS: "1", SHADOW_ENABLED: "1", SHADOW_STATE_DIR: shadowDir,
+    }, env);
+    for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k];
+    try {
+      server = await runHttp();
+      if (!server.listening) await once(server, "listening");
+    } catch (e) {
+      if (e?.code !== "EADDRINUSE" || attempt >= 5) throw e;
+      continue;
+    }
+    let reached = false;
+    const mark = () => { reached = true; };
+    server.prependListener("request", mark);
+    await fetch(`http://127.0.0.1:${server.address().port}/health`).then((r) => r.arrayBuffer()).catch(() => {});
+    server.removeListener("request", mark);
+    if (reached) break;
+    server.closeAllConnections?.();
+    await new Promise((r) => server.close(r));
+    assert.ok(attempt < 5, "no 127.0.0.1 port reached this server in 5 tries");
+  }
+  const url = `http://127.0.0.1:${server.address().port}`;
+  return {
+    url,
+    shadowDir,
+    /** The same public book the server reads (one file per key on disk), for replacing and revoking keys. */
+    book: new AgentKeyBook({ dir: path.join(stateDir, "agent-keys"), now: () => new Date() }),
+    /** A Starter token for `agent` from the real client_credentials grant. */
+    async tokenFor(agent) {
+      const res = await fetch(`${url}/oauth/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: agent.assertion(`${PUBLIC}/oauth/token`) }),
+      });
+      const body = await res.json();
+      assert.equal(res.status, 200, JSON.stringify(body));
+      return body.access_token;
+    },
+    async close() {
+      server.closeAllConnections?.();
+      await new Promise((r) => server.close(r));
+      for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    },
+  };
+}
+
+const sessionDir = (app, ownerId, sessionId) => path.join(app.shadowDir, "owners", ownerKeyOf(ownerId), "sessions", sessionId);
+
+async function mcpCall(app, name, args, cred) {
+  const { status, body } = await rpc(`${app.url}/mcp`, "tools/call", { name, arguments: args }, cred);
+  assert.equal(status, 200, JSON.stringify(body));
+  return body.result;
+}
+
+test("shadowOwnerFromClaims: ak:<root> for an agent key whose root is known; acct keeps precedence; no root, the jti as before", () => {
+  const akf = "ab".repeat(32);
+  const root = "cd".repeat(32);
+  assert.equal(shadowOwnerFromClaims({ jti: "j1", akf }, "raw", root), `ak:${root}`);
+  assert.equal(shadowOwnerFromClaims({ jti: "j1", akf, acct: "acct_" + "A".repeat(22) }, "raw", root), "acct_" + "A".repeat(22));
+  assert.equal(shadowOwnerFromClaims({ jti: "j1", akf }, "raw"), "jti:j1", "no book: not an agent");
+  assert.equal(shadowOwnerFromClaims({ jti: "j1" }, "raw", root), "jti:j1", "no akf: not an agent");
+  assert.equal(shadowOwnerFromClaims({ jti: "j1", akf }, "raw", "not-a-fingerprint"), "jti:j1");
+});
+
+test("an agent token opens /shadow/mcp and owns by ak:<root>", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    const tools = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token });
+    assert.equal(tools.status, 200, JSON.stringify(tools.body));
+    // With sign-in on, every endpoint lists clockchain_delete_account; for an agent it answers ACCOUNT_REQUIRED.
+    assert.deepEqual(tools.body.result.tools.map((t) => t.name).sort(), [...SHADOW_TOOLS, "clockchain_delete_account"].sort());
+    assert.equal((await call(app, "clockchain_delete_account", { confirm: true }, { bearer: token })).value.error, "ACCOUNT_REQUIRED");
+    const { value: s } = await call(app, "shadow_start_session", { title: "agent's" }, { bearer: token });
+    assert.ok(existsSync(sessionDir(app, `ak:${agent.fingerprint}`, s.session_id)), "stored under ak:<root>");
+    // Another token from the same key is the same owner; another agent and an account are not.
+    const again = await app.tokenFor(agent);
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { apiKey: again })).value.title, "agent's");
+    const stranger = await app.tokenFor(makeAgentKey());
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: stranger })).value.error, "SHADOW_NOT_FOUND");
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: acctToken() })).value.error, "SHADOW_NOT_FOUND");
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("after replace, a token from the new key owns the same sessions", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const first = makeAgentKey();
+    const oldToken = await app.tokenFor(first);
+    const { value: s } = await call(app, "shadow_start_session", { title: "kept across keys" }, { bearer: oldToken });
+    const second = makeAgentKey();
+    app.book.replace(first.fingerprint, second.publicKeyPem);
+    const newToken = await app.tokenFor(second);
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: newToken })).value.title, "kept across keys");
+    const { value: listed } = await call(app, "shadow_list_sessions", {}, { bearer: newToken });
+    assert.deepEqual(listed.sessions.map((x) => x.session_id), [s.session_id]);
+    const { value: s2 } = await call(app, "shadow_start_session", { title: "new key" }, { bearer: newToken });
+    assert.ok(existsSync(sessionDir(app, `ak:${first.fingerprint}`, s2.session_id)), "still owned by the first key, the root");
+    // Replacing usually follows a compromise: the old key's tokens stop working at once.
+    const refused = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: oldToken });
+    assert.equal(refused.status, 401);
+    assert.deepEqual(refused.body, { error: "invalid_token", message: CANCELLED });
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("a token minted before revoke is refused after it", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token })).status, 200);
+    assert.equal((await rpc(`${app.url}/mcp`, "tools/list", {}, { bearer: token })).status, 200);
+    app.book.revoke(agent.fingerprint);
+    for (const endpoint of ["/shadow/mcp", "/mcp"]) {
+      const res = await fetch(`${app.url}${endpoint}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      assert.equal(res.status, 401, endpoint);
+      assert.match(res.headers.get("www-authenticate") ?? "", /error="invalid_token"/, endpoint);
+      assert.equal(res.headers.get("cache-control"), "no-store", endpoint);
+      assert.deepEqual(await res.json(), { error: "invalid_token", message: CANCELLED }, endpoint);
+    }
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("a starter token cannot call timer_set or alarm_set on /mcp", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const token = await app.tokenFor(makeAgentKey());
+    const list = await rpc(`${app.url}/mcp`, "tools/list", {}, { bearer: token });
+    assert.equal(list.body.result.tools.length, 50, "the tool list is unchanged");
+    const calls = [
+      ["timer_set", { delay_ms: 60_000 }],
+      ["alarm_set", { fire_at: new Date(Date.now() + 3_600_000).toISOString() }],
+      ["timer_list", {}],
+    ];
+    for (const [name, args] of calls) {
+      const result = await mcpCall(app, name, args, { bearer: token });
+      assert.equal(result.isError, true, name);
+      const body = JSON.parse(result.content[0].text);
+      assert.equal(body.error, "not_on_starter", name);
+      assert.equal(body.tool, name);
+      assert.match(body.message, /Starter/);
+    }
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("account tokens are unchanged", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const account = { bearer: acctToken() };
+    const { value: s } = await call(app, "shadow_start_session", { title: "account" }, account);
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, account)).value.title, "account");
+    // A keeper tool on /mcp reaches its handler, as before: no Starter refusal.
+    const result = await mcpCall(app, "timer_list", {}, account);
+    assert.doesNotMatch(result.content[0].text, /not_on_starter/);
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("with MCP_AGENT_KEYS off, an akf token gains nothing: Shadow says account_required and /mcp treats it as a demo token", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys({ MCP_AGENT_KEYS: undefined });
+  try {
+    const agent = makeAgentKey();
+    const { token } = mintAgentToken(SECRET, 3600, Math.floor(Date.now() / 1000), randomUUID(), agent.fingerprint);
+    const shadow = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token });
+    assert.equal(shadow.status, 403);
+    assert.equal(shadow.body.error, "account_required");
+    const result = await mcpCall(app, "timer_list", {}, { bearer: token });
+    assert.doesNotMatch(result.content[0].text, /not_on_starter/, "today's demo-token rules");
+    assert.equal(existsSync(path.join(app.shadowDir, "owners", ownerKeyOf(`ak:${agent.fingerprint}`))), false);
   } finally {
     await app.close();
     __setShadowLedgerForTests(undefined);

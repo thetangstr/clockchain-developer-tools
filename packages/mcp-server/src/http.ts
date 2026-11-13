@@ -87,7 +87,7 @@ import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/ser
 import { createShadowHttpHandler, PREVIEW_CHAT_PATH, PREVIEW_PATH, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger, shadowLedgerIdentity } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
-import { AgentKeyBook } from "./agent-keys/book.js";
+import { AgentKeyBook, type KeyEntry } from "./agent-keys/book.js";
 import { jwtBearerProof } from "./agent-keys/proof.js";
 import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
 
@@ -1115,12 +1115,32 @@ export async function runHttp(): Promise<Server> {
   // a v:2 trial token marks the request as an ANONYMOUS TRIAL and carries the
   // ephemeral DID + channel. Returns the verified payload (when that is how auth
   // passed) so the caller can rate-limit on the token's `jti` WITHOUT re-verifying.
+  // An agent-key token (`akf`, from the client_credentials grant) is an agent on the Starter plan, with `agentRoot`
+  // the root key that owns its records; its key must still be active in the book.
   type AuthOutcome =
     | { ok: false }
+    | { ok: false; agentKeyCancelled: true }
     | { ok: true; reason: "static_token" }
     | { ok: true; reason: "demo_token_v1"; payload: TokenPayload }
+    | { ok: true; reason: "agent_key"; payload: TokenPayload; agentRoot: string }
     | { ok: true; scope: HandshakeSessionTokenPayload }
     | { ok: true; trial: TrialTokenPayload };
+  // A token's agent key in the public book (MCP_AGENT_KEYS on). A replaced or revoked key's tokens stop at once, since
+  // replacing usually follows a compromise: the agent signs in again with its current key, whose tokens own the same
+  // records through the shared root. A key missing from the book, or a book that can't be read, is refused too.
+  // Agent keys off: no book, and an akf token is an ordinary demo token, as before (undefined here).
+  const agentKeyOf = (payload: TokenPayload): { root: string } | "cancelled" | "unusable" | undefined => {
+    if (!agentKeyBook || payload.akf === undefined) return undefined;
+    let entry: KeyEntry | null;
+    try {
+      entry = agentKeyBook.get(payload.akf);
+    } catch (e) {
+      console.error(JSON.stringify({ event: "agent_key_book_unreadable", error: (e as Error)?.name ?? "error" }));
+      return "unusable";
+    }
+    if (!entry) return "unusable";
+    return entry.status === "active" ? { root: entry.root } : "cancelled";
+  };
   const checkAuth = (req: IncomingMessage): AuthOutcome => {
     if (isAuthorized(req.headers, tokens)) return { ok: true, reason: "static_token" };
     if (!selfServeEnabled) return { ok: false };
@@ -1131,7 +1151,14 @@ export async function runHttp(): Promise<Server> {
     if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
     // Off with free keys (network.ts): a token with no account behind it spends the server's own credits. Accounts' tokens keep working.
     if (v1.valid && !FREE_TOKENS && !v1.payload.acct) return { ok: false };
-    if (v1.valid) return { ok: true, reason: "demo_token_v1", payload: v1.payload };
+    if (v1.valid) {
+      const agent = agentKeyOf(v1.payload);
+      if (agent === "cancelled") return { ok: false, agentKeyCancelled: true };
+      if (agent === "unusable") return { ok: false };
+      // An account's claim keeps precedence: such a token is the account's, as before.
+      if (agent && !v1.payload.acct) return { ok: true, reason: "agent_key", payload: v1.payload, agentRoot: agent.root };
+      return { ok: true, reason: "demo_token_v1", payload: v1.payload };
+    }
     const v2 = verifyTrialToken(signingSecret, presented);
     if (v2.valid && !FREE_TOKENS) return { ok: false };
     if (v2.valid) return { ok: true, trial: v2.payload };
@@ -1159,6 +1186,11 @@ export async function runHttp(): Promise<Server> {
   // presented and refused); with OAuth off it is the original response, byte for byte.
   const mcpUnauthorized = (res: ServerResponse, req?: IncomingMessage): void =>
     writeMcpUnauthorized(res, oauth && req ? oauth.challenge(pathOf(req.url), presentedApiKey(req.headers) !== "") : undefined);
+  // A token whose agent key was replaced or revoked, on /mcp and the /shadow MCP paths: a 401 that says so plainly.
+  const agentKeyCancelledUnauthorized = (res: ServerResponse, req: IncomingMessage): void => {
+    res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store", ...oauth?.challenge(pathOf(req.url), true) });
+    res.end(JSON.stringify({ error: "invalid_token", message: "This agent key was cancelled or replaced; sign in again with your current key." }));
+  };
 
   // ---- /shadow/* (hosted Shadow) -------------------------------------------
   // Off unless SHADOW_ENABLED=1: then every /shadow path answers 404 and nothing
@@ -1195,6 +1227,10 @@ export async function runHttp(): Promise<Server> {
   // A 401 on /shadow/*: the same status and challenge as /mcp's, but /mcp's body sends an agent to x-api-key and POST
   // /token, whose key Shadow then refuses. With OAuth on, it says what works here. With OAuth off: /mcp's, unchanged.
   const shadowUnauthorized = (res: ServerResponse, req?: IncomingMessage): void => {
+    if (req && agentKeyBook) {
+      const auth = checkAuth(req);
+      if (!auth.ok && "agentKeyCancelled" in auth) return agentKeyCancelledUnauthorized(res, req);
+    }
     if (!oauth || !req || oauthConfig.kind !== "ready") return mcpUnauthorized(res, req);
     const base = oauthConfig.publicUrl;
     res.writeHead(401, { "content-type": "application/json", ...oauth.challenge(pathOf(req.url), presentedApiKey(req.headers) !== "") });
@@ -1228,22 +1264,25 @@ export async function runHttp(): Promise<Server> {
       instructions: `${base}/shadow/connect`,
     }));
   };
+  // An agent's own key (ak:<root fingerprint>, MCP_AGENT_KEYS on) is an owner here like a signed-in account.
+  const AGENT_OWNER = /^ak:[0-9a-f]{64}$/;
   const shadowAuthenticate = (req: IncomingMessage): ShadowAuth => {
     const auth = shadowResolveOwner(req);
-    if (!auth.ok || shadowAllowNonAcct || ACCT_PATTERN.test(auth.ownerId)) return auth;
+    if (!auth.ok || shadowAllowNonAcct || ACCT_PATTERN.test(auth.ownerId) || AGENT_OWNER.test(auth.ownerId)) return auth;
     return { ok: false, accountRequired: true };
   };
   const shadowResolveOwner = (req: IncomingMessage): ShadowAuth => {
     const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
     const presented = presentedApiKey(req.headers);
-    const signed = (claims: { jti?: string; acct?: string }): ShadowAuth => ({
+    // An agent's every token shares its root key's rate bucket, as it shares the root's records.
+    const signed = (claims: { jti?: string; acct?: string; akf?: string }, agentRoot?: string): ShadowAuth => ({
       ok: true,
-      ownerId: shadowOwnerFromClaims(claims, presented),
-      rateKey: callerPrincipalId(req.headers, ip, signedTokenSubject(claims)),
+      ownerId: shadowOwnerFromClaims(claims, presented, agentRoot),
+      rateKey: callerPrincipalId(req.headers, ip, agentRoot ? `ak:${agentRoot}` : signedTokenSubject(claims)),
     });
     const auth = checkAuth(req);
     if (!auth.ok || "scope" in auth) return { ok: false };
-    if ("payload" in auth) return signed(auth.payload);
+    if ("payload" in auth) return signed(auth.payload, "agentRoot" in auth ? auth.agentRoot : undefined);
     if ("trial" in auth) return signed(auth.trial);
     const matched = matchStaticToken(req.headers, tokens);
     if (matched) {
@@ -1259,7 +1298,11 @@ export async function runHttp(): Promise<Server> {
     if (looksLikeSelfServe(presented)) {
       const v1 = verifyToken(signingSecret, presented);
       if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
-      if (v1.valid) return signed(v1.payload);
+      if (v1.valid) {
+        const agent = agentKeyOf(v1.payload);
+        if (agent === "cancelled" || agent === "unusable") return { ok: false };
+        return signed(v1.payload, agent && !v1.payload.acct ? agent.root : undefined);
+      }
       const v2 = verifyTrialToken(signingSecret, presented);
       if (v2.valid) return signed(v2.payload);
       return { ok: false };
@@ -1944,6 +1987,10 @@ export async function runHttp(): Promise<Server> {
     // rate-limit key so we don't HMAC-verify the token twice per request.
     const auth: AuthOutcome = byo ? { ok: true, reason: "static_token" } : checkAuth(req);
     if (!byo && !auth.ok) {
+      if ("agentKeyCancelled" in auth) {
+        agentKeyCancelledUnauthorized(res, req);
+        return;
+      }
       const presented = presentedApiKey(req.headers);
       // A malformed or expired signed-token-shaped credential must never fall
       // through as BYO: that would erase its session/role/tool restrictions.
@@ -1959,7 +2006,7 @@ export async function runHttp(): Promise<Server> {
     }
 
     // With free keys off, /mcp's delegated writes aren't open to free accounts either: they spend the server's credits, with no per-account limit there.
-    if (!FREE_TOKENS && !byo && auth.ok && "reason" in auth && auth.reason === "demo_token_v1") {
+    if (!FREE_TOKENS && !byo && auth.ok && "reason" in auth && (auth.reason === "demo_token_v1" || auth.reason === "agent_key")) {
       res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify({ error: "account_not_enabled_here", message: "On this network a signed-in account works on Shadow (/shadow/mcp), not on these tools." }));
       return;
@@ -1975,7 +2022,9 @@ export async function runHttp(): Promise<Server> {
     const selfServeJti = byo || !auth.ok
       ? undefined
       : "payload" in auth
-        ? signedTokenSubject(auth.payload) // an OAuth token's account, else its jti
+        ? "agentRoot" in auth
+          ? `ak:${auth.agentRoot}` // an agent's root key: every token of the agent shares one bucket
+          : signedTokenSubject(auth.payload) // an OAuth token's account, else its jti
         : "trial" in auth
           ? auth.trial.jti
           : "scope" in auth
@@ -2033,10 +2082,14 @@ export async function runHttp(): Promise<Server> {
         }
       }
 
-      // Resolve entitlement -> keeper gate (LLD §4.1 A1/A4). Only an anonymous
-      // TRIAL (v:2 trial token) gets a gate; BYO / static-token / v:1-demo
-      // callers are AUTHENTICATED and bypass the trial/keeper layer (LLD §13).
+      // Resolve entitlement -> keeper gate (LLD §4.1 A1/A4). An anonymous TRIAL
+      // (v:2 trial token) and an agent's own key (Starter) get a gate; BYO /
+      // static-token / v:1-demo callers are AUTHENTICATED and bypass the
+      // trial/keeper layer (LLD §13).
       let gate: KeeperGate | undefined;
+      if (!byo && auth.ok && "reason" in auth && auth.reason === "agent_key") {
+        gate = buildKeeperGate({ kind: "authenticated", reason: "agent_key", plan: "starter" });
+      }
       if (!byo && auth.ok && "trial" in auth) {
         const eph = auth.trial.eph;
         const channel = normalizeChannel(auth.trial.ch);

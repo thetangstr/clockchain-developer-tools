@@ -211,18 +211,24 @@ const first = (h: string | string[] | undefined): string => (Array.isArray(h) ? 
 const ACCT = /^acct_[A-Za-z0-9_-]{22}$/;
 let warnedAcct = false;
 
+const AGENT_ROOT = /^[0-9a-f]{64}$/;
+
 /**
  * The owner of a session, from a signed cc_ token's verified claims: the OAuth account (`acct`) when present, else
- * the token's own id. The `sub` label is supplied unauthenticated at POST /token and is never used. verifyToken already
- * refuses a token whose `acct` is malformed; the check here is defence in depth.
+ * the agent's root key (`ak:<root fingerprint>`) for an agent-key token (`akf`), else the token's own id. `agentRoot`
+ * is the root the caller looked up in the public key book for `akf`; without it (agent keys off) an `akf` token is no
+ * agent and owns by its jti, as before. Every key that replaces another keeps its root, so its records stay with it.
+ * The `sub` label is supplied unauthenticated at POST /token and is never used. verifyToken already refuses a token
+ * whose `acct` is malformed; the check here is defence in depth.
  */
-export function shadowOwnerFromClaims(claims: { jti?: unknown; acct?: unknown }, rawToken: string): string {
+export function shadowOwnerFromClaims(claims: { jti?: unknown; acct?: unknown; akf?: unknown }, rawToken: string, agentRoot?: string): string {
   const acct = claims.acct;
   if (typeof acct === "string" && ACCT.test(acct)) return acct;
   if (acct !== undefined && !warnedAcct) {
     warnedAcct = true;
     console.warn(JSON.stringify({ event: "shadow_acct_claim_malformed", note: "a signed token carries an acct claim that is not acct_ + 22 base64url characters; owning by jti" }));
   }
+  if (acct === undefined && typeof claims.akf === "string" && agentRoot !== undefined && AGENT_ROOT.test(agentRoot)) return `ak:${agentRoot}`;
   if (typeof claims.jti === "string" && claims.jti.length > 0) return `jti:${claims.jti}`;
   return `tok:${createHash("sha256").update(rawToken).digest("hex")}`;
 }
