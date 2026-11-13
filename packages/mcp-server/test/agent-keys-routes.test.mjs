@@ -49,6 +49,7 @@ async function harness(o = {}) {
     publicUrl: PUBLIC, ipOf: () => "203.0.113.9", readJsonBody,
     ...(o.noFiling ? {} : { file: (fp, event, extra) => svc.fileAgentKeyEvent(fp, event, extra) }),
     lookupsPerMinute: o.lookups ?? 600, changesPerHour: o.changes ?? 20, now: () => clock.t, log: (e) => logs.push(e),
+    ...(o.allowNewKey ? { allowNewKey: o.allowNewKey } : {}),
   });
   const server = createServer(async (req, res) => {
     if (!(await routes(req, res))) {
@@ -521,11 +522,42 @@ test("lookups and changes are limited per address", async () => {
   }
 });
 
+test("a replace past the hourly ceiling on new keys is refused, and spends nothing", async () => {
+  let open = false;
+  let asked = 0;
+  const h = await harness({ allowNewKey: () => { asked++; return open; } });
+  try {
+    const old = h.agent();
+    const next = makeAgentKey();
+    const body = { assertion: old.assertion(actionUrl(old.fingerprint, "replace"), naming(next)), new_public_key: next.publicKeyPem, new_key_assertion: proving(next, old.fingerprint) };
+    const refused = await h.post(old.fingerprint, "replace", body);
+    assert.equal(refused.status, 429);
+    assert.equal(refused.headers.get("retry-after"), "3600");
+    assert.deepEqual(await refused.json(), { error: "temporarily_unavailable", error_description: "Clockchain isn't taking new agent keys right now. Try again later." });
+    assert.equal(h.book.get(old.fingerprint).status, "active", "nothing changed");
+    assert.equal(h.book.get(next.fingerprint), null);
+    assert.ok(h.logs.some((e) => e.event === "agent_keys_rate_limited" && e.surface === "agent_key_new_global"));
+    // A refused request burns neither assertion: the same one goes through once there is room.
+    open = true;
+    const res = await h.post(old.fingerprint, "replace", body);
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    assert.equal(h.book.get(next.fingerprint).status, "active");
+    // A revoke makes no new key, so it never asks.
+    const before = asked;
+    open = false;
+    const other = h.agent();
+    assert.equal((await h.post(other.fingerprint, "revoke", { assertion: other.assertion(actionUrl(other.fingerprint, "revoke")) })).status, 200);
+    assert.equal(asked, before);
+  } finally {
+    await h.close();
+  }
+});
+
 // ---- through the real server ------------------------------------------------------------
 
 const ENV_KEYS = [
   "PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_TRUSTED_PROXY", "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS",
-  "MCP_REQUIRE_AUTH", "MCP_STATE_DIR", "MCP_AGENT_KEYS", "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR", "SHADOW_ENABLED", "SHADOW_STATE_DIR",
+  "MCP_REQUIRE_AUTH", "MCP_STATE_DIR", "MCP_AGENT_KEYS", "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR", "MCP_AGENT_KEYS_NEW_PER_HOUR", "SHADOW_ENABLED", "SHADOW_STATE_DIR",
   "SHADOW_ANON_PER_MINUTE",
 ];
 
@@ -594,6 +626,33 @@ test("routes 404 when MCP_AGENT_KEYS is off", async () => {
     }
   } finally {
     await off.close();
+  }
+});
+
+test("on the real server, keys made by replace count toward the hourly ceiling on new keys", async () => {
+  const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_HOUR: "2" });
+  try {
+    const old = makeAgentKey();
+    assert.equal((await grant(s.url, old.assertion(`${PUBLIC}/oauth/token`))).status, 200, "one new key");
+    const next = makeAgentKey();
+    const replaced = await fetch(`${s.url}/agent-keys/${old.fingerprint}/replace`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assertion: old.assertion(actionUrl(old.fingerprint, "replace"), naming(next)), new_public_key: next.publicKeyPem, new_key_assertion: proving(next, old.fingerprint) }),
+    });
+    assert.equal(replaced.status, 200, "two");
+    const third = await grant(s.url, makeAgentKey().assertion(`${PUBLIC}/oauth/token`));
+    assert.equal(third.status, 429, "the ceiling is shared with replace");
+    assert.equal((await third.json()).error, "temporarily_unavailable");
+    // The key the replace made is known now, so it still mints.
+    assert.equal((await grant(s.url, next.assertion(`${PUBLIC}/oauth/token`))).status, 200);
+    const later = makeAgentKey();
+    const again = await fetch(`${s.url}/agent-keys/${next.fingerprint}/replace`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assertion: next.assertion(actionUrl(next.fingerprint, "replace"), naming(later)), new_public_key: later.publicKeyPem, new_key_assertion: proving(later, next.fingerprint) }),
+    });
+    assert.equal(again.status, 429);
+  } finally {
+    await s.close();
   }
 });
 

@@ -321,10 +321,11 @@ All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString
 | `MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR` | 20 | Account-key sign-in tries. |
 | `MCP_AGENT_KEYS` | off | `1`, with `MCP_OAUTH=1`, lets an agent sign in with its own Ed25519 key and no person: the `client_credentials` grant on `/oauth/token` (a signed assertion for a one-hour Starter token, no refresh token), the public key list at `/agent-keys/<fingerprint>.json` with its replace and revoke routes, and `shadow_sign_checkpoint`. `/llms.txt` and `/shadow/connect` then say how. Keys are kept under `${MCP_STATE_DIR}/agent-keys`, public halves only. Any value but `0` or `1` turns only agent keys off, logged as `agent keys misconfigured (off)`. |
 | `MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR` | 10 | Only with `MCP_AGENT_KEYS=1`. New agent keys accepted per IP per hour; a key already on the list doesn't count. |
+| `MCP_AGENT_KEYS_NEW_PER_HOUR` | 200 | Only with `MCP_AGENT_KEYS=1`. New agent keys accepted per hour from every IP together, counting keys made by replace; a key already on the list doesn't count. Past it, a new key gets 429 for up to an hour. A bad value turns only agent keys off, like `MCP_AGENT_KEYS`. |
 | `MCP_METRICS_TOKEN` | off | Bearer token for `/metrics`, which answers 404 without one. See `alerts.md`. |
 | `OPENAI_APPS_CHALLENGE_TOKEN` | off | See "ChatGPT domain check". |
 
-`MCP_AGENT_KEYS`, `MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR`, `SHADOW_WITNESS_KEY_FILE` and `SHADOW_STARTER_ANCHORS_PER_DAY` aren't passed
+`MCP_AGENT_KEYS`, `MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR`, `MCP_AGENT_KEYS_NEW_PER_HOUR`, `SHADOW_WITNESS_KEY_FILE` and `SHADOW_STARTER_ANCHORS_PER_DAY` aren't passed
 through `docker-compose.yml` yet, so setting them in SSM changes nothing until that wiring lands (after the founder's go).
 
 A malformed Shadow setting stops Shadow from starting: every `/shadow` path answers 503, and the reason is in the log as

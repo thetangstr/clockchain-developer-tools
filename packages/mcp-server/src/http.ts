@@ -661,7 +661,7 @@ export async function runHttp(): Promise<Server> {
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
         ...(agentKeyBook && oauthConfig.agentKeys
-          ? { agentKeys: { book: agentKeyBook, proof: jwtBearerProof(), newPerIpPerHour: oauthConfig.agentKeys.newPerIpPerHour, tokenTtlSeconds: oauthConfig.agentKeys.tokenTtl } }
+          ? { agentKeys: { book: agentKeyBook, proof: jwtBearerProof(), newPerIpPerHour: oauthConfig.agentKeys.newPerIpPerHour, newPerHour: oauthConfig.agentKeys.newPerHour, tokenTtlSeconds: oauthConfig.agentKeys.tokenTtl } }
           : {}),
         ...(shadowChatPath ? { chatPaths: shadowPreviewChatPath ? [shadowChatPath, shadowPreviewChatPath] : [shadowChatPath] } : {}),
         ...(shadowPreview ? { extraPaths: [PREVIEW_PATH] } : {}),
@@ -1416,6 +1416,7 @@ export async function runHttp(): Promise<Server> {
         book: agentKeyBook,
         proof: jwtBearerProof(),
         usedAssertions: oauth.usedAssertions,
+        ...(oauth.allowNewAgentKey ? { allowNewKey: oauth.allowNewAgentKey } : {}),
         publicUrl: oauthConfig.publicUrl,
         ipOf: (req) => clientBucket(standaloneClientIp(req.headers, req.socket.remoteAddress, oauthConfig.trustedProxy)),
         readJsonBody,

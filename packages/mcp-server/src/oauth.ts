@@ -91,6 +91,8 @@ export interface AgentKeysConfig {
   enabled: boolean;
   /** New keys admitted per IP per hour (MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR, default 10). Known keys don't count. */
   newPerIpPerHour: number;
+  /** New keys admitted per hour from every address, by the token grant and by replace (MCP_AGENT_KEYS_NEW_PER_HOUR, default 200). */
+  newPerHour: number;
   /** Starter token lifetime, seconds. */
   tokenTtl: 3600;
   /** The agent key book: <MCP_STATE_DIR>/agent-keys, next to the accounts and the OAuth replay state. */
@@ -168,9 +170,11 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
   let agentKeysProblem: string | undefined;
   if (agentKeysFlag !== "" && agentKeysFlag !== "0") {
     const raw = (env.MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR ?? "").trim();
+    const rawAll = (env.MCP_AGENT_KEYS_NEW_PER_HOUR ?? "").trim();
     if (agentKeysFlag !== "1") agentKeysProblem = "MCP_AGENT_KEYS must be 1 or 0";
     else if (raw !== "" && !/^[1-9][0-9]{0,4}$/.test(raw)) agentKeysProblem = "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR must be a whole number from 1 to 99999";
-    else agentKeys = { enabled: true, newPerIpPerHour: raw === "" ? 10 : Number(raw), tokenTtl: 3600, dir: join(stateDir, "agent-keys") };
+    else if (rawAll !== "" && !/^[1-9][0-9]{0,4}$/.test(rawAll)) agentKeysProblem = "MCP_AGENT_KEYS_NEW_PER_HOUR must be a whole number from 1 to 99999";
+    else agentKeys = { enabled: true, newPerIpPerHour: raw === "" ? 10 : Number(raw), newPerHour: rawAll === "" ? 200 : Number(rawAll), tokenTtl: 3600, dir: join(stateDir, "agent-keys") };
   }
   return {
     kind: "ready",
@@ -246,6 +250,8 @@ export interface OAuthOptions {
     proof: KeyProof;
     /** New keys admitted per IP per hour (default 10). Keys already in the book don't count. */
     newPerIpPerHour?: number;
+    /** New keys admitted per hour from every address (default 200), shared with replace through allowNewAgentKey. */
+    newPerHour?: number;
     /** Starter token lifetime (default 3600). */
     tokenTtlSeconds?: number;
   };
@@ -270,6 +276,11 @@ export interface OAuthHandler {
    * is single use everywhere. Undefined when agent keys are off or the replay state couldn't be opened.
    */
   readonly usedAssertions: ExpiringSet | undefined;
+  /**
+   * Takes one from the hourly allowance of new agent keys from every address (agentKeys set): false once it is used up.
+   * The token grant spends it on a key the book has never seen, and /agent-keys/<fp>/replace on the key it makes.
+   */
+  readonly allowNewAgentKey: (() => boolean) | undefined;
 }
 
 type ArtifactKind = "client" | "request" | "code" | "refresh" | "grant" | "cookie";
@@ -772,6 +783,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   // Agent keys: only a key the book has never seen counts against its address.
   const agentKeys = options.agentKeys;
   const allowNewAgentKey = limiter(agentKeys?.newPerIpPerHour ?? 10, 60 * 60_000, now);
+  const allowNewAgentKeyGlobal = limiter(agentKeys?.newPerHour ?? 200, 60 * 60_000, now);
   const agentTokenTtl = agentKeys?.tokenTtlSeconds ?? 3600;
 
   // Accounts (src/accounts.ts). Opened once at boot; if that fails the approval page answers 503 and the rest of
@@ -1414,6 +1426,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         sendOAuthError(res, 429, "temporarily_unavailable", "Too many new agent keys from this address. Try again later, or reuse a key you already have.", { "retry-after": "3600" });
         return;
       }
+      if (!known && !allowNewAgentKeyGlobal("agent-key:all")) {
+        rateLimited("agent_key_global");
+        sendOAuthError(res, 429, "temporarily_unavailable", "Clockchain isn't taking new agent keys right now. Try again later, or reuse a key you already have.", { "retry-after": "3600" });
+        return;
+      }
       entry = known ?? keys.book.admit(proven.publicKeyPem).entry;
     } catch {
       log({ event: "oauth_agent_keys_unavailable" });
@@ -1631,6 +1648,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     },
     accounts,
     usedAssertions: replay?.usedAssertions,
+    allowNewAgentKey: agentKeys ? () => allowNewAgentKeyGlobal("agent-key:all") : undefined,
     challenge(path, tokenPresented) {
       if (!mcpPaths.includes(path)) return undefined;
       const metadataUrl = `${base}/.well-known/oauth-protected-resource${path}`;

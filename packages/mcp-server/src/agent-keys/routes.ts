@@ -35,6 +35,8 @@ export interface AgentKeyRoutesOptions {
   lookupsPerMinute: number;
   /** Replaces and revokes per address per hour (default 20). */
   changesPerHour?: number;
+  /** Takes one from the hourly allowance of new keys from every address (OAuthHandler.allowNewAgentKey), for the key a replace makes. Unset: no ceiling. */
+  allowNewKey?: () => boolean;
   now?: () => number;
   log?: (event: Record<string, unknown>) => void;
   onRateLimited?: () => void;
@@ -254,13 +256,14 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
     // From here to the change, everything is synchronous, so single use and the book's checks hold under concurrency.
     let entry: KeyEntry | null;
     let newFp: string | undefined;
+    let resuming = false;
     try {
       entry = o.book.get(fp);
       newFp = newPem !== undefined ? fingerprint(newPem) : undefined;
       if (!entry) return refuse("unknown_key", 404, "not_found", "No agent key has this fingerprint.");
       const agentId = entry.root.slice(0, 16);
       // The same replacement asked for again (a lost answer, or an interrupted one) finishes it and files it again.
-      const resuming = action === "replace" && entry.status === "replaced" && entry.replacedBy === newFp;
+      resuming = action === "replace" && entry.status === "replaced" && entry.replacedBy === newFp;
       if (entry.status !== "active" && !resuming) {
         return refuse(`key_${entry.status}`, 409, "key_not_active", entry.status === "revoked" ? "This agent key was cancelled." : "This agent key was already replaced.", agentId);
       }
@@ -270,6 +273,10 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
     } catch {
       log({ event: "agent_keys_unavailable" });
       return unavailable(res);
+    }
+    // A replace makes a new key, which counts toward the ceiling on new keys the token grant has too. Refused, it spends nothing.
+    if (newPem !== undefined && !resuming && o.allowNewKey && !o.allowNewKey()) {
+      return limited(res, "agent_key_new_global", "Clockchain isn't taking new agent keys right now. Try again later.", "3600");
     }
     try {
       for (const a of spent) usedAssertions.add(a.key, a.exp);

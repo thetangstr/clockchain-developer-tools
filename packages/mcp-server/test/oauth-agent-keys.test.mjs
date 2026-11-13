@@ -25,7 +25,7 @@ const JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
 const ENV_KEYS = [
   "PORT", "MCP_PORT", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_TRUSTED_PROXY", "MCP_TOKEN_SIGNING_SECRET", "MCP_AUTH_TOKENS",
-  "MCP_REQUIRE_AUTH", "MCP_STATE_DIR", "MCP_AGENT_KEYS", "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR", "SHADOW_ENABLED", "SHADOW_STATE_DIR",
+  "MCP_REQUIRE_AUTH", "MCP_STATE_DIR", "MCP_AGENT_KEYS", "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR", "MCP_AGENT_KEYS_NEW_PER_HOUR", "SHADOW_ENABLED", "SHADOW_STATE_DIR",
 ];
 const tempDir = (label) => mkdtempSync(path.join(tmpdir(), `oauth-ak-${label}-`));
 
@@ -117,12 +117,12 @@ test("config: MCP_AGENT_KEYS=1 adds agentKeys; unset leaves the config as it was
   assert.equal("agentKeysProblem" in today, false);
   assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "0" }, SECRET), today);
   assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "" }, SECRET), today);
-  // Off, the per-address limit is not read at all.
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "lots" }, SECRET), today);
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1" }, SECRET), { ...today, agentKeys: { enabled: true, newPerIpPerHour: 10, tokenTtl: 3600, dir: "/app/state/agent-keys" } });
+  // Off, the limits are not read at all.
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "lots", MCP_AGENT_KEYS_NEW_PER_HOUR: "lots" }, SECRET), today);
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1" }, SECRET), { ...today, agentKeys: { enabled: true, newPerIpPerHour: 10, newPerHour: 200, tokenTtl: 3600, dir: "/app/state/agent-keys" } });
   assert.deepEqual(
-    loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "25", MCP_STATE_DIR: "/srv/state" }, SECRET).agentKeys,
-    { enabled: true, newPerIpPerHour: 25, tokenTtl: 3600, dir: "/srv/state/agent-keys" },
+    loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "25", MCP_AGENT_KEYS_NEW_PER_HOUR: "500", MCP_STATE_DIR: "/srv/state" }, SECRET).agentKeys,
+    { enabled: true, newPerIpPerHour: 25, newPerHour: 500, tokenTtl: 3600, dir: "/srv/state/agent-keys" },
   );
   // A wrong agent-keys value never takes sign-in down: OAuth stays ready exactly as without it, agent keys stay off,
   // and the problem is reported.
@@ -130,6 +130,7 @@ test("config: MCP_AGENT_KEYS=1 adds agentKeys; unset leaves the config as it was
     [{ MCP_AGENT_KEYS: "yes" }, /MCP_AGENT_KEYS must be 1 or 0/],
     [{ MCP_AGENT_KEYS: "true" }, /MCP_AGENT_KEYS must be 1 or 0/],
     ...["0", "lots", "100000"].map((v) => [{ MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: v }, /MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR/]),
+    ...["0", "lots", "100000", "-5"].map((v) => [{ MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_HOUR: v }, /MCP_AGENT_KEYS_NEW_PER_HOUR must be a whole number from 1 to 99999/]),
   ];
   for (const [env, reason] of bad) {
     const config = loadOAuthConfig({ MCP_OAUTH: "1", ...env }, SECRET);
@@ -375,6 +376,29 @@ test("the 11th new key from one address in an hour gets 429, but a known key sti
     // Next hour, a new key is welcome again.
     h.advance(60 * 60_000 + 1000);
     assert.equal((await grant(h.url, agents[10].assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test("past the hourly ceiling on new keys from every address, a new key gets 429, but a known key still mints", async () => {
+  const h = await harness({ newPerHour: 3 });
+  try {
+    const agents = Array.from({ length: 4 }, () => makeAgentKey());
+    for (const agent of agents.slice(0, 3)) {
+      const res = await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }));
+      assert.equal(res.status, 200, await res.text());
+    }
+    const fourth = await grant(h.url, agents[3].assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }));
+    assert.equal(fourth.status, 429, "the address is still well within its own 10");
+    assert.equal(fourth.headers.get("retry-after"), "3600");
+    assert.deepEqual(await fourth.json(), { error: "temporarily_unavailable", error_description: "Clockchain isn't taking new agent keys right now. Try again later, or reuse a key you already have." });
+    assert.equal(h.book.get(agents[3].fingerprint), null, "the limited key is not admitted");
+    assert.ok(h.logs.some((e) => e.event === "oauth_rate_limited" && e.surface === "agent_key_global"), JSON.stringify(h.logs));
+    // Keys already in the book don't count.
+    assert.equal((await grant(h.url, agents[0].assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+    h.advance(60 * 60_000 + 1000);
+    assert.equal((await grant(h.url, agents[3].assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
   } finally {
     await h.close();
   }
