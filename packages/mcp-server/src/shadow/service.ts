@@ -1063,8 +1063,14 @@ export class ShadowService {
     );
   }
 
-  /** The start-up retention sweep, then one every sweepIntervalMs. */
+  /** The start-up retention sweep, then one every sweepIntervalMs. With the witness key, first every owner's held key moves out. */
   start(): void {
+    try {
+      const held = this.store.migrateHeldKeys(this.now());
+      if (held.migrated || held.failed) this.log("shadow_held_keys_migrated", { owners: held.migrated, failed: held.failed });
+    } catch (e) {
+      this.log("shadow_held_keys_migrate_failed", { error: (e as Error).name });
+    }
     this.sweep();
     this.timer = setInterval(() => {
       try {

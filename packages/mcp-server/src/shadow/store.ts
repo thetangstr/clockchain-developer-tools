@@ -280,6 +280,28 @@ export class ShadowStore {
     return current.operatorId;
   }
 
+  /**
+   * With the witness key, once at start: every owner that still holds a key.json (or a copy of one) has it moved to
+   * operator.json as its next use would, so an owner that never comes back doesn't keep a private key on disk. Idempotent;
+   * without the witness key, nothing. Returns counts only.
+   */
+  migrateHeldKeys(now: Date): { migrated: number; failed: number } {
+    const counts = { migrated: 0, failed: 0 };
+    const ownersDir = join(this.root, "owners");
+    if (!this.witness || !existsSync(ownersDir)) return counts;
+    for (const ownerKey of readdirSync(ownersDir)) {
+      if (!OWNER_KEY.test(ownerKey)) continue;
+      try {
+        if (!readdirSync(join(ownersDir, ownerKey)).some((name) => name === "key.json" || name.startsWith("key.json."))) continue;
+        this.witnessedOperatorId(ownerKey, now);
+        counts.migrated++;
+      } catch {
+        counts.failed++; // Left as it is: its next use, or the next start, tries again.
+      }
+    }
+    return counts;
+  }
+
   private removeHeldKeys(ownerKey: string): void {
     const dir = this.ownerDir(ownerKey);
     if (!existsSync(dir)) return;

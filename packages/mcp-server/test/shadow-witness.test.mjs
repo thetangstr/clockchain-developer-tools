@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -137,6 +137,49 @@ test("an existing key.json keeps its operatorId but its key is not used for new 
   const earlier = await packetOf(svc, done.closed.links);
   assert.equal(earlier.packet.checkpoint.publicKey, legacyKey);
   assert.equal((await verifyPacket(earlier.packet, { pin: earlier.pin })).result, "pass");
+});
+
+test("at start with the witness key, owners that never come back lose their key.json too, keeping their operator ids", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-dormant-"));
+  const fake = new FakeLedger();
+  const B = "jti:22222222-2222-4222-8222-222222222222";
+  const legacy = setup({ dir, fake });
+  const ids = {};
+  for (const owner of [A, B]) ids[owner] = (await shortSession(legacy.svc, owner)).closed.pin.operatorId;
+  legacy.svc.stop();
+  const keyFile = (owner) => path.join(ownerDir(dir, owner), "key.json");
+  copyFileSync(keyFile(A), `${keyFile(A)}.bak`);
+  const held = () => [A, B].flatMap((o) => readdirSync(ownerDir(dir, o)).filter((n) => n === "key.json" || n.startsWith("key.json.")));
+  assert.deepEqual(held().sort(), ["key.json", "key.json", "key.json.bak"]);
+
+  // Legacy mode leaves them alone.
+  const plain = setup({ dir, fake });
+  plain.svc.start();
+  plain.svc.stop();
+  assert.equal(held().length, 3);
+
+  const witness = loadWitnessKey(witnessFile());
+  const logs = [];
+  const { svc } = setup({ dir, fake, witness, logs });
+  svc.start();
+  svc.stop();
+  assert.deepEqual(held(), [], "no key.json, .bak or other copy is left");
+  for (const owner of [A, B]) {
+    const opFile = path.join(ownerDir(dir, owner), "operator.json");
+    assert.equal(JSON.parse(readFileSync(opFile, "utf8")).value.operatorId, ids[owner]);
+    assert.doesNotMatch(readFileSync(opFile, "utf8"), /PRIVATE KEY/);
+  }
+  const moved = logs.filter((l) => l.event === "shadow_held_keys_migrated");
+  assert.deepEqual(moved, [{ event: "shadow_held_keys_migrated", owners: 2, failed: 0 }], "counts only");
+
+  // Once is enough: a second start finds nothing, changes nothing, and says nothing.
+  const again = setup({ dir, fake, witness, logs });
+  again.svc.start();
+  again.svc.stop();
+  assert.equal(logs.filter((l) => l.event === "shadow_held_keys_migrated").length, 1);
+  for (const owner of [A, B]) assert.equal(JSON.parse(readFileSync(path.join(ownerDir(dir, owner), "operator.json"), "utf8")).value.operatorId, ids[owner]);
+  // And the next session is still the same operator.
+  assert.equal((await shortSession(again.svc, B)).closed.pin.operatorId, ids[B]);
 });
 
 test("switched back to no witness key, an owner keeps the operator id from operator.json", async () => {
