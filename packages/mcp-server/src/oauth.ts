@@ -265,6 +265,11 @@ export interface OAuthHandler {
   challenge(path: string, tokenPresented: boolean): Record<string, string> | undefined;
   /** The account store the sign-in page uses (undefined when unusable), shared with the chat account tools. */
   readonly accounts: AccountStore | undefined;
+  /**
+   * Spent agent client assertions (agentKeys set), the one set the token grant and /agent-keys/* share, so each assertion
+   * is single use everywhere. Undefined when agent keys are off or the replay state couldn't be opened.
+   */
+  readonly usedAssertions: ExpiringSet | undefined;
 }
 
 type ArtifactKind = "client" | "request" | "code" | "refresh" | "grant" | "cookie";
@@ -1625,6 +1630,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       return true;
     },
     accounts,
+    usedAssertions: replay?.usedAssertions,
     challenge(path, tokenPresented) {
       if (!mcpPaths.includes(path)) return undefined;
       const metadataUrl = `${base}/.well-known/oauth-protected-resource${path}`;

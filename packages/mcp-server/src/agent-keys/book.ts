@@ -16,7 +16,8 @@ export type KeyEntry = {
   filing: KeyFiling;
   replacedBy?: string;
   revokedAt?: string;
-  events: { action: "filed" | "replaced" | "revoked"; at: string; ledgerId?: string; block?: number }[];
+  /** A replaced or revoked event is filed once it has `filedAt`; until then it is waiting for Clockchain. */
+  events: { action: "filed" | "replaced" | "revoked"; at: string; ledgerId?: string; block?: number; filedAt?: string }[];
 };
 
 export class AgentKeyError extends Error {
@@ -85,6 +86,25 @@ export class AgentKeyBook {
     entry.filing = filing;
     if (filing.state === "filed") {
       entry.events.push({ action: "filed", at: filing.filedAt ?? this.now().toISOString(), ...(filing.ledgerId !== undefined && { ledgerId: filing.ledgerId }), ...(filing.block !== undefined && { block: filing.block }) });
+    }
+    this.save(entry);
+  }
+
+  /**
+   * Records where the latest `action` event landed on Clockchain (fileKey's result for "replaced" or "revoked"). The event's
+   * `at` never changes, since its ledger hash is built from it, and a filed event is never set back by a later, slower try.
+   */
+  setEventFiling(fp: string, action: "replaced" | "revoked", filing: KeyFiling): void {
+    const entry = this.must(fp);
+    const event = [...entry.events].reverse().find((e) => e.action === action);
+    if (!event) throw new AgentKeyError("no_event");
+    if (event.filedAt !== undefined) return;
+    if (filing.ledgerId !== undefined) event.ledgerId = filing.ledgerId;
+    if (filing.state === "filed") {
+      if (filing.block !== undefined) event.block = filing.block;
+      event.filedAt = filing.filedAt ?? this.now().toISOString();
+    } else if (filing.ledgerId === undefined) {
+      return;
     }
     this.save(entry);
   }

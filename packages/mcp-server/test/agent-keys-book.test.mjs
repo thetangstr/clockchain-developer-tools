@@ -107,3 +107,23 @@ test("replace is safe to retry after an interruption", () => {
   assert.deepEqual(book.replace(a.fingerprint, newPem), b);
   assert.throws(() => book.replace(a.fingerprint, pem()), code("already_replaced"));
 });
+
+test("setEventFiling records where a replace or revoke landed, and never sets a filed event back", () => {
+  const { book } = fresh();
+  const a = book.admit(pem()).entry;
+  assert.throws(() => book.setEventFiling(a.fingerprint, "revoked", { state: "filed", ledgerId: "L0" }), code("no_event"));
+  book.replace(a.fingerprint, pem());
+  const at = book.get(a.fingerprint).events[0].at;
+  // Written, not yet in a block: the ledger id is kept, and the event is still waiting.
+  book.setEventFiling(a.fingerprint, "replaced", { state: "pending", ledgerId: "L1" });
+  assert.deepEqual(book.get(a.fingerprint).events, [{ action: "replaced", at, ledgerId: "L1" }]);
+  book.setEventFiling(a.fingerprint, "replaced", { state: "filed", ledgerId: "L1", block: 9, filedAt: "2026-11-13T00:00:05Z" });
+  const filed = { action: "replaced", at, ledgerId: "L1", block: 9, filedAt: "2026-11-13T00:00:05Z" };
+  assert.deepEqual(book.get(a.fingerprint).events, [filed]);
+  // A late, slower retry can't undo it.
+  book.setEventFiling(a.fingerprint, "replaced", { state: "pending" });
+  book.setEventFiling(a.fingerprint, "replaced", { state: "unfiled" });
+  assert.deepEqual(book.get(a.fingerprint).events, [filed]);
+  // The event's own `at` is what its ledger hash was built from, so it never changes.
+  assert.equal(book.get(a.fingerprint).events[0].at, at);
+});

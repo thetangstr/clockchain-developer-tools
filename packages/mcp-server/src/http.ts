@@ -91,6 +91,7 @@ import { fingerprint } from "./shadow/lib/keys.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
 import { AgentKeyBook, type KeyEntry } from "./agent-keys/book.js";
 import { jwtBearerProof } from "./agent-keys/proof.js";
+import { createAgentKeyRoutes } from "./agent-keys/routes.js";
 import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
 
 /**
@@ -847,7 +848,7 @@ export async function runHttp(): Promise<Server> {
     "sign_evidence", "evidence_submitted", "certificate_available",
   ] as const;
   const DEP_NAMES = ["relay_discovery", "relay_result", "gateway_pool", "evm_rpc"] as const;
-  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call", "oauth"] as const;
+  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call", "oauth", "agent_keys"] as const;
 
   const httpRequests = metrics.counter("clockchain_http_requests_total", "HTTP requests by route class and status class.");
   const httpDuration = metrics.histogram("clockchain_http_request_duration_seconds", "HTTP request duration by route class.");
@@ -1406,6 +1407,23 @@ export async function runHttp(): Promise<Server> {
   const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : INSTALL_TXT;
   const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : MCP_MANIFEST, null, 2);
 
+  // The public book's routes (MCP_AGENT_KEYS=1): lookups, and replace and revoke signed by the agent's own key, filed on
+  // Clockchain through hosted Shadow's ledger (Shadow off: a change stands and its filing waits). Assertions name each
+  // action's URL under MCP_PUBLIC_URL, as the token grant's name its token_endpoint, and share its spent-assertion set.
+  const agentKeyRoutes = agentKeyBook && oauth && oauthConfig.kind === "ready"
+    ? createAgentKeyRoutes({
+        book: agentKeyBook,
+        proof: jwtBearerProof(),
+        usedAssertions: oauth.usedAssertions,
+        publicUrl: oauthConfig.publicUrl,
+        ipOf: (req) => clientBucket(standaloneClientIp(req.headers, req.socket.remoteAddress, oauthConfig.trustedProxy)),
+        readJsonBody,
+        ...(shadowService ? { file: shadowService.fileAgentKeyEvent.bind(shadowService) } : {}),
+        lookupsPerMinute: Number(process.env.SHADOW_ANON_PER_MINUTE || "600"),
+        onRateLimited: () => rlEvents.inc({ surface: bounded("agent_keys", RL_SURFACES) }),
+      })
+    : undefined;
+
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestStarted = Date.now();
     const routeClass = bounded(classifyRoute(req.method, req.url, firstHeader(req.headers.accept)), ROUTE_CLASSES, "other");
@@ -1830,6 +1848,17 @@ export async function runHttp(): Promise<Server> {
         });
         res.end(JSON.stringify({ error: "INVITATION_UNAVAILABLE" }));
       }
+      return;
+    }
+
+    // The public book of agent keys (public; replace and revoke are signed by the key). 404 when MCP_AGENT_KEYS is off.
+    if (pathOf(req.url) === "/agent-keys" || pathOf(req.url).startsWith("/agent-keys/")) {
+      if (agentKeyRoutes) {
+        await agentKeyRoutes(req, res);
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "not_found", error_description: "Agent keys are not on here." }));
       return;
     }
 

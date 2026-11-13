@@ -17,8 +17,8 @@ import { declaredFields, declaredOf, declaredText, withDeclared, type DeclaredIn
 import { accountLevelNote, anchorsNow, deferredReason, effectiveLevel, finer, isLogLevel, levelNote, levelSetBy, recordedReason, type AnchorOutlook, type LevelSetBy, type LogLevel } from "./log-level.js";
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, Pin, ShadowEvent } from "./lib/types.js";
-import type { AgentKeyBook } from "../agent-keys/book.js";
-import { fileKey, StarterAnchors, type FilingLedger } from "../agent-keys/filing.js";
+import { AgentKeyError, type AgentKeyBook } from "../agent-keys/book.js";
+import { fileKey, StarterAnchors, type FilingLedger, type FilingResult } from "../agent-keys/filing.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AgentEntry, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
   ANCHOR_LABEL, RECORD_KINDS, RecordError, START_LABEL, VERSION, LIBRARY, advance, buildEvent, buildPacket, buildPin,
@@ -2392,24 +2392,13 @@ export class ShadowService {
    */
   private async anchorNetwork(ownerKey: string, sessionId: string, row: OutboxRow, deadline: number, keys: (string | undefined)[] | null): Promise<AnchorOutcome> {
     const day = this.today();
-    const max = this.limits.maxAnchorsPerOwnerPerDay;
     let ledger: ShadowLedger;
     try {
       ledger = this.ledger();
     } catch {
       return { kind: "failed", failure: { kind: "Transient", code: "unavailable", retryAfterSeconds: null }, maybeWritten: row.sendStarted !== false };
     }
-    const budget = this.budget();
-    const anchoring: FilingLedger = {
-      ledger, budget: keys && this.starterAnchors ? this.withStarter(budget, this.starterAnchors) : budget,
-      reserve: () => {
-        if (this.store.bumpAnchors(ownerKey, day, 1, max) === null) throw new AnchorLimitError();
-      },
-      refund: () => {
-        this.store.bumpAnchors(ownerKey, day, -1, max);
-      },
-      waitMs: this.limits.anchorWaitMs, tries: 3, backoffMs: [500, 1500], sleep: this.sleep, deadline,
-    };
+    const anchoring = this.anchoring(ledger, ownerKey, day, deadline, keys !== null);
     if (keys) {
       const held = await this.fileFirst(keys, anchoring, row);
       if (held) return held;
@@ -2418,6 +2407,42 @@ export class ShadowService {
       ...anchoring, referenceId: referenceId(sessionId), hash: row.hash, label: row.kind === "start" ? START_LABEL : ANCHOR_LABEL,
       ledgerId: row.state === "pending" ? row.ledgerId : null, uncertain: row.sendStarted !== false,
     });
+  }
+
+  /** What an anchor needs besides its own hash: the ledger, the budget (with the Starter allowance for an agent), and the owner's daily anchors. */
+  private anchoring(ledger: ShadowLedger, ownerKey: string, day: string, deadline: number, agent: boolean): FilingLedger {
+    const max = this.limits.maxAnchorsPerOwnerPerDay;
+    const budget = this.budget();
+    return {
+      ledger, budget: agent && this.starterAnchors ? this.withStarter(budget, this.starterAnchors) : budget,
+      reserve: () => {
+        if (this.store.bumpAnchors(ownerKey, day, 1, max) === null) throw new AnchorLimitError();
+      },
+      refund: () => {
+        this.store.bumpAnchors(ownerKey, day, -1, max);
+      },
+      waitMs: this.limits.anchorWaitMs, tries: 3, backoffMs: [500, 1500], sleep: this.sleep, deadline,
+    };
+  }
+
+  /**
+   * Files a key's "replaced" or "revoked" event on Clockchain (agent-keys/routes.ts), as an anchor of the agent that owns
+   * the key's root: it spends that owner's daily anchors and the Starter allowance like any agent anchor, and runs one filing
+   * per key at a time. Recording the result in the book is the caller's job (fileKey leaves it so).
+   */
+  async fileAgentKeyEvent(fp: string, event: "replaced" | "revoked", extra: { newFp?: string } = {}): Promise<FilingResult> {
+    const book = this.agentKeys;
+    if (!book) throw new AgentKeyError("unavailable");
+    const root = book.rootOf(fp);
+    if (!root) throw new AgentKeyError("unknown_key");
+    let ledger: ShadowLedger;
+    try {
+      ledger = this.ledger();
+    } catch {
+      return { state: "pending", failure: { kind: "Transient", code: "unavailable", retryAfterSeconds: null } };
+    }
+    const anchoring = this.anchoring(ledger, ownerKeyOf(`ak:${root}`), this.today(), Date.now() + ANCHOR_BUDGET_MS, true);
+    return this.locks.run(`agent-key:${fp}`, () => fileKey(book, anchoring, fp, event, extra));
   }
 
   /** Files each of `keys` not yet filed, one filing per key at a time. Null when all are filed; else the outcome that holds the row. */
