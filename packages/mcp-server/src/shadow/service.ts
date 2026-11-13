@@ -578,7 +578,8 @@ function withAnchoring<T extends { result: "pass" | "fail" | "indeterminate"; ex
 
 /**
  * An agent's key verdict deciding the result: a record its key doesn't stand behind fails, saying why in the verdict's words,
- * and one whose key isn't filed yet, or can't be checked, is at most indeterminate. Every other verdict (witnessed and legacy too) leaves it as is.
+ * and one whose key isn't filed yet, or can't be checked, is at most indeterminate. Every other verdict leaves it as is: record_failed
+ * already fails, and witnessed and legacy are as computed.
  */
 function withKeyVerdict<T extends { result: "pass" | "fail" | "indeterminate"; exitCode: 0 | 1 | 2; summary: string; failed: string[]; indeterminate: string[]; checks: { name: string; status: string; reason: string }[] }>(report: T, key: KeyCheck): T {
   if (key.verdict === "not_from_agent" || key.verdict === "key_revoked_before" || key.verdict === "key_filed_after")
@@ -839,7 +840,7 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
  * library's summary, which is vendored and unchanged, is written for a pin that reached the reader separately: here the
  * report says whose pin it was, and {@link hostedViewer} replaces its "Proven" tag. An agent's checkpoint isn't the
  * server's to sign, so for an agent (`agentLine` not undefined) a passing trust check reads its key verdict when that
- * verdict agrees with a pass (a string), and otherwise keeps the library's own reason (null).
+ * verdict agrees with a pass (a string), and otherwise {@link AGENT_PIN} (null): this server built that pin too.
  */
 function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T, agentLine?: string | null): T {
   return {
@@ -847,11 +848,13 @@ function ownPinReport<T extends { summary: string; checks: { name: string; statu
     // "Captured" would claim more than the verifier can see: it knows the runs in the record, not the work outside it.
     summary: report.summary.replace("the supplied pin", "this server's own pin").replace("every run was captured", "every recorded run has an ending"),
     checks: report.checks.map((c) =>
-      c.name === "trust" && c.status === "pass" ? agentLine === null ? c : { ...c, reason: agentLine ?? "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
+      c.name === "trust" && c.status === "pass" ? { ...c, reason: agentLine === null ? AGENT_PIN : agentLine ?? "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
         : c.name === "time" ? { ...c, reason: c.reason.replace("with a single validator they are only as good as its clock", "with a single-operator gateway they are only as good as its clock") }
           : c),
   };
 }
+
+const AGENT_PIN = "Matches the pin from this server for the agent's checkpoint; that pin isn't independent.";
 
 const OWN_PIN_NOTE = `<p class="meta">The pin behind this page came from this server, so these checks aren't independent. For an independent check, run the command at the end of this page with a pin you received separately.</p>`;
 
@@ -1378,8 +1381,8 @@ export class ShadowService {
 
   /**
    * What a passing trust check says, for ownPinReport: the server's own-pin text (undefined) unless the agent signed; then
-   * its key verdict when that agrees with a pass (made_by_agent or key_not_filed, on a record that didn't fail), else the
-   * library's own reason (null).
+   * its key verdict when that agrees with a pass (made_by_agent or key_not_filed, on a record that didn't fail), else
+   * AGENT_PIN (null).
    */
   private trustLine(meta: SessionMeta, key: KeyCheck, result: string): string | null | undefined {
     if (!this.agentSigns(meta)) return undefined;

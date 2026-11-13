@@ -7,7 +7,7 @@ import type { Checkpoint } from "../shadow/lib/types.js";
 import { HOSTED_LIMITS } from "../shadow/recorder.js";
 import type { KeyEntry } from "./book.js";
 
-export type KeyVerdict = "made_by_agent" | "key_not_filed" | "key_check_unavailable" | "key_filed_after" | "key_revoked_before" | "not_from_agent" | "witnessed" | "legacy";
+export type KeyVerdict = "made_by_agent" | "record_failed" | "key_not_filed" | "key_check_unavailable" | "key_filed_after" | "key_revoked_before" | "not_from_agent" | "witnessed" | "legacy";
 export type KeyCheck = { verdict: KeyVerdict; text: string };
 
 export const CHECKED = " Checked against Clockchain's public key list.";
@@ -59,10 +59,10 @@ export function checkAgentKey(entry: KeyEntry | null, cp: Checkpoint, cpBlock: n
 
 /**
  * The verdict for a record that failed its checks for another reason than its key (its steps no longer match the signed
- * checkpoint, say): made_by_agent would claim it unchanged, so it says the record failed. Other verdicts already say what's wrong.
+ * checkpoint, say): made_by_agent would claim it unchanged, so it is record_failed instead. Other verdicts already say what's wrong.
  */
 export function failedRecord(r: KeyCheck, cp: Checkpoint): KeyCheck {
   if (r.verdict !== "made_by_agent") return r;
   const agentId = AGENT_OPERATOR.exec(cp.body.operatorId)![1].slice(0, 16);
-  return { verdict: r.verdict, text: `Signed by agent ${agentId}, but this record failed its checks.${CHECKED}` };
+  return { verdict: "record_failed", text: `Signed by agent ${agentId}, but this record failed its checks.${CHECKED}` };
 }

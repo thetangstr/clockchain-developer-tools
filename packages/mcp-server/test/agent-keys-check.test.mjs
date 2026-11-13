@@ -22,6 +22,7 @@ import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 import { makeAgentKey } from "./helpers/agent-key.mjs";
 
 const CHECKED = " Checked against Clockchain's public key list.";
+const AGENT_PIN = "Matches the pin from this server for the agent's checkpoint; that pin isn't independent.";
 const BASE = "https://mcp.example.test";
 const T0 = Date.UTC(2026, 10, 13, 12, 0, 0);
 const iso = (t) => new Date(t).toISOString();
@@ -163,7 +164,7 @@ test("a record that fails its checks is never called unchanged", () => {
   const book = bookAt(clock);
   const ag = agentIn(book);
   const made = checkAgentKey(book.get(ag.fp), agentCp(ag), 12);
-  assert.deepEqual(failedRecord(made, agentCp(ag)), { verdict: "made_by_agent", text: `Signed by agent ${ag.id}, but this record failed its checks.${CHECKED}` });
+  assert.deepEqual(failedRecord(made, agentCp(ag)), { verdict: "record_failed", text: `Signed by agent ${ag.id}, but this record failed its checks.${CHECKED}` });
   // Any other verdict already says what is wrong, and is kept.
   const other = checkAgentKey(null, agentCp(ag), 12);
   assert.deepEqual(failedRecord(other, agentCp(ag)), other);
@@ -397,15 +398,19 @@ test("a record whose steps no longer match its signed checkpoint fails, and noth
   const line = `Signed by agent ${ag.id}, but this record failed its checks.${CHECKED}`;
   const v = await verifyOf(env, ag);
   assert.equal(v.result, "fail");
-  assert.equal(v.agent_key.verdict, "made_by_agent");
+  assert.equal(v.agent_key.verdict, "record_failed");
   assert.equal(v.agent_key.text, line);
   assert.ok(!JSON.stringify(v).includes("unchanged since"), "not in agent_key, the summary or any check");
-  const trust = v.checks.find((c) => c.name === "trust");
-  assert.ok(!trust || trust.reason !== line, "the trust check keeps its own reason");
+  // This server built the pin, so the trust check says so, not the library's "supplied pin".
+  assert.deepEqual(v.checks.find((c) => c.name === "trust"), { name: "trust", status: "pass", reason: AGENT_PIN });
+  assert.ok(!JSON.stringify(v).includes("supplied pin"));
+  assert.ok(!v.checks.some((c) => c.name === "agent_key"), "the record already fails; the key check adds nothing");
   const html = await viewer(env.svc, ag.owner, ag.sessionId);
   assert.ok(html.includes(`<p><b>${line.replaceAll("'", "&#39;")}</b></p>`));
   assert.ok(!html.includes("unchanged since"));
   assert.ok(html.includes('class="result fail"'));
+  assert.ok(html.includes(AGENT_PIN.replaceAll("'", "&#39;")), "the viewer's trust line too");
+  assert.ok(!html.includes("supplied pin"));
 });
 
 test("an anchor with no block height is an unknown block, not block 0", async () => {
