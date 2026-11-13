@@ -51,7 +51,7 @@ export type AnchorOutlook = {
   /** The close still has its anchor. */
   closeCanAnchor: boolean;
   /** Why anchors aren't landing just now, when they aren't. */
-  blocked: "outage" | "day_limit" | "budget" | "unconfirmed" | null;
+  blocked: "outage" | "day_limit" | "starter_limit" | "key_filing" | "budget" | "unconfirmed" | null;
 };
 
 const NEXT_ANCHOR: Record<LogLevel, string> = {
@@ -65,6 +65,8 @@ function stillPossible(level: LogLevel, o: AnchorOutlook): string {
   if (!o.closeCanAnchor) return "This session has no anchors left, so this stays unanchored.";
   if (o.blocked === "outage") return "Clockchain isn't taking anchors right now, so this stays unanchored unless a later anchor lands.";
   if (o.blocked === "day_limit") return "This account's anchors for today are used up, so this stays unanchored unless a later anchor lands.";
+  if (o.blocked === "starter_limit") return "Today's free allowance for new agents is used up, so this stays unanchored unless a later anchor lands.";
+  if (o.blocked === "key_filing") return "This agent's key is being filed on Clockchain first; the session's anchors wait for it.";
   if (o.blocked === "budget") return "The server's Clockchain write budget is used up, so this stays unanchored unless a later anchor lands.";
   if (o.blocked === "unconfirmed") return "Earlier anchors can't be confirmed, so no more are sent until they can be, and only the close can still anchor this.";
   if (!o.canAnchor) return "This session has used the anchors it can spend before the close, so only the close can still anchor this.";

@@ -209,6 +209,14 @@ export class AnchorLimitError extends Error {
   }
 }
 
+/** The Starter allowance every new agent (ak: owner) shares is used up for today, raised before a write is attempted. */
+export class StarterLimitError extends Error {
+  constructor() {
+    super("starter allowance reached");
+    this.name = "StarterLimitError";
+  }
+}
+
 class HashMismatchError extends Error {}
 
 export type Failure = { kind: ErrorKind; code: string; retryAfterSeconds: number | null };
@@ -217,6 +225,7 @@ export type Failure = { kind: ErrorKind; code: string; retryAfterSeconds: number
 export function classifyFailure(e: unknown): Failure {
   const f = (kind: ErrorKind, code: string, retryAfterSeconds: number | null = null): Failure => ({ kind, code, retryAfterSeconds });
   if (e instanceof AnchorLimitError) return f("Credits", "anchor_limit");
+  if (e instanceof StarterLimitError) return f("Credits", "starter_limit");
   if (e instanceof BudgetExceededError) return f("Credits", "log_budget");
   if (e instanceof HashMismatchError) return f("Permanent", "hash_mismatch");
   if (e instanceof AuthError) return f("Auth", "http_401");

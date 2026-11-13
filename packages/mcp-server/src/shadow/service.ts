@@ -18,13 +18,14 @@ import { accountLevelNote, anchorsNow, deferredReason, effectiveLevel, finer, is
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, Pin, ShadowEvent } from "./lib/types.js";
 import type { AgentKeyBook } from "../agent-keys/book.js";
+import { fileKey, StarterAnchors, type FilingLedger } from "../agent-keys/filing.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AgentEntry, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
   ANCHOR_LABEL, RECORD_KINDS, RecordError, START_LABEL, VERSION, LIBRARY, advance, buildEvent, buildPacket, buildPin,
   agentOperatorId, checkpointBody, checkpointOver, receiptPayload, referenceId, refuseThinkTag, signingModeOf, startHashOf, stepFor, type RecordKind,
 } from "./recorder.js";
-import { verifySignature, type KeyProvider } from "./lib/keys.js";
-import { AnchorLimitError, anchorHash, prefetchOnline, type AnchorOutcome, type ShadowLedger } from "./ledger.js";
+import { fingerprint, verifySignature, type KeyProvider } from "./lib/keys.js";
+import { AnchorLimitError, anchorHash, prefetchOnline, type AnchorOutcome, type Failure, type ShadowLedger } from "./ledger.js";
 
 export class ShadowError extends Error {
   readonly code: string;
@@ -61,6 +62,8 @@ export type ShadowLimits = {
   linkCacheBytes: number;
   /** An open session with no new step for this long closes by itself. 0: never. */
   idleCloseMs: number;
+  /** The Starter allowance: anchors per UTC day shared by every agent-key owner (ak:), key filings included. Accounts never draw on it. */
+  maxStarterAnchorsPerDay: number;
 };
 
 export const DEFAULT_SHADOW_LIMITS: ShadowLimits = {
@@ -82,6 +85,7 @@ export const DEFAULT_SHADOW_LIMITS: ShadowLimits = {
   maxSessionStartsPerOwnerPerDay: 30,
   linkCacheBytes: 48 * 1024 * 1024,
   idleCloseMs: 0,
+  maxStarterAnchorsPerDay: 2000,
 };
 
 const RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out", "unknown"] as const;
@@ -114,6 +118,14 @@ const MAX_IDLE_CLOSES_PER_PASS = 200;
 const IDLE_AT_LIMIT_MS = 60 * 60_000;
 const START_NEW = "Call again without session_id to start a new session; keep logging there.";
 const NEW_SESSION_NOTE = "This session_id goes with every later step in this conversation. The viewer reads \"indeterminate\" until the session is closed and its anchors land; shadow_close_session and shadow_verify are for when the person asks to finish or verify.";
+/** Our own limits on anchors: a row they stop waits for a later call, unspent. */
+const OWN_LIMITS = new Set(["anchor_limit", "log_budget", "starter_limit"]);
+/** Codes a row waits under without counting a try or writing an error into the record: our limits, and its agent key being filed first. */
+const WAITING_CODES = new Set([...OWN_LIMITS, "key_filing"]);
+/** What holds every row of an agent's session at once: its key not yet filed, or the Starter allowance used up. */
+const AGENT_HOLDS = new Set(["key_filing", "starter_limit"]);
+const STARTER_USED_UP = "Today's free allowance for new agents is used up.";
+const FILING_FIRST = "Filing this agent's key on Clockchain first.";
 /** shadow_close_session's person_messages: well beyond any conversation, and small enough to read as a count. */
 export const MAX_PERSON_MESSAGES = 10_000;
 
@@ -125,7 +137,7 @@ export type ShadowConfig =
       network: Network;
       /** The env-tunable caps (security review follow-up, finding 2); the rest keep DEFAULT_SHADOW_LIMITS. */
       limits: Pick<ShadowLimits, "maxStateBytes" | "maxBytesPerOwner" | "maxSessionStartsPerOwnerPerDay"> &
-        Partial<Pick<ShadowLimits, "maxAnchorsPerOwnerPerDay" | "maxAnchorsPerSession" | "onlineVerifyMaxReceipts">>;
+        Partial<Pick<ShadowLimits, "maxAnchorsPerOwnerPerDay" | "maxAnchorsPerSession" | "onlineVerifyMaxReceipts" | "maxStarterAnchorsPerDay">>;
       linkConcurrency: number;
       /** Logging on by default is available on some endpoint (SHADOW_AUTO_LOG=1 or SHADOW_PREVIEW_AUTO_LOG=1): its limits and viewer table apply. */
       autoLog?: true;
@@ -167,7 +179,8 @@ const MAX_ANCHORS_PER_SESSION = 1500;
  * Either logging flag below turns on automatic logging, which anchors every step. Its defaults are AUTO_LOG_DEFAULTS: anchors
  * per account per day and per session (SHADOW_ANCHORS_PER_DAY, SHADOW_ANCHORS_PER_SESSION; without a flag, 60 and 100 unless
  * set), shadow_log_step calls per account per minute (SHADOW_LOG_STEPS_PER_MIN), and a smaller SHADOW_ACCOUNT_MAX_BYTES.
- * Without a flag and those settings the result is exactly what it was before them.
+ * Without a flag and those settings the result is exactly what it was before them. SHADOW_STARTER_ANCHORS_PER_DAY (default
+ * 2000) is the Starter allowance every agent-key owner shares.
  *
  * Automatic logging is per endpoint. SHADOW_AUTO_LOG=1 puts it on /shadow/mcp and /shadow/chat/mcp, the paths directories
  * list, so a listed server must not set it. SHADOW_PREVIEW_AUTO_LOG=1 adds /shadow/preview/mcp and /shadow/preview/chat/mcp,
@@ -196,6 +209,7 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
   const anchorsPerDay = whole("SHADOW_ANCHORS_PER_DAY", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerDay : DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay);
   const anchorsPerSession = whole("SHADOW_ANCHORS_PER_SESSION", autoLog ? AUTO_LOG_DEFAULTS.anchorsPerSession : DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession);
   if (anchorsPerSession > MAX_ANCHORS_PER_SESSION) problems.push(`SHADOW_ANCHORS_PER_SESSION must be at most ${MAX_ANCHORS_PER_SESSION}`);
+  const starterPerDay = whole("SHADOW_STARTER_ANCHORS_PER_DAY", DEFAULT_SHADOW_LIMITS.maxStarterAnchorsPerDay);
   // Shadow's own writer on the ledger. Unset: the delegated CLOCKCHAIN_CLIENT_ID, as before. It goes on a public ledger, so
   // no email; and it must differ from the delegated one, or /mcp's writes would land under it.
   const ledgerClient = (env.SHADOW_LEDGER_CLIENT_ID ?? "").trim();
@@ -221,6 +235,7 @@ export function loadShadowConfig(env: NodeJS.ProcessEnv): ShadowConfig {
       maxSessionStartsPerOwnerPerDay: whole("SHADOW_SESSION_STARTS_PER_DAY", SHADOW_ENV_DEFAULTS.maxSessionStartsPerOwnerPerDay),
       ...(anchorsPerDay !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerOwnerPerDay ? { maxAnchorsPerOwnerPerDay: anchorsPerDay } : {}),
       ...(anchorsPerSession !== DEFAULT_SHADOW_LIMITS.maxAnchorsPerSession ? { maxAnchorsPerSession: anchorsPerSession } : {}),
+      ...(starterPerDay !== DEFAULT_SHADOW_LIMITS.maxStarterAnchorsPerDay ? { maxStarterAnchorsPerDay: starterPerDay } : {}),
       // Every receipt is checked online, however many a session has (a start marker plus the session's anchors).
       ...(autoLog ? { onlineVerifyMaxReceipts: anchorsPerSession + 1 } : {}),
       ...(idleHours ? { idleCloseMs: idleHours * 3_600_000 } : {}),
@@ -943,6 +958,8 @@ export class ShadowService {
   private readonly autoLog: boolean;
   private readonly witness: boolean;
   private readonly agentKeys: AgentKeyBook | undefined;
+  /** The Starter allowance agent-key owners share; only with the book. */
+  private readonly starterAnchors: StarterAnchors | undefined;
   private readonly locks = new KeyedMutex();
   private readonly heavy = new Gate(32);
   private readonly drains = new Map<string, Promise<void>>();
@@ -967,6 +984,7 @@ export class ShadowService {
     this.witness = o.witness !== undefined;
     this.agentKeys = o.agentKeys;
     this.limits = { ...DEFAULT_SHADOW_LIMITS, ...(o.limits ?? {}) };
+    this.starterAnchors = o.agentKeys ? new StarterAnchors({ stateDir: o.stateDir, max: this.limits.maxStarterAnchorsPerDay, today: () => this.today() }) : undefined;
     this.network = o.network ?? "clockchain-testnet";
     this.now = o.now ?? (() => new Date());
     this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -1313,7 +1331,7 @@ export class ShadowService {
     // A parked row isn't waiting its turn, so it holds no place in the queue.
     if (!closing && meta.outbox.length - this.parked(meta) >= MAX_OUTBOX)
       return { code: "SHADOW_ANCHOR_BACKLOG", message: "Too many anchors are still waiting for Clockchain; the checkpoint is signed but not queued. Try again later." };
-    meta.outbox.push(this.row("checkpoint", cp.hash, cp));
+    meta.outbox.push(this.row("checkpoint", cp.hash, cp, this.agentSigns(meta) ? { signer: fingerprint(cp.publicKey) } : {}));
     return null;
   }
 
@@ -1326,10 +1344,11 @@ export class ShadowService {
     const used = meta.anchors.length + meta.outbox.length, max = this.limits.maxAnchorsPerSession;
     const latest = Math.max(0, ...meta.anchors.map((a) => a.count ?? 0));
     const trouble = meta.outbox.filter((r) => r.lastErrorKind && r.lastErrorCode !== "search_refused" && (r.body?.count ?? 0) >= latest);
+    const has = (code: string) => trouble.some((r) => r.lastErrorCode === code);
     return {
       canAnchor: used < max - 1,
       closeCanAnchor: used < max,
-      blocked: trouble.some((r) => r.lastErrorCode === "anchor_limit") ? "day_limit" : trouble.some((r) => r.lastErrorCode === "log_budget") ? "budget" : trouble.length ? "outage" : this.parked(meta) >= MAX_PARKED ? "unconfirmed" : null,
+      blocked: has("anchor_limit") ? "day_limit" : has("starter_limit") ? "starter_limit" : has("log_budget") ? "budget" : has("key_filing") ? "key_filing" : trouble.length ? "outage" : this.parked(meta) >= MAX_PARKED ? "unconfirmed" : null,
     };
   }
 
@@ -1403,12 +1422,14 @@ export class ShadowService {
       }
       // An agent-key owner gets its operator id from its root and no key; every other owner's comes from the store.
       const operatorId = agentOperatorId(ownerId) ?? this.store.operator(ownerKey, now).operatorId;
+      const agentRoot = AGENT_OWNER.exec(ownerId)?.[1];
       const sessionId = randomUUID(), nonce = randomUUID();
       const meta: SessionMeta = {
         v: 1, sessionId, ownerKey, operatorId, title, agents, network: this.network, state: "open",
         createdAt: now.toISOString(), closedAt: null, expiresAt: new Date(now.getTime() + this.limits.retentionMs).toISOString(),
         cap: randomBytes(16).toString("base64url"), nonce, startHash: startHashOf(operatorId, sessionId, nonce),
         seq: 0, head: null, eventsBytes: 0, agentSteps: 0, runs: [], checkpoint: null, outbox: [], anchors: [],
+        ...(agentRoot ? { agentRoot } : {}),
         ...(level === "step" ? {} : { logLevel: level, logLevelBy: by }),
         accountLevelSeen,
       };
@@ -1429,18 +1450,19 @@ export class ShadowService {
           this.appendNote(m, start.text, start.note);
           m.outbox.push(row);
           this.store.writeMeta(m);
-          outcome = await this.anchorNetwork(ownerKey, m.sessionId, { ...row, sendStarted: false }, deadline);
+          outcome = await this.anchorNetwork(ownerKey, m.sessionId, { ...row, sendStarted: false }, deadline, this.keysToFile(m, row));
           this.applyOutcome(m, row.id, outcome);
         } else {
           // Nothing to lose in the wait: openers wait for the start marker, as the library's openSession does.
-          outcome = await this.anchorNetwork(ownerKey, m.sessionId, this.row("start", m.startHash, null), deadline);
+          const row = this.row("start", m.startHash, null);
+          outcome = await this.anchorNetwork(ownerKey, m.sessionId, row, deadline, this.keysToFile(m, row));
           let receipt: Record<string, unknown> | null = null;
           let error: { errorKind: string; errorCode: string } | null = null;
           if (outcome.kind === "anchored") receipt = receiptPayload(m.sessionId, outcome.receipt);
           else if (outcome.kind === "pending") m.outbox.push(this.row("start", m.startHash, null, { state: "pending", ledgerId: outcome.ledgerId, submittedAt: outcome.submittedAt, attempts: 1, sendStarted: true }));
           else {
             error = { errorKind: outcome.failure.kind, errorCode: outcome.failure.code };
-            const ours = outcome.failure.code === "anchor_limit" || outcome.failure.code === "log_budget";
+            const ours = WAITING_CODES.has(outcome.failure.code);
             const unconfirmed = outcome.kind === "unconfirmed";
             m.outbox.push(this.row("start", m.startHash, null, { attempts: ours ? 0 : 1, lastErrorKind: outcome.failure.kind, lastErrorCode: unconfirmed ? "search_refused" : outcome.failure.code, sendStarted: outcome.kind === "unconfirmed" || outcome.maybeWritten }));
           }
@@ -1859,7 +1881,7 @@ export class ShadowService {
     const row = target ? meta.outbox.find((x) => x.hash === target) : undefined;
     if (!row) return { ...none, anchor_status: "not_anchored", anchor_reason: refused?.message ?? "No anchor was sent for these steps." };
     if (row.state === "failed") return { ...none, anchor_status: "failed", anchor_reason: reasonOf(row) ?? "Clockchain did not accept it." };
-    const limited = [row, ...meta.outbox].find((r) => r.lastErrorCode === "anchor_limit" || r.lastErrorCode === "log_budget");
+    const limited = [row, ...meta.outbox].find((r) => r.lastErrorCode !== null && OWN_LIMITS.has(r.lastErrorCode));
     if (limited) return { ...none, anchor_status: "over_limit", anchor_reason: reasonOf(limited) ?? "An anchoring limit has been reached." };
     return { ...none, anchor_status: "pending", anchor_reason: reasonOf(row) ?? "Waiting to be sent to Clockchain." };
   }
@@ -2354,18 +2376,32 @@ export class ShadowService {
     return this.now().toISOString().slice(0, 10);
   }
 
-  private anchorNetwork(ownerKey: string, sessionId: string, row: OutboxRow, deadline: number): Promise<AnchorOutcome> {
+  /**
+   * The agent keys Clockchain must hold before this row is anchored: the session's root key and, for a checkpoint, the key
+   * that signed it (a replacement key, say). Null for an account's session. A key it can't name is undefined, and the row waits.
+   */
+  private keysToFile(meta: SessionMeta, row: OutboxRow): (string | undefined)[] | null {
+    if (!this.agentSigns(meta)) return null;
+    return [...new Set([meta.agentRoot, ...(row.kind === "checkpoint" ? [row.signer] : [])])];
+  }
+
+  /**
+   * Anchors one row. For an agent-key owner (`keys` set) each of its keys not yet filed is filed first, and the row is sent
+   * only once they all are; every anchor, filings included, also draws on the Starter allowance. Filings count toward the
+   * owner's daily anchors like any other.
+   */
+  private async anchorNetwork(ownerKey: string, sessionId: string, row: OutboxRow, deadline: number, keys: (string | undefined)[] | null): Promise<AnchorOutcome> {
     const day = this.today();
     const max = this.limits.maxAnchorsPerOwnerPerDay;
     let ledger: ShadowLedger;
     try {
       ledger = this.ledger();
     } catch {
-      return Promise.resolve({ kind: "failed", failure: { kind: "Transient", code: "unavailable", retryAfterSeconds: null }, maybeWritten: row.sendStarted !== false });
+      return { kind: "failed", failure: { kind: "Transient", code: "unavailable", retryAfterSeconds: null }, maybeWritten: row.sendStarted !== false };
     }
-    return anchorHash({
-      ledger, referenceId: referenceId(sessionId), hash: row.hash, label: row.kind === "start" ? START_LABEL : ANCHOR_LABEL,
-      ledgerId: row.state === "pending" ? row.ledgerId : null, uncertain: row.sendStarted !== false, budget: this.budget(),
+    const budget = this.budget();
+    const anchoring: FilingLedger = {
+      ledger, budget: keys && this.starterAnchors ? this.withStarter(budget, this.starterAnchors) : budget,
       reserve: () => {
         if (this.store.bumpAnchors(ownerKey, day, 1, max) === null) throw new AnchorLimitError();
       },
@@ -2373,7 +2409,57 @@ export class ShadowService {
         this.store.bumpAnchors(ownerKey, day, -1, max);
       },
       waitMs: this.limits.anchorWaitMs, tries: 3, backoffMs: [500, 1500], sleep: this.sleep, deadline,
+    };
+    if (keys) {
+      const held = await this.fileFirst(keys, anchoring, row);
+      if (held) return held;
+    }
+    return anchorHash({
+      ...anchoring, referenceId: referenceId(sessionId), hash: row.hash, label: row.kind === "start" ? START_LABEL : ANCHOR_LABEL,
+      ledgerId: row.state === "pending" ? row.ledgerId : null, uncertain: row.sendStarted !== false,
     });
+  }
+
+  /** Files each of `keys` not yet filed, one filing per key at a time. Null when all are filed; else the outcome that holds the row. */
+  private async fileFirst(keys: (string | undefined)[], anchoring: FilingLedger, row: OutboxRow): Promise<AnchorOutcome | null> {
+    // The row wasn't sent, so whether it may have been is what it was before. A limit that stopped the filing is said as itself.
+    const wait = (failure?: Failure): AnchorOutcome => ({
+      kind: "failed", maybeWritten: row.sendStarted !== false,
+      failure: failure && OWN_LIMITS.has(failure.code) ? failure : { kind: "Transient", code: "key_filing", retryAfterSeconds: null },
+    });
+    const book = this.agentKeys;
+    if (!book) return wait();
+    for (const fp of keys) {
+      if (!fp) return wait();
+      try {
+        const filing = await this.locks.run(`agent-key:${fp}`, () => fileKey(book, anchoring, fp, "filed"));
+        if (filing.state !== "filed") return wait(filing.failure);
+      } catch {
+        this.log("shadow_agent_key_filing_error", {});
+        return wait();
+      }
+    }
+    return null;
+  }
+
+  /** The server's write budget with the Starter allowance on top. A count that can't be saved doesn't undo a write that landed. */
+  private withStarter(budget: LogBudget, starter: StarterAnchors): LogBudget {
+    return {
+      check: () => {
+        budget.check();
+        starter.check();
+      },
+      record: () => {
+        budget.record();
+        try {
+          starter.record();
+        } catch {
+          this.log("shadow_starter_count_unsaved", {});
+        }
+      },
+      remaining: () => budget.remaining(),
+      enabled: budget.enabled,
+    };
   }
 
   /** Drains the session's outbox once; concurrent callers share the pass. Never holds the lock across the network. */
@@ -2391,7 +2477,7 @@ export class ShadowService {
     const deadline = o.deadline ?? Date.now() + ANCHOR_BUDGET_MS;
     for (;;) {
       if (Date.now() >= deadline) return; // What is left stays queued for the next call.
-      const job = await this.session(ownerKey, sessionId, (meta) => {
+      const next = await this.session(ownerKey, sessionId, (meta) => {
         const row = nextRow(meta, tried, o.asked ? null : this.now().getTime());
         if (!row) return null;
         // Owed on a network this server has left: never written to the new one.
@@ -2409,16 +2495,18 @@ export class ShadowService {
           return null;
         }
         const job = { ...row };
+        const keys = this.keysToFile(meta, row);
         // On disk before the network call: a process that dies after the ledger write and before the receipt leaves this behind.
         if (row.sendStarted === false && !row.ledgerId) {
           row.sendStarted = true;
           this.store.writeMeta(meta);
         }
-        return job;
+        return { job, keys };
       }).catch(() => null);
-      if (!job) return;
+      if (!next) return;
+      const { job, keys } = next;
       tried.add(job.id);
-      const outcome = await this.anchorNetwork(ownerKey, sessionId, job, deadline);
+      const outcome = await this.anchorNetwork(ownerKey, sessionId, job, deadline, keys);
       const halt = await this.session(ownerKey, sessionId, (meta) => this.applyOutcome(meta, job.id, outcome)).catch(() => true);
       // A step's call comes back quickly when Clockchain refuses: the rest stay queued for the next step.
       if (halt || (o.stopOnFailure && outcome.kind === "failed")) return;
@@ -2430,6 +2518,8 @@ export class ShadowService {
     const row = meta.outbox.find((r) => r.id === rowId);
     if (!row) return false;
     let halt = false;
+    // What held an agent's row (its key, or the Starter allowance) is over once the row is tried again; the outcome says what's next.
+    if (row.lastErrorCode !== null && AGENT_HOLDS.has(row.lastErrorCode)) Object.assign(row, { lastErrorKind: null, lastErrorCode: null });
     if (outcome.kind === "anchored") {
       const receipt = receiptPayload(meta.sessionId, { ...outcome.receipt, submittedAt: outcome.receipt.submittedAt ?? row.submittedAt });
       const payload = row.kind === "start"
@@ -2455,12 +2545,16 @@ export class ShadowService {
       row.lastErrorKind = f.kind;
       row.lastErrorCode = f.code;
       if (!outcome.maybeWritten) row.sendStarted = false;
-      halt = f.kind === "Auth" || f.kind === "Credits";
+      halt = f.kind === "Auth" || f.kind === "Credits" || f.code === "key_filing";
+      // The session's other rows wait on the same key or allowance, so they say so too, unspent.
+      if (AGENT_HOLDS.has(f.code))
+        for (const r of meta.outbox)
+          if (r !== row && r.state === "queued" && !r.ledgerId && (r.lastErrorCode === null || WAITING_CODES.has(r.lastErrorCode))) Object.assign(r, { lastErrorKind: f.kind, lastErrorCode: f.code });
       // A closed session has no later checkpoint to fall back on, so only a permanent refusal ends its rows; the rest back off.
       const closed = meta.state === "closed";
       if (closed) row.nextTryAt = this.retryAt(row);
-      // Our own limits are not Clockchain failures: the row waits, and nothing goes into the record.
-      if (f.code !== "anchor_limit" && f.code !== "log_budget") {
+      // Our own limits, and an agent's key still being filed, are not Clockchain failures: the row waits, and nothing goes into the record.
+      if (!WAITING_CODES.has(f.code)) {
         row.attempts++;
         const failed = f.kind === "Permanent" || (!closed && row.attempts >= MAX_PASSES);
         if (failed) row.state = "failed";
@@ -2499,7 +2593,7 @@ export class ShadowService {
     const a = meta.anchors.find((x) => x.hash === hash);
     if (a) return { status: "anchored", checkpoint_hash: hash, covers_steps: a.count, ledger_id: a.ledgerId, block: a.blockHeight, block_time: a.blockTime, submitted_at: a.submittedAt };
     const r = meta.outbox.find((x) => x.hash === hash);
-    if (r) return { status: r.state === "failed" ? "failed" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : r.lastErrorCode === "search_refused" ? "Signed and recorded. Whether it reached Clockchain isn't known." : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
+    if (r) return { status: r.state === "failed" ? "failed" : r.lastErrorCode === "starter_limit" ? "over_limit" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : r.lastErrorCode === "search_refused" ? "Signed and recorded. Whether it reached Clockchain isn't known." : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
     if (refused) return { status: "not_anchored", checkpoint_hash: hash, covers_steps: meta.checkpoint?.body.count ?? null, code: refused.code, reason: refused.message };
     return { status: "not_anchored", checkpoint_hash: hash };
   }
@@ -2530,6 +2624,8 @@ function reasonOf(r: OutboxRow): string | null {
   if (!r.lastErrorKind && r.state !== "pending" && r.sendStarted === true) return "A send was started, and whether it reached Clockchain isn't known yet. The ledger is asked before it is sent again.";
   if (!r.lastErrorKind) return r.state === "pending" ? "Written to Clockchain; waiting for its block." : null;
   if (r.lastErrorCode === "anchor_limit") return "Today's anchor limit for your account is used up; it will be anchored on a later call.";
+  if (r.lastErrorCode === "starter_limit") return STARTER_USED_UP;
+  if (r.lastErrorCode === "key_filing") return FILING_FIRST;
   if (r.lastErrorCode === "log_budget") return "The server's Clockchain write budget is used up; it will be anchored once it is raised.";
   return `Clockchain did not accept it (${r.lastErrorKind}, ${r.lastErrorCode}).`;
 }

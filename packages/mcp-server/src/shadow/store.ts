@@ -64,6 +64,8 @@ export type OutboxRow = {
   sendStarted?: boolean;
   /** Not before this, unless a person's retry asks: how a row that keeps failing backs off. */
   nextTryAt?: string;
+  /** An agent-signed checkpoint's signing key (fingerprint), filed on Clockchain before the row is. Other rows don't have it. */
+  signer?: string;
 };
 
 /** A receipt that landed in the record (a session.opened receipt or a clockchain.anchored step). */
@@ -107,6 +109,8 @@ export type SessionMeta = {
    * the hash it was given. `final` is the close's. Cleared when the agent signs it. Other sessions never have it.
    */
   awaitingSignature?: { hash: string; body: CheckpointBody; final: boolean };
+  /** An agent-key owner's root key (ak:<root>), filed on Clockchain before any of the session's anchors. Other sessions don't have it. */
+  agentRoot?: string;
   outbox: OutboxRow[];
   anchors: AnchorInfo[];
   /** The person revoked this session's links: its capability file is gone, and no tool hands the links out. */
