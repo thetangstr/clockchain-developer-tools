@@ -58,7 +58,10 @@ export function jwtBearerProof(): KeyProof {
       if (!header || !claims || !signature) return refuse("The assertion is malformed.");
 
       if (header.alg !== "EdDSA") return refuse("The assertion must be signed with EdDSA.");
-      if (header.typ !== "JWT" || header.crit !== undefined) return refuse("The assertion header is not supported.");
+      const typ = header.typ;
+      if ((typ !== undefined && (typeof typ !== "string" || typ.toLowerCase() !== "jwt")) || header.crit !== undefined) {
+        return refuse("The assertion header is not supported.");
+      }
       const jwk = header.jwk;
       if (!isObj(jwk) || jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || "d" in jwk || typeof jwk.x !== "string") {
         return refuse("The assertion has no usable public key.");

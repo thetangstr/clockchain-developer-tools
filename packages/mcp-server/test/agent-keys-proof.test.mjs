@@ -127,6 +127,16 @@ test("refuses a header without a usable public jwk", () => {
   refused(agent.assertion(AUD, { iat: NOW, header: { jwk: "not an object" } }));
   refused(agent.assertion(AUD, { iat: NOW, header: { crit: ["exp"] } }));
   refused(agent.assertion(AUD, { iat: NOW, header: { typ: "at+jwt" } }));
+  refused(agent.assertion(AUD, { iat: NOW, header: { typ: 1 } }));
+  refused(agent.assertion(AUD, { iat: NOW, header: { typ: ["JWT"] } }));
+  refused(agent.assertion(AUD, { iat: NOW, header: { typ: null } }));
+});
+
+test("accepts a header with typ absent or any case of JWT", () => {
+  const agent = makeAgentKey();
+  check(agent.assertion(AUD, { iat: NOW, header: { typ: undefined } }));
+  check(agent.assertion(AUD, { iat: NOW, header: { typ: "jwt" } }));
+  check(agent.assertion(AUD, { iat: NOW, header: { typ: "Jwt" } }));
 });
 
 test("refuses a jti outside 8 to 128 characters", () => {
