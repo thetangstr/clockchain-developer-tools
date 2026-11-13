@@ -1,9 +1,10 @@
 // The public book of agent keys over HTTP (MCP_AGENT_KEYS=1). Anyone, without signing in, can look a key up by its
 // fingerprint: GET /agent-keys/<fp>.json. An agent replaces its key (POST /agent-keys/<fp>/replace, signed by the old key)
 // or cancels it (POST /agent-keys/<fp>/revoke, signed by the key itself) with an RFC 7523 assertion whose audience is that
-// action's own URL. A change takes effect in the book at once, so the old key's tokens stop on their next call, and is then
-// filed on Clockchain under the key's reference. A filing that waits (the ledger is slow, down, or over an allowance) is
-// shown as pending and tried again when the change is asked for again, or on a lookup at most once a minute per event.
+// action's own URL; a replace assertion also names the new key's fingerprint in its `new_key` claim. A change takes effect
+// in the book at once, so the old key's tokens stop on their next call, and is then filed on Clockchain under the key's
+// reference. A filing that waits (the ledger is slow, down, or over an allowance) is shown as pending and tried again when
+// the change is asked for again, or on a lookup at most once a minute per event.
 // Errors are {error, error_description}, and nothing here ever echoes or logs an assertion.
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -40,6 +41,7 @@ export interface AgentKeyRoutesOptions {
 
 const LOOKUP = /^\/agent-keys\/([0-9a-f]{64})\.json$/;
 const ACTION = /^\/agent-keys\/([0-9a-f]{64})\/(replace|revoke)$/;
+const FINGERPRINT = /^[0-9a-f]{64}$/;
 const MAX_BODY_BYTES = 16 * 1024;
 const RETRY_MS = 60_000;
 const MAX_RETRY_KEYS = 10_000;
@@ -197,7 +199,7 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
       return refuse("bad_new_key", 400, "invalid_request", "new_public_key must be an Ed25519 public key as a canonical SPKI PEM.");
     }
 
-    let proven: { publicKeyPem: string; jti: string; exp: number };
+    let proven: ReturnType<KeyProof["verify"]>;
     try {
       proven = o.proof.verify({ assertion: body.assertion as string, audience: `${base}/agent-keys/${fp}/${action}`, nowSec: Math.floor(now() / 1000) });
     } catch (e) {
@@ -209,6 +211,17 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
       return refuse("other_key", 401, "invalid_client", action === "replace"
         ? "The assertion must be signed by the key being replaced."
         : "The assertion must be signed by the key being cancelled.");
+    }
+    // A replace assertion names the new key it was signed for, so one that is captured can't be sent with another key. A
+    // refusal here doesn't spend it: the agent's own request with it still goes through.
+    if (newPem !== undefined) {
+      const named = proven.claims.new_key;
+      if (typeof named !== "string" || !FINGERPRINT.test(named)) {
+        return refuse("no_new_key", 401, "invalid_client", "The assertion must name the new key: put its fingerprint (64 lowercase hex) in the new_key claim.");
+      }
+      if (named !== fingerprint(newPem)) {
+        return refuse("other_new_key", 401, "invalid_client", "The assertion's new_key names a different key than new_public_key.");
+      }
     }
     const replayKey = createHash("sha256").update(`${fp}:${proven.jti}`, "utf8").digest("base64url");
     if (usedAssertions.has(replayKey)) {

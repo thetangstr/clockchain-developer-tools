@@ -34,9 +34,22 @@ function refused(assertion, opts = {}) {
 test("a valid assertion yields the agent's canonical public key, jti and exp", () => {
   const agent = makeAgentKey();
   const out = check(agent.assertion(AUD, { iat: NOW, exp: NOW + 300, jti: "jti-0001" }));
-  assert.deepEqual(out, { publicKeyPem: agent.publicKeyPem, jti: "jti-0001", exp: NOW + 300 });
+  const { claims: _claims, ...proven } = out;
+  assert.deepEqual(proven, { publicKeyPem: agent.publicKeyPem, jti: "jti-0001", exp: NOW + 300 });
   assert.ok(ed25519PublicKeyDer(out.publicKeyPem));
   assert.equal(fingerprint(out.publicKeyPem), agent.fingerprint);
+});
+
+test("a valid assertion also returns its verified claims, as a read-only copy", () => {
+  const agent = makeAgentKey();
+  const out = check(agent.assertion(AUD, { iat: NOW, exp: NOW + 300, jti: "jti-0002", claims: { new_key: "a".repeat(64) } }));
+  assert.deepEqual(out.claims, { iss: agent.thumbprint, sub: agent.thumbprint, aud: AUD, iat: NOW, exp: NOW + 300, jti: "jti-0002", new_key: "a".repeat(64) });
+  assert.ok(Object.isFrozen(out.claims));
+  assert.throws(() => { out.claims.new_key = "b".repeat(64); }, TypeError);
+  // A copy: a second verify of the same assertion gets its own object.
+  const again = check(agent.assertion(AUD, { iat: NOW, exp: NOW + 300, jti: "jti-0003" }));
+  assert.notEqual(again.claims, out.claims);
+  assert.equal(again.claims.new_key, undefined);
 });
 
 test("the helper's thumbprint is the RFC 7638 value and its hash signatures verify", () => {

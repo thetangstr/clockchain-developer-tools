@@ -28,6 +28,8 @@ const JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 const tempDir = (label) => mkdtempSync(path.join(tmpdir(), `ak-routes-${label}-`));
 const keyRef = (fp) => `agent-key:v1:${fp}`;
 const actionUrl = (fp, action) => `${PUBLIC}/agent-keys/${fp}/${action}`;
+/** The claim a replace assertion names its new key with. */
+const naming = (key, more = {}) => ({ ...more, claims: { new_key: key.fingerprint, ...more.claims } });
 
 /** The routes alone over a real HTTP server, with a fake ledger behind a real ShadowService, and a controllable clock. */
 async function harness(o = {}) {
@@ -156,13 +158,13 @@ test("replace needs the old key's signature", async () => {
     const url = actionUrl(old.fingerprint, "replace");
     const refusals = [
       // Signed by someone else (an active key in the book), by the new key, for another action, for another key's URL.
-      [stranger.assertion(url), 401, "invalid_client"],
-      [next.assertion(url), 401, "invalid_client"],
-      [old.assertion(actionUrl(old.fingerprint, "revoke")), 401, "invalid_client"],
-      [old.assertion(`${PUBLIC}/oauth/token`), 401, "invalid_client"],
-      [old.assertion(actionUrl(stranger.fingerprint, "replace")), 401, "invalid_client"],
+      [stranger.assertion(url, naming(next)), 401, "invalid_client"],
+      [next.assertion(url, naming(next)), 401, "invalid_client"],
+      [old.assertion(actionUrl(old.fingerprint, "revoke"), naming(next)), 401, "invalid_client"],
+      [old.assertion(`${PUBLIC}/oauth/token`, naming(next)), 401, "invalid_client"],
+      [old.assertion(actionUrl(stranger.fingerprint, "replace"), naming(next)), 401, "invalid_client"],
       // Expired, and not an assertion at all.
-      [old.assertion(url, { iat: Math.floor(h.clock.t / 1000) - 400, exp: Math.floor(h.clock.t / 1000) - 100 }), 401, "invalid_client"],
+      [old.assertion(url, naming(next, { iat: Math.floor(h.clock.t / 1000) - 400, exp: Math.floor(h.clock.t / 1000) - 100 })), 401, "invalid_client"],
       ["not.an.assertion", 401, "invalid_client"],
     ];
     for (const [assertion, status, error] of refusals) {
@@ -175,25 +177,25 @@ test("replace needs the old key's signature", async () => {
       assert.equal(res.headers.get("cache-control"), "no-store");
     }
     // A stranger's key can't take over the old key's root by naming itself, either.
-    const takeover = await h.post(old.fingerprint, "replace", { assertion: stranger.assertion(url), new_public_key: stranger.publicKeyPem });
+    const takeover = await h.post(old.fingerprint, "replace", { assertion: stranger.assertion(url, naming(stranger)), new_public_key: stranger.publicKeyPem });
     assert.equal(takeover.status, 401);
     // Malformed bodies.
     assert.equal((await h.post(old.fingerprint, "replace", { new_public_key: next.publicKeyPem })).status, 400);
     assert.equal((await h.post(old.fingerprint, "replace", { assertion: old.assertion(url) })).status, 400);
     assert.equal((await h.post(old.fingerprint, "replace", "{not json")).status, 400);
-    assert.equal((await h.post(old.fingerprint, "replace", { assertion: old.assertion(url), new_public_key: next.publicKeyPem, extra: 1 })).status, 400);
-    const crlf = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url), new_public_key: next.publicKeyPem.replace(/\n/g, "\r\n") });
+    assert.equal((await h.post(old.fingerprint, "replace", { assertion: old.assertion(url, naming(next)), new_public_key: next.publicKeyPem, extra: 1 })).status, 400);
+    const crlf = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url, naming(next)), new_public_key: next.publicKeyPem.replace(/\n/g, "\r\n") });
     assert.equal(crlf.status, 400, "the new key must be a canonical Ed25519 SPKI PEM");
     assert.equal((await crlf.json()).error, "invalid_request");
     // The new key may not be one that already belongs to an agent.
-    const taken = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url), new_public_key: stranger.publicKeyPem });
+    const taken = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url, naming(stranger)), new_public_key: stranger.publicKeyPem });
     assert.equal(taken.status, 409);
     assert.equal((await taken.json()).error, "key_exists");
     assert.equal(h.book.get(old.fingerprint).status, "active", "nothing changed yet");
     assert.equal(h.fake.writes.length, 0);
 
     // Signed by the old key, naming the new one.
-    const assertion = old.assertion(url);
+    const assertion = old.assertion(url, naming(next));
     const res = await h.post(old.fingerprint, "replace", { assertion, new_public_key: next.publicKeyPem });
     const body = await res.json();
     assert.equal(res.status, 200, JSON.stringify(body));
@@ -221,17 +223,60 @@ test("replace needs the old key's signature", async () => {
     const replay = await h.post(old.fingerprint, "replace", { assertion, new_public_key: next.publicKeyPem });
     assert.equal(replay.status, 401);
     // The old key can't replace itself again with another key, and a stranger can't replace the new one.
-    const again = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url), new_public_key: makeAgentKey().publicKeyPem });
+    const other = makeAgentKey();
+    const again = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url, naming(other)), new_public_key: other.publicKeyPem });
     assert.equal(again.status, 409);
     assert.equal((await again.json()).error, "key_not_active");
-    const hijack = await h.post(next.fingerprint, "replace", { assertion: old.assertion(actionUrl(next.fingerprint, "replace")), new_public_key: makeAgentKey().publicKeyPem });
+    const thief = makeAgentKey();
+    const hijack = await h.post(next.fingerprint, "replace", { assertion: old.assertion(actionUrl(next.fingerprint, "replace"), naming(thief)), new_public_key: thief.publicKeyPem });
     assert.equal(hijack.status, 401);
     // Asked again by the old key for the same new key (a lost response), it finishes without a second write.
-    const retry = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url), new_public_key: next.publicKeyPem });
+    const retry = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url, naming(next)), new_public_key: next.publicKeyPem });
     assert.equal(retry.status, 200);
     assert.equal(h.fake.writes.filter((w) => w.additionalInfo === "agent key replaced").length, 1);
     // No log line carries the assertion.
     assert.ok(!JSON.stringify(h.logs).includes(assertion));
+  } finally {
+    await h.close();
+  }
+});
+
+test("a replace assertion binds the new key, so a captured one can't be redirected", async () => {
+  const h = await harness();
+  try {
+    const old = h.agent();
+    const next = makeAgentKey();
+    const attacker = makeAgentKey();
+    const url = actionUrl(old.fingerprint, "replace");
+    const refusedWith = async (assertion, newKey) => {
+      const res = await h.post(old.fingerprint, "replace", { assertion, new_public_key: newKey.publicKeyPem });
+      const body = await res.json();
+      assert.equal(res.status, 401, JSON.stringify(body));
+      assert.equal(body.error, "invalid_client");
+      assert.match(body.error_description, /new_key/);
+      assert.ok(!body.error_description.includes(assertion));
+    };
+    // No new_key claim, a malformed one, and one naming a different key than the body.
+    await refusedWith(old.assertion(url), next);
+    for (const bad of [42, "", next.fingerprint.toUpperCase(), next.fingerprint.slice(1), next.publicKeyPem]) {
+      await refusedWith(old.assertion(url, { claims: { new_key: bad } }), next);
+    }
+    await refusedWith(old.assertion(url, naming(attacker)), next);
+    // A captured valid assertion sent with the attacker's key instead: refused, nothing changes, nothing is written.
+    const captured = old.assertion(url, naming(next));
+    await refusedWith(captured, attacker);
+    assert.equal(h.book.get(old.fingerprint).status, "active");
+    assert.equal(h.book.get(attacker.fingerprint), null);
+    assert.equal(h.fake.writes.length, 0);
+    // The redirect didn't spend it: the agent's own request with that assertion goes through.
+    const res = await h.post(old.fingerprint, "replace", { assertion: captured, new_public_key: next.publicKeyPem });
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.fingerprint, next.fingerprint);
+    assert.equal(h.book.get(old.fingerprint).replacedBy, next.fingerprint);
+    // Finishing the same replacement again needs new_key too.
+    await refusedWith(old.assertion(url), next);
+    assert.equal((await h.post(old.fingerprint, "replace", { assertion: old.assertion(url, naming(next)), new_public_key: next.publicKeyPem })).status, 200);
   } finally {
     await h.close();
   }
@@ -275,7 +320,8 @@ test("revoke shows status revoked with revokedAt", async () => {
     const again = await h.post(agent.fingerprint, "revoke", { assertion: agent.assertion(url) });
     assert.equal(again.status, 409);
     assert.equal((await again.json()).error, "key_not_active");
-    const replace = await h.post(agent.fingerprint, "replace", { assertion: agent.assertion(actionUrl(agent.fingerprint, "replace")), new_public_key: makeAgentKey().publicKeyPem });
+    const after = makeAgentKey();
+    const replace = await h.post(agent.fingerprint, "replace", { assertion: agent.assertion(actionUrl(agent.fingerprint, "replace"), naming(after)), new_public_key: after.publicKeyPem });
     assert.equal(replace.status, 409);
   } finally {
     await h.close();
@@ -287,7 +333,7 @@ test("lookup never includes private material", async () => {
   try {
     const old = h.agent();
     const next = makeAgentKey();
-    await h.post(old.fingerprint, "replace", { assertion: old.assertion(actionUrl(old.fingerprint, "replace")), new_public_key: next.publicKeyPem });
+    await h.post(old.fingerprint, "replace", { assertion: old.assertion(actionUrl(old.fingerprint, "replace"), naming(next)), new_public_key: next.publicKeyPem });
     await h.post(next.fingerprint, "revoke", { assertion: next.assertion(actionUrl(next.fingerprint, "revoke")) });
     for (const fp of [old.fingerprint, next.fingerprint]) {
       const text = await (await h.lookup(fp)).text();
@@ -367,7 +413,7 @@ test("without a ledger the change still stands and shows as pending", async () =
   try {
     const old = h.agent();
     const next = makeAgentKey();
-    const res = await h.post(old.fingerprint, "replace", { assertion: old.assertion(actionUrl(old.fingerprint, "replace")), new_public_key: next.publicKeyPem });
+    const res = await h.post(old.fingerprint, "replace", { assertion: old.assertion(actionUrl(old.fingerprint, "replace"), naming(next)), new_public_key: next.publicKeyPem });
     const body = await res.json();
     assert.equal(res.status, 200, JSON.stringify(body));
     assert.equal(body.event.state, "pending");
@@ -490,7 +536,7 @@ test("on the real server, a key's token stops after replace and the new key's wo
     assert.equal((await looked.json()).status, "active");
 
     const next = makeAgentKey();
-    const assertion = old.assertion(actionUrl(old.fingerprint, "replace"));
+    const assertion = old.assertion(actionUrl(old.fingerprint, "replace"), naming(next));
     const send = () => fetch(`${s.url}/agent-keys/${old.fingerprint}/replace`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assertion, new_public_key: next.publicKeyPem }),
     });

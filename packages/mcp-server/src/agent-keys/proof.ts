@@ -7,7 +7,8 @@ import { AgentKeyError } from "./book.js";
 
 /** One interface, so the proof format can be swapped (LLD §17 caveat). */
 export interface KeyProof {
-  verify(input: { assertion: string; audience: string; nowSec: number }): { publicKeyPem: string; jti: string; exp: number };
+  /** `claims` is the verified claim set as a frozen copy, for callers that bind more to the assertion (a replace's new_key). */
+  verify(input: { assertion: string; audience: string; nowSec: number }): { publicKeyPem: string; jti: string; exp: number; claims: Readonly<Record<string, unknown>> };
 }
 
 const MAX_LIFETIME_SEC = 300;
@@ -44,6 +45,15 @@ const thumbprint = (x: string) =>
   createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
 
 const isSec = (v: unknown): v is number => Number.isSafeInteger(v);
+
+/** Freezes a parsed JSON value all the way down. */
+function frozen<T>(v: T): T {
+  if (v !== null && typeof v === "object") {
+    for (const x of Object.values(v)) frozen(x);
+    Object.freeze(v);
+  }
+  return v;
+}
 
 export function jwtBearerProof(): KeyProof {
   return {
@@ -97,7 +107,8 @@ export function jwtBearerProof(): KeyProof {
       if (exp <= nowSec) return refuse("The assertion has expired.");
       if (typeof jti !== "string" || jti.length < 8 || jti.length > 128) return refuse("The assertion id must be 8 to 128 characters.");
 
-      return { publicKeyPem, jti, exp };
+      // A fresh parse per call, so the frozen object is this caller's own copy.
+      return { publicKeyPem, jti, exp, claims: frozen(claims) };
     },
   };
 }
