@@ -16,13 +16,14 @@ import { redactSecrets, redactText } from "./redact.js";
 import { declaredFields, declaredOf, declaredText, withDeclared, type DeclaredInput } from "./intent.js";
 import { accountLevelNote, anchorsNow, deferredReason, effectiveLevel, finer, isLogLevel, levelNote, levelSetBy, recordedReason, type AnchorOutlook, type LevelSetBy, type LogLevel } from "./log-level.js";
 import { windows, type Window } from "./lib/windows.js";
-import type { Checkpoint, Network, ShadowEvent } from "./lib/types.js";
+import type { Checkpoint, Network, Pin, ShadowEvent } from "./lib/types.js";
+import type { AgentKeyBook } from "../agent-keys/book.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AgentEntry, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
   ANCHOR_LABEL, RECORD_KINDS, RecordError, START_LABEL, VERSION, LIBRARY, advance, buildEvent, buildPacket, buildPin,
-  agentOperatorId, checkpointOver, receiptPayload, referenceId, refuseThinkTag, signingModeOf, startHashOf, stepFor, type RecordKind,
+  agentOperatorId, checkpointBody, checkpointOver, receiptPayload, referenceId, refuseThinkTag, signingModeOf, startHashOf, stepFor, type RecordKind,
 } from "./recorder.js";
-import type { KeyProvider } from "./lib/keys.js";
+import { verifySignature, type KeyProvider } from "./lib/keys.js";
 import { AnchorLimitError, anchorHash, prefetchOnline, type AnchorOutcome, type ShadowLedger } from "./ledger.js";
 
 export class ShadowError extends Error {
@@ -865,6 +866,19 @@ function withAnchoringCaveat(html: string, a: Anchoring): string {
   return html.replace("Exit code 0 is pass, 2 indeterminate, 1 fail.</p>", () => `Exit code 0 is pass, 2 indeterminate, 1 fail.</p><p class="meta">${escHtml(anchoringCaveat(a))}</p>`);
 }
 
+const NOTHING_SIGNED = "The agent has not signed a checkpoint of this record yet, so none of its steps are signed by the agent and there is nothing to verify. The agent calls shadow_checkpoint for the hash to sign, then shadow_sign_checkpoint.";
+
+/**
+ * Says what an agent's signed checkpoint leaves out: steps recorded after it, which are in no checkpoint and so not on this
+ * page. Clockchain's receipts are left out of the count: one for the checkpoint itself always lands after it.
+ */
+function withUnsignedTail(html: string, after: ShadowEvent[]): string {
+  const n = after.filter((e) => !e.body.kind.startsWith("clockchain.")).length;
+  if (!n) return html;
+  const line = `${n} ${n === 1 ? "step was" : "steps were"} recorded after the last checkpoint the agent signed. ${n === 1 ? "It is" : "They are"} not signed by the agent, so ${n === 1 ? "it is" : "they are"} not on this page.`;
+  return html.replace("<h2>What this record shows</h2>", () => `<p class="meta">${escHtml(line)}</p><h2>What this record shows</h2>`);
+}
+
 /**
  * Marks the server's own steps in the library's timeline, which prints every note alike. The mark is markup, and step content
  * is escaped on the page, so an agent's note can use the same words and still not read as one.
@@ -896,9 +910,20 @@ export type ServiceOptions = {
   autoLog?: boolean;
   /** SHADOW_WITNESS_KEY_FILE: Clockchain's single published key, which signs signed-in accounts' checkpoints. Unset: a key per owner, as before. */
   witness?: KeyProvider;
+  /** MCP_AGENT_KEYS=1: the public book of agents' keys (the one the token endpoint uses), which checks an agent's own checkpoint signatures. */
+  agentKeys?: AgentKeyBook;
 };
 
 type Links = { viewer: string | null; packet: string | null; summary?: string };
+type Refusal = { code: string; message: string };
+/** A close's final checkpoint: the one queued for Clockchain, or for an agent the hash it is to sign (`sign`, also the target). */
+type FinalCheckpoint = { target: string; refused: Refusal | null; sign?: string };
+
+const SIGN_NOTE = "Sign this hash with your key and call shadow_sign_checkpoint.";
+const signView = (hash: string) => ({ hash, note: SIGN_NOTE });
+const AGENT_SIGNS = "The steps are recorded. This agent signs its own checkpoints, so none was made here: call shadow_checkpoint for the hash to sign, then shadow_sign_checkpoint.";
+const NOT_AGENT_OWNER = () => new ShadowError("not_agent_owner", "Only the agent that owns this session can sign its checkpoints, with an active key of its own. Sign in again with your current key.");
+const AGENT_OWNER = /^ak:([0-9a-f]{64})$/;
 
 export class ShadowService {
   readonly store: ShadowStore;
@@ -911,6 +936,7 @@ export class ShadowService {
   private readonly log: NonNullable<ServiceOptions["log"]>;
   private readonly autoLog: boolean;
   private readonly witness: boolean;
+  private readonly agentKeys: AgentKeyBook | undefined;
   private readonly locks = new KeyedMutex();
   private readonly heavy = new Gate(32);
   private readonly drains = new Map<string, Promise<void>>();
@@ -933,6 +959,7 @@ export class ShadowService {
   constructor(o: ServiceOptions) {
     this.store = new ShadowStore(o.stateDir, o.witness);
     this.witness = o.witness !== undefined;
+    this.agentKeys = o.agentKeys;
     this.limits = { ...DEFAULT_SHADOW_LIMITS, ...(o.limits ?? {}) };
     this.network = o.network ?? "clockchain-testnet";
     this.now = o.now ?? (() => new Date());
@@ -1047,25 +1074,60 @@ export class ShadowService {
   }
 
   /**
-   * Writes a session's ending and queues its final checkpoint under one hold of the heavy gate. Being busy can only refuse this
-   * before anything is written: once session.closed is on disk, nothing here waits for the gate.
+   * Writes a session's ending and queues its final checkpoint under one hold of the heavy gate (for an agent, keeps it for the
+   * agent to sign). Being busy can only refuse this before anything is written: once session.closed is on disk, nothing here
+   * waits for the gate.
    */
-  private sealClose(meta: SessionMeta, ending: () => void): Promise<{ target: string; refused: { code: string; message: string } | null }> {
+  private sealClose(meta: SessionMeta, ending: () => void): Promise<FinalCheckpoint> {
     return this.heavy.run(() => {
       ending();
-      const cp = this.signed(meta, this.store.readEvents(meta));
-      meta.checkpoint = cp;
-      const refused = this.queueCheckpoint(meta, cp, true);
+      const r = this.queueFinal(meta, this.store.readEvents(meta));
       this.store.writeMeta(meta);
-      return { target: cp.hash, refused };
+      return r;
     });
   }
 
-  /** Queues the final checkpoint of a closed session that has none, which a crash in the middle of a close leaves. The caller writes the metadata. */
-  private queueFinal(meta: SessionMeta, events: ShadowEvent[]): { target: string; refused: { code: string; message: string } | null } {
+  /**
+   * Queues the final checkpoint of a closed session that has none, which a crash in the middle of a close leaves. For an agent
+   * there is nothing to queue until it signs: the body waits for its signature, and `sign` is the hash to sign. The caller
+   * writes the metadata.
+   */
+  private queueFinal(meta: SessionMeta, events: ShadowEvent[]): FinalCheckpoint {
+    if (this.agentSigns(meta)) {
+      const sign = this.awaitSignature(meta, events, true);
+      if (sign) return { target: sign, refused: null, sign };
+      // The agent's last signed checkpoint covers every step: queued, unless that was refused before.
+      const cp = meta.checkpoint!;
+      return { target: cp.hash, refused: this.queueCheckpoint(meta, cp, true) };
+    }
     const cp = this.signed(meta, events);
     meta.checkpoint = cp;
     return { target: cp.hash, refused: this.queueCheckpoint(meta, cp, true) };
+  }
+
+  /** Whether this session's checkpoints are its agent's to sign (an agent-key owner): the server builds them, and never signs. */
+  private agentSigns(meta: SessionMeta): boolean {
+    return signingModeOf(meta, this.witness) === "agent";
+  }
+
+  /**
+   * An agent session's checkpoint over every step, kept for the agent to sign, and its hash; null when its last signed
+   * checkpoint already covers them. Asked again over the same steps, it is the same body, so a signature in flight stays good.
+   * The caller writes the metadata.
+   */
+  private awaitSignature(meta: SessionMeta, events: ShadowEvent[], final: boolean): string | null {
+    const waiting = meta.awaitingSignature;
+    if (waiting && waiting.body.count === events.length) {
+      if (final) waiting.final = true;
+      return waiting.hash;
+    }
+    const r = checkpointBody(meta, events, this.now(), "agent");
+    if ("unchanged" in r) {
+      delete meta.awaitingSignature;
+      return null;
+    }
+    meta.awaitingSignature = { hash: r.hash, body: r.body, final };
+    return r.hash;
   }
 
   /** For /metrics: totals only, and read from memory, so a scrape never walks the disk. */
@@ -1201,14 +1263,25 @@ export class ShadowService {
     return checkpointOver(meta, events, this.store.operator(meta.ownerKey, this.now()).keys, this.now(), mode);
   }
 
-  /** latestCheckpoint(): a fresh, signed, unanchored checkpoint when steps were added since the last one. */
-  private latest(meta: SessionMeta, events: ShadowEvent[]): Checkpoint {
+  /**
+   * latestCheckpoint(): a fresh, signed, unanchored checkpoint when steps were added since the last one. For an agent, the
+   * last checkpoint it signed (null before its first), which can cover fewer steps than the record holds: the server never signs.
+   */
+  private latest(meta: SessionMeta, events: ShadowEvent[]): Checkpoint | null {
+    if (this.agentSigns(meta)) return meta.checkpoint;
     const cp = this.signed(meta, events);
     if (cp !== meta.checkpoint) {
       meta.checkpoint = cp;
       this.store.writeMeta(meta);
     }
     return cp;
+  }
+
+  /** A closed session's pin. For an agent, of the last checkpoint it signed, and none while its final checkpoint waits for its signature. */
+  private pinOf(meta: SessionMeta, events: ShadowEvent[]): Pin | null {
+    if (meta.awaitingSignature?.final) return null;
+    const cp = this.latest(meta, events);
+    return cp ? buildPin(meta, cp) : null;
   }
 
   /**
@@ -1259,7 +1332,8 @@ export class ShadowService {
    * pin names the record's head. That covers a row in the queue, one a retry can bring back, and a final checkpoint still owed.
    */
   private pinNote(meta: SessionMeta): string | null {
-    if (meta.state !== "closed") return null;
+    // An agent's pin is over the checkpoint it signed: receipts landing after it don't change it.
+    if (meta.state !== "closed" || this.agentSigns(meta)) return null;
     const coming = meta.outbox.some((r) => r.state !== "failed") || revivable(meta).length > 0 || (finalOwed(meta) && meta.network === this.network && this.outlook(meta).closeCanAnchor);
     if (!coming) return null;
     return `This pin is for the record as it stands now. A Clockchain receipt may still land. Each one adds a step, so the pin changes when it does, and this one will no longer match. ${meta.linksRevoked ? "shadow_get_session gives" : "shadow_get_session and the packet link give"} the current one.`;
@@ -1713,9 +1787,10 @@ export class ShadowService {
       } finally {
         if (made.steps.length) this.store.writeMeta(meta);
       }
-      // Not this call's turn to anchor: nothing is signed or sent, so no anchor allowance is spent.
-      if (!anchoring) {
-        made.deferred = level;
+      // Not this call's turn to anchor, or an agent's, which signs its own: nothing is signed or sent, so no anchor allowance is spent.
+      if (!anchoring || this.agentSigns(meta)) {
+        if (anchoring) made.refused = { code: "SHADOW_AGENT_SIGNS", message: AGENT_SIGNS };
+        else made.deferred = level;
         if (input.table) made.turn = await this.withEvents(meta, (events) => turnRows(events, made.steps[0].seq)).catch(() => made.turn);
         return;
       }
@@ -1786,25 +1861,46 @@ export class ShadowService {
   async checkpoint(ownerId: string, input: { session_id?: unknown }) {
     const sessionId = sessionIdOf(input.session_id);
     const ownerKey = ownerKeyOf(ownerId);
-    const made: { target: string | null; refused: { code: string; message: string } | null } = { target: null, refused: null };
+    const made: { target: string | null; refused: Refusal | null; sign?: string } = { target: null, refused: null };
     await this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state === "closed") { // Only retries what is still owed.
         const revived = revive(meta);
-        if (finalOwed(meta)) await this.withEvents(meta, (events) => this.queueFinal(meta, events));
+        // An agent's final checkpoint still unsigned: the hash to sign.
+        if (finalOwed(meta)) {
+          const final = await this.withEvents(meta, (events) => this.queueFinal(meta, events));
+          if (final.sign) {
+            Object.assign(made, final);
+            this.store.writeMeta(meta);
+            return;
+          }
+        }
         if (revived || meta.outbox.length) this.store.writeMeta(meta);
         return;
       }
-      const cp = await this.withEvents(meta, (events) => this.signed(meta, events));
+      if (this.agentSigns(meta)) {
+        // The body waits for the agent's signature, on disk, so a restart keeps the hash it was given. Nothing is queued.
+        const sign = await this.withEvents(meta, (events) => {
+          const hash = this.awaitSignature(meta, events, false);
+          this.store.writeMeta(meta);
+          return hash;
+        });
+        if (sign) {
+          made.target = made.sign = sign;
+          return;
+        }
+      }
+      const cp = this.agentSigns(meta) ? meta.checkpoint! : await this.withEvents(meta, (events) => this.signed(meta, events));
       meta.checkpoint = cp;
       made.target = cp.hash;
       made.refused = this.queueCheckpoint(meta, cp);
       this.store.writeMeta(meta);
     });
-    await this.drain(ownerKey, sessionId, { asked: true });
+    if (!made.sign) await this.drain(ownerKey, sessionId, { asked: true });
     return this.session(ownerKey, sessionId, (meta) => ({
       session_id: sessionId,
       status: meta.state,
       ...(made.target ? { checkpoint: this.anchorView(meta, made.target, made.refused) } : { note: "The session is closed; anchors still owed were retried." }),
+      ...(made.sign ? { sign: signView(made.sign) } : {}),
       pending_anchors: meta.outbox.map(pendingView),
       anchors_today: this.store.anchorsToday(ownerKey, this.today()),
       anchors_per_day: this.limits.maxAnchorsPerOwnerPerDay,
@@ -1820,7 +1916,7 @@ export class ShadowService {
       throw bad(`status must be one of ${RUN_STATUSES.join(", ")}.`);
     const status = (input.status ?? null) as (typeof RUN_STATUSES)[number] | null;
     const ownerKey = ownerKeyOf(ownerId);
-    const made: { target: string; refused: { code: string; message: string } | null } = { target: "", refused: null };
+    const made: FinalCheckpoint = { target: "", refused: null };
     await this.session(ownerKey, sessionId, async (meta) => {
       if (meta.state === "closed") {
         // A retry finishes what an earlier close left: a final checkpoint never queued, or one still waiting. Otherwise it is over.
@@ -1850,7 +1946,7 @@ export class ShadowService {
     await this.drain(ownerKey, sessionId, { asked: true });
     return this.session(ownerKey, sessionId, async (meta) => {
       const links = this.links(meta, base);
-      const { pin, log, anchoring } = await this.withEvents(meta, (events) => ({ pin: buildPin(meta, this.latest(meta, events)), log: this.autoLog ? sessionLog(meta, events) : null, anchoring: anchoringOf(meta, events) }));
+      const { pin, log, anchoring } = await this.withEvents(meta, (events) => ({ pin: this.pinOf(meta, events), log: this.autoLog ? sessionLog(meta, events) : null, anchoring: anchoringOf(meta, events) }));
       this.log("shadow_session_closed", { sessionId, steps: meta.seq, anchors: meta.anchors.length, pending: meta.outbox.length });
       return {
         ...(log ? { summary: sessionLogText(log, { max: MAX_SUMMARY_ROWS, rest: links.summary ?? links.viewer }), summary_note: "This summary is for the person, in full, as it is.", capture: meta.capture ?? null, capture_note: captureNote(meta) } : {}),
@@ -1858,12 +1954,68 @@ export class ShadowService {
         status: "closed",
         steps: meta.seq,
         final_checkpoint: this.anchorView(meta, made.target, made.refused),
+        ...(made.sign ? { sign: signView(made.sign) } : {}),
         anchoring,
         pin,
         ...(this.pinNote(meta) ? { pin_note: this.pinNote(meta) } : {}),
         links,
         links_note: meta.linksRevoked ? LINKS_REVOKED_NOTE : LINKS_NOTE,
         share: meta.linksRevoked ? "This session's links were revoked, so there is nothing to share." : "The viewer or packet link is for whoever should check this record; the pin goes by a different channel.",
+      };
+    });
+  }
+
+  /** Whether agents' keys are on: then an agent-key owner signs its own checkpoints with shadow_sign_checkpoint. */
+  get agentKeysOn(): boolean {
+    return this.agentKeys !== undefined;
+  }
+
+  /**
+   * shadow_sign_checkpoint: the agent's own signature over the checkpoint hash it was given. `agentKey` is the fingerprint
+   * of the key its token was issued for (akf). The key must be active in the book and belong to the session owner's root,
+   * and its signature must verify over the hash waiting in the session. Then the checkpoint is the agent's, under its key,
+   * and is queued and anchored as shadow_checkpoint queues the server's.
+   */
+  async signCheckpoint(ownerId: string, agentKey: string | undefined, input: { session_id?: unknown; hash?: unknown; signature?: unknown }) {
+    const sessionId = sessionIdOf(input.session_id);
+    const root = AGENT_OWNER.exec(ownerId)?.[1];
+    if (!root || !this.agentKeys || typeof agentKey !== "string") throw NOT_AGENT_OWNER();
+    let entry: ReturnType<AgentKeyBook["get"]>;
+    try {
+      entry = this.agentKeys.get(agentKey);
+    } catch {
+      this.log("shadow_agent_key_unreadable", { sessionId });
+      throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't read this agent's key right now. Try again later.");
+    }
+    if (!entry || entry.status !== "active" || entry.root !== root) throw NOT_AGENT_OWNER();
+    const key = entry.publicKeyPem;
+    const ownerKey = ownerKeyOf(ownerId);
+    const made: { target: string; refused: Refusal | null } = { target: "", refused: null };
+    await this.session(ownerKey, sessionId, (meta) => {
+      if (!this.agentSigns(meta)) throw NOT_AGENT_OWNER();
+      const waiting = meta.awaitingSignature;
+      if (!waiting) throw new ShadowError("hash_mismatch", "No checkpoint of this session is waiting to be signed. Call shadow_checkpoint for the hash to sign.");
+      if (input.hash !== waiting.hash) throw new ShadowError("hash_mismatch", `That is not the hash waiting to be signed. The current hash is ${waiting.hash}: sign it and call shadow_sign_checkpoint again.`);
+      if (!verifySignature(key, waiting.hash, input.signature))
+        throw new ShadowError("bad_signature", "The signature does not verify over that hash under your key. Sign the 32 bytes of the hash (its hex decoded) with Ed25519, and send the 64-byte signature in base64.");
+      const cp: Checkpoint = { body: waiting.body, hash: waiting.hash, publicKey: key, signature: input.signature as string };
+      meta.checkpoint = cp;
+      delete meta.awaitingSignature;
+      made.target = cp.hash;
+      made.refused = this.queueCheckpoint(meta, cp, waiting.final);
+      this.store.writeMeta(meta);
+    });
+    await this.drain(ownerKey, sessionId, { asked: true });
+    return this.session(ownerKey, sessionId, async (meta) => {
+      const pin = meta.state === "closed" ? await this.withEvents(meta, (events) => this.pinOf(meta, events)) : null;
+      return {
+        session_id: sessionId,
+        status: meta.state,
+        checkpoint: this.anchorView(meta, made.target, made.refused),
+        ...(pin ? { pin } : {}),
+        pending_anchors: meta.outbox.map(pendingView),
+        anchors_today: this.store.anchorsToday(ownerKey, this.today()),
+        anchors_per_day: this.limits.maxAnchorsPerOwnerPerDay,
       };
     });
   }
@@ -1884,7 +2036,7 @@ export class ShadowService {
   async getSession(ownerId: string, input: { session_id?: unknown }, base: string) {
     const sessionId = sessionIdOf(input.session_id);
     return this.session(ownerKeyOf(ownerId), sessionId, (meta) => this.withEvents(meta, (events) => {
-      const pin = meta.state === "closed" ? buildPin(meta, this.latest(meta, events)) : null;
+      const pin = meta.state === "closed" ? this.pinOf(meta, events) : null;
       const facts = sessionFacts(events);
       // A session from before hashed notes has only its metadata to say who set it, and it reads as step whatever that says.
       const setBy = facts.setBy ?? (meta.accountLevelSeen === undefined ? meta.logLevelBy : null);
@@ -1908,7 +2060,7 @@ export class ShadowService {
         time_windows: windowsView(windows(events)),
         links: this.links(meta, base),
         links_note: meta.linksRevoked ? LINKS_REVOKED_NOTE : LINKS_NOTE,
-        ...(pin ? { pin, ...(this.pinNote(meta) ? { pin_note: this.pinNote(meta) } : {}) } : { pin_note: "The pin is issued when the session is closed." }),
+        ...(pin ? { pin, ...(this.pinNote(meta) ? { pin_note: this.pinNote(meta) } : {}) } : { pin_note: meta.state === "closed" ? "The pin is issued when the agent signs the final checkpoint (shadow_checkpoint gives the hash, shadow_sign_checkpoint takes the signature)." : "The pin is issued when the session is closed." }),
       };
     }));
   }
@@ -1955,7 +2107,9 @@ export class ShadowService {
     }
     return this.session(ownerKey, sessionId, (meta) => this.withEvents(meta, async (events) => {
       const cp = this.latest(meta, events);
-      const packet = buildPacket(meta, cp, events, meta.network, this.now());
+      if (!cp) return { session_id: sessionId, result: "indeterminate" as const, summary: NOTHING_SIGNED, checks: [], anchoring: anchoringOf(meta, events), online: onlineNote, links: this.links(meta, base) };
+      // An agent's checkpoint covers what it signed; the steps after it are in no checkpoint, so not in the packet.
+      const packet = buildPacket(meta, cp, events.slice(0, cp.body.count), meta.network, this.now());
       const pin = buildPin(meta, cp);
       // Verified as a relying party would: strictly parsed from its JSON.
       // With logging on by default, a record that can't be confirmed on the ledger doesn't pass: witness decides too. So too
@@ -2139,10 +2293,19 @@ export class ShadowService {
             return body;
           }
           const cp = this.latest(meta, events);
-          const packet = buildPacket(meta, cp, events, meta.network, this.now());
-          const pin = buildPin(meta, cp);
           const anchoring = anchoringOf(meta, events);
           let body: Buffer;
+          if (!cp) {
+            body = Buffer.from(kind === "packet"
+              ? JSON.stringify({ packet: null, pin: null, anchoring, note: NOTHING_SIGNED }, null, 1)
+              : `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Clockchain Shadow</title></head><body><h1>${escHtml(meta.title)}</h1><p>${escHtml(NOTHING_SIGNED)}</p></body></html>\n`);
+            this.linkBuildCount++;
+            this.linkCache.set(linkKey(kind, meta), body);
+            return body;
+          }
+          // An agent's checkpoint covers what it signed; the steps after it are in no checkpoint, so not in the packet.
+          const packet = buildPacket(meta, cp, events.slice(0, cp.body.count), meta.network, this.now());
+          const pin = buildPin(meta, cp);
           if (kind === "packet") {
             body = Buffer.from(JSON.stringify({
               packet, pin,
@@ -2152,7 +2315,7 @@ export class ShadowService {
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
             const shown = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(ownPinReport(report), anchoring) : ownPinReport(report);
-            const html = withServerSteps(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events);
+            const html = withServerSteps(withUnsignedTail(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events.slice(cp.body.count)), events);
             body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }
           this.linkBuildCount++;

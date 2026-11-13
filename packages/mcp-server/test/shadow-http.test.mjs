@@ -413,8 +413,9 @@ test("an agent token opens /shadow/mcp and owns by ak:<root>", async () => {
     const token = await app.tokenFor(agent);
     const tools = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token });
     assert.equal(tools.status, 200, JSON.stringify(tools.body));
-    // With sign-in on, every endpoint lists clockchain_delete_account; for an agent it answers ACCOUNT_REQUIRED.
-    assert.deepEqual(tools.body.result.tools.map((t) => t.name).sort(), [...SHADOW_TOOLS, "clockchain_delete_account"].sort());
+    // With sign-in on, every endpoint lists clockchain_delete_account; for an agent it answers ACCOUNT_REQUIRED. With
+    // agent keys on, shadow_sign_checkpoint is listed too.
+    assert.deepEqual(tools.body.result.tools.map((t) => t.name).sort(), [...SHADOW_TOOLS, "clockchain_delete_account", "shadow_sign_checkpoint"].sort());
     assert.equal((await call(app, "clockchain_delete_account", { confirm: true }, { bearer: token })).value.error, "ACCOUNT_REQUIRED");
     const { value: s } = await call(app, "shadow_start_session", { title: "agent's" }, { bearer: token });
     assert.ok(existsSync(sessionDir(app, `ak:${agent.fingerprint}`, s.session_id)), "stored under ak:<root>");
@@ -424,6 +425,38 @@ test("an agent token opens /shadow/mcp and owns by ak:<root>", async () => {
     const stranger = await app.tokenFor(makeAgentKey());
     assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: stranger })).value.error, "SHADOW_NOT_FOUND");
     assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: acctToken() })).value.error, "SHADOW_NOT_FOUND");
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("an agent signs its own checkpoint over /shadow/mcp, with the key its token names", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    const { value: s } = await call(app, "shadow_start_session", { title: "agent's", agents: [{ id: "planner" }] }, { bearer: token });
+    await call(app, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "task", content: "Find flights" }, { bearer: token });
+    const { value: cp } = await call(app, "shadow_checkpoint", { session_id: s.session_id }, { bearer: token });
+    assert.match(cp.sign.hash, /^[0-9a-f]{64}$/);
+    // A token of another agent can't see the session; an account isn't an agent owner.
+    const stranger = await app.tokenFor(makeAgentKey());
+    assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { bearer: stranger })).value.error, "SHADOW_NOT_FOUND");
+    assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { bearer: acctToken() })).value.error, "not_agent_owner");
+    const { value: signed } = await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { bearer: token });
+    assert.equal(signed.checkpoint.status, "anchored", JSON.stringify(signed));
+    assert.equal(signed.checkpoint.checkpoint_hash, cp.sign.hash);
+    // After replace, the old key's tokens stop, and the new key signs for the same records.
+    const next = makeAgentKey();
+    app.book.replace(agent.fingerprint, next.publicKeyPem);
+    const nextToken = await app.tokenFor(next);
+    await call(app, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." }, { bearer: nextToken });
+    const { value: cp2 } = await call(app, "shadow_checkpoint", { session_id: s.session_id }, { bearer: nextToken });
+    assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp2.sign.hash, signature: agent.signHash(cp2.sign.hash) }, { bearer: nextToken })).value.error, "bad_signature");
+    const { value: signed2 } = await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp2.sign.hash, signature: next.signHash(cp2.sign.hash) }, { bearer: nextToken });
+    assert.equal(signed2.checkpoint.status, "anchored", JSON.stringify(signed2));
   } finally {
     await app.close();
     __setShadowLedgerForTests(undefined);

@@ -1279,11 +1279,16 @@ export async function runHttp(): Promise<Server> {
     const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
     const presented = presentedApiKey(req.headers);
     // An agent's every token shares its root key's rate bucket, as it shares the root's records.
-    const signed = (claims: { jti?: string; acct?: string; akf?: string }, agentRoot?: string): ShadowAuth => ({
-      ok: true,
-      ownerId: shadowOwnerFromClaims(claims, presented, agentRoot),
-      rateKey: callerPrincipalId(req.headers, ip, agentRoot ? `ak:${agentRoot}` : signedTokenSubject(claims)),
-    });
+    // An agent owner's token also names the key it was issued for, which signs the agent's checkpoints.
+    const signed = (claims: { jti?: string; acct?: string; akf?: string }, agentRoot?: string): ShadowAuth => {
+      const ownerId = shadowOwnerFromClaims(claims, presented, agentRoot);
+      return {
+        ok: true,
+        ownerId,
+        rateKey: callerPrincipalId(req.headers, ip, agentRoot ? `ak:${agentRoot}` : signedTokenSubject(claims)),
+        ...(AGENT_OWNER.test(ownerId) && typeof claims.akf === "string" ? { agentKey: claims.akf } : {}),
+      };
+    };
     const auth = checkAuth(req);
     if (!auth.ok || "scope" in auth) return { ok: false };
     if ("payload" in auth) return signed(auth.payload, "agentRoot" in auth ? auth.agentRoot : undefined);
@@ -1334,6 +1339,8 @@ export async function runHttp(): Promise<Server> {
         limits: shadowConfig.limits,
         ...(shadowConfig.autoLog ? { autoLog: true } : {}),
         ...(witness ? { witness } : {}),
+        // The same book the token endpoint admits keys to: an agent's checkpoint signatures are checked against it.
+        ...(agentKeyBook ? { agentKeys: agentKeyBook } : {}),
       });
       const disk = diskBudgetProblem(shadowConfig.stateDir, shadowConfig.limits.maxStateBytes);
       if (disk) throw Object.assign(new Error(disk), { name: "ShadowConfigError" });

@@ -136,7 +136,8 @@ export const PREVIEW_CHAT_PATH = "/shadow/preview/chat/mcp";
 /** Retention and sharing, said wherever a tool hands out or describes links. */
 const RETENTION = "Records are kept 30 days, then deleted; anyone with a link can read the record until then, unless the person revokes the link or deletes the record.";
 
-export type ShadowAuth = { ok: true; ownerId: string; rateKey: string } | { ok: false; accountRequired?: boolean };
+/** `agentKey`: for an agent-key owner (ak:<root>), the fingerprint of the key its token was issued for (akf), which signs its checkpoints. */
+export type ShadowAuth = { ok: true; ownerId: string; rateKey: string; agentKey?: string } | { ok: false; accountRequired?: boolean };
 
 /** Bounds on the public link responses (security review finding 1). */
 export type LinkLimits = { concurrent: number; perClient: number; idleMs: number; maxMs: number };
@@ -296,6 +297,7 @@ const TOOL_META = {
   shadow_record: tool("Record a step", false, false, false, true),
   shadow_checkpoint: tool("Anchor a checkpoint", false, true, false, true),
   shadow_close_session: tool("Close the session", false, true, true, true),
+  shadow_sign_checkpoint: tool("Sign a checkpoint", false, true, true, true),
   shadow_get_session: tool("Get a session", true, false, true, false),
   shadow_list_sessions: tool("List sessions", true, false, true, false),
   shadow_verify: tool("Verify a session", true, false, true, true),
@@ -320,7 +322,7 @@ export function buildShadowServer(
   service: ShadowService,
   ownerId: string | null,
   base: string,
-  o: { chatAccounts?: AccountStore | undefined; accountStore?: AccountStore | undefined; autoLog?: { accounts?: AccountStore | undefined; logStepAllowed: boolean; stepsPerMinute: number } | undefined } = {},
+  o: { chatAccounts?: AccountStore | undefined; accountStore?: AccountStore | undefined; autoLog?: { accounts?: AccountStore | undefined; logStepAllowed: boolean; stepsPerMinute: number } | undefined; agentKey?: string | undefined } = {},
 ): McpServer {
   const accounts = o.chatAccounts;
   const autoLog = o.autoLog;
@@ -443,6 +445,22 @@ export function buildShadowServer(
     description: `Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way), or not_anchored if the session has only its last anchor left, which is kept for the close.${asked(" The anchored hash can't be removed.")}`,
     inputSchema: { session_id: sessionId },
   }, run((a) => service.checkpoint(owner, a)));
+
+  // Agents' own keys on (MCP_AGENT_KEYS=1): an agent signs its checkpoints itself. Off, the tool list is as before.
+  if (service.agentKeysOn) {
+    server.registerTool("shadow_sign_checkpoint", {
+      ...TOOL_META.shadow_sign_checkpoint,
+      description:
+        "For an agent signed in with its own key: Clockchain holds no key for you, so shadow_checkpoint and shadow_close_session return sign.hash, the checkpoint's hash, and anchor nothing. " +
+        "Sign the 32 bytes of that hash (its hex decoded) with your Ed25519 key and pass the base64 signature here. The checkpoint is then yours, under your key, and is anchored on Clockchain. " +
+        `Steps recorded after the last checkpoint you signed are not signed by you.${asked(" The anchored hash can't be removed.")}`,
+      inputSchema: {
+        session_id: sessionId,
+        hash: z.string().describe("sign.hash, exactly as shadow_checkpoint or shadow_close_session returned it."),
+        signature: z.string().describe("Your Ed25519 signature over the hash's 32 bytes, in base64 (88 characters)."),
+      },
+    }, run((a) => service.signCheckpoint(owner, o.agentKey, a)));
+  }
 
   server.registerTool("shadow_close_session", {
     ...TOOL_META.shadow_close_session,
@@ -795,6 +813,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
       chatAccounts: chat?.accounts,
       accountStore: deps.accounts,
       autoLog: autoLog && { accounts: autoLog.accounts, logStepAllowed, stepsPerMinute: autoLog.stepsPerMinute },
+      agentKey: auth.agentKey,
     }));
   }
 

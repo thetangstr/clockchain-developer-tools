@@ -1,6 +1,6 @@
 // Hosted Shadow signing modes. Clockchain holds no key per account: with SHADOW_WITNESS_KEY_FILE set, a signed-in
 // account's checkpoints are witnessed under Clockchain's single published service key; an agent-key owner (ak:) is the
-// agent's to sign (Task 7), so the server refuses to sign for it; with no witness key, everything is as before.
+// agent's to sign, so the server never signs for it; with no witness key, everything is as before.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ShadowService, ShadowError } from "../dist/shadow/service.js";
+import { ShadowService } from "../dist/shadow/service.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { DOMAIN, hash, parseStrict } from "../dist/shadow/lib/profile.js";
 import { fingerprint } from "../dist/shadow/lib/keys.js";
@@ -202,12 +202,9 @@ for (const withWitness of [false, true]) {
     assert.equal(existsSync(path.join(ownerDir(dir, AGENT), "key.json")), false);
     assert.equal(existsSync(path.join(ownerDir(dir, AGENT), "operator.json")), false);
     await svc.record(AGENT, { session_id: s1.session_id, agent: "planner", kind: "task", content: "Find flights" });
-    // Signing is the agent's (Task 7): an internal error, never a witness or legacy signature.
-    await assert.rejects(svc.checkpoint(AGENT, { session_id: s1.session_id }), (e) => {
-      assert.ok(!(e instanceof ShadowError), "an internal error, not a user-facing refusal");
-      assert.match(e.message, /agent/);
-      return true;
-    });
+    // Signing is the agent's (test/shadow-agent-sign.test.mjs): a hash to sign, never a witness or legacy signature.
+    const r = await svc.checkpoint(AGENT, { session_id: s1.session_id });
+    assert.match(r.sign.hash, /^[0-9a-f]{64}$/);
     assert.equal(svc.store.readMeta(ownerKeyOf(AGENT), s1.session_id).checkpoint, null);
     assert.equal(existsSync(path.join(ownerDir(dir, AGENT), "key.json")), false);
   });

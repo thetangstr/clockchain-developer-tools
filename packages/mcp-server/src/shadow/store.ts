@@ -102,6 +102,11 @@ export type SessionMeta = {
   agentSteps: number;
   runs: RunState[];
   checkpoint: Checkpoint | null;
+  /**
+   * An agent-key session's checkpoint body waiting for the agent's own signature, kept here so a restart doesn't change
+   * the hash it was given. `final` is the close's. Cleared when the agent signs it. Other sessions never have it.
+   */
+  awaitingSignature?: { hash: string; body: CheckpointBody; final: boolean };
   outbox: OutboxRow[];
   anchors: AnchorInfo[];
   /** The person revoked this session's links: its capability file is gone, and no tool hands the links out. */
