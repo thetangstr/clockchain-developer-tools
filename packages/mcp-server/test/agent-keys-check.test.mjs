@@ -3,12 +3,12 @@
 // checking its own book, so each line says "Checked against Clockchain's public key list" and never claims independence.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { checkAgentKey, plainDate } from "../dist/agent-keys/check.js";
+import { checkAgentKey, failedRecord, plainDate } from "../dist/agent-keys/check.js";
 import { AgentKeyBook } from "../dist/agent-keys/book.js";
 import { ShadowService } from "../dist/shadow/service.js";
 import { DOMAIN, hash } from "../dist/shadow/lib/profile.js";
@@ -151,6 +151,24 @@ test("witnessed: an account's checkpoint under Clockchain's published witness ke
   assert.equal(checkAgentKey(null, cp, 12, { witness: "00".repeat(32) }).verdict, "legacy", "another key than the published one is not the witness");
 });
 
+test("key_check_unavailable: with no key book, nothing is checked and nothing is claimed of the key", () => {
+  const clock = { t: T0 };
+  const ag = agentIn(bookAt(clock));
+  const r = checkAgentKey(null, agentCp(ag), 12, { noBook: true });
+  assert.deepEqual(r, { verdict: "key_check_unavailable", text: `Signed by agent ${ag.id}. Its key can't be checked right now.` });
+});
+
+test("a record that fails its checks is never called unchanged", () => {
+  const clock = { t: T0 };
+  const book = bookAt(clock);
+  const ag = agentIn(book);
+  const made = checkAgentKey(book.get(ag.fp), agentCp(ag), 12);
+  assert.deepEqual(failedRecord(made, agentCp(ag)), { verdict: "made_by_agent", text: `Signed by agent ${ag.id}, but this record failed its checks.${CHECKED}` });
+  // Any other verdict already says what is wrong, and is kept.
+  const other = checkAgentKey(null, agentCp(ag), 12);
+  assert.deepEqual(failedRecord(other, agentCp(ag)), other);
+});
+
 test("dates read as plain UTC dates", () => {
   assert.equal(plainDate("2026-11-13T00:00:00Z"), "13 November 2026");
   assert.equal(plainDate("2026-11-13T23:30:00-05:00"), "14 November 2026");
@@ -160,18 +178,19 @@ test("dates read as plain UTC dates", () => {
 // ---- the service ---------------------------------------------------------------------------------------------------
 
 function setup(o = {}) {
-  const clock = { t: T0 };
+  const clock = o.clock ?? { t: T0 };
   const fake = new FakeLedger();
   fake.base = T0;
   const keysDir = mkdtempSync(path.join(tmpdir(), "agent-keys-check-"));
   const book = bookAt(clock, keysDir);
+  const stateDir = o.stateDir ?? mkdtempSync(path.join(tmpdir(), "agent-keys-check-svc-"));
   const svc = new ShadowService({
-    stateDir: mkdtempSync(path.join(tmpdir(), "agent-keys-check-svc-")), ledger: () => fake, budget: () => createLogBudget({}),
-    now: () => new Date(clock.t), sleep: async () => {}, log: () => {}, agentKeys: book, ...(o.autoLog ? { autoLog: true } : {}),
+    stateDir, ledger: () => fake, budget: () => createLogBudget({}),
+    now: () => new Date(clock.t), sleep: async () => {}, log: () => {}, ...(o.noBook ? {} : { agentKeys: book }), ...(o.autoLog ? { autoLog: true } : {}),
     ...(o.witness ? { witness: o.witness } : {}),
   });
   svc.sweep();
-  return { svc, fake, book, clock, keysDir };
+  return { svc, fake, book, clock, keysDir, stateDir };
 }
 
 /** An agent with a session of one step and a checkpoint it signed. */
@@ -244,7 +263,10 @@ test("an agent checkpoint whose receipt hasn't landed reads the key verdict and 
   const html = await viewer(env.svc, ag.owner, ag.sessionId);
   assert.ok(html.includes(`Made by agent ${ag.id}, unchanged since 15 November 2026. Key filed 13 November 2026.`));
   assert.ok(html.includes("This command doesn&#39;t check anchoring"), "the anchoring caveat stays");
-  assert.ok(!html.includes(">Proven<") && !html.includes("<b>Proven:</b>"));
+  // The signed steps match the agent's key; nothing is called proven, and the open, partly anchored record isn't a pass.
+  assert.ok(html.includes('<td class="tag">Matches the signing key</td>'));
+  assert.ok(html.includes('class="result indeterminate"'));
+  assert.ok(!/Proven/.test(html));
 });
 
 const ACCOUNT = "jti:11111111-1111-4111-8111-111111111111";
@@ -362,4 +384,55 @@ test("made_by_agent, witnessed and legacy results are as computed", async () => 
     assert.equal(r.result, "pass", r.summary);
     assert.ok(!r.checks.some((c) => c.name === "agent_key"));
   }
+});
+
+// ---- never claim more than was checked -------------------------------------------------------------------------------
+
+test("a record whose steps no longer match its signed checkpoint fails, and nothing says unchanged", async () => {
+  const env = setup({ autoLog: true });
+  const ag = await closedAgentSession(env);
+  const meta = metaOf(env.svc, ag.owner, ag.sessionId);
+  const file = env.svc.store.eventsPath(meta.ownerKey, meta.sessionId);
+  writeFileSync(file, readFileSync(file, "utf8").replace("TAP at 389 EUR.", "TAP at 999 EUR."));
+  const line = `Signed by agent ${ag.id}, but this record failed its checks.${CHECKED}`;
+  const v = await verifyOf(env, ag);
+  assert.equal(v.result, "fail");
+  assert.equal(v.agent_key.verdict, "made_by_agent");
+  assert.equal(v.agent_key.text, line);
+  assert.ok(!JSON.stringify(v).includes("unchanged since"), "not in agent_key, the summary or any check");
+  const trust = v.checks.find((c) => c.name === "trust");
+  assert.ok(!trust || trust.reason !== line, "the trust check keeps its own reason");
+  const html = await viewer(env.svc, ag.owner, ag.sessionId);
+  assert.ok(html.includes(`<p><b>${line.replaceAll("'", "&#39;")}</b></p>`));
+  assert.ok(!html.includes("unchanged since"));
+  assert.ok(html.includes('class="result fail"'));
+});
+
+test("an anchor with no block height is an unknown block, not block 0", async () => {
+  const env = setup();
+  const ag = await closedAgentSession(env);
+  const meta = metaOf(env.svc, ag.owner, ag.sessionId);
+  const cpHash = meta.checkpoint.hash;
+  const a = meta.anchors.find((x) => x.marker === "checkpoint" && x.hash === cpHash);
+  a.blockHeight = "";
+  env.svc.store.writeMeta(meta);
+  const v = await verifyOf(env, ag);
+  assert.equal(v.agent_key.verdict, "made_by_agent");
+});
+
+test("with the key book off, an agent's record says its key can't be checked, is at most indeterminate, and its link works", async () => {
+  const env = setup();
+  const ag = await closedAgentSession(env);
+  assert.equal((await verifyOf(env, ag)).result, "pass");
+  const off = setup({ stateDir: env.stateDir, clock: env.clock, noBook: true });
+  const text = `Signed by agent ${ag.id}. Its key can't be checked right now.`;
+  const v = await off.svc.verify(ag.owner, { session_id: ag.sessionId }, BASE);
+  assert.equal(v.agent_key.verdict, "key_check_unavailable");
+  assert.equal(v.agent_key.text, text);
+  assert.equal(v.result, "indeterminate");
+  assert.equal(v.summary, text);
+  const html = await viewer(off.svc, ag.owner, ag.sessionId);
+  assert.ok(html.includes(`<p><b>${text.replaceAll("'", "&#39;")}</b></p>`));
+  assert.ok(!html.includes(CHECKED.trim().replaceAll("'", "&#39;")), "nothing was checked against the list");
+  assert.ok(!html.includes("doesn&#39;t match its key"));
 });

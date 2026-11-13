@@ -18,7 +18,7 @@ import { accountLevelNote, anchorsNow, deferredReason, effectiveLevel, finer, is
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, Pin, ShadowEvent } from "./lib/types.js";
 import { AgentKeyError, type AgentKeyBook } from "../agent-keys/book.js";
-import { checkAgentKey, type KeyCheck } from "../agent-keys/check.js";
+import { checkAgentKey, failedRecord, type KeyCheck } from "../agent-keys/check.js";
 import { fileKey, StarterAnchors, type FilingLedger, type FilingResult } from "../agent-keys/filing.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AgentEntry, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
@@ -578,12 +578,12 @@ function withAnchoring<T extends { result: "pass" | "fail" | "indeterminate"; ex
 
 /**
  * An agent's key verdict deciding the result: a record its key doesn't stand behind fails, saying why in the verdict's words,
- * and one whose key isn't filed yet is at most indeterminate. Every other verdict (witnessed and legacy too) leaves it as is.
+ * and one whose key isn't filed yet, or can't be checked, is at most indeterminate. Every other verdict (witnessed and legacy too) leaves it as is.
  */
 function withKeyVerdict<T extends { result: "pass" | "fail" | "indeterminate"; exitCode: 0 | 1 | 2; summary: string; failed: string[]; indeterminate: string[]; checks: { name: string; status: string; reason: string }[] }>(report: T, key: KeyCheck): T {
   if (key.verdict === "not_from_agent" || key.verdict === "key_revoked_before" || key.verdict === "key_filed_after")
     return { ...report, result: "fail", exitCode: 1, summary: key.text, failed: [...report.failed, "agent_key"], checks: [...report.checks, { name: "agent_key", status: "fail", reason: key.text }] };
-  if (key.verdict === "key_not_filed")
+  if (key.verdict === "key_not_filed" || key.verdict === "key_check_unavailable")
     return {
       ...report,
       ...(report.result === "pass" ? { result: "indeterminate" as const, exitCode: 2 as const, summary: key.text } : {}),
@@ -838,15 +838,16 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
  * The hosted viewer checks a packet against the pin this same server made, so its checks aren't independent. The
  * library's summary, which is vendored and unchanged, is written for a pin that reached the reader separately: here the
  * report says whose pin it was, and {@link hostedViewer} replaces its "Proven" tag. An agent's checkpoint isn't the
- * server's to sign, so for an agent a passing trust check reads its key verdict (`agentLine`) instead.
+ * server's to sign, so for an agent (`agentLine` not undefined) a passing trust check reads its key verdict when that
+ * verdict agrees with a pass (a string), and otherwise keeps the library's own reason (null).
  */
-function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T, agentLine?: string): T {
+function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T, agentLine?: string | null): T {
   return {
     ...report,
     // "Captured" would claim more than the verifier can see: it knows the runs in the record, not the work outside it.
     summary: report.summary.replace("the supplied pin", "this server's own pin").replace("every run was captured", "every recorded run has an ending"),
     checks: report.checks.map((c) =>
-      c.name === "trust" && c.status === "pass" ? { ...c, reason: agentLine ?? "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
+      c.name === "trust" && c.status === "pass" ? agentLine === null ? c : { ...c, reason: agentLine ?? "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
         : c.name === "time" ? { ...c, reason: c.reason.replace("with a single validator they are only as good as its clock", "with a single-operator gateway they are only as good as its clock") }
           : c),
   };
@@ -1358,14 +1359,31 @@ export class ShadowService {
 
   /**
    * Who made `cp`, from the public key lists: an agent's key in the book (checked against the anchor of `cp`, when its
-   * receipt has landed), or Clockchain's witness key. `lookup` is where a reader finds that key.
+   * receipt has landed), or Clockchain's witness key. `lookup` is where a reader finds that key. `failed`: the record
+   * failed its checks for another reason, so it is never called unchanged.
    */
-  private keyCheck(meta: SessionMeta, cp: Checkpoint): KeyCheck & { lookup: string | null } {
+  private keyCheck(meta: SessionMeta, cp: Checkpoint, failed: boolean): KeyCheck & { lookup: string | null } {
     const anchor = meta.anchors.find((a) => a.marker === "checkpoint" && a.hash === cp.hash);
-    const block = anchor ? Number(anchor.blockHeight) : NaN;
-    const r = checkAgentKey(this.keyEntry(meta, cp), cp, Number.isSafeInteger(block) ? block : null, { anchoredAt: anchor?.blockTime ?? null, ...(this.witnessKey ? { witness: this.witnessKey } : {}) });
-    const lookup = r.verdict === "legacy" ? null : r.verdict === "witnessed" ? "/.well-known/clockchain-witness-key.json" : `/agent-keys/${fingerprint(cp.publicKey)}.json`;
+    // A block is known only as digits: an anchor whose height hasn't come back holds "".
+    const block = anchor && /^\d+$/.test(anchor.blockHeight) ? Number(anchor.blockHeight) : null;
+    const checked = checkAgentKey(this.keyEntry(meta, cp), cp, block !== null && Number.isSafeInteger(block) ? block : null, {
+      anchoredAt: anchor?.blockTime ?? null,
+      ...(this.witnessKey ? { witness: this.witnessKey } : {}),
+      ...(this.agentSigns(meta) && !this.agentKeys ? { noBook: true } : {}),
+    });
+    const r = failed ? failedRecord(checked, cp) : checked;
+    const lookup = r.verdict === "legacy" || r.verdict === "key_check_unavailable" ? null : r.verdict === "witnessed" ? "/.well-known/clockchain-witness-key.json" : `/agent-keys/${fingerprint(cp.publicKey)}.json`;
     return { ...r, lookup };
+  }
+
+  /**
+   * What a passing trust check says, for ownPinReport: the server's own-pin text (undefined) unless the agent signed; then
+   * its key verdict when that agrees with a pass (made_by_agent or key_not_filed, on a record that didn't fail), else the
+   * library's own reason (null).
+   */
+  private trustLine(meta: SessionMeta, key: KeyCheck, result: string): string | null | undefined {
+    if (!this.agentSigns(meta)) return undefined;
+    return result !== "fail" && (key.verdict === "made_by_agent" || key.verdict === "key_not_filed") ? key.text : null;
   }
 
   /** A closed session's pin. For an agent, of the last checkpoint it signed, and none while its final checkpoint waits for its signature. */
@@ -2211,9 +2229,9 @@ export class ShadowService {
       // anywhere for a record with no receipts when the ledger gave no answer: nothing says what it holds for this session.
       const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog || online?.searchUnanswered ? { requireOnline: true } : {}) });
       const anchoring = anchoringOf(meta, events);
-      const key = this.keyCheck(meta, cp);
+      const key = this.keyCheck(meta, cp, checked.result === "fail");
       // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere it needs at least some of the record to be.
-      const own = this.autoLog ? ownPinReport(checked, this.agentSigns(meta) ? key.text : undefined) : checked;
+      const own = this.autoLog ? ownPinReport(checked, this.trustLine(meta, key, checked.result)) : checked;
       const report = withKeyVerdict(anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own, key);
       // The result is about the signed prefix only, so steps the agent never signed are said beside it.
       const unsigned = unsignedCount(events.slice(cp.body.count));
@@ -2417,8 +2435,8 @@ export class ShadowService {
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
             const agent = this.agentSigns(meta);
-            const key = this.keyCheck(meta, cp);
-            const own = ownPinReport(report, agent ? key.text : undefined);
+            const key = this.keyCheck(meta, cp, report.result === "fail");
+            const own = ownPinReport(report, this.trustLine(meta, key, report.result));
             // A failed key verdict fails the page, so the library tags nothing as matching.
             const shown = withKeyVerdict(anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own, key);
             const html = withServerSteps(withUnsignedTail(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html, key.verdict === "legacy" ? null : key, agent), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events.slice(cp.body.count)), events);
