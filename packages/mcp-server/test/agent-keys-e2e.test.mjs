@@ -5,7 +5,7 @@
 // or log line carries the token, the assertion or a cc_ token.
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { once } from "node:events";
@@ -231,5 +231,6 @@ test("an agent onboards from the instructions alone: one token call, signed chec
     for (const k of Object.keys(orig)) console[k] = orig[k];
     await app?.close();
     __setShadowLedgerForTests(undefined);
+    rmSync(root, { recursive: true, force: true });
   }
 });
