@@ -287,6 +287,9 @@ const sessionId = z.string().describe("The session_id from shadow_start_session.
  */
 const tool = (title: string, readOnlyHint: boolean, destructiveHint: boolean, idempotentHint: boolean, openWorldHint: boolean) =>
   ({ title, annotations: { title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint } });
+// With agent keys on: an agent signed in with its own key signs the hash these two tools return (shadow_sign_checkpoint).
+const AGENT_SIGNS_CHECKPOINT = " Signed in with your own agent key, it anchors nothing and returns sign.hash instead: sign it with your key and send the signature with shadow_sign_checkpoint, which anchors it.";
+const AGENT_SIGNS_CLOSE = " Signed in with your own agent key, it returns sign.hash, the final checkpoint's hash: sign it with your key and send the signature with shadow_sign_checkpoint, which anchors it and returns the pin.";
 const TOOL_META = {
   // Not marked destructive, as on production: an app that prompts for destructive tools would prompt on every step, and these exist only on paths people add by hand.
   shadow_log_step: tool("Log one step", false, false, false, true),
@@ -442,7 +445,7 @@ export function buildShadowServer(
 
   server.registerTool("shadow_checkpoint", {
     ...TOOL_META.shadow_checkpoint,
-    description: `Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way), or not_anchored if the session has only its last anchor left, which is kept for the close.${asked(" The anchored hash can't be removed.")}`,
+    description: `Sign a checkpoint over every step so far and anchor it on Clockchain. Returns the step count, block, block time and ledger id, or pending if Clockchain is slow (the steps are safe either way), or not_anchored if the session has only its last anchor left, which is kept for the close.${service.agentKeysOn ? AGENT_SIGNS_CHECKPOINT : ""}${asked(" The anchored hash can't be removed.")}`,
     inputSchema: { session_id: sessionId },
   }, run((a) => service.checkpoint(owner, a)));
 
@@ -464,7 +467,7 @@ export function buildShadowServer(
 
   server.registerTool("shadow_close_session", {
     ...TOOL_META.shadow_close_session,
-    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin, the links to share, and anchoring: how many recorded steps have a checkpoint with a Clockchain receipt.${autoLog ? " Also returns summary, every step's hashes, block and ledger ID, for the person, in full, and how the person's messages compare with what was logged." : ""} No steps can be added afterwards.${asked(" The anchored hash can't be removed.")} ${RETENTION}`,
+    description: `Finish the session: a final checkpoint, anchored on Clockchain, then close. Returns the pin, the links to share, and anchoring: how many recorded steps have a checkpoint with a Clockchain receipt.${autoLog ? " Also returns summary, every step's hashes, block and ledger ID, for the person, in full, and how the person's messages compare with what was logged." : ""} No steps can be added afterwards.${service.agentKeysOn ? AGENT_SIGNS_CLOSE : ""}${asked(" The anchored hash can't be removed.")} ${RETENTION}`,
     inputSchema: {
       session_id: sessionId,
       status: z.enum(["succeeded", "failed", "cancelled", "timed_out", "unknown"]).optional()
@@ -742,7 +745,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     if (deps.chat && (path === deps.chat.path || (deps.preview && path === PREVIEW_CHAT_PATH))) return mcp(req, res, path, deps.chat);
     if (path === "/shadow/connect" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
-      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog?.paths.has("/shadow/mcp") === true));
+      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog?.paths.has("/shadow/mcp") === true, deps.service.agentKeysOn));
       return;
     }
     // The log summary of a session, by the same capability as its viewer. Only with SHADOW_AUTO_LOG=1.

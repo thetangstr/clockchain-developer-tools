@@ -121,6 +121,8 @@ test("enabled: /mcp is unchanged, /shadow/mcp has the Shadow tools and its instr
     assert.deepEqual(tools.body.result.tools.map((t) => t.name).sort(), [...SHADOW_TOOLS].sort());
     for (const t of tools.body.result.tools.filter((x) => ["shadow_start_session", "shadow_close_session", "shadow_get_session"].includes(x.name)))
       assert.match(t.description, /kept 30 days.*revokes the link/, t.name);
+    // Agent keys off: nobody signs their own checkpoints, so no tool mentions it.
+    assert.ok(!JSON.stringify(tools.body.result.tools).includes("shadow_sign_checkpoint"));
     const init = await rpc(`${app.url}/shadow/mcp`, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } }, account);
     assert.equal(init.body.result.instructions, ASKED_INSTRUCTIONS);
     assert.match(init.body.result.instructions, /shadow_start_session.*\n.*shadow_record/s);

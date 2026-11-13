@@ -241,6 +241,20 @@ test("flag on: the discovery files' URLs follow MCP_PUBLIC_URL, not a forged Hos
   }
 });
 
+test("how an agent signs in with its own key is shown only with agent keys on, in eight lines, under this base", () => {
+  const base = "https://mcp.clockchain.network/staging";
+  for (const [off, on] of [[connectInstructions(base, CHAT), connectInstructions(base, CHAT, false, true)], [installTxtWithShadow(base, CHAT), installTxtWithShadow(base, CHAT, false, true)]]) {
+    assert.ok(!off.includes("Agents that run code") && !off.includes("/oauth/token") && !off.includes("shadow_sign_checkpoint"));
+    const lines = on.split("\n");
+    const at = lines.findIndex((l) => /^ *Agents that run code /.test(l));
+    const block = lines.slice(at, lines.indexOf("", at));
+    assert.ok(at > 0 && block.length <= 8, `${block.length} lines`);
+    for (const u of block.join(" ").match(/https?:\/\/[^\s"{}]+/g)) assert.ok(u.startsWith(`${base}/`), u);
+    lines.splice(at, block.length + 1);
+    assert.equal(lines.join("\n"), off, "the rest is unchanged");
+  }
+});
+
 test("a prefixed public URL (staging) carries its prefix on every Shadow URL", () => {
   const base = "https://mcp.clockchain.network/staging";
   for (const text of [shadowInstallSection(base, CHAT), connectInstructions(base, CHAT), JSON.stringify(manifestWithShadow(base, CHAT).shadow)]) {

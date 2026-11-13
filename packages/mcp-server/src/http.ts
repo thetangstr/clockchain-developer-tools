@@ -1404,7 +1404,8 @@ export async function runHttp(): Promise<Server> {
   // The discovery files name Shadow only where a person can use it: it started, and sign-in is on (it takes signed-in
   // accounts only). Anything else serves the plain files, byte for byte. URLs come from MCP_PUBLIC_URL, never the Host.
   const shadowPublicUrl = shadowHandler && oauthConfig.kind === "ready" ? oauthConfig.publicUrl : undefined;
-  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : INSTALL_TXT;
+  // With agent keys on (the book exists only then), the Shadow section also says how an agent signs in with its own key.
+  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog, agentKeyBook !== undefined) : INSTALL_TXT;
   const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : MCP_MANIFEST, null, 2);
 
   // The public book's routes (MCP_AGENT_KEYS=1): lookups, and replace and revoke signed by the agent's own key, filed on
