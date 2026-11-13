@@ -50,6 +50,12 @@ export interface TokenPayload {
    * present but not in this exact format.
    */
   acct?: string;
+  /**
+   * Optional agent key fingerprint (64 lowercase hex, `fingerprint()` in shadow/lib/keys.ts): the Ed25519 key whose
+   * signed client assertion proved possession when this token was minted. Set ONLY by the OAuth token endpoint's
+   * client_credentials grant, through {@link mintAgentToken}; nothing a caller sends to `POST /token` can set it.
+   */
+  akf?: string;
 }
 
 /** The exact `acct` claim format: `acct_` + 22 base64url characters. */
@@ -94,6 +100,26 @@ export function mintToken(
     if (!isAcctId(acct)) throw new Error("mintToken: malformed acct");
     payload.acct = acct;
   }
+  const seg = b64url(Buffer.from(JSON.stringify(payload), "utf8"));
+  return { token: `${PREFIX}${seg}.${sign(seg, secret)}`, payload };
+}
+
+const AKF_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * Mint a Starter token for an agent that proved it holds its own key (the OAuth client_credentials grant). The token
+ * is an ordinary v:1 token plus `akf`, the proving key's fingerprint, so {@link verifyToken} accepts it unchanged.
+ * Throws when `akf` is not 64 lowercase hex characters.
+ */
+export function mintAgentToken(
+  secret: string,
+  ttlSeconds: number,
+  nowSec: number,
+  jti: string,
+  akf: string,
+): { token: string; payload: TokenPayload } {
+  if (typeof akf !== "string" || !AKF_PATTERN.test(akf)) throw new Error("mintAgentToken: malformed akf");
+  const payload: TokenPayload = { v: 1, tier: "demo", iat: nowSec, exp: nowSec + ttlSeconds, jti, akf };
   const seg = b64url(Buffer.from(JSON.stringify(payload), "utf8"));
   return { token: `${PREFIX}${seg}.${sign(seg, secret)}`, payload };
 }

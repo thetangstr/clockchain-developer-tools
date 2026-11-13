@@ -1,6 +1,7 @@
 import { FREE_TOKENS, NETWORK_PROBLEM, ON_MAINNET } from "./network.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -87,6 +88,8 @@ import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/ser
 import { createShadowHttpHandler, PREVIEW_CHAT_PATH, PREVIEW_PATH, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger, shadowLedgerIdentity } from "./shadow/ledger.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
+import { AgentKeyBook } from "./agent-keys/book.js";
+import { jwtBearerProof } from "./agent-keys/proof.js";
 import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
 
 /**
@@ -633,6 +636,11 @@ export async function runHttp(): Promise<Server> {
   if (shadowAutoLog) {
     console.warn(JSON.stringify({ event: "shadow_auto_log_on_listed_paths", note: "SHADOW_AUTO_LOG=1 puts logging on by default on /shadow/mcp and /shadow/chat/mcp. Directories list those paths: use SHADOW_PREVIEW_AUTO_LOG=1 on a listed server" }));
   }
+  // Agent keys (MCP_AGENT_KEYS=1, with OAuth on): the public book of agents' Ed25519 public keys, one file per key under
+  // ${MCP_STATE_DIR:-/app/state}/agent-keys. One instance for the whole server. Off: no book, and nothing reads one.
+  const agentKeyBook: AgentKeyBook | undefined = oauthConfig.kind === "ready" && oauthConfig.agentKeys?.enabled
+    ? new AgentKeyBook({ dir: join((process.env.MCP_STATE_DIR ?? "").trim() || "/app/state", "agent-keys"), now: () => new Date() })
+    : undefined;
   const oauth: OAuthHandler | undefined = oauthConfig.kind === "ready"
     ? createOAuthHandler({
         signingSecret,
@@ -646,6 +654,9 @@ export async function runHttp(): Promise<Server> {
         cookieName: oauthConfig.cookieName,
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
+        ...(agentKeyBook && oauthConfig.agentKeys
+          ? { agentKeys: { book: agentKeyBook, proof: jwtBearerProof(), newPerIpPerHour: oauthConfig.agentKeys.newPerIpPerHour, tokenTtlSeconds: oauthConfig.agentKeys.tokenTtl } }
+          : {}),
         ...(shadowChatPath ? { chatPaths: shadowPreviewChatPath ? [shadowChatPath, shadowPreviewChatPath] : [shadowChatPath] } : {}),
         ...(shadowPreview ? { extraPaths: [PREVIEW_PATH] } : {}),
         // Every sign-in page says plainly how logging works for the endpoint it signs in to.
@@ -2117,6 +2128,9 @@ export async function runHttp(): Promise<Server> {
       );
       if (oauthConfig.kind === "ready") {
         console.error(`[clockchain-mcp] OAuth sign-in: ENABLED (issuer ${oauthConfig.publicUrl}, ${oauthConfig.approvalsPerHour} approvals/hour/IP)`);
+        if (oauthConfig.agentKeys?.enabled) {
+          console.error(`[clockchain-mcp] agent keys: ENABLED (client_credentials, ${oauthConfig.agentKeys.newPerIpPerHour} new keys/hour/IP)`);
+        }
       }
       resolve();
     });
