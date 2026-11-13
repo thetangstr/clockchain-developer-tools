@@ -577,6 +577,23 @@ function withAnchoring<T extends { result: "pass" | "fail" | "indeterminate"; ex
 }
 
 /**
+ * An agent's key verdict deciding the result: a record its key doesn't stand behind fails, saying why in the verdict's words,
+ * and one whose key isn't filed yet is at most indeterminate. Every other verdict (witnessed and legacy too) leaves it as is.
+ */
+function withKeyVerdict<T extends { result: "pass" | "fail" | "indeterminate"; exitCode: 0 | 1 | 2; summary: string; failed: string[]; indeterminate: string[]; checks: { name: string; status: string; reason: string }[] }>(report: T, key: KeyCheck): T {
+  if (key.verdict === "not_from_agent" || key.verdict === "key_revoked_before" || key.verdict === "key_filed_after")
+    return { ...report, result: "fail", exitCode: 1, summary: key.text, failed: [...report.failed, "agent_key"], checks: [...report.checks, { name: "agent_key", status: "fail", reason: key.text }] };
+  if (key.verdict === "key_not_filed")
+    return {
+      ...report,
+      ...(report.result === "pass" ? { result: "indeterminate" as const, exitCode: 2 as const, summary: key.text } : {}),
+      indeterminate: [...report.indeterminate, "agent_key"],
+      checks: [...report.checks, { name: "agent_key", status: "indeterminate", reason: key.text }],
+    };
+  return report;
+}
+
+/**
  * Whether the anchoring counts decide the result, not only sit beside it. With logging on by default they always do. On a listed
  * connection the person chooses when to anchor, so a partly anchored record keeps the verifier's result; but one with nothing
  * on the ledger at all doesn't pass, whether its close failed or hasn't landed yet: no receipt says anything about it.
@@ -2197,7 +2214,7 @@ export class ShadowService {
       const key = this.keyCheck(meta, cp);
       // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere it needs at least some of the record to be.
       const own = this.autoLog ? ownPinReport(checked, this.agentSigns(meta) ? key.text : undefined) : checked;
-      const report = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own;
+      const report = withKeyVerdict(anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own, key);
       // The result is about the signed prefix only, so steps the agent never signed are said beside it.
       const unsigned = unsignedCount(events.slice(cp.body.count));
       return {
@@ -2402,7 +2419,8 @@ export class ShadowService {
             const agent = this.agentSigns(meta);
             const key = this.keyCheck(meta, cp);
             const own = ownPinReport(report, agent ? key.text : undefined);
-            const shown = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own;
+            // A failed key verdict fails the page, so the library tags nothing as matching.
+            const shown = withKeyVerdict(anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own, key);
             const html = withServerSteps(withUnsignedTail(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html, key.verdict === "legacy" ? null : key, agent), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events.slice(cp.body.count)), events);
             body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }

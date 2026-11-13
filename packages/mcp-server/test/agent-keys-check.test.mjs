@@ -3,7 +3,7 @@
 // checking its own book, so each line says "Checked against Clockchain's public key list" and never claims independence.
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -26,8 +26,8 @@ const BASE = "https://mcp.example.test";
 const T0 = Date.UTC(2026, 10, 13, 12, 0, 0);
 const iso = (t) => new Date(t).toISOString();
 
-function bookAt(clock) {
-  return new AgentKeyBook({ dir: mkdtempSync(path.join(tmpdir(), "agent-keys-check-")), now: () => new Date(clock.t) });
+function bookAt(clock, dir = mkdtempSync(path.join(tmpdir(), "agent-keys-check-"))) {
+  return new AgentKeyBook({ dir, now: () => new Date(clock.t) });
 }
 
 /** An agent's key in a book, filed (or not) as `filing` says. */
@@ -94,6 +94,17 @@ test("key_revoked_before: the key was cancelled before the record", () => {
   assert.equal(checkAgentKey(book.get(ag.fp), agentCp(ag, { createdAt: iso(T0 + 1000) }), 12).verdict, "made_by_agent");
 });
 
+test("a key replaced before the record counts as cancelled; replaced after, the record stands", () => {
+  const clock = { t: T0 };
+  const book = bookAt(clock);
+  const ag = agentIn(book);
+  clock.t = T0 + 30_000;
+  book.replace(ag.fp, makeAgentKey().publicKeyPem);
+  const r = checkAgentKey(book.get(ag.fp), agentCp(ag, { createdAt: iso(T0 + 60_000) }), 12);
+  assert.deepEqual(r, { verdict: "key_revoked_before", text: `Signed by agent ${ag.id}, but that key was cancelled before this record.${CHECKED}` });
+  assert.equal(checkAgentKey(book.get(ag.fp), agentCp(ag, { createdAt: iso(T0 + 1000) }), 12).verdict, "made_by_agent");
+});
+
 test("not_from_agent: a bad signature, a changed body, another agent's key, or a key not in the book", () => {
   const clock = { t: T0 };
   const book = bookAt(clock);
@@ -152,14 +163,15 @@ function setup(o = {}) {
   const clock = { t: T0 };
   const fake = new FakeLedger();
   fake.base = T0;
-  const book = bookAt(clock);
+  const keysDir = mkdtempSync(path.join(tmpdir(), "agent-keys-check-"));
+  const book = bookAt(clock, keysDir);
   const svc = new ShadowService({
     stateDir: mkdtempSync(path.join(tmpdir(), "agent-keys-check-svc-")), ledger: () => fake, budget: () => createLogBudget({}),
     now: () => new Date(clock.t), sleep: async () => {}, log: () => {}, agentKeys: book, ...(o.autoLog ? { autoLog: true } : {}),
     ...(o.witness ? { witness: o.witness } : {}),
   });
   svc.sweep();
-  return { svc, fake, book, clock };
+  return { svc, fake, book, clock, keysDir };
 }
 
 /** An agent with a session of one step and a checkpoint it signed. */
@@ -265,4 +277,89 @@ test("a legacy account's record keeps today's text, and its viewer has no key li
   const html = await viewer(env.svc, ACCOUNT, id);
   assert.ok(html.includes("<h1>Shadow evidence summary</h1>\n<p class=\"meta\">Session"), "the title is followed by the library's own line");
   assert.ok(!html.includes(CHECKED.trim().replaceAll("'", "&#39;")));
+});
+
+// ---- the key check decides a failed verify -------------------------------------------------------------------------
+
+const verifyOf = (env, ag) => env.svc.verify(ag.owner, { session_id: ag.sessionId }, BASE);
+
+/** An agent's closed session with its final checkpoint signed: a record that passes. */
+async function closedAgentSession(env) {
+  const key = makeAgentKey();
+  const { entry } = env.book.admit(key.publicKeyPem);
+  const owner = `ak:${entry.root}`;
+  const s = await env.svc.startSession(owner, { title: "an agent's", agents: [{ id: "planner" }] }, BASE);
+  await env.svc.record(owner, { session_id: s.session_id, agent: "planner", kind: "task", content: "Find flights" });
+  await env.svc.record(owner, { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." });
+  const closed = await env.svc.close(owner, { session_id: s.session_id, status: "succeeded" }, BASE);
+  await env.svc.signCheckpoint(owner, entry.fingerprint, { session_id: s.session_id, hash: closed.sign.hash, signature: key.signHash(closed.sign.hash) });
+  return { key, owner, fp: entry.fingerprint, id: entry.root.slice(0, 16), sessionId: s.session_id };
+}
+
+async function closedAccountSession(env) {
+  const id = await accountSession(env);
+  await env.svc.record(ACCOUNT, { session_id: id, agent: "planner", kind: "message", content: "TAP at 389 EUR." });
+  await env.svc.close(ACCOUNT, { session_id: id, status: "succeeded" }, BASE);
+  return id;
+}
+
+/** Each way the book can say the record isn't this agent's, set up after a good record. */
+const FAILING = {
+  not_from_agent: (env, ag) => {
+    rmSync(path.join(env.keysDir, `${ag.fp}.json`), { force: true });
+    rmSync(path.join(env.keysDir, `${ag.fp}.json.bak`), { force: true });
+  },
+  key_revoked_before: (env, ag) => {
+    env.clock.t = T0 - 60_000;
+    env.book.revoke(ag.fp);
+  },
+  key_filed_after: (env, ag) => env.book.setFiling(ag.fp, { ...env.book.get(ag.fp).filing, block: 1_000_000 }),
+};
+
+for (const [verdict, make] of Object.entries(FAILING)) {
+  test(`${verdict} fails shadow_verify, and the viewer shows nothing as matching`, async () => {
+    const env = setup();
+    const ag = await closedAgentSession(env);
+    const before = await verifyOf(env, ag);
+    assert.equal(before.result, "pass", before.summary);
+    make(env, ag);
+    const v = await verifyOf(env, ag);
+    assert.equal(v.agent_key.verdict, verdict);
+    assert.equal(v.result, "fail");
+    assert.equal(v.summary, v.agent_key.text, "the summary says why, in the verdict's words");
+    assert.deepEqual(v.checks.find((c) => c.name === "agent_key"), { name: "agent_key", status: "fail", reason: v.agent_key.text });
+    const html = await viewer(env.svc, ag.owner, ag.sessionId);
+    assert.ok(html.includes(`<p><b>${v.agent_key.text.replaceAll("'", "&#39;")}</b></p>`));
+    assert.ok(html.includes('class="result fail"'));
+    assert.ok(!html.includes("Matches the signing key") && !html.includes("Proven"), "nothing reads as matching or proven");
+  });
+}
+
+test("key_not_filed makes shadow_verify at most indeterminate", async () => {
+  const env = setup();
+  const ag = await closedAgentSession(env);
+  env.book.setFiling(ag.fp, { state: "pending", ledgerId: env.book.get(ag.fp).filing.ledgerId });
+  const v = await verifyOf(env, ag);
+  assert.equal(v.agent_key.verdict, "key_not_filed");
+  assert.equal(v.result, "indeterminate");
+  assert.equal(v.summary, v.agent_key.text);
+  assert.deepEqual(v.checks.find((c) => c.name === "agent_key"), { name: "agent_key", status: "indeterminate", reason: v.agent_key.text });
+  assert.ok((await viewer(env.svc, ag.owner, ag.sessionId)).includes('class="result indeterminate"'));
+});
+
+test("made_by_agent, witnessed and legacy results are as computed", async () => {
+  const env = setup();
+  const ag = await closedAgentSession(env);
+  const v = await verifyOf(env, ag);
+  assert.equal(v.agent_key.verdict, "made_by_agent");
+  assert.equal(v.result, "pass", v.summary);
+  assert.ok(!v.checks.some((c) => c.name === "agent_key"));
+  for (const o of [{ witness: keyProvider(generateKeyPairSync("ed25519").privateKey) }, {}]) {
+    const acct = setup(o);
+    const id = await closedAccountSession(acct);
+    const r = await acct.svc.verify(ACCOUNT, { session_id: id }, BASE);
+    assert.equal(r.agent_key.verdict, o.witness ? "witnessed" : "legacy");
+    assert.equal(r.result, "pass", r.summary);
+    assert.ok(!r.checks.some((c) => c.name === "agent_key"));
+  }
 });
