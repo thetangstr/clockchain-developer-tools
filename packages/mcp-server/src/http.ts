@@ -114,20 +114,17 @@ const firstHeader = (h: string | string[] | undefined): string =>
 export const pathOf = (url: string | undefined): string => (url ?? "").split("?")[0];
 
 /**
- * Best-effort client IP for rate limiting. Behind the GCP load balancer / Cloud
- * Run, the socket's remote address is a Google proxy IP (identical for every
- * caller), so keying limits on it would create a single global bucket. The real
- * client is the first entry of `X-Forwarded-For`. This is for abuse mitigation,
- * not auth — XFF is client-spoofable, but spoofing only rotates the rate-limit
- * key, and actual tool usage is independently capped per token + at the gateway.
+ * Client IP for rate limiting. `X-Forwarded-For` is honoured only when the TCP
+ * peer is the configured reverse proxy (`MCP_OAUTH_TRUSTED_PROXY`); from anyone
+ * else it is a client-controlled header and is ignored, so a caller cannot dodge
+ * per-address limits by faking it.
  */
 export function clientIp(
-  headers: Record<string, string | string[] | undefined>,
+  headers: IncomingHttpHeaders,
   remoteAddr: string | undefined,
+  trustedProxy?: string,
 ): string {
-  const xff = firstHeader(headers["x-forwarded-for"]);
-  const first = xff.split(",")[0]?.trim();
-  return first || remoteAddr || "unknown";
+  return standaloneClientIp(headers, remoteAddr, trustedProxy);
 }
 
 /**
@@ -1223,7 +1220,7 @@ export async function runHttp(): Promise<Server> {
     return { ok: false, accountRequired: true };
   };
   const shadowResolveOwner = (req: IncomingMessage): ShadowAuth => {
-    const ip = clientIp(req.headers, req.socket.remoteAddress);
+    const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
     const presented = presentedApiKey(req.headers);
     const signed = (claims: { jti?: string; acct?: string }): ShadowAuth => ({
       ok: true,
@@ -1575,7 +1572,7 @@ export async function runHttp(): Promise<Server> {
         res.end(JSON.stringify({ error: "bad_request" }));
         return;
       }
-      const ip = clientIp(req.headers, req.socket.remoteAddress);
+      const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
       if (!allowChainVerify(`chainverify:${ip}`)) {
         rlEvents.inc({ surface: bounded("chain_verify", RL_SURFACES) });
         res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
@@ -1768,7 +1765,7 @@ export async function runHttp(): Promise<Server> {
         }));
         return;
       }
-      const ip = clientIp(req.headers, req.socket.remoteAddress);
+      const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
       // ALWAYS enforce the per-IP abuse ceiling. This is the only guard on the
       // shared delegated-key budget, so it must be unconditional and never keyed
       // on attacker-controlled input. `sub` is NOT used here: rotating `sub` must
@@ -1972,7 +1969,7 @@ export async function runHttp(): Promise<Server> {
           : undefined;
     const effectiveCallerId = callerPrincipalId(
       req.headers,
-      clientIp(req.headers, req.socket.remoteAddress),
+      clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy),
       selfServeJti,
       byo?.apiKey,
     );

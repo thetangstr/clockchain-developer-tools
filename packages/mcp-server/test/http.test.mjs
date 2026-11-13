@@ -1,6 +1,8 @@
 // Unit tests for HTTP auth (pure, no port binding).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { isAuthorized, parseTokens, isHealthCheck, callerKey, callerPrincipalId, principalIdForCallerKey, createRateLimiter, rateLimitHeaders, sanitizeSub, pathOf, presentedApiKey, clockchainOverridesFromKey, clientIp, isRateLimitExempt, RATE_LIMIT_EXEMPT_METHODS } from "../dist/http.js";
 import { mintToken } from "../dist/token.js";
 
@@ -123,13 +125,50 @@ test("rate limiter disabled when perMin <= 0 (always allows)", () => {
   for (let i = 0; i < 1000; i++) assert.equal(rl.allow("k", 1000).allowed, true);
 });
 
-test("clientIp prefers X-Forwarded-For (real client behind the LB), else socket addr", () => {
-  // Behind the GCP LB the socket addr is a proxy; XFF carries the real client.
-  assert.equal(clientIp({ "x-forwarded-for": "203.0.113.7, 35.191.0.1" }, "10.0.0.1"), "203.0.113.7");
-  assert.equal(clientIp({ "x-forwarded-for": " 198.51.100.2 " }, "10.0.0.1"), "198.51.100.2");
-  assert.equal(clientIp({}, "10.0.0.1"), "10.0.0.1"); // no XFF → socket addr
+test("clientIp ignores X-Forwarded-For from an untrusted peer", () => {
+  const headers = { "x-forwarded-for": "6.6.6.6" };
+  assert.equal(clientIp(headers, "10.0.0.5"), "10.0.0.5");
+  assert.equal(clientIp(headers, "10.0.0.5", "172.30.0.3"), "10.0.0.5");
   assert.equal(clientIp({}, undefined), "unknown");
-  assert.equal(clientIp({ "x-forwarded-for": ["1.1.1.1, 2.2.2.2"] }, "10.0.0.1"), "1.1.1.1");
+});
+
+test("clientIp uses X-Forwarded-For from the trusted proxy", () => {
+  const headers = { "x-forwarded-for": "6.6.6.6" };
+  assert.equal(clientIp(headers, "172.30.0.3", "172.30.0.3"), "6.6.6.6");
+  assert.equal(clientIp({ "x-forwarded-for": " 203.0.113.7, 35.191.0.1" }, "172.30.0.3", "172.30.0.3"), "203.0.113.7");
+  assert.equal(clientIp({}, "172.30.0.3", "172.30.0.3"), "172.30.0.3"); // trusted peer, no XFF
+});
+
+test("POST /token mint ceiling cannot be dodged by rotating X-Forwarded-For", async () => {
+  const port = 39518;
+  const proc = spawn("node", [fileURLToPath(new URL("../dist/index.js", import.meta.url))], {
+    env: {
+      ...process.env,
+      MCP_TRANSPORT: "http",
+      PORT: String(port),
+      MCP_AUTH_TOKENS: "mint-test-token",
+      MCP_REQUIRE_AUTH: "1",
+      MCP_TOKEN_SIGNING_SECRET: "mint-test-secret",
+      MCP_TOKEN_MINT_PER_HOUR: "2",
+      MCP_OAUTH_TRUSTED_PROXY: "",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("server did not start in time")), 10_000);
+      proc.stderr.on("data", (d) => {
+        if (String(d).includes("listening on")) { clearTimeout(t); resolve(); }
+      });
+      proc.on("exit", (code) => reject(new Error(`server exited early (${code})`)));
+    });
+    const mint = (xff) => fetch(`http://127.0.0.1:${port}/token`, { method: "POST", headers: { "x-forwarded-for": xff } });
+    assert.equal((await mint("1.1.1.1")).status, 200);
+    assert.equal((await mint("2.2.2.2")).status, 200);
+    assert.equal((await mint("3.3.3.3")).status, 429);
+  } finally {
+    proc.kill();
+  }
 });
 
 test("rate limiter honors a custom window (e.g. hourly mint limit)", () => {
