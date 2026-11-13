@@ -86,6 +86,8 @@ import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute
 import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/service.js";
 import { createShadowHttpHandler, PREVIEW_CHAT_PATH, PREVIEW_PATH, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
 import { runtimeShadowLedger, shadowLedgerIdentity } from "./shadow/ledger.js";
+import { loadWitnessKey } from "./shadow/witness.js";
+import { fingerprint } from "./shadow/lib/keys.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
 import { AgentKeyBook, type KeyEntry } from "./agent-keys/book.js";
 import { jwtBearerProof } from "./agent-keys/proof.js";
@@ -1201,6 +1203,8 @@ export async function runHttp(): Promise<Server> {
   // and a handshake session token (scoped to one handshake) is refused.
   let shadowHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined;
   let shadowService: ShadowService | undefined;
+  /** /.well-known/clockchain-witness-key.json: Clockchain's published witness key, set once SHADOW_WITNESS_KEY_FILE loads. */
+  let witnessKeyBody: string | undefined;
   const shadowLinkLimit = keyedWindowLimiter(Number(process.env.SHADOW_LINKS_PER_MINUTE || "60"), 60_000, Date.now);
   // Discovery before sign-in on the chat endpoint, per client (generous: claude.ai calls from shared egress).
   const shadowAnonymousLimit = keyedWindowLimiter(Number(process.env.SHADOW_ANON_PER_MINUTE || "600"), 60_000, Date.now);
@@ -1315,6 +1319,11 @@ export async function runHttp(): Promise<Server> {
       // SHADOW_LINK_CONCURRENCY). A malformed one, or a global cap above half the state filesystem's free space,
       // keeps Shadow from starting: every /shadow path then answers 503 and the reason is logged.
       if (shadowConfig.problem) throw Object.assign(new Error(shadowConfig.problem), { name: "ShadowConfigError" });
+      // SHADOW_WITNESS_KEY_FILE: an existing PKCS8 Ed25519 private key, provisioned like any other secret. Set, it signs
+      // signed-in accounts' checkpoints; a file that won't load is a ShadowConfigError. Unset: a key per owner, as before.
+      const witnessFile = (process.env.SHADOW_WITNESS_KEY_FILE ?? "").trim();
+      const witness = witnessFile ? loadWitnessKey(witnessFile) : undefined;
+      if (witness) witnessKeyBody = JSON.stringify({ publicKey: witness.publicKey(), fingerprint: fingerprint(witness.publicKey()) }, null, 2);
       if (!shadowLedgerIdentity()) console.error(JSON.stringify({ event: "shadow_writer_is_delegated", note: "SHADOW_LEDGER_CLIENT_ID and SHADOW_LEDGER_WALLET_ID are unset, so Shadow's ledger entries carry the delegated client and wallet." }));
       const service = new ShadowService({
         stateDir: shadowConfig.stateDir,
@@ -1324,6 +1333,7 @@ export async function runHttp(): Promise<Server> {
         budget: () => shadowBudget,
         limits: shadowConfig.limits,
         ...(shadowConfig.autoLog ? { autoLog: true } : {}),
+        ...(witness ? { witness } : {}),
       });
       const disk = diskBudgetProblem(shadowConfig.stateDir, shadowConfig.limits.maxStateBytes);
       if (disk) throw Object.assign(new Error(disk), { name: "ShadowConfigError" });
@@ -1581,6 +1591,19 @@ export async function runHttp(): Promise<Server> {
         "cache-control": "public, max-age=300",
       });
       res.end(manifestBody);
+      return;
+    }
+
+    // The public half of the witness key that signs signed-in accounts' Shadow checkpoints, for anyone to pin. No auth.
+    // Without SHADOW_WITNESS_KEY_FILE (or when it didn't load) there is none: 404.
+    if (req.method === "GET" && pathOf(req.url) === "/.well-known/clockchain-witness-key.json") {
+      if (witnessKeyBody === undefined) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "no_witness_key" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=300" });
+      res.end(witnessKeyBody);
       return;
     }
 

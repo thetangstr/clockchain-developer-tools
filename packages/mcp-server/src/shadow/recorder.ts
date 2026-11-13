@@ -28,6 +28,39 @@ export const HOSTED_LIMITS = [
   "Hosted: the agent reported each step to the Clockchain MCP server, which keeps the record and holds the signing key on the agent's behalf.",
 ];
 
+/**
+ * Who signs a checkpoint, decided per checkpoint: "agent" for an agent-key owner (its operator id is agentOperatorId's),
+ * which signs its own; "witness" for every other owner when Clockchain's single published witness key is configured;
+ * "legacy" otherwise, the per-owner key of before.
+ */
+export type SigningMode = "agent" | "witness" | "legacy";
+
+const SIGNED_BY: Record<Exclude<SigningMode, "legacy">, string> = {
+  agent: "Signed by the agent's own key. Clockchain received the steps and holds no key for this agent.",
+  witness: "Witnessed: Clockchain received each step from the signed-in account and signed with its single published service key. The agent did not sign.",
+};
+
+/** HOSTED_LIMITS, with its last line saying who signed. Legacy checkpoints keep today's text exactly. */
+export function limitsFor(mode: SigningMode): string[] {
+  return mode === "legacy" ? HOSTED_LIMITS : [...HOSTED_LIMITS.slice(0, -1), SIGNED_BY[mode]];
+}
+
+const AGENT_OWNER = /^ak:([0-9a-f]{64})$/;
+const AGENT_OPERATOR = "agent-";
+
+/** The operator id of an agent-key owner (ak:<root>): stable across its sessions and keys. Undefined for any other owner. */
+export function agentOperatorId(ownerId: string): string | undefined {
+  if (!ownerId.startsWith("ak:")) return undefined;
+  const m = AGENT_OWNER.exec(ownerId);
+  if (!m) throw new Error("malformed agent owner id");
+  return AGENT_OPERATOR + m[1].slice(0, 32);
+}
+
+/** The signing mode of a session's next checkpoint. Other operator ids are random UUIDs, so they never start with "agent-". */
+export function signingModeOf(meta: Pick<SessionMeta, "operatorId">, witness: boolean): SigningMode {
+  return meta.operatorId.startsWith(AGENT_OPERATOR) ? "agent" : witness ? "witness" : "legacy";
+}
+
 /** Every hosted text field keeps the whole content: shadow_record accepts at most 32 KB, which is at most 32,768 UTF-16 units. */
 export const HOSTED_MAX_TEXT = 32_768;
 
@@ -198,20 +231,30 @@ export function advance(meta: SessionMeta, event: ShadowEvent, bytes: number): v
   if (b.kind === "session.closed") meta.state = "closed";
 }
 
-/** Session.checkpoint(): the previous checkpoint when nothing changed, else a new one signed over every step. */
-export function checkpointOver(meta: SessionMeta, events: ShadowEvent[], keys: KeyProvider, now: Date): Checkpoint {
+/**
+ * The unsigned half of Session.checkpoint(): the previous checkpoint when nothing changed, else the new body over every
+ * step and its hash, for the signer of `mode` to sign.
+ */
+export function checkpointBody(meta: SessionMeta, events: ShadowEvent[], now: Date, mode: SigningMode): { body: CheckpointBody; hash: string } | { unchanged: Checkpoint } {
   const prev = meta.checkpoint;
-  if (prev && prev.body.count === events.length) return prev;
+  if (prev && prev.body.count === events.length) return { unchanged: prev };
   const agents = meta.agents.map((a) => a.id);
   const body: CheckpointBody = {
     profile: PROFILE, operatorId: meta.operatorId, sessionId: meta.sessionId, streamId: "collector",
     count: events.length, head: events.at(-1)?.hash ?? null, merkleRoot: merkle(events.map((e) => e.hash)).root,
     previousCheckpointHash: prev?.hash ?? null, createdAt: now.toISOString(), network: meta.network,
     inventory: { profile: "shadow-inventory-v1", agents },
-    coverage: coverage(events, agents), knownLimits: HOSTED_LIMITS,
+    coverage: coverage(events, agents), knownLimits: limitsFor(mode),
   };
-  const h = hash(DOMAIN.checkpoint, body);
-  return { body, hash: h, publicKey: keys.publicKey(), signature: keys.sign(h) };
+  return { body, hash: hash(DOMAIN.checkpoint, body) };
+}
+
+/** Session.checkpoint(), signed by the server: the witness key, or a legacy owner's key. Never for an agent, which signs its own. */
+export function checkpointOver(meta: SessionMeta, events: ShadowEvent[], keys: KeyProvider, now: Date, mode: SigningMode): Checkpoint {
+  if (mode === "agent") throw new Error("An agent signs its own checkpoints; the server holds no key for it");
+  const r = checkpointBody(meta, events, now, mode);
+  if ("unchanged" in r) return r.unchanged;
+  return { body: r.body, hash: r.hash, publicKey: keys.publicKey(), signature: keys.sign(r.hash) };
 }
 
 /** Session.pendingCheckpoints(): checkpoints queued for Clockchain whose receipt is not among the steps. */

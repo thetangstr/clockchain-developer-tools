@@ -20,8 +20,9 @@ import type { Checkpoint, Network, ShadowEvent } from "./lib/types.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AgentEntry, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
   ANCHOR_LABEL, RECORD_KINDS, RecordError, START_LABEL, VERSION, LIBRARY, advance, buildEvent, buildPacket, buildPin,
-  checkpointOver, receiptPayload, referenceId, refuseThinkTag, startHashOf, stepFor, type RecordKind,
+  agentOperatorId, checkpointOver, receiptPayload, referenceId, refuseThinkTag, signingModeOf, startHashOf, stepFor, type RecordKind,
 } from "./recorder.js";
+import type { KeyProvider } from "./lib/keys.js";
 import { AnchorLimitError, anchorHash, prefetchOnline, type AnchorOutcome, type ShadowLedger } from "./ledger.js";
 
 export class ShadowError extends Error {
@@ -893,6 +894,8 @@ export type ServiceOptions = {
   log?: (event: string, fields: Record<string, string | number | boolean | null>) => void;
   /** SHADOW_AUTO_LOG=1: the viewer's per-step table of hash, block and ledger id, and verify's receipt counts. */
   autoLog?: boolean;
+  /** SHADOW_WITNESS_KEY_FILE: Clockchain's single published key, which signs signed-in accounts' checkpoints. Unset: a key per owner, as before. */
+  witness?: KeyProvider;
 };
 
 type Links = { viewer: string | null; packet: string | null; summary?: string };
@@ -907,6 +910,7 @@ export class ShadowService {
   private readonly budget: () => LogBudget;
   private readonly log: NonNullable<ServiceOptions["log"]>;
   private readonly autoLog: boolean;
+  private readonly witness: boolean;
   private readonly locks = new KeyedMutex();
   private readonly heavy = new Gate(32);
   private readonly drains = new Map<string, Promise<void>>();
@@ -927,7 +931,8 @@ export class ShadowService {
   private readonly deletedOwners = new Set<string>();
 
   constructor(o: ServiceOptions) {
-    this.store = new ShadowStore(o.stateDir);
+    this.store = new ShadowStore(o.stateDir, o.witness);
+    this.witness = o.witness !== undefined;
     this.limits = { ...DEFAULT_SHADOW_LIMITS, ...(o.limits ?? {}) };
     this.network = o.network ?? "clockchain-testnet";
     this.now = o.now ?? (() => new Date());
@@ -1048,7 +1053,7 @@ export class ShadowService {
   private sealClose(meta: SessionMeta, ending: () => void): Promise<{ target: string; refused: { code: string; message: string } | null }> {
     return this.heavy.run(() => {
       ending();
-      const cp = checkpointOver(meta, this.store.readEvents(meta), this.store.operator(meta.ownerKey, this.now()).keys, this.now());
+      const cp = this.signed(meta, this.store.readEvents(meta));
       meta.checkpoint = cp;
       const refused = this.queueCheckpoint(meta, cp, true);
       this.store.writeMeta(meta);
@@ -1058,7 +1063,7 @@ export class ShadowService {
 
   /** Queues the final checkpoint of a closed session that has none, which a crash in the middle of a close leaves. The caller writes the metadata. */
   private queueFinal(meta: SessionMeta, events: ShadowEvent[]): { target: string; refused: { code: string; message: string } | null } {
-    const cp = checkpointOver(meta, events, this.store.operator(meta.ownerKey, this.now()).keys, this.now());
+    const cp = this.signed(meta, events);
     meta.checkpoint = cp;
     return { target: cp.hash, refused: this.queueCheckpoint(meta, cp, true) };
   }
@@ -1186,9 +1191,19 @@ export class ShadowService {
     return this.heavy.run(() => fn(this.store.readEvents(meta)));
   }
 
+  /**
+   * checkpointOver() with the session's signing mode: the witness key, or a legacy owner's key. An agent-key session's
+   * checkpoints are the agent's to sign, and the server has no key for it: asking is a bug, never a fallback to another key.
+   */
+  private signed(meta: SessionMeta, events: ShadowEvent[]): Checkpoint {
+    const mode = signingModeOf(meta, this.witness);
+    if (mode === "agent") throw new Error("An agent signs its own checkpoints; the server holds no key for it");
+    return checkpointOver(meta, events, this.store.operator(meta.ownerKey, this.now()).keys, this.now(), mode);
+  }
+
   /** latestCheckpoint(): a fresh, signed, unanchored checkpoint when steps were added since the last one. */
   private latest(meta: SessionMeta, events: ShadowEvent[]): Checkpoint {
-    const cp = checkpointOver(meta, events, this.store.operator(meta.ownerKey, this.now()).keys, this.now());
+    const cp = this.signed(meta, events);
     if (cp !== meta.checkpoint) {
       meta.checkpoint = cp;
       this.store.writeMeta(meta);
@@ -1306,12 +1321,13 @@ export class ShadowService {
         if (!made) throw new ShadowError("SHADOW_LIMIT_OPEN_SESSIONS", `You have ${open} open sessions, the most allowed. Close one with shadow_close_session first.`);
         void this.drain(ownerKey, makeRoom.sessionId).catch(() => undefined);
       }
-      const op = this.store.operator(ownerKey, now);
+      // An agent-key owner gets its operator id from its root and no key; every other owner's comes from the store.
+      const operatorId = agentOperatorId(ownerId) ?? this.store.operator(ownerKey, now).operatorId;
       const sessionId = randomUUID(), nonce = randomUUID();
       const meta: SessionMeta = {
-        v: 1, sessionId, ownerKey, operatorId: op.operatorId, title, agents, network: this.network, state: "open",
+        v: 1, sessionId, ownerKey, operatorId, title, agents, network: this.network, state: "open",
         createdAt: now.toISOString(), closedAt: null, expiresAt: new Date(now.getTime() + this.limits.retentionMs).toISOString(),
-        cap: randomBytes(16).toString("base64url"), nonce, startHash: startHashOf(op.operatorId, sessionId, nonce),
+        cap: randomBytes(16).toString("base64url"), nonce, startHash: startHashOf(operatorId, sessionId, nonce),
         seq: 0, head: null, eventsBytes: 0, agentSteps: 0, runs: [], checkpoint: null, outbox: [], anchors: [],
         ...(level === "step" ? {} : { logLevel: level, logLevelBy: by }),
         accountLevelSeen,
@@ -1707,7 +1723,7 @@ export class ShadowService {
       try {
         const cp = await this.withEvents(meta, (events) => {
           if (input.table) made.turn = turnRows(events, made.steps[0].seq);
-          return checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now());
+          return this.signed(meta, events);
         });
         meta.checkpoint = cp;
         made.target = cp.hash;
@@ -1778,7 +1794,7 @@ export class ShadowService {
         if (revived || meta.outbox.length) this.store.writeMeta(meta);
         return;
       }
-      const cp = await this.withEvents(meta, (events) => checkpointOver(meta, events, this.store.operator(ownerKey, this.now()).keys, this.now()));
+      const cp = await this.withEvents(meta, (events) => this.signed(meta, events));
       meta.checkpoint = cp;
       made.target = cp.hash;
       made.refused = this.queueCheckpoint(meta, cp);

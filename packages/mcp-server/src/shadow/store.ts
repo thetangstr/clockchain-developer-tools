@@ -1,7 +1,8 @@
 // Hosted Shadow storage (under SHADOW_STATE_DIR). Everything is plain files, so it survives a container restart on
 // the /app/state volume and needs no native module:
 //
-//   owners/<ownerKey>/key.json                      operator id + Ed25519 private key (0600, written once)
+//   owners/<ownerKey>/key.json                      operator id + Ed25519 private key (0600, written once), with no witness key
+//   owners/<ownerKey>/operator.json                 operator id only, with the witness key (SHADOW_WITNESS_KEY_FILE)
 //   owners/<ownerKey>/usage.json                    anchors and session starts today (the per-owner daily limits)
 //   owners/<ownerKey>/settings.json                 written once the owner turns automatic logging off (SHADOW_AUTO_LOG)
 //   owners/<ownerKey>/sessions/<sessionId>/meta.json      small durable JSON: state, head, checkpoint, outbox, anchors
@@ -121,6 +122,7 @@ export type Operator = { operatorId: string; keys: KeyProvider };
 /** levelUnreadable: logging was switched while the file couldn't be read, so its level is unknown, not gone. */
 type OwnerSettings = { loggingOff: boolean; logLevel?: LogLevel; levelUnreadable?: true };
 type KeyFile = { operatorId: string; privateKeyPem: string; createdAt: string };
+type OperatorFile = { operatorId: string; createdAt: string };
 type UsageFile = { day: string; anchors: number; starts?: number };
 export type DailyCounter = "anchors" | "starts";
 type CapFile = { ownerKey: string; sessionId: string };
@@ -189,8 +191,12 @@ export class ShadowStore {
   /** Where each owing account's next turn starts in its sessions. */
   private owedNext = new Map<string, number>();
 
-  constructor(root: string) {
+  /** Clockchain's single witness key: when set, no owner key is created or used. */
+  private readonly witness: KeyProvider | undefined;
+
+  constructor(root: string, witness?: KeyProvider) {
     this.root = root;
+    this.witness = witness;
   }
 
   private ownerDir(ownerKey: string): string {
@@ -209,10 +215,51 @@ export class ShadowStore {
 
   // ---- operator key -------------------------------------------------------------------------------------------
 
-  /** The owner's operator id and signing key, created on first use. The private key never leaves this file. */
+  /**
+   * The owner's operator id and signing key. With the witness key, the key is the witness and the operator id comes from
+   * operator.json, or from a key.json written before (its private key is not read), and no key.json is ever written.
+   * Without it, both come from key.json, created on first use; the private key never leaves that file.
+   */
   operator(ownerKey: string, now: Date): Operator {
     const cached = this.operators.get(ownerKey);
     if (cached) return cached;
+    const op: Operator = this.witness ? { operatorId: this.witnessedOperatorId(ownerKey, now), keys: this.witness } : this.ownerKeyOperator(ownerKey, now);
+    if (this.operators.size >= 512) this.operators.delete(this.operators.keys().next().value as string);
+    this.operators.set(ownerKey, op);
+    return op;
+  }
+
+  private witnessedOperatorId(ownerKey: string, now: Date): string {
+    let current: OperatorFile | undefined;
+    const file = createDurableJsonFile<OperatorFile>({
+      path: join(this.ownerDir(ownerKey), "operator.json"),
+      schema: "shadow-operator-v1",
+      snapshot: () => current!,
+      validate: (v) => {
+        if (!isObj(v) || typeof v.operatorId !== "string") throw new Error("bad operator file");
+        return v as unknown as OperatorFile;
+      },
+      maxBytes: SMALL_MAX_BYTES,
+    });
+    current = file.load();
+    if (current) return current.operatorId;
+    const old = createDurableJsonFile<{ operatorId: string }>({
+      path: join(this.ownerDir(ownerKey), "key.json"),
+      schema: "shadow-operator-key-v1",
+      snapshot: () => { throw new Error("key.json is never written with the witness key"); },
+      validate: (v) => {
+        if (!isObj(v) || typeof v.operatorId !== "string") throw new Error("bad key file");
+        return { operatorId: v.operatorId };
+      },
+      maxBytes: KEY_MAX_BYTES,
+    }).load();
+    if (old) return old.operatorId;
+    current = { operatorId: randomUUID(), createdAt: now.toISOString() };
+    file.save("now");
+    return current.operatorId;
+  }
+
+  private ownerKeyOperator(ownerKey: string, now: Date): Operator {
     let current: KeyFile | undefined;
     const file = createDurableJsonFile<KeyFile>({
       path: join(this.ownerDir(ownerKey), "key.json"),
@@ -230,10 +277,7 @@ export class ShadowStore {
       current = { operatorId: randomUUID(), privateKeyPem, createdAt: now.toISOString() };
       file.save("now");
     }
-    const op: Operator = { operatorId: current.operatorId, keys: keyProvider(createPrivateKey(current.privateKeyPem)) };
-    if (this.operators.size >= 512) this.operators.delete(this.operators.keys().next().value as string);
-    this.operators.set(ownerKey, op);
-    return op;
+    return { operatorId: current.operatorId, keys: keyProvider(createPrivateKey(current.privateKeyPem)) };
   }
 
   // ---- the owner's logging setting (SHADOW_AUTO_LOG) ------------------------------------------------------------
@@ -684,8 +728,12 @@ export class ShadowStore {
           }
         }
         if (remaining === 0) {
-          const keyPath = join(odir, "key.json");
-          const keyAge = existsSync(keyPath) ? nowMs - statSync(keyPath).mtimeMs : Infinity;
+          // The younger of the operator files: an owner whose server switched witness key on and off again may have both.
+          let keyAge = Infinity;
+          for (const name of ["key.json", "operator.json"]) {
+            const p = join(odir, name);
+            if (existsSync(p)) keyAge = Math.min(keyAge, nowMs - statSync(p).mtimeMs);
+          }
           // A logging setting outlives the records: "off" must never silently turn back on.
           if (keyAge > retentionMs && !existsSync(join(odir, "settings.json"))) {
             rmSync(odir, { recursive: true, force: true });
