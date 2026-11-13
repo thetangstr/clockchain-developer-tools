@@ -1,10 +1,11 @@
 // The public book of agent keys over HTTP (MCP_AGENT_KEYS=1). Anyone, without signing in, can look a key up by its
 // fingerprint: GET /agent-keys/<fp>.json. An agent replaces its key (POST /agent-keys/<fp>/replace, signed by the old key)
 // or cancels it (POST /agent-keys/<fp>/revoke, signed by the key itself) with an RFC 7523 assertion whose audience is that
-// action's own URL; a replace assertion also names the new key's fingerprint in its `new_key` claim. A change takes effect
-// in the book at once, so the old key's tokens stop on their next call, and is then filed on Clockchain under the key's
-// reference. A filing that waits (the ledger is slow, down, or over an allowance) is shown as pending and tried again when
-// the change is asked for again, or on a lookup at most once a minute per event.
+// action's own URL. A replace assertion also names the new key's fingerprint in its `new_key` claim, and comes with the
+// new key's own assertion (same URL) naming the old key in its `replaces` claim, so the new key is proven held. A change
+// takes effect in the book at once, so the old key's tokens stop on their next call, and is then filed on Clockchain under
+// the key's reference. A filing that waits (the ledger is slow, down, or over an allowance) is shown as pending and tried
+// again when the change is asked for again, or on a lookup at most once a minute per event.
 // Errors are {error, error_description}, and nothing here ever echoes or logs an assertion.
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -188,10 +189,10 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
     } catch {
       return refuse("bad_body", 400, "invalid_request", "Send a JSON body of at most 16 KB.");
     }
-    const members = action === "replace" ? ["assertion", "new_public_key"] : ["assertion"];
+    const members = action === "replace" ? ["assertion", "new_public_key", "new_key_assertion"] : ["assertion"];
     if (!isObj(body) || Object.keys(body).length !== members.length || !members.every((m) => typeof body[m] === "string")) {
       return refuse("bad_body", 400, "invalid_request", action === "replace"
-        ? "Send {\"assertion\": ..., \"new_public_key\": ...}: an assertion signed by this key, and the new public key."
+        ? "Send {\"assertion\": ..., \"new_public_key\": ..., \"new_key_assertion\": ...}: an assertion signed by this key, the new public key, and an assertion signed by the new key."
         : "Send {\"assertion\": ...}: an assertion signed by this key.");
     }
     const newPem = action === "replace" ? body.new_public_key as string : undefined;
@@ -199,9 +200,11 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
       return refuse("bad_new_key", 400, "invalid_request", "new_public_key must be an Ed25519 public key as a canonical SPKI PEM.");
     }
 
+    const audience = `${base}/agent-keys/${fp}/${action}`;
+    const nowSec = Math.floor(now() / 1000);
     let proven: ReturnType<KeyProof["verify"]>;
     try {
-      proven = o.proof.verify({ assertion: body.assertion as string, audience: `${base}/agent-keys/${fp}/${action}`, nowSec: Math.floor(now() / 1000) });
+      proven = o.proof.verify({ assertion: body.assertion as string, audience, nowSec });
     } catch (e) {
       // The proof's reasons never echo the assertion.
       if (e instanceof AgentKeyError) return refuse("bad_proof", 401, "invalid_client", e.message);
@@ -223,8 +226,28 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
         return refuse("other_new_key", 401, "invalid_client", "The assertion's new_key names a different key than new_public_key.");
       }
     }
-    const replayKey = createHash("sha256").update(`${fp}:${proven.jti}`, "utf8").digest("base64url");
-    if (usedAssertions.has(replayKey)) {
+    // The new key proves it is held, by signing for this same URL and naming the key it replaces, so nobody can file a
+    // key they don't hold (someone else's public key) under their own root.
+    let provenNew: ReturnType<KeyProof["verify"]> | undefined;
+    if (newPem !== undefined) {
+      try {
+        provenNew = o.proof.verify({ assertion: body.new_key_assertion as string, audience, nowSec });
+      } catch (e) {
+        if (e instanceof AgentKeyError) return refuse("bad_new_key_proof", 401, "invalid_client", `new_key_assertion: ${e.message}`);
+        throw e;
+      }
+      if (provenNew.publicKeyPem !== newPem) {
+        return refuse("other_new_key_signer", 401, "invalid_client", "new_key_assertion must be signed by the key in new_public_key.");
+      }
+      const replaces = provenNew.claims.replaces;
+      if (typeof replaces !== "string" || !FINGERPRINT.test(replaces) || replaces !== fp) {
+        return refuse("no_replaces", 401, "invalid_client", "new_key_assertion must name the key it replaces: put that key's fingerprint (64 lowercase hex) in the replaces claim.");
+      }
+    }
+    // Both assertions are checked in full before either is spent, so a refused request burns neither.
+    const spent = [{ fp, jti: proven.jti, exp: proven.exp }, ...(provenNew && newPem !== undefined ? [{ fp: fingerprint(newPem), jti: provenNew.jti, exp: provenNew.exp }] : [])]
+      .map((a) => ({ key: createHash("sha256").update(`${a.fp}:${a.jti}`, "utf8").digest("base64url"), exp: a.exp }));
+    if (spent.some((a) => usedAssertions.has(a.key))) {
       return refuse("replayed", 401, "invalid_client", "This assertion was already used. Sign a new one with a fresh jti.");
     }
 
@@ -249,7 +272,7 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
       return unavailable(res);
     }
     try {
-      usedAssertions.add(replayKey, proven.exp);
+      for (const a of spent) usedAssertions.add(a.key, a.exp);
     } catch {
       log({ event: "agent_keys_replay_write_failed" });
       return unavailable(res);
