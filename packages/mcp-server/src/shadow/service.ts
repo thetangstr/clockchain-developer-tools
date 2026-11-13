@@ -18,6 +18,7 @@ import { accountLevelNote, anchorsNow, deferredReason, effectiveLevel, finer, is
 import { windows, type Window } from "./lib/windows.js";
 import type { Checkpoint, Network, Pin, ShadowEvent } from "./lib/types.js";
 import { AgentKeyError, type AgentKeyBook } from "../agent-keys/book.js";
+import { checkAgentKey, type KeyCheck } from "../agent-keys/check.js";
 import { fileKey, StarterAnchors, type FilingLedger, type FilingResult } from "../agent-keys/filing.js";
 import { META_MAX_BYTES, ShadowStore, isSessionId, ownerKeyOf, type AnchorBacklog, type AgentEntry, type AnchorInfo, type OutboxRow, type SessionMeta } from "./store.js";
 import {
@@ -351,13 +352,16 @@ class ByteLru {
   }
 }
 
-/** What a link body depends on: the steps (append-only, so the count), the checkpoint, and the queued checkpoints and how they stand. */
+/**
+ * What a link body depends on: the steps (append-only, so the count), the checkpoint, the queued checkpoints and how they
+ * stand, and for an agent the book's entry for its signing key (`keyStamp`), so a filing or cancellation that lands later shows.
+ */
 type LinkKind = "packet" | "summary" | "log" | "log-json";
 
-function linkKey(kind: LinkKind, meta: SessionMeta): string {
+function linkKey(kind: LinkKind, meta: SessionMeta, keyStamp: string): string {
   const cp = meta.checkpoint;
   const queued = meta.outbox.filter((r) => r.kind === "checkpoint").map((r) => `${r.hash}/${r.state}/${r.lastErrorCode ?? ""}`).join(",");
-  return `${kind}:${meta.sessionId}:${meta.seq}:${cp?.hash ?? "-"}:${cp?.body.count ?? -1}:${queued}`;
+  return `${kind}:${meta.sessionId}:${meta.seq}:${cp?.hash ?? "-"}:${cp?.body.count ?? -1}:${queued}:${keyStamp}`;
 }
 
 // ---- input checks -----------------------------------------------------------------------------------------------------
@@ -816,15 +820,16 @@ function logFooter(meta: { agentSteps: number; anchors: { blockHeight: string; l
 /**
  * The hosted viewer checks a packet against the pin this same server made, so its checks aren't independent. The
  * library's summary, which is vendored and unchanged, is written for a pin that reached the reader separately: here the
- * report says whose pin it was, and {@link hostedViewer} replaces its "Proven" tag.
+ * report says whose pin it was, and {@link hostedViewer} replaces its "Proven" tag. An agent's checkpoint isn't the
+ * server's to sign, so for an agent a passing trust check reads its key verdict (`agentLine`) instead.
  */
-function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T): T {
+function ownPinReport<T extends { summary: string; checks: { name: string; status: string; reason: string }[] }>(report: T, agentLine?: string): T {
   return {
     ...report,
     // "Captured" would claim more than the verifier can see: it knows the runs in the record, not the work outside it.
     summary: report.summary.replace("the supplied pin", "this server's own pin").replace("every run was captured", "every recorded run has an ending"),
     checks: report.checks.map((c) =>
-      c.name === "trust" && c.status === "pass" ? { ...c, reason: "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
+      c.name === "trust" && c.status === "pass" ? { ...c, reason: agentLine ?? "Matches the pin from this server. That pin isn't independent: it shows the record is what this server signed, not that this server is honest." }
         : c.name === "time" ? { ...c, reason: c.reason.replace("with a single validator they are only as good as its clock", "with a single-operator gateway they are only as good as its clock") }
           : c),
   };
@@ -832,11 +837,17 @@ function ownPinReport<T extends { summary: string; checks: { name: string; statu
 
 const OWN_PIN_NOTE = `<p class="meta">The pin behind this page came from this server, so these checks aren't independent. For an independent check, run the command at the end of this page with a pin you received separately.</p>`;
 
-/** The summary page with "Proven" (which step content can't produce: it is escaped) saying what was really checked. */
-function hostedViewer(html: string): string {
+/**
+ * The summary page with "Proven" (which step content can't produce: it is escaped) saying what was really checked: what
+ * the server signed, or for an agent's checkpoint, which the server didn't sign, the signing key. `keyLine` (an agent's
+ * or a witnessed record's key verdict) is the first line under the title; a legacy record's page is as before.
+ */
+function hostedViewer(html: string, keyLine: KeyCheck | null, agent: boolean): string {
+  const tag = agent ? "Matches the signing key" : "Matches what the server signed";
   return html
-    .replaceAll("<b>Proven:</b>", "<b>Matches what the server signed:</b>")
-    .replaceAll('<td class="tag">Proven</td>', '<td class="tag">Matches what the server signed</td>')
+    .replace("<h1>Shadow evidence summary</h1>\n", (h) => (keyLine ? `${h}<p><b>${escHtml(keyLine.text)}</b></p>` : h))
+    .replaceAll("<b>Proven:</b>", `<b>${tag}:</b>`)
+    .replaceAll('<td class="tag">Proven</td>', `<td class="tag">${tag}</td>`)
     .replace("and that the validators keep good time.</li>", "and that the single-operator gateway keeps good time.</li>")
     .replace("<h2>What this record shows</h2>", `<h2>What this record shows</h2>${OWN_PIN_NOTE}`);
 }
@@ -957,6 +968,8 @@ export class ShadowService {
   private readonly log: NonNullable<ServiceOptions["log"]>;
   private readonly autoLog: boolean;
   private readonly witness: boolean;
+  /** The fingerprint of Clockchain's published witness key, when there is one. */
+  private readonly witnessKey: string | undefined;
   private readonly agentKeys: AgentKeyBook | undefined;
   /** The Starter allowance agent-key owners share; only with the book. */
   private readonly starterAnchors: StarterAnchors | undefined;
@@ -982,6 +995,7 @@ export class ShadowService {
   constructor(o: ServiceOptions) {
     this.store = new ShadowStore(o.stateDir, o.witness);
     this.witness = o.witness !== undefined;
+    this.witnessKey = o.witness ? fingerprint(o.witness.publicKey()) : undefined;
     this.agentKeys = o.agentKeys;
     this.limits = { ...DEFAULT_SHADOW_LIMITS, ...(o.limits ?? {}) };
     this.starterAnchors = o.agentKeys ? new StarterAnchors({ stateDir: o.stateDir, max: this.limits.maxStarterAnchorsPerDay, today: () => this.today() }) : undefined;
@@ -1299,6 +1313,42 @@ export class ShadowService {
       this.store.writeMeta(meta);
     }
     return cp;
+  }
+
+  /** The book's entry for an agent checkpoint's signing key; null for any other checkpoint, or a key the book doesn't have. */
+  private keyEntry(meta: SessionMeta, cp: Checkpoint): ReturnType<AgentKeyBook["get"]> {
+    if (!this.agentSigns(meta) || !this.agentKeys) return null;
+    try {
+      return this.agentKeys.get(fingerprint(cp.publicKey));
+    } catch {
+      this.log("shadow_agent_key_unreadable", { sessionId: meta.sessionId });
+      throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't read this agent's key right now. Try again later.");
+    }
+  }
+
+  /** What the link cache keys on for the key verdict: the agent's key entry as it stands, which a filing or cancellation changes. */
+  private keyStamp(meta: SessionMeta): string {
+    const cp = meta.checkpoint;
+    if (!cp || !this.agentSigns(meta) || !this.agentKeys) return "-";
+    let e: ReturnType<AgentKeyBook["get"]>;
+    try {
+      e = this.agentKeys.get(fingerprint(cp.publicKey));
+    } catch {
+      return "?"; // The build reads it again, and says it can't.
+    }
+    return e ? `${e.status}/${e.filing.state}/${e.filing.block ?? ""}/${e.filing.filedAt ?? ""}/${e.revokedAt ?? ""}` : "none";
+  }
+
+  /**
+   * Who made `cp`, from the public key lists: an agent's key in the book (checked against the anchor of `cp`, when its
+   * receipt has landed), or Clockchain's witness key. `lookup` is where a reader finds that key.
+   */
+  private keyCheck(meta: SessionMeta, cp: Checkpoint): KeyCheck & { lookup: string | null } {
+    const anchor = meta.anchors.find((a) => a.marker === "checkpoint" && a.hash === cp.hash);
+    const block = anchor ? Number(anchor.blockHeight) : NaN;
+    const r = checkAgentKey(this.keyEntry(meta, cp), cp, Number.isSafeInteger(block) ? block : null, { anchoredAt: anchor?.blockTime ?? null, ...(this.witnessKey ? { witness: this.witnessKey } : {}) });
+    const lookup = r.verdict === "legacy" ? null : r.verdict === "witnessed" ? "/.well-known/clockchain-witness-key.json" : `/agent-keys/${fingerprint(cp.publicKey)}.json`;
+    return { ...r, lookup };
   }
 
   /** A closed session's pin. For an agent, of the last checkpoint it signed, and none while its final checkpoint waits for its signature. */
@@ -2144,8 +2194,9 @@ export class ShadowService {
       // anywhere for a record with no receipts when the ledger gave no answer: nothing says what it holds for this session.
       const checked = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin: parseStrict(JSON.stringify(pin)), online, ...(this.autoLog || online?.searchUnanswered ? { requireOnline: true } : {}) });
       const anchoring = anchoringOf(meta, events);
+      const key = this.keyCheck(meta, cp);
       // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere it needs at least some of the record to be.
-      const own = this.autoLog ? ownPinReport(checked) : checked;
+      const own = this.autoLog ? ownPinReport(checked, this.agentSigns(meta) ? key.text : undefined) : checked;
       const report = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own;
       // The result is about the signed prefix only, so steps the agent never signed are said beside it.
       const unsigned = unsignedCount(events.slice(cp.body.count));
@@ -2155,6 +2206,7 @@ export class ShadowService {
         summary: report.summary,
         ...(unsigned ? { unsigned_steps: unsigned, unsigned_note: unsignedText(unsigned, "in what was verified") } : {}),
         checks: report.checks,
+        agent_key: key,
         anchoring,
         online: onlineNote,
         ...(receipts ? { receipts_checked_online: receipts.checked, receipts_total: receipts.total } : {}),
@@ -2298,7 +2350,8 @@ export class ShadowService {
       meta = undefined;
     }
     if (!meta || meta.linksRevoked || Date.parse(meta.expiresAt) <= this.now().getTime()) return undefined;
-    const hit = this.linkCache.get(linkKey(kind, meta));
+    const stamp = this.keyStamp(meta);
+    const hit = this.linkCache.get(linkKey(kind, meta, stamp));
     if (hit) return hit;
     const flight = `${kind}:${meta.sessionId}:${meta.seq}`;
     const running = this.linkBuilds.get(flight);
@@ -2312,7 +2365,8 @@ export class ShadowService {
     try {
       return await this.session(ownerKey, sessionId, (meta) => {
         if (meta.linksRevoked) return undefined; // Revoked while this request waited for the lock.
-        const cached = this.linkCache.get(linkKey(kind, meta));
+        const stamp = this.keyStamp(meta);
+        const cached = this.linkCache.get(linkKey(kind, meta, stamp));
         if (cached) return cached;
         return this.withEvents(meta, async (events) => {
           if (kind === "log" || kind === "log-json") {
@@ -2320,7 +2374,7 @@ export class ShadowService {
             // In JSON a title is a value, so without the backticks that mark a name in text.
             const body = Buffer.from(kind === "log" ? sessionLogText(log) : JSON.stringify({ ...log, steps: log.steps.map((s) => ({ ...s, title: s.title.replaceAll("`", "") })) }, null, 1));
             this.linkBuildCount++;
-            this.linkCache.set(linkKey(kind, meta), body);
+            this.linkCache.set(linkKey(kind, meta, stamp), body);
             return body;
           }
           const cp = this.latest(meta, events);
@@ -2331,7 +2385,7 @@ export class ShadowService {
               ? JSON.stringify({ packet: null, pin: null, anchoring, note: NOTHING_SIGNED }, null, 1)
               : `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Clockchain Shadow</title></head><body><h1>${escHtml(meta.title)}</h1><p>${escHtml(NOTHING_SIGNED)}</p></body></html>\n`);
             this.linkBuildCount++;
-            this.linkCache.set(linkKey(kind, meta), body);
+            this.linkCache.set(linkKey(kind, meta, stamp), body);
             return body;
           }
           // An agent's checkpoint covers what it signed; the steps after it are in no checkpoint, so not in the packet.
@@ -2345,12 +2399,15 @@ export class ShadowService {
             }, null, 1));
           } else {
             const report = await verifyPacket(parseStrict(JSON.stringify(packet)), { pin });
-            const shown = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(ownPinReport(report), anchoring) : ownPinReport(report);
-            const html = withServerSteps(withUnsignedTail(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events.slice(cp.body.count)), events);
+            const agent = this.agentSigns(meta);
+            const key = this.keyCheck(meta, cp);
+            const own = ownPinReport(report, agent ? key.text : undefined);
+            const shown = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own;
+            const html = withServerSteps(withUnsignedTail(withAnchoringCaveat(withSessionDetails(hostedViewer(summarize(packet, shown, { packetFile: "packet.json", pinFile: "pin.json" }).html, key.verdict === "legacy" ? null : key, agent), meta, sessionFacts(events), anchoring, this.pinNote(meta)), anchoring), events.slice(cp.body.count)), events);
             body = Buffer.from(this.autoLog ? withStepAnchors(html.replace("<h2>What this record shows</h2>", () => `<h2>What this record shows</h2><p class="meta">${escHtml(captureNote(meta))}</p>`), events, meta.cap) : html);
           }
           this.linkBuildCount++;
-          this.linkCache.set(linkKey(kind, meta), body);
+          this.linkCache.set(linkKey(kind, meta, stamp), body);
           return body;
         });
       });
