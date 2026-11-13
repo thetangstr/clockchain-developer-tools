@@ -3,7 +3,7 @@
 // own fingerprint as its hash, and is written once. Also the Starter allowance: one daily count of the anchors every new
 // agent (ak: owner) spends, filings included, kept apart from accounts.
 import { join } from "node:path";
-import { createDurableJsonFile } from "../handshake-core/durable-store.js";
+import { createDurableJsonFile, type DurableJsonFile } from "../handshake-core/durable-store.js";
 import { StarterLimitError, anchorHash, type AnchorRequest, type Failure } from "../shadow/ledger.js";
 import { hash } from "../shadow/lib/profile.js";
 import { AgentKeyError, type AgentKeyBook, type KeyFiling } from "./book.js";
@@ -71,42 +71,62 @@ type StarterFile = { day: string; anchors: number };
 /**
  * The Starter allowance: anchors per UTC day shared by every ak: owner, under the Shadow state dir so a restart keeps the
  * count. check() and record() are a LogBudget's: refuse before a write, count after one lands. Accounts never use it.
+ * One durable file, read once and then saved from memory, so a damaged file is set aside once and never rotated over its
+ * good backup. A count that can't be read at all fails closed: the allowance reads as used up for the rest of that UTC day.
  */
 export class StarterAnchors {
-  private readonly path: string;
   private readonly max: number;
   private readonly today: () => string;
+  private readonly file: DurableJsonFile<StarterFile>;
+  /** Today's count in memory, once read. */
+  private value: StarterFile | undefined;
+  /** The UTC day the file was found unreadable on. */
+  private unreadableOn: string | undefined;
 
   constructor(o: { stateDir: string; max: number; today: () => string }) {
-    this.path = join(o.stateDir, "starter-anchors.json");
     this.max = o.max;
     this.today = o.today;
+    this.file = createDurableJsonFile<StarterFile>({
+      path: join(o.stateDir, "starter-anchors.json"), schema: "shadow-starter-anchors-v1", snapshot: () => this.value!, maxBytes: 4096,
+      validate: (v) => {
+        const f = v as StarterFile;
+        if (!f || typeof f !== "object" || typeof f.day !== "string" || !Number.isSafeInteger(f.anchors) || f.anchors < 0) throw new Error("bad starter allowance file");
+        return { day: f.day, anchors: f.anchors };
+      },
+    });
   }
 
-  /** Throws StarterLimitError when today's allowance is used up. */
+  /** Throws StarterLimitError when today's allowance is used up, or today's count can't be read. */
   check(): void {
     if (this.used() >= this.max) throw new StarterLimitError();
   }
 
   record(): void {
     const day = this.today();
-    const value: StarterFile = { day, anchors: this.used(day) + 1 };
-    this.file(() => value).save("now");
+    if (this.current(day) === null) return; // Unreadable today: check() refuses, so nothing is counted against it.
+    this.value = { day, anchors: this.used(day) + 1 };
+    this.file.save("now");
   }
 
+  /** Today's count; the whole allowance when it can't be read. */
   used(day = this.today()): number {
-    const stored = this.file(() => ({ day, anchors: 0 })).load();
-    return stored && stored.day === day ? stored.anchors : 0;
+    return this.current(day) ?? this.max;
   }
 
-  private file(snapshot: () => StarterFile) {
-    return createDurableJsonFile<StarterFile>({
-      path: this.path, schema: "shadow-starter-anchors-v1", snapshot, maxBytes: 4096,
-      validate: (v) => {
-        const f = v as StarterFile;
-        if (!f || typeof f !== "object" || typeof f.day !== "string" || !Number.isSafeInteger(f.anchors) || f.anchors < 0) throw new Error("bad starter allowance file");
-        return f;
-      },
-    });
+  /** Today's stored count, read from disk the first time; null when it couldn't be read today. */
+  private current(day: string): number | null {
+    if (this.value === undefined && this.unreadableOn === undefined) {
+      try {
+        this.value = this.file.load() ?? { day, anchors: 0 };
+      } catch {
+        this.unreadableOn = day;
+      }
+    }
+    if (this.value === undefined) {
+      if (this.unreadableOn === day) return null;
+      // A later day's count starts afresh whatever the unreadable file said.
+      this.value = { day, anchors: 0 };
+    }
+    return this.value.day === day ? this.value.anchors : 0;
   }
 }

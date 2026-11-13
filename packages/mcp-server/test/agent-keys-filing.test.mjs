@@ -1,7 +1,7 @@
 // Each agent key is filed on Clockchain before any record it owns or signed is anchored, so a checker can see the key existed
 // before the record. New agents (ak: owners) share one daily Starter allowance of anchors, filings included, apart from accounts.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -227,4 +227,53 @@ test("fileKey writes replaced and revoked events under the key's reference, once
   await fileKey(book, ctx, next.fingerprint, "revoked");
   assert.equal(fake.records[1].additionalInfo, "agent key revoked");
   assert.equal(fake.records[1].assetHash, hash("agent-key-event:v1", { fp: next.fingerprint, event: "revoked", newFp: null, at: book.get(next.fingerprint).revokedAt }));
+});
+
+const STARTER_FILE = "starter-anchors.json";
+const corruptCopies = (dir) => readdirSync(dir).filter((n) => n.startsWith(`${STARTER_FILE}.corrupt-`)).length;
+
+test("a damaged Starter count file never overwrites its good backup", async () => {
+  const { svc, book, dir, keysDir, clock, fake } = setup();
+  await started(svc, agentIn(book).owner); // two anchors: a main file and its backup
+  const main = path.join(dir, STARTER_FILE);
+  writeFileSync(main, "not json", { mode: 0o600 });
+  const again = setup({ dir, keysDir, clock, fake });
+  const b = agentIn(again.book);
+  const s = await started(again.svc, b.owner);
+  assert.equal(s.start_anchor.status, "anchored", "the backup's count is used");
+  const bak = JSON.parse(readFileSync(`${main}.bak`, "utf8"));
+  assert.equal(bak.schema, "shadow-starter-anchors-v1");
+  assert.ok(Number.isSafeInteger(bak.value.anchors), "the backup still holds a count");
+  assert.equal(corruptCopies(dir), 1, "the damaged file is set aside once");
+  await started(again.svc, b.owner);
+  await signed(again.svc, b.owner, s.session_id, b.key, b.akf);
+  assert.equal(corruptCopies(dir), 1, "checking again doesn't set it aside again");
+  assert.equal(JSON.parse(readFileSync(main, "utf8")).value.anchors, 5, "the count goes on from the backup's");
+});
+
+test("an unreadable Starter count refuses agent anchors as over the allowance", async () => {
+  const first = setup();
+  await started(first.svc, agentIn(first.book).owner);
+  const main = path.join(first.dir, STARTER_FILE);
+  writeFileSync(main, "not json", { mode: 0o600 });
+  writeFileSync(`${main}.bak`, "not json either", { mode: 0o600 });
+  const fake = new FakeLedger();
+  const { svc, book } = setup({ dir: first.dir, keysDir: first.keysDir, clock: first.clock, fake });
+  const ag = agentIn(book);
+  const s = await started(svc, ag.owner);
+  assert.equal(s.start_anchor.status, "pending");
+  assert.equal(fake.writes.length, 0, "nothing is written");
+  const cp = await signed(svc, ag.owner, s.session_id, ag.key, ag.akf);
+  assert.equal(cp.checkpoint.status, "over_limit");
+  assert.equal(cp.checkpoint.reason, STARTER_USED_UP);
+  const meta = metaOf(svc, ag.owner, s.session_id);
+  assert.ok(meta.outbox.every((r) => r.state === "queued" && r.attempts === 0 && r.lastErrorCode === "starter_limit"));
+  assert.equal(svc.store.readEvents(meta).filter((e) => e.body.kind === "clockchain.error").length, 0, "no Clockchain error is recorded");
+  // Accounts never draw on it.
+  const acct = await svc.startSession(ACCOUNT, { title: "an account's", agents: [{ id: "planner" }] }, BASE);
+  assert.equal(acct.start_anchor.status, "anchored");
+  // The next UTC day's count starts afresh.
+  first.clock.t += 24 * 3_600_000;
+  assert.equal((await svc.checkpoint(ag.owner, { session_id: s.session_id })).checkpoint.status, "anchored");
+  assert.equal(JSON.parse(readFileSync(main, "utf8")).value.anchors, 3, "the filing, the start marker and the checkpoint");
 });
