@@ -324,7 +324,7 @@ test("open mode (no MCP_AUTH_TOKENS, local use): a presented credential owns its
 
 const PUBLIC = "https://mcp.example.test";
 const JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-const CANCELLED = "This agent key was cancelled or replaced; sign in again with your current key.";
+const CANCELLED = "This agent key was cancelled or replaced. Use a key that is still active.";
 
 async function freeLoopbackPort() {
   const probe = createServer().listen(0, "127.0.0.1");

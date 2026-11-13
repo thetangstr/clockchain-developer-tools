@@ -1192,7 +1192,7 @@ export async function runHttp(): Promise<Server> {
   // A token whose agent key was replaced or revoked, on /mcp and the /shadow MCP paths: a 401 that says so plainly.
   const agentKeyCancelledUnauthorized = (res: ServerResponse, req: IncomingMessage): void => {
     res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store", ...oauth?.challenge(pathOf(req.url), true) });
-    res.end(JSON.stringify({ error: "invalid_token", message: "This agent key was cancelled or replaced; sign in again with your current key." }));
+    res.end(JSON.stringify({ error: "invalid_token", message: "This agent key was cancelled or replaced. Use a key that is still active." }));
   };
 
   // ---- /shadow/* (hosted Shadow) -------------------------------------------
