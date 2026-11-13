@@ -54,10 +54,11 @@ test("made_by_agent: a filed key that signed the record", () => {
   const r = checkAgentKey(book.get(ag.fp), cp, 12, { anchoredAt: "2026-11-14T03:00:00Z" });
   assert.equal(r.verdict, "made_by_agent");
   assert.equal(r.text, `Made by agent ${ag.id}, unchanged since 14 November 2026. Key filed 13 November 2026.${CHECKED}`);
-  // An anchor still to land: the checkpoint's own time, and still not key_filed_after (its block is unknown).
-  const pending = checkAgentKey(book.get(ag.fp), agentCp(ag, { createdAt: "2026-12-01T23:59:59Z" }), null);
+  // An anchor still to land: still not key_filed_after (its block is unknown), and nothing is called unchanged since a
+  // time, because nothing on Clockchain fixes one yet.
+  const pending = checkAgentKey(book.get(ag.fp), agentCp(ag, { createdAt: "2026-12-01T23:59:59Z" }), null, { anchoredAt: "2026-12-02T00:00:00Z" });
   assert.equal(pending.verdict, "made_by_agent");
-  assert.equal(pending.text, `Made by agent ${ag.id}, unchanged since 1 December 2026. Key filed 13 November 2026.${CHECKED}`);
+  assert.equal(pending.text, `Signed by agent ${ag.id}. Key filed 13 November 2026. Not yet anchored on Clockchain.${CHECKED}`);
 });
 
 test("key_not_filed: the key is in the book but not on Clockchain yet", () => {
@@ -165,9 +166,22 @@ test("a record that fails its checks is never called unchanged", () => {
   const ag = agentIn(book);
   const made = checkAgentKey(book.get(ag.fp), agentCp(ag), 12);
   assert.deepEqual(failedRecord(made, agentCp(ag)), { verdict: "record_failed", text: `Signed by agent ${ag.id}, but this record failed its checks.${CHECKED}` });
+  // Not yet anchored, too.
+  const unanchored = checkAgentKey(book.get(ag.fp), agentCp(ag), null);
+  assert.deepEqual(failedRecord(unanchored, agentCp(ag)), { verdict: "record_failed", text: `Signed by agent ${ag.id}, but this record failed its checks.${CHECKED}` });
+  // A witnessed record that fails its checks says so, and isn't called witnessed alone.
+  const witness = makeAgentKey();
+  const body = { profile: "shadow-v1", operatorId: "6f1c2d3e-0000-4000-8000-000000000000", sessionId: "s1", count: 2, createdAt: iso(T0) };
+  const h = hash(DOMAIN.checkpoint, body);
+  const acctCp = { body, hash: h, publicKey: witness.publicKeyPem, signature: witness.signHash(h) };
+  const witnessed = checkAgentKey(null, acctCp, 12, { witness: witness.fingerprint });
+  assert.equal(witnessed.verdict, "witnessed");
+  assert.deepEqual(failedRecord(witnessed, acctCp), { verdict: "record_failed", text: `Witnessed by Clockchain for a signed-in account, but this record failed its checks.${CHECKED}` });
   // Any other verdict already says what is wrong, and is kept.
   const other = checkAgentKey(null, agentCp(ag), 12);
   assert.deepEqual(failedRecord(other, agentCp(ag)), other);
+  const legacy = checkAgentKey(null, acctCp, 12);
+  assert.deepEqual(failedRecord(legacy, acctCp), legacy);
 });
 
 test("dates read as plain UTC dates", () => {
@@ -262,7 +276,8 @@ test("an agent checkpoint whose receipt hasn't landed reads the key verdict and 
   await env.svc.signCheckpoint(ag.owner, ag.fp, { session_id: ag.sessionId, hash: toSign.hash, signature: ag.key.signHash(toSign.hash) });
   assert.ok(!metaOf(env.svc, ag.owner, ag.sessionId).anchors.some((a) => a.hash === toSign.hash), "its receipt hasn't landed");
   const html = await viewer(env.svc, ag.owner, ag.sessionId);
-  assert.ok(html.includes(`Made by agent ${ag.id}, unchanged since 15 November 2026. Key filed 13 November 2026.`));
+  assert.ok(html.includes(`Signed by agent ${ag.id}. Key filed 13 November 2026. Not yet anchored on Clockchain.`));
+  assert.ok(!html.includes("unchanged since"), "nothing anchored fixes a time");
   assert.ok(html.includes("This command doesn&#39;t check anchoring"), "the anchoring caveat stays");
   // The signed steps match the agent's key; nothing is called proven, and the open, partly anchored record isn't a pass.
   assert.ok(html.includes('<td class="tag">Matches the signing key</td>'));
@@ -290,6 +305,22 @@ test("a witnessed account's record says so, with where the witness key is publis
   assert.ok(html.includes(`<h1>Shadow evidence summary</h1>\n<p><b>Witnessed by Clockchain for a signed-in account. Checked against Clockchain&#39;s public key list.</b></p>`));
   assert.ok(html.includes("Matches what the server signed"));
   assert.ok(!/<script/i.test(html));
+});
+
+test("a witnessed record that fails its checks says it failed, in shadow_verify and the viewer", async () => {
+  const witness = keyProvider(generateKeyPairSync("ed25519").privateKey);
+  const env = setup({ witness, autoLog: true });
+  const id = await closedAccountSession(env);
+  const meta = metaOf(env.svc, ACCOUNT, id);
+  const file = env.svc.store.eventsPath(meta.ownerKey, meta.sessionId);
+  writeFileSync(file, readFileSync(file, "utf8").replace("TAP at 389 EUR.", "TAP at 999 EUR."));
+  const line = `Witnessed by Clockchain for a signed-in account, but this record failed its checks.${CHECKED}`;
+  const v = await env.svc.verify(ACCOUNT, { session_id: id }, BASE);
+  assert.equal(v.result, "fail");
+  assert.deepEqual(v.agent_key, { verdict: "record_failed", text: line, lookup: "/.well-known/clockchain-witness-key.json" });
+  const html = await viewer(env.svc, ACCOUNT, id);
+  assert.ok(html.includes(`<p><b>${line.replaceAll("'", "&#39;")}</b></p>`));
+  assert.ok(!html.includes(`<p><b>Witnessed by Clockchain for a signed-in account. Checked`));
 });
 
 test("a legacy account's record keeps today's text, and its viewer has no key line", async () => {

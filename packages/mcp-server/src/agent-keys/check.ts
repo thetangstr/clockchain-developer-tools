@@ -54,14 +54,19 @@ export function checkAgentKey(entry: KeyEntry | null, cp: Checkpoint, cpBlock: n
     return { verdict: "key_filed_after", text: `Signed by agent ${agentId}, but its key was filed after this record.${CHECKED}` };
   if (!filed) return { verdict: "key_not_filed", text: `Signed by agent ${agentId}. Its key isn't filed on Clockchain yet.${CHECKED}` };
   const filedAt = entry.filing.filedAt ?? entry.events.find((e) => e.action === "filed")?.at ?? entry.firstSeenAt;
+  // Unchanged since a time only once Clockchain holds the checkpoint at a known block; until then, signed and nothing more.
+  if (cpBlock === null)
+    return { verdict: "made_by_agent", text: `Signed by agent ${agentId}. Key filed ${plainDate(filedAt)}. Not yet anchored on Clockchain.${CHECKED}` };
   return { verdict: "made_by_agent", text: `Made by agent ${agentId}, unchanged since ${plainDate(opts.anchoredAt ?? cp.body.createdAt)}. Key filed ${plainDate(filedAt)}.${CHECKED}` };
 }
 
 /**
  * The verdict for a record that failed its checks for another reason than its key (its steps no longer match the signed
- * checkpoint, say): made_by_agent would claim it unchanged, so it is record_failed instead. Other verdicts already say what's wrong.
+ * checkpoint, say): made_by_agent would claim it unchanged, and witnessed would read as a good record, so each is
+ * record_failed instead. Other verdicts already say what's wrong.
  */
 export function failedRecord(r: KeyCheck, cp: Checkpoint): KeyCheck {
+  if (r.verdict === "witnessed") return { verdict: "record_failed", text: `Witnessed by Clockchain for a signed-in account, but this record failed its checks.${CHECKED}` };
   if (r.verdict !== "made_by_agent") return r;
   const agentId = AGENT_OPERATOR.exec(cp.body.operatorId)![1].slice(0, 16);
   return { verdict: "record_failed", text: `Signed by agent ${agentId}, but this record failed its checks.${CHECKED}` };

@@ -1382,7 +1382,8 @@ export class ShadowService {
       ...(this.agentSigns(meta) && !this.agentKeys ? { noBook: true } : {}),
     });
     const r = failed ? failedRecord(checked, cp) : checked;
-    const lookup = r.verdict === "legacy" || r.verdict === "key_check_unavailable" ? null : r.verdict === "witnessed" ? "/.well-known/clockchain-witness-key.json" : `/agent-keys/${fingerprint(cp.publicKey)}.json`;
+    // Where the signing key is listed, as checked: a failed witnessed record's key is still the witness key.
+    const lookup = checked.verdict === "legacy" || checked.verdict === "key_check_unavailable" ? null : checked.verdict === "witnessed" ? "/.well-known/clockchain-witness-key.json" : `/agent-keys/${fingerprint(cp.publicKey)}.json`;
     return { ...r, lookup };
   }
 
