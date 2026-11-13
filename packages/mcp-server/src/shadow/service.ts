@@ -973,7 +973,14 @@ type Refusal = { code: string; message: string };
 type FinalCheckpoint = { target: string; refused: Refusal | null; sign?: string };
 
 const SIGN_NOTE = "Sign this hash with your key and call shadow_sign_checkpoint.";
-const signView = (hash: string) => ({ hash, note: SIGN_NOTE });
+/**
+ * The hash for the agent to sign, with the step count and head (the last step's hash) it covers, so the agent can compare
+ * them with the steps it recorded before it signs. A step someone else appended with its token changes them.
+ */
+const signView = (meta: SessionMeta, hash: string) => {
+  const body = meta.awaitingSignature?.hash === hash ? meta.awaitingSignature.body : undefined;
+  return { hash, ...(body ? { count: body.count, head: body.head } : {}), note: SIGN_NOTE };
+};
 const AGENT_SIGNS = "The steps are recorded. This agent signs its own checkpoints, so none was made here: call shadow_checkpoint for the hash to sign, then shadow_sign_checkpoint.";
 const NOT_AGENT_OWNER = () => new ShadowError("not_agent_owner", "Only the agent that owns this session can sign its checkpoints, with an active key of its own. Sign in again with your current key.");
 const AGENT_OWNER = /^ak:([0-9a-f]{64})$/;
@@ -2016,7 +2023,7 @@ export class ShadowService {
       session_id: sessionId,
       status: meta.state,
       ...(made.target ? { checkpoint: this.anchorView(meta, made.target, made.refused) } : { note: "The session is closed; anchors still owed were retried." }),
-      ...(made.sign ? { sign: signView(made.sign) } : {}),
+      ...(made.sign ? { sign: signView(meta, made.sign) } : {}),
       pending_anchors: meta.outbox.map(pendingView),
       anchors_today: this.store.anchorsToday(ownerKey, this.today()),
       anchors_per_day: this.limits.maxAnchorsPerOwnerPerDay,
@@ -2070,7 +2077,7 @@ export class ShadowService {
         status: "closed",
         steps: meta.seq,
         final_checkpoint: this.anchorView(meta, made.target, made.refused),
-        ...(made.sign ? { sign: signView(made.sign) } : {}),
+        ...(made.sign ? { sign: signView(meta, made.sign) } : {}),
         anchoring,
         pin,
         ...(this.pinNote(meta) ? { pin_note: this.pinNote(meta) } : {}),

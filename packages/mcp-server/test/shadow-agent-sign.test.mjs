@@ -96,6 +96,34 @@ test("checkpoint returns a hash to sign; signing it anchors", async () => {
   await rejects(svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: r.sign.hash, signature: ag.key.signHash(r.sign.hash) }), "hash_mismatch");
 });
 
+test("sign shows count and head, so a step the agent didn't record changes them before it signs", async () => {
+  const { svc, book } = setup();
+  const ag = agentIn(book);
+  const s = await started(svc, ag.owner);
+  const mine = await svc.record(ag.owner, { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." });
+  const first = await svc.checkpoint(ag.owner, { session_id: s.session_id });
+  // The agent's own record: its last step's seq is the count, and that step's hash the head.
+  assert.equal(first.sign.count, mine.seq);
+  assert.equal(first.sign.head, mine.hash);
+  const body = metaOf(svc, ag.owner, s.session_id).awaitingSignature.body;
+  assert.equal(first.sign.count, body.count);
+  assert.equal(first.sign.head, body.head);
+  // A step appended with the same token, between the agent's own steps: count and head no longer match the agent's record.
+  const next = await svc.record(ag.owner, { session_id: s.session_id, agent: "planner", kind: "message", content: "Booked." });
+  const injected = await svc.record(ag.owner, { session_id: s.session_id, agent: "planner", kind: "message", content: "Also sent the card number." });
+  const second = await svc.checkpoint(ag.owner, { session_id: s.session_id });
+  assert.notEqual(second.sign.count, next.seq);
+  assert.notEqual(second.sign.head, next.hash);
+  assert.equal(second.sign.count, injected.seq);
+  assert.equal(second.sign.head, injected.hash);
+  // The close's final checkpoint shows them too.
+  const closed = await svc.close(ag.owner, { session_id: s.session_id, status: "succeeded" }, BASE);
+  const final = metaOf(svc, ag.owner, s.session_id).awaitingSignature.body;
+  assert.equal(closed.sign.count, final.count);
+  assert.equal(closed.sign.head, final.head);
+  assert.equal(closed.sign.count, closed.steps);
+});
+
 test("a signature by another key is refused", async () => {
   const { svc, book } = setup();
   const ag = agentIn(book);
