@@ -2,7 +2,8 @@
 // the /app/state volume and needs no native module:
 //
 //   owners/<ownerKey>/key.json                      operator id + Ed25519 private key (0600, written once), with no witness key
-//   owners/<ownerKey>/operator.json                 operator id only, with the witness key (SHADOW_WITNESS_KEY_FILE)
+//   owners/<ownerKey>/operator.json                 operator id only, with the witness key (SHADOW_WITNESS_KEY_FILE), which
+//                                                   replaces and removes key.json
 //   owners/<ownerKey>/usage.json                    anchors and session starts today (the per-owner daily limits)
 //   owners/<ownerKey>/settings.json                 written once the owner turns automatic logging off (SHADOW_AUTO_LOG)
 //   owners/<ownerKey>/sessions/<sessionId>/meta.json      small durable JSON: state, head, checkpoint, outbox, anchors
@@ -12,12 +13,13 @@
 // The ownerKey is a hash of the authenticated owner id, so no token, jti or account id appears in a path. JSON files
 // use the handshake surfaces' durable writer (0700 dirs, 0600 files, fsync, rename, .bak). Events are appended with
 // appendDurableLine. A crash between an event append and the meta write is repaired on the next load (reconcile).
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign, timingSafeEqual, type KeyObject } from "node:crypto";
-import { closeSync, existsSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, timingSafeEqual } from "node:crypto";
+import { closeSync, existsSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, rmSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { appendDurableLine, cleanStaleFiles, createDurableJsonFile } from "../handshake-core/durable-store.js";
 import { isLogLevel, levelSetBy, type LevelSetBy, type LogLevel } from "./log-level.js";
 import type { KeyProvider } from "./lib/keys.js";
+import { keyProvider } from "./witness.js";
 import type { Checkpoint, CheckpointBody, Network, ShadowEvent } from "./lib/types.js";
 
 /** Big enough for a session with an anchor per step: about 260 bytes per anchor in meta.anchors. */
@@ -147,13 +149,12 @@ function validateMeta(v: unknown): SessionMeta {
   return v as unknown as SessionMeta;
 }
 
-function keyProvider(privateKey: KeyObject): KeyProvider {
-  // Same construction as the library's provider() in keys.ts.
-  const pem = createPublicKey(privateKey).export({ type: "spki", format: "pem" }).toString();
-  return {
-    publicKey: () => pem,
-    sign: (hashHex) => sign(null, Buffer.from(hashHex, "hex"), privateKey).toString("base64"),
-  };
+function mtimeOf(path: string): Date | undefined {
+  try {
+    return statSync(path).mtime;
+  } catch {
+    return undefined;
+  }
 }
 
 function dirBytes(dir: string): number {
@@ -217,8 +218,9 @@ export class ShadowStore {
 
   /**
    * The owner's operator id and signing key. With the witness key, the key is the witness and the operator id comes from
-   * operator.json, or from a key.json written before (its private key is not read), and no key.json is ever written.
-   * Without it, both come from key.json, created on first use; the private key never leaves that file.
+   * operator.json. An owner from before it has its operator id moved there from key.json, whose private key is then
+   * removed with every copy of it: Clockchain holds no key per account. Without the witness key, both come from key.json,
+   * created on first use (under operator.json's id, if the witness key was on before); the private key never leaves it.
    */
   operator(ownerKey: string, now: Date): Operator {
     const cached = this.operators.get(ownerKey);
@@ -229,34 +231,50 @@ export class ShadowStore {
     return op;
   }
 
-  private witnessedOperatorId(ownerKey: string, now: Date): string {
-    let current: OperatorFile | undefined;
-    const file = createDurableJsonFile<OperatorFile>({
+  private operatorFile(ownerKey: string, current: () => OperatorFile) {
+    return createDurableJsonFile<OperatorFile>({
       path: join(this.ownerDir(ownerKey), "operator.json"),
       schema: "shadow-operator-v1",
-      snapshot: () => current!,
+      snapshot: current,
       validate: (v) => {
-        if (!isObj(v) || typeof v.operatorId !== "string") throw new Error("bad operator file");
+        if (!isObj(v) || typeof v.operatorId !== "string" || typeof v.createdAt !== "string") throw new Error("bad operator file");
         return v as unknown as OperatorFile;
       },
       maxBytes: SMALL_MAX_BYTES,
     });
+  }
+
+  private witnessedOperatorId(ownerKey: string, now: Date): string {
+    let current: OperatorFile | undefined;
+    const file = this.operatorFile(ownerKey, () => current!);
     current = file.load();
-    if (current) return current.operatorId;
-    const old = createDurableJsonFile<{ operatorId: string }>({
-      path: join(this.ownerDir(ownerKey), "key.json"),
-      schema: "shadow-operator-key-v1",
-      snapshot: () => { throw new Error("key.json is never written with the witness key"); },
-      validate: (v) => {
-        if (!isObj(v) || typeof v.operatorId !== "string") throw new Error("bad key file");
-        return { operatorId: v.operatorId };
-      },
-      maxBytes: KEY_MAX_BYTES,
-    }).load();
-    if (old) return old.operatorId;
-    current = { operatorId: randomUUID(), createdAt: now.toISOString() };
-    file.save("now");
+    if (!current) {
+      const keyPath = join(this.ownerDir(ownerKey), "key.json");
+      const old = createDurableJsonFile<OperatorFile>({
+        path: keyPath,
+        schema: "shadow-operator-key-v1",
+        snapshot: () => { throw new Error("key.json is never written with the witness key"); },
+        validate: (v) => {
+          if (!isObj(v) || typeof v.operatorId !== "string") throw new Error("bad key file");
+          return { operatorId: v.operatorId, createdAt: typeof v.createdAt === "string" ? v.createdAt : now.toISOString() };
+        },
+        maxBytes: KEY_MAX_BYTES,
+      }).load();
+      // The retention clock (the file's age, in the sweep) carries over with the id.
+      const since = old ? (mtimeOf(keyPath) ?? mtimeOf(`${keyPath}.bak`)) : undefined;
+      current = old ?? { operatorId: randomUUID(), createdAt: now.toISOString() };
+      file.save("now");
+      if (since) utimesSync(join(this.ownerDir(ownerKey), "operator.json"), since, since);
+    }
+    // Only once the id is durable elsewhere: key.json, its .bak, any quarantined or half-written copy.
+    this.removeHeldKeys(ownerKey);
     return current.operatorId;
+  }
+
+  private removeHeldKeys(ownerKey: string): void {
+    const dir = this.ownerDir(ownerKey);
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir)) if (name === "key.json" || name.startsWith("key.json.")) rmSync(join(dir, name), { force: true });
   }
 
   private ownerKeyOperator(ownerKey: string, now: Date): Operator {
@@ -274,7 +292,9 @@ export class ShadowStore {
     current = file.load();
     if (!current) {
       const privateKeyPem = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-      current = { operatorId: randomUUID(), privateKeyPem, createdAt: now.toISOString() };
+      // An owner made while the witness key was on keeps its operator id.
+      const operatorId = this.operatorFile(ownerKey, () => { throw new Error("operator.json is only read here"); }).load()?.operatorId ?? randomUUID();
+      current = { operatorId, privateKeyPem, createdAt: now.toISOString() };
       file.save("now");
     }
     return { operatorId: current.operatorId, keys: keyProvider(createPrivateKey(current.privateKeyPem)) };
@@ -728,7 +748,7 @@ export class ShadowStore {
           }
         }
         if (remaining === 0) {
-          // The younger of the operator files: an owner whose server switched witness key on and off again may have both.
+          // The younger of the operator files: an owner made with the witness key on, then used with it off, has both.
           let keyAge = Infinity;
           for (const name of ["key.json", "operator.json"]) {
             const p = join(odir, name);

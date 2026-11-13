@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -103,7 +103,12 @@ test("an existing key.json keeps its operatorId but its key is not used for new 
   const legacyKey = (await packetOf(legacy.svc, done.closed.links)).packet.checkpoint.publicKey;
   legacy.svc.stop();
   const keyFile = path.join(ownerDir(dir, A), "key.json");
-  const keyBefore = readFileSync(keyFile, "utf8");
+  // The durable writer keeps a .bak beside a rewritten file, which holds the private key too.
+  copyFileSync(keyFile, `${keyFile}.bak`);
+  const keyCreatedAt = JSON.parse(readFileSync(keyFile, "utf8")).value.createdAt;
+  const old_ = Date.now() - 3 * DAY;
+  utimesSync(keyFile, old_ / 1000, old_ / 1000);
+  const keyMtime = statSync(keyFile).mtimeMs;
 
   const witness = loadWitnessKey(witnessFile());
   const { svc } = setup({ dir, fake, witness });
@@ -119,8 +124,34 @@ test("an existing key.json keeps its operatorId but its key is not used for new 
   assert.notEqual(packet.checkpoint.publicKey, legacyKey);
   assert.equal(packet.checkpoint.body.operatorId, done.closed.pin.operatorId);
   assert.equal((await verifyPacket(packet, { pin })).result, "pass");
-  // key.json is left exactly as it was; no new one is written.
-  assert.equal(readFileSync(keyFile, "utf8"), keyBefore);
+  // The held key is gone, .bak included; operator.json keeps the operator id, and the retention clock where it was.
+  assert.equal(existsSync(keyFile), false);
+  assert.equal(existsSync(`${keyFile}.bak`), false);
+  const opFile = path.join(ownerDir(dir, A), "operator.json");
+  const op = JSON.parse(readFileSync(opFile, "utf8")).value;
+  assert.equal(op.operatorId, done.closed.pin.operatorId);
+  assert.equal(op.createdAt, keyCreatedAt);
+  assert.doesNotMatch(readFileSync(opFile, "utf8"), /PRIVATE KEY/);
+  assert.equal(statSync(opFile).mtimeMs, keyMtime);
+  // A packet signed with the old key still verifies: it carries its own public key.
+  const earlier = await packetOf(svc, done.closed.links);
+  assert.equal(earlier.packet.checkpoint.publicKey, legacyKey);
+  assert.equal((await verifyPacket(earlier.packet, { pin: earlier.pin })).result, "pass");
+});
+
+test("switched back to no witness key, an owner keeps the operator id from operator.json", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-back-"));
+  const fake = new FakeLedger();
+  const witnessed = setup({ dir, fake, witness: loadWitnessKey(witnessFile()) });
+  const first = await shortSession(witnessed.svc);
+  witnessed.svc.stop();
+  const { svc } = setup({ dir, fake });
+  const next = await shortSession(svc);
+  assert.equal(next.closed.pin.operatorId, first.closed.pin.operatorId);
+  assert.ok(existsSync(path.join(ownerDir(dir, A), "key.json")), "a legacy key, under the same operator id");
+  const { packet, pin } = await packetOf(svc, next.closed.links);
+  assert.equal(packet.checkpoint.body.operatorId, first.closed.pin.operatorId);
+  assert.equal((await verifyPacket(packet, { pin })).result, "pass");
 });
 
 test("verifyPacket passes and the pin fingerprint is the witness fingerprint", async () => {

@@ -16,8 +16,8 @@ export class WitnessKeyError extends Error {
   }
 }
 
-function keyProvider(privateKey: KeyObject): KeyProvider {
-  // Same construction as the library's provider() in keys.ts.
+/** A KeyProvider over an Ed25519 private key: the same construction as the library's provider() in keys.ts (not exported there). */
+export function keyProvider(privateKey: KeyObject): KeyProvider {
   const pem = createPublicKey(privateKey).export({ type: "spki", format: "pem" }).toString();
   return {
     publicKey: () => pem,
