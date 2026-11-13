@@ -1,7 +1,6 @@
 import { FREE_TOKENS, NETWORK_PROBLEM, ON_MAINNET } from "./network.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -636,10 +635,14 @@ export async function runHttp(): Promise<Server> {
   if (shadowAutoLog) {
     console.warn(JSON.stringify({ event: "shadow_auto_log_on_listed_paths", note: "SHADOW_AUTO_LOG=1 puts logging on by default on /shadow/mcp and /shadow/chat/mcp. Directories list those paths: use SHADOW_PREVIEW_AUTO_LOG=1 on a listed server" }));
   }
+  // A bad agent-keys value leaves OAuth up and only agent keys off; say so as loudly as OAuth's own misconfiguration.
+  if (oauthConfig.kind === "ready" && oauthConfig.agentKeysProblem) {
+    console.error(`[clockchain-mcp] agent keys misconfigured (off): ${oauthConfig.agentKeysProblem}`);
+  }
   // Agent keys (MCP_AGENT_KEYS=1, with OAuth on): the public book of agents' Ed25519 public keys, one file per key under
   // ${MCP_STATE_DIR:-/app/state}/agent-keys. One instance for the whole server. Off: no book, and nothing reads one.
   const agentKeyBook: AgentKeyBook | undefined = oauthConfig.kind === "ready" && oauthConfig.agentKeys?.enabled
-    ? new AgentKeyBook({ dir: join((process.env.MCP_STATE_DIR ?? "").trim() || "/app/state", "agent-keys"), now: () => new Date() })
+    ? new AgentKeyBook({ dir: oauthConfig.agentKeys.dir, now: () => new Date() })
     : undefined;
   const oauth: OAuthHandler | undefined = oauthConfig.kind === "ready"
     ? createOAuthHandler({

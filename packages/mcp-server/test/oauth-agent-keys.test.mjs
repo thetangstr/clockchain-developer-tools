@@ -37,7 +37,7 @@ async function freeLoopbackPort() {
   return port;
 }
 
-/** The real runHttp wiring with the given env (copied from test/oauth.test.mjs). */
+/** The real runHttp wiring with the given env (copied from test/oauth.test.mjs, plus a retry when the port is taken). */
 async function boot(env) {
   const saved = {};
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
@@ -46,8 +46,14 @@ async function boot(env) {
   for (let attempt = 1; ; attempt++) {
     Object.assign(process.env, { MCP_PORT: String(await freeLoopbackPort()), MCP_AUTH_TOKENS: STATIC_TOKEN, MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: stateDir }, env);
     for (const [k, v] of Object.entries(env)) if (v === undefined) delete process.env[k];
-    server = await runHttp();
-    if (!server.listening) await once(server, "listening");
+    try {
+      server = await runHttp();
+      if (!server.listening) await once(server, "listening");
+    } catch (e) {
+      // Another test took the probed port between the probe and this bind (parallel runs): pick again.
+      if (e?.code !== "EADDRINUSE" || attempt >= 5) throw e;
+      continue;
+    }
     let reached = false;
     const mark = () => { reached = true; };
     server.prependListener("request", mark);
@@ -105,20 +111,59 @@ const grant = (base, assertion, extra = {}) =>
 
 // ---- config -----------------------------------------------------------------
 
-test("config: MCP_AGENT_KEYS=1 adds agentKeys; unset leaves the config as it was; bad values are misconfigured", () => {
+test("config: MCP_AGENT_KEYS=1 adds agentKeys; unset leaves the config as it was; bad values keep OAuth up without agent keys", () => {
   const today = loadOAuthConfig({ MCP_OAUTH: "1" }, SECRET);
   assert.equal("agentKeys" in today, false);
+  assert.equal("agentKeysProblem" in today, false);
   assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "0" }, SECRET), today);
   assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "" }, SECRET), today);
   // Off, the per-address limit is not read at all.
   assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "lots" }, SECRET), today);
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1" }, SECRET), { ...today, agentKeys: { enabled: true, newPerIpPerHour: 10, tokenTtl: 3600 } });
-  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "25" }, SECRET).agentKeys, { enabled: true, newPerIpPerHour: 25, tokenTtl: 3600 });
-  assert.match(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "yes" }, SECRET).reason, /MCP_AGENT_KEYS/);
-  for (const bad of ["0", "lots", "100000"]) {
-    assert.match(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: bad }, SECRET).reason, /MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR/, bad);
+  assert.deepEqual(loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1" }, SECRET), { ...today, agentKeys: { enabled: true, newPerIpPerHour: 10, tokenTtl: 3600, dir: "/app/state/agent-keys" } });
+  assert.deepEqual(
+    loadOAuthConfig({ MCP_OAUTH: "1", MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "25", MCP_STATE_DIR: "/srv/state" }, SECRET).agentKeys,
+    { enabled: true, newPerIpPerHour: 25, tokenTtl: 3600, dir: "/srv/state/agent-keys" },
+  );
+  // A wrong agent-keys value never takes sign-in down: OAuth stays ready exactly as without it, agent keys stay off,
+  // and the problem is reported.
+  const bad = [
+    [{ MCP_AGENT_KEYS: "yes" }, /MCP_AGENT_KEYS must be 1 or 0/],
+    [{ MCP_AGENT_KEYS: "true" }, /MCP_AGENT_KEYS must be 1 or 0/],
+    ...["0", "lots", "100000"].map((v) => [{ MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: v }, /MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR/]),
+  ];
+  for (const [env, reason] of bad) {
+    const config = loadOAuthConfig({ MCP_OAUTH: "1", ...env }, SECRET);
+    const { agentKeysProblem, ...rest } = config;
+    assert.equal(config.kind, "ready", JSON.stringify(env));
+    assert.equal("agentKeys" in config, false, JSON.stringify(env));
+    assert.match(agentKeysProblem, reason, JSON.stringify(env));
+    assert.deepEqual(rest, today, JSON.stringify(env));
   }
   assert.deepEqual(loadOAuthConfig({ MCP_AGENT_KEYS: "1" }, SECRET), { kind: "disabled" });
+  assert.deepEqual(loadOAuthConfig({ MCP_AGENT_KEYS: "yes" }, SECRET), { kind: "disabled" });
+});
+
+test("a wrong MCP_AGENT_KEYS keeps sign-in serving, leaves the grant off, and says so at boot", async () => {
+  const captured = [];
+  const original = console.error;
+  console.error = (...args) => { captured.push(args.join(" ")); };
+  let s;
+  try {
+    s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_AGENT_KEYS: "yes" });
+    const meta = await fetch(`${s.url}/.well-known/oauth-authorization-server`);
+    assert.equal(meta.status, 200, "OAuth is still up");
+    assert.deepEqual((await meta.json()).grant_types_supported, ["authorization_code", "refresh_token"]);
+    const reg = await fetch(`${s.url}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "App", redirect_uris: ["https://example.test/cb"] }) });
+    assert.equal(reg.status, 201, "registration still works");
+    const { client_id } = await reg.json();
+    const res = await grant(s.url, makeAgentKey().assertion(TOKEN_ENDPOINT), { client_id });
+    assert.equal((await res.json()).error, "unsupported_grant_type");
+    assert.equal(existsSync(path.join(s.stateDir, "agent-keys")), false);
+    assert.ok(captured.some((line) => /agent keys misconfigured \(off\).*MCP_AGENT_KEYS must be 1 or 0/.test(line)), captured.join("\n"));
+  } finally {
+    console.error = original;
+    await s?.close();
+  }
 });
 
 test("mintAgentToken carries akf, verifies unchanged, and refuses a malformed fingerprint", () => {

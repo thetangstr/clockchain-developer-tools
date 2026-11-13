@@ -81,15 +81,21 @@ export type OAuthConfig =
       /** The account cookie's name (see accountCookieName). */
       cookieName: string;
       trustedProxy?: string;
-      /** MCP_AGENT_KEYS=1: the client_credentials grant for agent keys. Absent when off. */
-      agentKeys?: {
-        enabled: boolean;
-        /** New keys admitted per IP per hour (MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR, default 10). Known keys don't count. */
-        newPerIpPerHour: number;
-        /** Starter token lifetime, seconds. */
-        tokenTtl: 3600;
-      };
+      /** MCP_AGENT_KEYS=1: the client_credentials grant for agent keys. Absent when off or misconfigured. */
+      agentKeys?: AgentKeysConfig;
+      /** Why agent keys are off despite MCP_AGENT_KEYS being set (a bad value). OAuth itself stays up. */
+      agentKeysProblem?: string;
     };
+
+export interface AgentKeysConfig {
+  enabled: boolean;
+  /** New keys admitted per IP per hour (MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR, default 10). Known keys don't count. */
+  newPerIpPerHour: number;
+  /** Starter token lifetime, seconds. */
+  tokenTtl: 3600;
+  /** The agent key book: <MCP_STATE_DIR>/agent-keys, next to the accounts and the OAuth replay state. */
+  dir: string;
+}
 
 /** An https origin (http only on loopback, for local runs) with no path, query or credentials. */
 /**
@@ -154,14 +160,17 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     counts[name] = raw === "" ? fallback : Number(raw);
   }
   const trustedProxy = (env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim();
-  // Agent keys: "" / "0" / absent = off, and then nothing else about OAuth changes.
+  const stateDir = (env.MCP_STATE_DIR ?? "").trim() || "/app/state";
+  // Agent keys: "" / "0" / absent = off, and then nothing else about OAuth changes. A bad value turns only agent keys
+  // off (reported in agentKeysProblem): it must never take sign-in, refresh or deleted-account checks down with it.
   const agentKeysFlag = (env.MCP_AGENT_KEYS ?? "").trim();
-  let agentKeys: { enabled: boolean; newPerIpPerHour: number; tokenTtl: 3600 } | undefined;
+  let agentKeys: AgentKeysConfig | undefined;
+  let agentKeysProblem: string | undefined;
   if (agentKeysFlag !== "" && agentKeysFlag !== "0") {
-    if (agentKeysFlag !== "1") return { kind: "misconfigured", reason: "MCP_AGENT_KEYS must be 1 or 0" };
     const raw = (env.MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR ?? "").trim();
-    if (raw !== "" && !/^[1-9][0-9]{0,4}$/.test(raw)) return { kind: "misconfigured", reason: "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR must be a whole number from 1 to 99999" };
-    agentKeys = { enabled: true, newPerIpPerHour: raw === "" ? 10 : Number(raw), tokenTtl: 3600 };
+    if (agentKeysFlag !== "1") agentKeysProblem = "MCP_AGENT_KEYS must be 1 or 0";
+    else if (raw !== "" && !/^[1-9][0-9]{0,4}$/.test(raw)) agentKeysProblem = "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR must be a whole number from 1 to 99999";
+    else agentKeys = { enabled: true, newPerIpPerHour: raw === "" ? 10 : Number(raw), tokenTtl: 3600, dir: join(stateDir, "agent-keys") };
   }
   return {
     kind: "ready",
@@ -171,11 +180,12 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     accountsPerIpPerHour: counts.MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR,
     keyAttemptsPerIpPerHour: counts.MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR,
     // Accounts and replay state live on the state volume, next to the handshake and Shadow state.
-    accountsDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "accounts"),
-    replayDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "oauth"),
+    accountsDir: join(stateDir, "accounts"),
+    replayDir: join(stateDir, "oauth"),
     cookieName,
     ...(trustedProxy ? { trustedProxy } : {}),
     ...(agentKeys ? { agentKeys } : {}),
+    ...(agentKeysProblem ? { agentKeysProblem } : {}),
   };
 }
 
