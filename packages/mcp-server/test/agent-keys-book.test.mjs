@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fingerprint } from "../dist/shadow/lib/keys.js";
 import { AgentKeyBook, AgentKeyError } from "../dist/agent-keys/book.js";
 
 const pem = () => generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -82,4 +83,27 @@ test("files are 0600", () => {
   assert.equal(statSync(dir).mode & 0o777, 0o700);
   assert.equal(statSync(join(dir, `${a.fingerprint}.json`)).mode & 0o777, 0o600);
   for (const f of readdirSync(dir)) assert.equal(statSync(join(dir, f)).mode & 0o077, 0);
+});
+
+test("replace is safe to retry after an interruption", () => {
+  const { dir, book } = fresh();
+  const a = book.admit(pem()).entry;
+  const newPem = pem();
+  const newFp = fingerprint(newPem);
+  // The interruption: only the old key's "replaced" mark reached the disk.
+  const path = join(dir, `${a.fingerprint}.json`);
+  const stored = JSON.parse(readFileSync(path, "utf8"));
+  stored.value.status = "replaced";
+  stored.value.replacedBy = newFp;
+  writeFileSync(path, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
+  assert.equal(book.get(a.fingerprint).status, "replaced");
+  assert.equal(book.get(newFp), null);
+  const b = book.replace(a.fingerprint, newPem);
+  assert.equal(b.fingerprint, newFp);
+  assert.equal(b.root, a.fingerprint);
+  assert.equal(b.status, "active");
+  assert.equal(book.get(a.fingerprint).replacedBy, newFp);
+  // A retry once complete returns the same entry; a different key is still refused.
+  assert.deepEqual(book.replace(a.fingerprint, newPem), b);
+  assert.throws(() => book.replace(a.fingerprint, pem()), code("already_replaced"));
 });

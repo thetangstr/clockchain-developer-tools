@@ -89,19 +89,30 @@ export class AgentKeyBook {
     this.save(entry);
   }
 
+  /**
+   * The old key is marked replaced (with replacedBy) before the new entry is written, so an interruption never leaves
+   * the old key valid. Calling replace again with the same new key finishes the job.
+   */
   replace(oldFp: string, newPem: string): KeyEntry {
     const old = this.must(oldFp);
     if (old.status === "revoked") throw new AgentKeyError("already_revoked");
-    if (old.status === "replaced") throw new AgentKeyError("already_replaced");
     const newFp = this.fingerprintOf(newPem);
-    if (newFp === oldFp || this.get(newFp)) throw new AgentKeyError("key_exists");
+    if (old.status === "replaced" && old.replacedBy !== newFp) throw new AgentKeyError("already_replaced");
+    const existing = this.get(newFp);
+    if (existing) {
+      if (old.replacedBy === newFp && existing.root === old.root) return existing;
+      throw new AgentKeyError("key_exists");
+    }
+    if (newFp === oldFp) throw new AgentKeyError("key_exists");
     const at = this.now().toISOString();
+    if (old.status === "active") {
+      old.status = "replaced";
+      old.replacedBy = newFp;
+      old.events.push({ action: "replaced", at });
+      this.save(old);
+    }
     const fresh: KeyEntry = { fingerprint: newFp, publicKeyPem: newPem, root: old.root, status: "active", firstSeenAt: at, filing: { state: "unfiled" }, events: [] };
     this.save(fresh);
-    old.status = "replaced";
-    old.replacedBy = newFp;
-    old.events.push({ action: "replaced", at });
-    this.save(old);
     return fresh;
   }
 
