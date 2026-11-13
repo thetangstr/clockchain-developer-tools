@@ -140,7 +140,7 @@ test("clientIp uses X-Forwarded-For from the trusted proxy", () => {
 });
 
 test("POST /token mint ceiling cannot be dodged by rotating X-Forwarded-For", async () => {
-  const port = 39518;
+  const port = 39562;
   const proc = spawn("node", [fileURLToPath(new URL("../dist/index.js", import.meta.url))], {
     env: {
       ...process.env,
