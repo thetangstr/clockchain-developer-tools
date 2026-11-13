@@ -152,6 +152,10 @@ test("steps after the last signed checkpoint are not proven", async () => {
   const s = await started(svc, ag.owner);
   const { sign } = await svc.checkpoint(ag.owner, { session_id: s.session_id });
   await svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: sign.hash, signature: ag.key.signHash(sign.hash) });
+  // Only the checkpoint's own receipt follows it: no unsigned steps, so verify says nothing of them.
+  const before = await svc.verify(ag.owner, { session_id: s.session_id }, BASE);
+  assert.equal("unsigned_steps" in before, false);
+  assert.equal("unsigned_note" in before, false);
   await svc.record(ag.owner, { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." });
   await svc.record(ag.owner, { session_id: s.session_id, agent: "planner", kind: "message", content: "Booked." });
   const meta = metaOf(svc, ag.owner, s.session_id);
@@ -167,7 +171,11 @@ test("steps after the last signed checkpoint are not proven", async () => {
   // The server never signs for the agent, whatever reads the record.
   await svc.getSession(ag.owner, { session_id: s.session_id }, BASE);
   const v = await svc.verify(ag.owner, { session_id: s.session_id }, BASE);
-  assert.ok(["pass", "indeterminate", "fail"].includes(v.result));
+  // The signed prefix is checked; the session is still open, so it isn't established. The tail is said, not hidden.
+  assert.equal(v.result, "indeterminate", v.summary);
+  assert.equal(v.unsigned_steps, 2);
+  assert.equal(v.unsigned_note, "2 steps were recorded after the last checkpoint the agent signed. They are not signed by the agent, so they are not in what was verified.");
+  assert.match(html, /2 steps were recorded after the last checkpoint the agent signed\. They are not signed by the agent, so they are not on this page\./);
   assert.equal(metaOf(svc, ag.owner, s.session_id).checkpoint.hash, sign.hash);
 });
 
@@ -205,6 +213,11 @@ test("close then sign gives a closed, proven session", async () => {
   const doc = JSON.parse(await svc.packetForCap(capOf(s.links)));
   const report = await verifyPacket(strict(doc.packet), { pin: strict(got.pin) });
   assert.equal(report.result, "pass", JSON.stringify(report.checks));
+  // Everything but the final checkpoint's own receipt is signed: verify names no unsigned steps.
+  const v = await svc.verify(ag.owner, { session_id: s.session_id }, BASE);
+  assert.equal(v.result, "pass", v.summary);
+  assert.equal("unsigned_steps" in v, false);
+  assert.equal("unsigned_note" in v, false);
   // Nothing more is owed: retrying the close finds nothing to do.
   await rejects(svc.close(ag.owner, { session_id: s.session_id }, BASE), "SHADOW_SESSION_CLOSED");
 });

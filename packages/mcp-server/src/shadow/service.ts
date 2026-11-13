@@ -869,14 +869,20 @@ function withAnchoringCaveat(html: string, a: Anchoring): string {
 const NOTHING_SIGNED = "The agent has not signed a checkpoint of this record yet, so none of its steps are signed by the agent and there is nothing to verify. The agent calls shadow_checkpoint for the hash to sign, then shadow_sign_checkpoint.";
 
 /**
- * Says what an agent's signed checkpoint leaves out: steps recorded after it, which are in no checkpoint and so not on this
- * page. Clockchain's receipts are left out of the count: one for the checkpoint itself always lands after it.
+ * Steps recorded after an agent's last signed checkpoint, which are in no checkpoint. Clockchain's receipts are left out of
+ * the count: one for the checkpoint itself always lands after it.
  */
+const unsignedCount = (after: ShadowEvent[]) => after.filter((e) => !e.body.kind.startsWith("clockchain.")).length;
+
+/** The sentence for those steps, ending with where they are missing from ("on this page", "in what was verified"). */
+const unsignedText = (n: number, missingFrom: string) =>
+  `${n} ${n === 1 ? "step was" : "steps were"} recorded after the last checkpoint the agent signed. ${n === 1 ? "It is" : "They are"} not signed by the agent, so ${n === 1 ? "it is" : "they are"} not ${missingFrom}.`;
+
+/** Says on the viewer what an agent's signed checkpoint leaves out. */
 function withUnsignedTail(html: string, after: ShadowEvent[]): string {
-  const n = after.filter((e) => !e.body.kind.startsWith("clockchain.")).length;
+  const n = unsignedCount(after);
   if (!n) return html;
-  const line = `${n} ${n === 1 ? "step was" : "steps were"} recorded after the last checkpoint the agent signed. ${n === 1 ? "It is" : "They are"} not signed by the agent, so ${n === 1 ? "it is" : "they are"} not on this page.`;
-  return html.replace("<h2>What this record shows</h2>", () => `<p class="meta">${escHtml(line)}</p><h2>What this record shows</h2>`);
+  return html.replace("<h2>What this record shows</h2>", () => `<p class="meta">${escHtml(unsignedText(n, "on this page"))}</p><h2>What this record shows</h2>`);
 }
 
 /**
@@ -2119,10 +2125,13 @@ export class ShadowService {
       // Where logging is on by default, a pass also needs every recorded step under an anchored checkpoint. Elsewhere it needs at least some of the record to be.
       const own = this.autoLog ? ownPinReport(checked) : checked;
       const report = anchoringDecides(this.autoLog, anchoring) ? withAnchoring(own, anchoring) : own;
+      // The result is about the signed prefix only, so steps the agent never signed are said beside it.
+      const unsigned = unsignedCount(events.slice(cp.body.count));
       return {
         session_id: sessionId,
         result: report.result,
         summary: report.summary,
+        ...(unsigned ? { unsigned_steps: unsigned, unsigned_note: unsignedText(unsigned, "in what was verified") } : {}),
         checks: report.checks,
         anchoring,
         online: onlineNote,
