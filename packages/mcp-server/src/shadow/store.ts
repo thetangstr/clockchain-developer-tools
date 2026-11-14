@@ -685,11 +685,12 @@ export class ShadowStore {
   }
 
   /**
-   * The whole store, for the idle pass: sessions to close, and closed ones with an anchor due. Gives way to the event loop as
+   * The whole store, for the idle pass: sessions to close, and closed ones with an anchor due (open ones too, when `held`
+   * says nothing but our own hold keeps theirs). Gives way to the event loop as
    * it goes, because every route shares this process. `owed` takes turns: one session per account per round, and each pass
    * starts further along, in accounts and in each account's sessions, so stuck sessions can't keep others off the list.
    */
-  async idleScan(cutoffMs: number, nowMs: number, limit: number): Promise<{ idle: { ownerKey: string; sessionId: string }[]; owed: { ownerKey: string; sessionId: string }[] }> {
+  async idleScan(cutoffMs: number, nowMs: number, limit: number, held?: (m: SessionMeta) => boolean): Promise<{ idle: { ownerKey: string; sessionId: string }[]; owed: { ownerKey: string; sessionId: string }[] }> {
     const ownersDir = join(this.root, "owners");
     if (!existsSync(ownersDir)) return { idle: [], owed: [] };
     const idle: { ownerKey: string; sessionId: string; at: number }[] = [];
@@ -708,6 +709,7 @@ export class ShadowStore {
           }
           const at = this.lastActivity(m);
           if (at <= cutoffMs) idle.push({ ownerKey, sessionId, at });
+          else if (held?.(m)) owing.set(ownerKey, [...(owing.get(ownerKey) ?? []), sessionId]);
         } catch {
           // Unreadable: left for the retention sweep.
         }

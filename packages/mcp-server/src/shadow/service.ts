@@ -128,7 +128,7 @@ const OWN_LIMITS = new Set(["anchor_limit", "log_budget", "starter_limit", "star
 const WAITING_CODES = new Set([...OWN_LIMITS, "key_filing"]);
 /** What holds every row of an agent's session at once: its key not yet filed, or the Starter allowance (or its address's share) used up. */
 const AGENT_HOLDS = new Set(["key_filing", "starter_limit", "starter_source_limit"]);
-const STARTER_USED_UP = "Today's free allowance for new agents is used up.";
+const STARTER_USED_UP = "Today's free allowance for new agents is used up. Try again tomorrow (UTC), or sign in to a Clockchain account.";
 const STARTER_SHARE_USED_UP = "Agents from this address have used their share of today's Starter allowance. Try again tomorrow (UTC), or sign in to a Clockchain account.";
 const FILING_FIRST = "Filing this agent's key on Clockchain first.";
 /** shadow_close_session's person_messages: well beyond any conversation, and small enough to read as a count. */
@@ -1108,7 +1108,8 @@ export class ShadowService {
    * Closes open sessions with no new step for idleCloseMs: a final checkpoint, anchored, as if the person had closed them.
    * Capped per pass, so a backlog after a long stop can't spend a day's anchors at once; the next pass takes the rest.
    * Not at start-up, so a restart can't close a session someone is coming back to before they can reach it. Nobody returns
-   * to a closed session, so the pass also retries the anchors closed sessions still owe, within the same limits.
+   * to a closed session, so the pass also retries the anchors closed sessions still owe, within the same limits, and those of
+   * open agent sessions held by the Starter allowance or a key filing, which a new UTC day or a filing frees.
    */
   async closeIdle(): Promise<number> {
     if (this.idlePassRunning) return 0;
@@ -1118,7 +1119,7 @@ export class ShadowService {
       const now = this.now().getTime();
       // Without idle closing the pass still retries what closed sessions owe: nobody comes back to a closed session.
       const cutoff = this.limits.idleCloseMs ? now - this.limits.idleCloseMs : -Infinity;
-      const { idle, owed } = await this.store.idleScan(cutoff, now, MAX_IDLE_CLOSES_PER_PASS);
+      const { idle, owed } = await this.store.idleScan(cutoff, now, MAX_IDLE_CLOSES_PER_PASS, heldByAgentLimit);
       for (const s of owed) await this.drain(s.ownerKey, s.sessionId, { stopOnFailure: true }).catch((e) => this.log("shadow_idle_close_failed", { sessionId: s.sessionId, error: (e as Error).name }));
       for (const s of idle) {
         try {
@@ -1589,7 +1590,7 @@ export class ShadowService {
           operator_id: m.operatorId,
           start_anchor: outcome.kind === "anchored"
             ? { status: "anchored", ledger_id: outcome.receipt.ledgerId, block: outcome.receipt.blockHeight, block_time: outcome.receipt.blockTime }
-            : { status: "pending", note: "The start marker will be anchored with your next checkpoint." },
+            : { status: "pending", note: "The start marker will be anchored with your next checkpoint.", ...startHeld(m) },
           expires_at: m.expiresAt,
           links: this.links(m, base),
           links_note: LINKS_NOTE,
@@ -2784,6 +2785,18 @@ function anchorFrom(e: ShadowEvent): AnchorInfo | null {
       count: p.checkpoint?.count ?? null, ledgerId: p.ledgerId, blockHeight: p.blockHeight ?? "", blockTime: p.blockTime ?? null, submittedAt: p.submittedAt ?? null,
     };
   return null;
+}
+
+/** Why a new session's start marker waits, when one of our own limits or the agent's key holds it: added to start_anchor. */
+function startHeld(meta: SessionMeta): { reason?: string } {
+  const row = meta.outbox.find((r) => r.kind === "start" && r.lastErrorCode !== null && WAITING_CODES.has(r.lastErrorCode));
+  const reason = row ? reasonOf(row) : null;
+  return reason ? { reason } : {};
+}
+
+/** An open session that waits only on its agent's key or the Starter allowance: the hourly pass tries it, as nobody may call again. */
+function heldByAgentLimit(meta: SessionMeta): boolean {
+  return meta.outbox.some((r) => r.state === "queued" && r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode));
 }
 
 function reasonOf(r: OutboxRow): string | null {

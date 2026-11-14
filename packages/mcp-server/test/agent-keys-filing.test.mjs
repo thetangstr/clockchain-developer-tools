@@ -19,7 +19,8 @@ import { makeAgentKey } from "./helpers/agent-key.mjs";
 
 const BASE = "https://mcp.example.test";
 const FILING_FIRST = "Filing this agent's key on Clockchain first.";
-const STARTER_USED_UP = "Today's free allowance for new agents is used up.";
+const STARTER_USED_UP = "Today's free allowance for new agents is used up. Try again tomorrow (UTC), or sign in to a Clockchain account.";
+const SHARE_USED_UP = "Agents from this address have used their share of today's Starter allowance. Try again tomorrow (UTC), or sign in to a Clockchain account.";
 const ACCOUNT = "user:account-owner";
 
 function setup(o = {}) {
@@ -394,4 +395,62 @@ test("a step deferred while the address's share is used up says so, not that the
   assert.equal(step.anchor_status, "deferred", JSON.stringify(step));
   assert.match(step.anchor_reason, /Agents from this address have used their share of today's Starter allowance, so this stays unanchored unless a later anchor lands\./);
   assert.doesNotMatch(step.anchor_reason, /free allowance for new agents is used up/);
+});
+
+test("a session started over the Starter allowance says why its start marker waits", async () => {
+  const { svc, book } = setup({ limits: { maxStarterAnchorsPerDay: 3 } });
+  await started(svc, agentIn(book).owner); // its filing and its start marker
+  const s = await started(svc, agentIn(book).owner); // its filing is the third; its start marker is over
+  assert.equal(s.start_anchor.status, "pending");
+  assert.equal(s.start_anchor.reason, STARTER_USED_UP);
+
+  const shared = setup({ limits: { maxStarterAnchorsPerSourcePerDay: 1 } });
+  const key = makeAgentKey();
+  const { entry } = shared.book.admit(key.publicKeyPem, "f".repeat(32));
+  const s2 = await started(shared.svc, `ak:${entry.root}`); // its filing is the address's one; its start marker is over
+  assert.equal(s2.start_anchor.status, "pending");
+  assert.equal(s2.start_anchor.reason, SHARE_USED_UP);
+
+  // A start marker that simply anchors, or waits for no limit, has no reason.
+  const plain = setup();
+  const fine = await started(plain.svc, agentIn(plain.book).owner);
+  assert.equal(fine.start_anchor.status, "anchored");
+  assert.equal(fine.start_anchor.reason, undefined);
+});
+
+test("an open agent session held by the Starter allowance is anchored by the hourly pass once the UTC day turns", async () => {
+  const { svc, fake, book, clock } = setup({ limits: { maxStarterAnchorsPerDay: 3 } });
+  await started(svc, agentIn(book).owner);
+  const b = agentIn(book);
+  const s = await started(svc, b.owner);
+  const cp = await signed(svc, b.owner, s.session_id, b.key, b.akf);
+  assert.equal(cp.checkpoint.status, "over_limit");
+  const writes = fake.writes.length;
+
+  // Still the same day: the pass tries, the allowance refuses, and nothing is written.
+  await svc.closeIdle();
+  assert.equal(fake.writes.length, writes);
+  assert.equal(metaOf(svc, b.owner, s.session_id).anchors.length, 0);
+
+  // A new UTC day: the agent doesn't call again, and the pass anchors what it signed.
+  clock.t += 24 * 3_600_000;
+  await svc.closeIdle();
+  const meta = metaOf(svc, b.owner, s.session_id);
+  assert.equal(meta.state, "open", "the session stays open");
+  assert.ok(meta.anchors.some((a) => a.marker === "checkpoint" && a.hash === cp.checkpoint.checkpoint_hash), JSON.stringify(meta.anchors));
+  assert.equal(meta.outbox.filter((r) => r.state !== "failed").length, 0, "nothing is left waiting");
+});
+
+test("the hourly pass leaves open sessions alone when nothing in them waits on a Starter hold", async () => {
+  const { svc, fake, book, clock } = setup();
+  const a = agentIn(book);
+  const s = await started(svc, a.owner);
+  const { sign } = await svc.checkpoint(a.owner, { session_id: s.session_id }); // asked for, never signed
+  assert.ok(sign.hash);
+  const writes = fake.writes.length;
+  const before = JSON.stringify(metaOf(svc, a.owner, s.session_id));
+  clock.t += 24 * 3_600_000;
+  await svc.closeIdle();
+  assert.equal(fake.writes.length, writes);
+  assert.equal(JSON.stringify(metaOf(svc, a.owner, s.session_id)), before, "the session isn't touched");
 });
