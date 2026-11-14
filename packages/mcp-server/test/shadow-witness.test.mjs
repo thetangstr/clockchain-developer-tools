@@ -197,6 +197,65 @@ test("switched back to no witness key, an owner keeps the operator id from opera
   assert.equal((await verifyPacket(packet, { pin })).result, "pass");
 });
 
+test("records made before the witness key still verify after the switch and after the rollback", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-roundtrip-"));
+  const fake = new FakeLedger();
+  const keyFile = path.join(ownerDir(dir, A), "key.json");
+  const opFile = path.join(ownerDir(dir, A), "operator.json");
+  const verifies = async (svc, links, pin) => {
+    const { packet } = await packetOf(svc, links);
+    const v = await verifyPacket(packet, { pin });
+    assert.equal(v.result, "pass", JSON.stringify(v.checks, null, 1));
+    return packet;
+  };
+
+  // 1. No witness key: session A under the account's own key.
+  const before = setup({ dir, fake });
+  const a = await shortSession(before.svc);
+  const first = await packetOf(before.svc, a.closed.links);
+  assert.equal((await verifyPacket(first.packet, { pin: first.pin })).result, "pass");
+  assert.deepEqual(first.packet.checkpoint.body.knownLimits, HOSTED_LIMITS);
+  const operatorId = a.closed.pin.operatorId;
+  const legacyKey = first.packet.checkpoint.publicKey;
+  before.svc.stop();
+
+  // 2. Restart with the witness key.
+  const witness = loadWitnessKey(witnessFile());
+  const switched = setup({ dir, fake, witness });
+  switched.svc.start(); // the start-time migration of every owner's held key
+  assert.equal(existsSync(keyFile), false, "the held key is gone");
+  assert.equal(JSON.parse(readFileSync(opFile, "utf8")).value.operatorId, operatorId);
+  const aSwitched = await verifies(switched.svc, a.closed.links, first.pin);
+  assert.equal(aSwitched.checkpoint.publicKey, legacyKey);
+  assert.deepEqual(aSwitched.checkpoint.body.knownLimits, HOSTED_LIMITS);
+  const html = await switched.svc.summaryForCap(capOf(a.closed.links));
+  // The viewer shows no key line for a legacy record (the limits line it carries is the packet's, checked above).
+  assert.match(html, /Matches what the server signed/);
+  assert.doesNotMatch(html, /Witnessed by Clockchain/);
+  assert.doesNotMatch(html, /Signed by agent/);
+  assert.match(html, /Result: pass/);
+  const b = await shortSession(switched.svc);
+  assert.equal(b.closed.pin.operatorId, operatorId);
+  const bPacket = await verifies(switched.svc, b.closed.links, b.closed.pin);
+  assert.equal(bPacket.checkpoint.publicKey, witness.publicKey());
+  assert.equal(bPacket.checkpoint.body.knownLimits.at(-1), WITNESSED);
+  switched.svc.stop();
+
+  // 3. Restart without it: the rollback.
+  const back = setup({ dir, fake });
+  await verifies(back.svc, a.closed.links, first.pin);
+  await verifies(back.svc, b.closed.links, b.closed.pin);
+  const c = await shortSession(back.svc);
+  assert.equal(c.closed.pin.operatorId, operatorId);
+  assert.ok(existsSync(keyFile), "a fresh per-account key");
+  const cPacket = await verifies(back.svc, c.closed.links, c.closed.pin);
+  assert.equal(cPacket.checkpoint.body.operatorId, operatorId);
+  assert.notEqual(cPacket.checkpoint.publicKey, legacyKey, "a new key, not the deleted one");
+  assert.notEqual(cPacket.checkpoint.publicKey, witness.publicKey());
+  assert.deepEqual(cPacket.checkpoint.body.knownLimits, HOSTED_LIMITS);
+  assert.equal(JSON.parse(readFileSync(opFile, "utf8")).value.operatorId, operatorId);
+});
+
 test("verifyPacket passes and the pin fingerprint is the witness fingerprint", async () => {
   const witness = loadWitnessKey(witnessFile());
   const { svc } = setup({ witness });
