@@ -380,3 +380,18 @@ test("a key's filing payload carries nothing of its source", async () => {
     assert.ok(!sent.includes("source"), "nor a source field");
   }
 });
+
+test("a step deferred while the address's share is used up says so, not that the whole allowance is gone", async () => {
+  const { svc, book } = setup({ limits: { maxStarterAnchorsPerSourcePerDay: 2 } });
+  const key = makeAgentKey();
+  const { entry } = book.admit(key.publicKeyPem, "e".repeat(32));
+  const owner = `ak:${entry.root}`;
+  const s = await svc.logStep(owner, { kind: "task", content: "Find flights", log_level: "turn" }, BASE);
+  const cp = await signed(svc, owner, s.session_id, key, entry.fingerprint);
+  assert.equal(cp.checkpoint.status, "over_limit", JSON.stringify(cp));
+  // A tool call at the turn level has no anchor of its own, and says why the later anchor isn't coming.
+  const step = await svc.logStep(owner, { session_id: s.session_id, kind: "tool_call", content: { tool: "search" } }, BASE);
+  assert.equal(step.anchor_status, "deferred", JSON.stringify(step));
+  assert.match(step.anchor_reason, /Agents from this address have used their share of today's Starter allowance, so this stays unanchored unless a later anchor lands\./);
+  assert.doesNotMatch(step.anchor_reason, /free allowance for new agents is used up/);
+});
