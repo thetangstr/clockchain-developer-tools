@@ -378,3 +378,34 @@ test("a retry after the key is cancelled is still refused", async () => {
   book.revoke(ag.akf);
   await rejects(svc.signCheckpoint(ag.owner, ag.akf, { ...call }), "not_agent_owner");
 });
+
+/** Starts a signature while the session's lock is held, cancels the key with `cancel`, then lets the signature run. */
+async function signWhileCancelled(cancel) {
+  const { svc, fake, book } = setup();
+  const ag = agentIn(book);
+  const s = await started(svc, ag.owner);
+  const { sign } = await svc.checkpoint(ag.owner, { session_id: s.session_id });
+  const before = metaOf(svc, ag.owner, s.session_id);
+  const writes = fake.writes.length;
+  let release, held;
+  await new Promise((entered) => {
+    held = svc.locks.run(`${ownerKeyOf(ag.owner)}/${s.session_id}`, () => new Promise((r) => { release = r; entered(); }));
+  });
+  const p = svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: sign.hash, signature: ag.key.signHash(sign.hash) });
+  cancel(book, ag);
+  release();
+  await held;
+  await rejects(p, "not_agent_owner");
+  const meta = metaOf(svc, ag.owner, s.session_id);
+  assert.equal(meta.awaitingSignature.hash, sign.hash);
+  assert.deepEqual(meta.checkpoint, before.checkpoint);
+  assert.equal(fake.writes.length, writes);
+}
+
+test("a key revoked while its signature waits for the session lock signs nothing", async () => {
+  await signWhileCancelled((book, ag) => book.revoke(ag.akf));
+});
+
+test("a key replaced while its signature waits for the session lock signs nothing", async () => {
+  await signWhileCancelled((book, ag) => book.replace(ag.akf, makeAgentKey().publicKeyPem));
+});

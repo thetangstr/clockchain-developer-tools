@@ -2161,18 +2161,21 @@ export class ShadowService {
     const sessionId = sessionIdOf(input.session_id);
     const root = AGENT_OWNER.exec(ownerId)?.[1];
     if (!root || !this.agentKeys || typeof agentKey !== "string") throw NOT_AGENT_OWNER();
-    let entry: ReturnType<AgentKeyBook["get"]>;
-    try {
-      entry = this.agentKeys.get(agentKey);
-    } catch {
-      this.log("shadow_agent_key_unreadable", { sessionId });
-      throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't read this agent's key right now. Try again later.");
-    }
-    if (!entry || entry.status !== "active" || entry.root !== root) throw NOT_AGENT_OWNER();
-    const key = entry.publicKeyPem;
+    const book = this.agentKeys;
     const ownerKey = ownerKeyOf(ownerId);
     const made: { target: string; refused: Refusal | null } = { target: "", refused: null };
     await this.session(ownerKey, sessionId, (meta) => {
+      // The key is read under the lock, and nothing awaits from here to writeMeta, so a key replaced or revoked while this
+      // call waited for the lock signs nothing.
+      let entry: ReturnType<AgentKeyBook["get"]>;
+      try {
+        entry = book.get(agentKey);
+      } catch {
+        this.log("shadow_agent_key_unreadable", { sessionId });
+        throw new ShadowError("SHADOW_UNAVAILABLE", "Clockchain can't read this agent's key right now. Try again later.");
+      }
+      if (!entry || entry.status !== "active" || entry.root !== root) throw NOT_AGENT_OWNER();
+      const key = entry.publicKeyPem;
       if (!this.agentSigns(meta)) throw NOT_AGENT_OWNER();
       const waiting = meta.awaitingSignature;
       // The same signature over the latest signed checkpoint, resent because the reply was lost: write and queue nothing,
