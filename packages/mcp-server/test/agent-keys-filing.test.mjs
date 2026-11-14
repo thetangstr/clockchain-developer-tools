@@ -427,10 +427,14 @@ test("an open agent session held by the Starter allowance is anchored by the hou
   assert.equal(cp.checkpoint.status, "over_limit");
   const writes = fake.writes.length;
 
-  // Still the same day: the pass tries, the allowance refuses, and nothing is written.
+  assert.equal(cp.checkpoint.note, "Signed and recorded. Shadow anchors it by itself once the allowance has room again; you don't need to call again.");
+  assert.equal(s.start_anchor.note, "Shadow anchors it by itself once the allowance has room again; you don't need to call again.");
+
+  // Still the same day: the allowance has no room, so the pass leaves the session as it is.
+  const before = JSON.stringify(metaOf(svc, b.owner, s.session_id));
   await svc.closeIdle();
   assert.equal(fake.writes.length, writes);
-  assert.equal(metaOf(svc, b.owner, s.session_id).anchors.length, 0);
+  assert.equal(JSON.stringify(metaOf(svc, b.owner, s.session_id)), before, "not even tried");
 
   // A new UTC day: the agent doesn't call again, and the pass anchors what it signed.
   clock.t += 24 * 3_600_000;
@@ -453,4 +457,46 @@ test("the hourly pass leaves open sessions alone when nothing in them waits on a
   await svc.closeIdle();
   assert.equal(fake.writes.length, writes);
   assert.equal(JSON.stringify(metaOf(svc, a.owner, s.session_id)), before, "the session isn't touched");
+});
+
+test("the hourly pass sends a held session's latest checkpoint only, and never a row that failed for another reason", async () => {
+  const { svc, fake, book, clock } = setup({ limits: { maxStarterAnchorsPerDay: 2 } });
+  const a = agentIn(book);
+  const s = await started(svc, a.owner); // its filing and start marker use the day's two
+  const hashes = [];
+  for (const step of ["Compare fares", "Pick the 09:40"]) {
+    await svc.record(a.owner, { session_id: s.session_id, agent: "planner", kind: "note", content: step });
+    hashes.push((await signed(svc, a.owner, s.session_id, a.key, a.akf)).checkpoint.checkpoint_hash);
+  }
+  await svc.record(a.owner, { session_id: s.session_id, agent: "planner", kind: "note", content: "Hold the seat" });
+  hashes.push((await signed(svc, a.owner, s.session_id, a.key, a.akf)).checkpoint.checkpoint_hash);
+  // The first checkpoint failed in an outage instead (as if): the pass must leave it to the agent's next call.
+  const meta = metaOf(svc, a.owner, s.session_id);
+  Object.assign(meta.outbox.find((r) => r.hash === hashes[0]), { lastErrorKind: "Transient", lastErrorCode: "unavailable" });
+  svc.store.writeMeta(meta);
+  const steps = meta.seq;
+
+  clock.t += 24 * 3_600_000;
+  await svc.closeIdle();
+  const after = metaOf(svc, a.owner, s.session_id);
+  assert.deepEqual(after.anchors.filter((x) => x.marker === "checkpoint").map((x) => x.hash), [hashes[2]], "only the latest checkpoint is sent");
+  assert.equal(fake.writes.length, 3);
+  const first = after.outbox.find((r) => r.hash === hashes[0]);
+  assert.equal(first.lastErrorCode, "unavailable");
+  assert.equal(first.attempts, 0, "the failed row's tries aren't used up");
+  assert.ok(after.outbox.some((r) => r.hash === hashes[1] && r.state === "queued"), "the middle one waits for the agent");
+  assert.equal(svc.store.readEvents(after).slice(steps).filter((e) => e.body.kind === "clockchain.error").length, 0);
+});
+
+test("the hourly pass leaves an open session held by an account-style limit to the next call", async () => {
+  const { svc, fake, book, clock } = setup({ limits: { maxAnchorsPerOwnerPerDay: 1 } });
+  const b = agentIn(book);
+  const s = await started(svc, b.owner); // the filing takes the owner's one anchor; the start marker waits on anchor_limit
+  assert.equal(metaOf(svc, b.owner, s.session_id).outbox[0].lastErrorCode, "anchor_limit");
+  const before = JSON.stringify(metaOf(svc, b.owner, s.session_id));
+  const writes = fake.writes.length;
+  clock.t += 24 * 3_600_000;
+  await svc.closeIdle();
+  assert.equal(fake.writes.length, writes);
+  assert.equal(JSON.stringify(metaOf(svc, b.owner, s.session_id)), before);
 });

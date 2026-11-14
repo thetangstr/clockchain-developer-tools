@@ -131,6 +131,8 @@ const AGENT_HOLDS = new Set(["key_filing", "starter_limit", "starter_source_limi
 const STARTER_USED_UP = "Today's free allowance for new agents is used up. Try again tomorrow (UTC), or sign in to a Clockchain account.";
 const STARTER_SHARE_USED_UP = "Agents from this address have used their share of today's Starter allowance. Try again tomorrow (UTC), or sign in to a Clockchain account.";
 const FILING_FIRST = "Filing this agent's key on Clockchain first.";
+/** What happens to an anchor held by the agent's key or the Starter allowance: the hourly pass sends it when it can. */
+const HELD_NOTE = "Shadow anchors it by itself once the allowance has room again; you don't need to call again.";
 /** shadow_close_session's person_messages: well beyond any conversation, and small enough to read as a count. */
 export const MAX_PERSON_MESSAGES = 10_000;
 
@@ -543,10 +545,19 @@ function finalOwed(meta: SessionMeta): boolean {
  * The next row to send. Oldest first, except on a closed session: there the close's row covers everything, so it goes first,
  * and older unpaid rows wait, because once it lands they aren't worth an anchor (see supersede). A row already written costs
  * nothing to follow up. A row backing off is passed over, so it holds up nothing behind it, unless `now` is null: a person asked.
+ * `held` is the hourly pass on an open session that waits on its agent's key or the Starter allowance: it sends only the start
+ * marker and the latest checkpoint, and only if a hold or nothing yet stopped them, so it can't use up a row's tries in an
+ * outage nobody is watching, or spend a new day's allowance on checkpoints the latest one covers.
  */
-function nextRow(meta: SessionMeta, tried: Set<string>, now: number | null): OutboxRow | undefined {
+function nextRow(meta: SessionMeta, tried: Set<string>, now: number | null, held = false): OutboxRow | undefined {
   const live = meta.outbox.filter((r) => r.state !== "failed");
   const due = (r: OutboxRow) => !tried.has(r.id) && (now === null || !r.nextTryAt || Date.parse(r.nextTryAt) <= now);
+  if (held && meta.state !== "closed") {
+    // The latest checkpoint is the one reaching furthest, anchored ones included: once it lands, the rest aren't sent.
+    const top = Math.max(0, ...meta.anchors.map((x) => x.count ?? 0), ...live.filter((r) => r.kind === "checkpoint").map((r) => r.body?.count ?? 0));
+    const latest = (r: OutboxRow) => r.kind === "checkpoint" && (r.body?.count ?? 0) === top;
+    return live.find((r) => due(r) && (r.kind === "start" || latest(r)) && (r.lastErrorCode === null || AGENT_HOLDS.has(r.lastErrorCode)));
+  }
   if (meta.state !== "closed") return live.find(due);
   const checkpoints = live.filter((r) => r.kind === "checkpoint").sort((a, b) => (b.body?.count ?? 0) - (a.body?.count ?? 0));
   return [...checkpoints.slice(0, 1), ...live.filter((r) => r.kind === "start"), ...checkpoints.slice(1).filter((r) => r.ledgerId)].find(due);
@@ -1109,7 +1120,7 @@ export class ShadowService {
    * Capped per pass, so a backlog after a long stop can't spend a day's anchors at once; the next pass takes the rest.
    * Not at start-up, so a restart can't close a session someone is coming back to before they can reach it. Nobody returns
    * to a closed session, so the pass also retries the anchors closed sessions still owe, within the same limits, and those of
-   * open agent sessions held by the Starter allowance or a key filing, which a new UTC day or a filing frees.
+   * open agent sessions held by the Starter allowance or a key filing once there is room (see heldWithRoom and nextRow).
    */
   async closeIdle(): Promise<number> {
     if (this.idlePassRunning) return 0;
@@ -1119,8 +1130,9 @@ export class ShadowService {
       const now = this.now().getTime();
       // Without idle closing the pass still retries what closed sessions owe: nobody comes back to a closed session.
       const cutoff = this.limits.idleCloseMs ? now - this.limits.idleCloseMs : -Infinity;
-      const { idle, owed } = await this.store.idleScan(cutoff, now, MAX_IDLE_CLOSES_PER_PASS, heldByAgentLimit);
+      const { idle, owed, held } = await this.store.idleScan(cutoff, now, MAX_IDLE_CLOSES_PER_PASS, this.heldWithRoom());
       for (const s of owed) await this.drain(s.ownerKey, s.sessionId, { stopOnFailure: true }).catch((e) => this.log("shadow_idle_close_failed", { sessionId: s.sessionId, error: (e as Error).name }));
+      for (const s of held) await this.drain(s.ownerKey, s.sessionId, { stopOnFailure: true, held: true }).catch((e) => this.log("shadow_idle_close_failed", { sessionId: s.sessionId, error: (e as Error).name }));
       for (const s of idle) {
         try {
           if (!(await this.finishIdle(s.ownerKey, s.sessionId, cutoff))) continue;
@@ -1137,6 +1149,29 @@ export class ShadowService {
     }
     if (closed) this.log("shadow_idle_closed", { closed });
     return closed;
+  }
+
+  /**
+   * For the hourly pass: whether an open session waits only on its agent's key or the Starter allowance, and the allowance
+   * (its address's share included) has room now, so a session can't take a turn just to be refused. Asks once per address.
+   */
+  private heldWithRoom(): (meta: SessionMeta) => boolean {
+    const room = new Map<string, boolean>();
+    return (meta) => {
+      const rows = meta.outbox.filter((r) => r.state === "queued" && r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode));
+      if (!rows.length || !this.starterAnchors) return false;
+      const source = this.sourceOf(meta.agentRoot);
+      const k = source ?? "";
+      if (!room.has(k)) {
+        try {
+          this.starterAnchors.check(source);
+          room.set(k, true);
+        } catch {
+          room.set(k, false);
+        }
+      }
+      return room.get(k)!;
+    };
   }
 
   /** Closes one session, unless a step has landed since the cutoff. Its open runs become gaps that say why. */
@@ -1590,7 +1625,7 @@ export class ShadowService {
           operator_id: m.operatorId,
           start_anchor: outcome.kind === "anchored"
             ? { status: "anchored", ledger_id: outcome.receipt.ledgerId, block: outcome.receipt.blockHeight, block_time: outcome.receipt.blockTime }
-            : { status: "pending", note: "The start marker will be anchored with your next checkpoint.", ...startHeld(m) },
+            : { status: "pending", note: heldByAgent(m) ? HELD_NOTE : "The start marker will be anchored with your next checkpoint.", ...startHeld(m) },
           expires_at: m.expiresAt,
           links: this.links(m, base),
           links_note: LINKS_NOTE,
@@ -2632,7 +2667,7 @@ export class ShadowService {
   }
 
   /** Drains the session's outbox once; concurrent callers share the pass. Never holds the lock across the network. */
-  private drain(ownerKey: string, sessionId: string, o: { deadline?: number; stopOnFailure?: boolean; asked?: boolean } = {}): Promise<void> {
+  private drain(ownerKey: string, sessionId: string, o: { deadline?: number; stopOnFailure?: boolean; asked?: boolean; held?: boolean } = {}): Promise<void> {
     const key = `${ownerKey}/${sessionId}`;
     const running = this.drains.get(key);
     if (running) return running;
@@ -2641,13 +2676,13 @@ export class ShadowService {
     return p;
   }
 
-  private async drainOnce(ownerKey: string, sessionId: string, o: { deadline?: number; stopOnFailure?: boolean; asked?: boolean }): Promise<void> {
+  private async drainOnce(ownerKey: string, sessionId: string, o: { deadline?: number; stopOnFailure?: boolean; asked?: boolean; held?: boolean }): Promise<void> {
     const tried = new Set<string>();
     const deadline = o.deadline ?? Date.now() + ANCHOR_BUDGET_MS;
     for (;;) {
       if (Date.now() >= deadline) return; // What is left stays queued for the next call.
       const next = await this.session(ownerKey, sessionId, (meta) => {
-        const row = nextRow(meta, tried, o.asked ? null : this.now().getTime());
+        const row = nextRow(meta, tried, o.asked ? null : this.now().getTime(), o.held === true);
         if (!row) return null;
         // Owed on a network this server has left: never written to the new one.
         if (meta.network !== this.network) {
@@ -2762,7 +2797,7 @@ export class ShadowService {
     const a = meta.anchors.find((x) => x.hash === hash);
     if (a) return { status: "anchored", checkpoint_hash: hash, covers_steps: a.count, ledger_id: a.ledgerId, block: a.blockHeight, block_time: a.blockTime, submitted_at: a.submittedAt };
     const r = meta.outbox.find((x) => x.hash === hash);
-    if (r) return { status: r.state === "failed" ? "failed" : r.lastErrorCode === "starter_limit" || r.lastErrorCode === "starter_source_limit" ? "over_limit" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : r.lastErrorCode === "search_refused" ? "Signed and recorded. Whether it reached Clockchain isn't known." : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
+    if (r) return { status: r.state === "failed" ? "failed" : r.lastErrorCode === "starter_limit" || r.lastErrorCode === "starter_source_limit" ? "over_limit" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : r.lastErrorCode === "search_refused" ? "Signed and recorded. Whether it reached Clockchain isn't known." : r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode) ? `Signed and recorded. ${HELD_NOTE}` : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
     if (refused) return { status: "not_anchored", checkpoint_hash: hash, covers_steps: meta.checkpoint?.body.count ?? null, code: refused.code, reason: refused.message };
     return { status: "not_anchored", checkpoint_hash: hash };
   }
@@ -2787,16 +2822,16 @@ function anchorFrom(e: ShadowEvent): AnchorInfo | null {
   return null;
 }
 
+/** Whether a new session's start marker waits on its agent's key or the Starter allowance, which the hourly pass retries. */
+function heldByAgent(meta: SessionMeta): boolean {
+  return meta.outbox.some((r) => r.kind === "start" && r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode));
+}
+
 /** Why a new session's start marker waits, when one of our own limits or the agent's key holds it: added to start_anchor. */
 function startHeld(meta: SessionMeta): { reason?: string } {
   const row = meta.outbox.find((r) => r.kind === "start" && r.lastErrorCode !== null && WAITING_CODES.has(r.lastErrorCode));
   const reason = row ? reasonOf(row) : null;
   return reason ? { reason } : {};
-}
-
-/** An open session that waits only on its agent's key or the Starter allowance: the hourly pass tries it, as nobody may call again. */
-function heldByAgentLimit(meta: SessionMeta): boolean {
-  return meta.outbox.some((r) => r.state === "queued" && r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode));
 }
 
 function reasonOf(r: OutboxRow): string | null {

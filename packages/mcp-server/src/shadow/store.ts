@@ -685,15 +685,16 @@ export class ShadowStore {
   }
 
   /**
-   * The whole store, for the idle pass: sessions to close, and closed ones with an anchor due (open ones too, when `held`
-   * says nothing but our own hold keeps theirs). Gives way to the event loop as
+   * The whole store, for the idle pass: sessions to close, closed ones with an anchor due, and open ones `waits` picks (an
+   * agent's anchors held by our own limit, now with room), oldest first and capped on their own. Gives way to the event loop as
    * it goes, because every route shares this process. `owed` takes turns: one session per account per round, and each pass
    * starts further along, in accounts and in each account's sessions, so stuck sessions can't keep others off the list.
    */
-  async idleScan(cutoffMs: number, nowMs: number, limit: number, held?: (m: SessionMeta) => boolean): Promise<{ idle: { ownerKey: string; sessionId: string }[]; owed: { ownerKey: string; sessionId: string }[] }> {
+  async idleScan(cutoffMs: number, nowMs: number, limit: number, waits?: (m: SessionMeta) => boolean): Promise<{ idle: { ownerKey: string; sessionId: string }[]; owed: { ownerKey: string; sessionId: string }[]; held: { ownerKey: string; sessionId: string }[] }> {
     const ownersDir = join(this.root, "owners");
-    if (!existsSync(ownersDir)) return { idle: [], owed: [] };
+    if (!existsSync(ownersDir)) return { idle: [], owed: [], held: [] };
     const idle: { ownerKey: string; sessionId: string; at: number }[] = [];
+    const held: { ownerKey: string; sessionId: string; at: number }[] = [];
     const owing = new Map<string, string[]>();
     let read = 0;
     for (const ownerKey of readdirSync(ownersDir)) {
@@ -709,13 +710,14 @@ export class ShadowStore {
           }
           const at = this.lastActivity(m);
           if (at <= cutoffMs) idle.push({ ownerKey, sessionId, at });
-          else if (held?.(m)) owing.set(ownerKey, [...(owing.get(ownerKey) ?? []), sessionId]);
+          else if (waits?.(m)) held.push({ ownerKey, sessionId, at });
         } catch {
           // Unreadable: left for the retention sweep.
         }
       }
     }
-    return { idle: idle.sort((a, b) => a.at - b.at).slice(0, limit).map(({ ownerKey, sessionId }) => ({ ownerKey, sessionId })), owed: this.takeTurns(owing, limit) };
+    const oldest = (list: { ownerKey: string; sessionId: string; at: number }[]) => list.sort((a, b) => a.at - b.at).slice(0, limit).map(({ ownerKey, sessionId }) => ({ ownerKey, sessionId }));
+    return { idle: oldest(idle), owed: this.takeTurns(owing, limit), held: oldest(held) };
   }
 
   private takeTurns(owing: Map<string, string[]>, limit: number): { ownerKey: string; sessionId: string }[] {
