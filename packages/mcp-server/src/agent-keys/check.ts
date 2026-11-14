@@ -53,12 +53,12 @@ export function checkAgentKey(entry: KeyEntry | null, cp: Checkpoint, cpBlock: n
   const filed = entry.filing.state === "filed";
   if (filed && entry.filing.block !== undefined && cpBlock !== null && entry.filing.block > cpBlock)
     return { verdict: "key_filed_after", text: `Signed by agent ${agentId}, but its key was filed after this record.${CHECKED}` };
-  if (!filed) return { verdict: "key_not_filed", text: `Signed by agent ${agentId}. Its key isn't filed on Clockchain yet.${SCOPE}${CHECKED}` };
+  if (!filed) return { verdict: "key_not_filed", text: `Signed by agent ${agentId}. Its key isn't filed on Clockchain yet.${CHECKED}${SCOPE}` };
   const filedAt = entry.filing.filedAt ?? entry.events.find((e) => e.action === "filed")?.at ?? entry.firstSeenAt;
   // Unchanged since a time only once Clockchain holds the checkpoint at a known block; until then, signed and nothing more.
   if (cpBlock === null)
-    return { verdict: "made_by_agent", text: `Signed by agent ${agentId}. Key filed ${plainDate(filedAt)}. Not yet anchored on Clockchain.${SCOPE}${CHECKED}` };
-  return { verdict: "made_by_agent", text: `Made by agent ${agentId}, unchanged since ${plainDate(opts.anchoredAt ?? cp.body.createdAt)}. Key filed ${plainDate(filedAt)}.${SCOPE}${CHECKED}` };
+    return { verdict: "made_by_agent", text: `Signed by agent ${agentId}. Key filed ${plainDate(filedAt)}. Not yet anchored on Clockchain.${CHECKED}${SCOPE}` };
+  return { verdict: "made_by_agent", text: `Made by agent ${agentId}, unchanged since ${plainDate(opts.anchoredAt ?? cp.body.createdAt)}. Key filed ${plainDate(filedAt)}.${CHECKED}${SCOPE}` };
 }
 
 /**

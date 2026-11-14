@@ -53,12 +53,12 @@ test("made_by_agent: a filed key that signed the record", () => {
   const cp = agentCp(ag);
   const r = checkAgentKey(book.get(ag.fp), cp, 12, { anchoredAt: "2026-11-14T03:00:00Z" });
   assert.equal(r.verdict, "made_by_agent");
-  assert.equal(r.text, `Made by agent ${ag.id}, unchanged since 14 November 2026. Key filed 13 November 2026.${SCOPE}${CHECKED}`);
+  assert.equal(r.text, `Made by agent ${ag.id}, unchanged since 14 November 2026. Key filed 13 November 2026.${CHECKED}${SCOPE}`);
   // An anchor still to land: still not key_filed_after (its block is unknown), and nothing is called unchanged since a
   // time, because nothing on Clockchain fixes one yet.
   const pending = checkAgentKey(book.get(ag.fp), agentCp(ag, { createdAt: "2026-12-01T23:59:59Z" }), null, { anchoredAt: "2026-12-02T00:00:00Z" });
   assert.equal(pending.verdict, "made_by_agent");
-  assert.equal(pending.text, `Signed by agent ${ag.id}. Key filed 13 November 2026. Not yet anchored on Clockchain.${SCOPE}${CHECKED}`);
+  assert.equal(pending.text, `Signed by agent ${ag.id}. Key filed 13 November 2026. Not yet anchored on Clockchain.${CHECKED}${SCOPE}`);
 });
 
 test("key_not_filed: the key is in the book but not on Clockchain yet", () => {
@@ -68,7 +68,7 @@ test("key_not_filed: the key is in the book but not on Clockchain yet", () => {
     const ag = agentIn(book, filing);
     const r = checkAgentKey(book.get(ag.fp), agentCp(ag), 12);
     assert.equal(r.verdict, "key_not_filed");
-    assert.equal(r.text, `Signed by agent ${ag.id}. Its key isn't filed on Clockchain yet.${SCOPE}${CHECKED}`);
+    assert.equal(r.text, `Signed by agent ${ag.id}. Its key isn't filed on Clockchain yet.${CHECKED}${SCOPE}`);
   }
 });
 
@@ -228,7 +228,7 @@ test("shadow_verify says who made an agent's record, and where its key is listed
   const ag = await agentSession(env);
   const v = await env.svc.verify(ag.owner, { session_id: ag.sessionId }, BASE);
   assert.equal(v.agent_key.verdict, "made_by_agent");
-  assert.equal(v.agent_key.text, `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${SCOPE}${CHECKED}`);
+  assert.equal(v.agent_key.text, `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${CHECKED}${SCOPE}`);
   assert.equal(v.agent_key.lookup, `/agent-keys/${ag.fp}.json`);
   // The own-pin wording is the server's, which didn't sign here: the agent-key line replaces it.
   const trust = v.checks.find((c) => c.name === "trust");
@@ -241,7 +241,7 @@ test("the viewer HTML contains the verdict text and no script tag", async () => 
   const env = setup();
   const ag = await agentSession(env);
   const html = await viewer(env.svc, ag.owner, ag.sessionId);
-  const text = `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${SCOPE}${CHECKED}`;
+  const text = `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${CHECKED}${SCOPE}`;
   assert.ok(html.includes(`<h1>Shadow evidence summary</h1>\n<p><b>${text.replaceAll("'", "&#39;")}</b></p>`), "the first line under the title");
   assert.ok(!/<script/i.test(html));
   assert.ok(html.includes(`content="${SUMMARY_CSP.replaceAll("'", "&#39;")}"`), "the page's CSP is unchanged");
