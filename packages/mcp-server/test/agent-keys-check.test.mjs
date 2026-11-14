@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { checkAgentKey, failedRecord, plainDate } from "../dist/agent-keys/check.js";
+import { checkAgentKey, failedRecord, plainDate, SCOPE } from "../dist/agent-keys/check.js";
 import { AgentKeyBook } from "../dist/agent-keys/book.js";
 import { ShadowService } from "../dist/shadow/service.js";
 import { DOMAIN, hash } from "../dist/shadow/lib/profile.js";
@@ -53,12 +53,12 @@ test("made_by_agent: a filed key that signed the record", () => {
   const cp = agentCp(ag);
   const r = checkAgentKey(book.get(ag.fp), cp, 12, { anchoredAt: "2026-11-14T03:00:00Z" });
   assert.equal(r.verdict, "made_by_agent");
-  assert.equal(r.text, `Made by agent ${ag.id}, unchanged since 14 November 2026. Key filed 13 November 2026.${CHECKED}`);
+  assert.equal(r.text, `Made by agent ${ag.id}, unchanged since 14 November 2026. Key filed 13 November 2026.${SCOPE}${CHECKED}`);
   // An anchor still to land: still not key_filed_after (its block is unknown), and nothing is called unchanged since a
   // time, because nothing on Clockchain fixes one yet.
   const pending = checkAgentKey(book.get(ag.fp), agentCp(ag, { createdAt: "2026-12-01T23:59:59Z" }), null, { anchoredAt: "2026-12-02T00:00:00Z" });
   assert.equal(pending.verdict, "made_by_agent");
-  assert.equal(pending.text, `Signed by agent ${ag.id}. Key filed 13 November 2026. Not yet anchored on Clockchain.${CHECKED}`);
+  assert.equal(pending.text, `Signed by agent ${ag.id}. Key filed 13 November 2026. Not yet anchored on Clockchain.${SCOPE}${CHECKED}`);
 });
 
 test("key_not_filed: the key is in the book but not on Clockchain yet", () => {
@@ -68,7 +68,7 @@ test("key_not_filed: the key is in the book but not on Clockchain yet", () => {
     const ag = agentIn(book, filing);
     const r = checkAgentKey(book.get(ag.fp), agentCp(ag), 12);
     assert.equal(r.verdict, "key_not_filed");
-    assert.equal(r.text, `Signed by agent ${ag.id}. Its key isn't filed on Clockchain yet.${CHECKED}`);
+    assert.equal(r.text, `Signed by agent ${ag.id}. Its key isn't filed on Clockchain yet.${SCOPE}${CHECKED}`);
   }
 });
 
@@ -145,7 +145,7 @@ test("witnessed: an account's checkpoint under Clockchain's published witness ke
   const h = hash(DOMAIN.checkpoint, body);
   const cp = { body, hash: h, publicKey: pem, signature: sign(null, Buffer.from(h, "hex"), privateKey).toString("base64") };
   const r = checkAgentKey(null, cp, 12, { witness: fingerprint(pem) });
-  assert.deepEqual(r, { verdict: "witnessed", text: `Witnessed by Clockchain for a signed-in account.${CHECKED}` });
+  assert.deepEqual(r, { verdict: "witnessed", text: `Witnessed by Clockchain for a signed-in account: Clockchain's key signed these steps as it received them, not the agent's own key.${CHECKED}` });
   // A per-owner key of before: today's text, with no claim about a key list.
   const legacy = checkAgentKey(null, cp, 12);
   assert.deepEqual(legacy, { verdict: "legacy", text: HOSTED_LIMITS.at(-1) });
@@ -157,7 +157,7 @@ test("key_check_unavailable: with no key book, nothing is checked and nothing is
   const clock = { t: T0 };
   const ag = agentIn(bookAt(clock));
   const r = checkAgentKey(null, agentCp(ag), 12, { noBook: true });
-  assert.deepEqual(r, { verdict: "key_check_unavailable", text: `Signed by agent ${ag.id}. Its key can't be checked right now.` });
+  assert.deepEqual(r, { verdict: "key_check_unavailable", text: `Signed by agent ${ag.id}. Its key can't be checked right now.${SCOPE}` });
 });
 
 test("a record that fails its checks is never called unchanged", () => {
@@ -228,7 +228,7 @@ test("shadow_verify says who made an agent's record, and where its key is listed
   const ag = await agentSession(env);
   const v = await env.svc.verify(ag.owner, { session_id: ag.sessionId }, BASE);
   assert.equal(v.agent_key.verdict, "made_by_agent");
-  assert.equal(v.agent_key.text, `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${CHECKED}`);
+  assert.equal(v.agent_key.text, `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${SCOPE}${CHECKED}`);
   assert.equal(v.agent_key.lookup, `/agent-keys/${ag.fp}.json`);
   // The own-pin wording is the server's, which didn't sign here: the agent-key line replaces it.
   const trust = v.checks.find((c) => c.name === "trust");
@@ -241,7 +241,7 @@ test("the viewer HTML contains the verdict text and no script tag", async () => 
   const env = setup();
   const ag = await agentSession(env);
   const html = await viewer(env.svc, ag.owner, ag.sessionId);
-  const text = `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${CHECKED}`;
+  const text = `Made by agent ${ag.id}, unchanged since 13 November 2026. Key filed 13 November 2026.${SCOPE}${CHECKED}`;
   assert.ok(html.includes(`<h1>Shadow evidence summary</h1>\n<p><b>${text.replaceAll("'", "&#39;")}</b></p>`), "the first line under the title");
   assert.ok(!/<script/i.test(html));
   assert.ok(html.includes(`content="${SUMMARY_CSP.replaceAll("'", "&#39;")}"`), "the page's CSP is unchanged");
@@ -298,11 +298,11 @@ test("a witnessed account's record says so, with where the witness key is publis
   const env = setup({ witness, autoLog: true });
   const id = await accountSession(env);
   const v = await env.svc.verify(ACCOUNT, { session_id: id }, BASE);
-  assert.deepEqual(v.agent_key, { verdict: "witnessed", text: `Witnessed by Clockchain for a signed-in account.${CHECKED}`, lookup: "/.well-known/clockchain-witness-key.json" });
+  assert.deepEqual(v.agent_key, { verdict: "witnessed", text: `Witnessed by Clockchain for a signed-in account: Clockchain's key signed these steps as it received them, not the agent's own key.${CHECKED}`, lookup: "/.well-known/clockchain-witness-key.json" });
   // The server did sign this one, so its own-pin wording stays.
   assert.equal(v.checks.find((c) => c.name === "trust").reason.startsWith("Matches the pin from this server."), true);
   const html = await viewer(env.svc, ACCOUNT, id);
-  assert.ok(html.includes(`<h1>Shadow evidence summary</h1>\n<p><b>Witnessed by Clockchain for a signed-in account. Checked against Clockchain&#39;s public key list.</b></p>`));
+  assert.ok(html.includes(`<h1>Shadow evidence summary</h1>\n<p><b>${("Witnessed by Clockchain for a signed-in account: Clockchain's key signed these steps as it received them, not the agent's own key." + CHECKED).replaceAll("'", "&#39;")}</b></p>`));
   assert.ok(html.includes("Matches what the server signed"));
   assert.ok(!/<script/i.test(html));
 });
@@ -461,7 +461,7 @@ test("with the key book off, an agent's record says its key can't be checked, is
   const ag = await closedAgentSession(env);
   assert.equal((await verifyOf(env, ag)).result, "pass");
   const off = setup({ stateDir: env.stateDir, clock: env.clock, noBook: true });
-  const text = `Signed by agent ${ag.id}. Its key can't be checked right now.`;
+  const text = `Signed by agent ${ag.id}. Its key can't be checked right now.${SCOPE}`;
   const v = await off.svc.verify(ag.owner, { session_id: ag.sessionId }, BASE);
   assert.equal(v.agent_key.verdict, "key_check_unavailable");
   assert.equal(v.agent_key.text, text);
@@ -471,4 +471,13 @@ test("with the key book off, an agent's record says its key can't be checked, is
   assert.ok(html.includes(`<p><b>${text.replaceAll("'", "&#39;")}</b></p>`));
   assert.ok(!html.includes(CHECKED.trim().replaceAll("'", "&#39;")), "nothing was checked against the list");
   assert.ok(!html.includes("doesn&#39;t match its key"));
+});
+
+test("an agent's record says what its signature shows, in the viewer and in shadow_verify", async () => {
+  const env = setup({ autoLog: true });
+  const ag = await agentSession(env);
+  const v = await env.svc.verify(ag.owner, { session_id: ag.sessionId }, BASE);
+  assert.equal(v.agent_key.verdict, "made_by_agent");
+  assert.ok(v.agent_key.text.includes(SCOPE));
+  assert.ok((await viewer(env.svc, ag.owner, ag.sessionId)).includes(SCOPE.replaceAll("'", "&#39;")));
 });

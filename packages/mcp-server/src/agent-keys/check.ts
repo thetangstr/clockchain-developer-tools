@@ -11,6 +11,7 @@ export type KeyVerdict = "made_by_agent" | "record_failed" | "key_not_filed" | "
 export type KeyCheck = { verdict: KeyVerdict; text: string };
 
 export const CHECKED = " Checked against Clockchain's public key list.";
+export const SCOPE = " An agent's signature shows which key signed, not who runs the agent or that the work happened.";
 const AGENT_OPERATOR = /^agent-([0-9a-f]{32})$/;
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
@@ -33,7 +34,7 @@ export function plainDate(iso: string): string {
 export function checkAgentKey(entry: KeyEntry | null, cp: Checkpoint, cpBlock: number | null, opts: { anchoredAt?: string | null; witness?: string; noBook?: boolean } = {}): KeyCheck {
   const operator = AGENT_OPERATOR.exec(cp.body.operatorId);
   if (!operator) {
-    if (opts.witness !== undefined && fingerprint(cp.publicKey) === opts.witness) return { verdict: "witnessed", text: `Witnessed by Clockchain for a signed-in account.${CHECKED}` };
+    if (opts.witness !== undefined && fingerprint(cp.publicKey) === opts.witness) return { verdict: "witnessed", text: `Witnessed by Clockchain for a signed-in account: Clockchain's key signed these steps as it received them, not the agent's own key.${CHECKED}` };
     return { verdict: "legacy", text: HOSTED_LIMITS.at(-1)! };
   }
   // The operator id carries the first 32 hex of the agent's root key, so the agent is named even when its key isn't in the book.
@@ -41,7 +42,7 @@ export function checkAgentKey(entry: KeyEntry | null, cp: Checkpoint, cpBlock: n
   const signed = hash(DOMAIN.checkpoint, cp.body) === cp.hash && verifySignature(cp.publicKey, cp.hash, cp.signature);
   if (opts.noBook)
     return signed
-      ? { verdict: "key_check_unavailable", text: `Signed by agent ${agentId}. Its key can't be checked right now.` }
+      ? { verdict: "key_check_unavailable", text: `Signed by agent ${agentId}. Its key can't be checked right now.${SCOPE}` }
       : { verdict: "not_from_agent", text: `Not from agent ${agentId}: the signature doesn't match its key.` };
   // A key missing from the book, or another agent's, ties the record to no key of this agent's.
   if (!signed || entry === null || entry.publicKeyPem !== cp.publicKey || entry.root.slice(0, 32) !== operator[1]) return { verdict: "not_from_agent", text: `Not from agent ${agentId}: the signature doesn't match its key.${CHECKED}` };
@@ -52,12 +53,12 @@ export function checkAgentKey(entry: KeyEntry | null, cp: Checkpoint, cpBlock: n
   const filed = entry.filing.state === "filed";
   if (filed && entry.filing.block !== undefined && cpBlock !== null && entry.filing.block > cpBlock)
     return { verdict: "key_filed_after", text: `Signed by agent ${agentId}, but its key was filed after this record.${CHECKED}` };
-  if (!filed) return { verdict: "key_not_filed", text: `Signed by agent ${agentId}. Its key isn't filed on Clockchain yet.${CHECKED}` };
+  if (!filed) return { verdict: "key_not_filed", text: `Signed by agent ${agentId}. Its key isn't filed on Clockchain yet.${SCOPE}${CHECKED}` };
   const filedAt = entry.filing.filedAt ?? entry.events.find((e) => e.action === "filed")?.at ?? entry.firstSeenAt;
   // Unchanged since a time only once Clockchain holds the checkpoint at a known block; until then, signed and nothing more.
   if (cpBlock === null)
-    return { verdict: "made_by_agent", text: `Signed by agent ${agentId}. Key filed ${plainDate(filedAt)}. Not yet anchored on Clockchain.${CHECKED}` };
-  return { verdict: "made_by_agent", text: `Made by agent ${agentId}, unchanged since ${plainDate(opts.anchoredAt ?? cp.body.createdAt)}. Key filed ${plainDate(filedAt)}.${CHECKED}` };
+    return { verdict: "made_by_agent", text: `Signed by agent ${agentId}. Key filed ${plainDate(filedAt)}. Not yet anchored on Clockchain.${SCOPE}${CHECKED}` };
+  return { verdict: "made_by_agent", text: `Made by agent ${agentId}, unchanged since ${plainDate(opts.anchoredAt ?? cp.body.createdAt)}. Key filed ${plainDate(filedAt)}.${SCOPE}${CHECKED}` };
 }
 
 /**
