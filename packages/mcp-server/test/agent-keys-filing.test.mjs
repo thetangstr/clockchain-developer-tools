@@ -477,7 +477,10 @@ test("the hourly pass sends a held session's latest checkpoint only, and never a
   const steps = meta.seq;
 
   clock.t += 24 * 3_600_000;
+  const scan = async () => (await svc.store.idleScan(-Infinity, clock.t, 200, svc.heldWithRoom())).held.length;
+  assert.equal(await scan(), 1, "the session takes a turn");
   await svc.closeIdle();
+  assert.equal(await scan(), 0, "with nothing left to send, it takes no more turns");
   const after = metaOf(svc, a.owner, s.session_id);
   assert.deepEqual(after.anchors.filter((x) => x.marker === "checkpoint").map((x) => x.hash), [hashes[2]], "only the latest checkpoint is sent");
   assert.equal(fake.writes.length, 3);

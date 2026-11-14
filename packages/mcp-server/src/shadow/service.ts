@@ -553,14 +553,21 @@ function nextRow(meta: SessionMeta, tried: Set<string>, now: number | null, held
   const live = meta.outbox.filter((r) => r.state !== "failed");
   const due = (r: OutboxRow) => !tried.has(r.id) && (now === null || !r.nextTryAt || Date.parse(r.nextTryAt) <= now);
   if (held && meta.state !== "closed") {
-    // The latest checkpoint is the one reaching furthest, anchored ones included: once it lands, the rest aren't sent.
-    const top = Math.max(0, ...meta.anchors.map((x) => x.count ?? 0), ...live.filter((r) => r.kind === "checkpoint").map((r) => r.body?.count ?? 0));
-    const latest = (r: OutboxRow) => r.kind === "checkpoint" && (r.body?.count ?? 0) === top;
-    return live.find((r) => due(r) && (r.kind === "start" || latest(r)) && (r.lastErrorCode === null || AGENT_HOLDS.has(r.lastErrorCode)));
+    return live.find((r) => due(r) && heldSends(meta, r) && (r.lastErrorCode === null || AGENT_HOLDS.has(r.lastErrorCode)));
   }
   if (meta.state !== "closed") return live.find(due);
   const checkpoints = live.filter((r) => r.kind === "checkpoint").sort((a, b) => (b.body?.count ?? 0) - (a.body?.count ?? 0));
   return [...checkpoints.slice(0, 1), ...live.filter((r) => r.kind === "start"), ...checkpoints.slice(1).filter((r) => r.ledgerId)].find(due);
+}
+
+/**
+ * Whether the hourly pass on an open session would send `r`: the start marker, or the checkpoint reaching furthest, anchored
+ * ones included. Once that lands, older checkpoints aren't sent; it covers them.
+ */
+function heldSends(meta: SessionMeta, r: OutboxRow): boolean {
+  if (r.kind === "start") return true;
+  const top = Math.max(0, ...meta.anchors.map((x) => x.count ?? 0), ...meta.outbox.filter((x) => x.kind === "checkpoint" && x.state !== "failed").map((x) => x.body?.count ?? 0));
+  return r.kind === "checkpoint" && (r.body?.count ?? 0) === top;
 }
 
 /**
@@ -1159,7 +1166,8 @@ export class ShadowService {
     const room = new Map<string, boolean>();
     return (meta) => {
       const rows = meta.outbox.filter((r) => r.state === "queued" && r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode));
-      if (!rows.length || !this.starterAnchors) return false;
+      // Only when the held pass would send something: older checkpoints the latest anchor covers stay queued, and never count.
+      if (!rows.length || !this.starterAnchors || !nextRow(meta, new Set(), this.now().getTime(), true)) return false;
       const source = this.sourceOf(meta.agentRoot);
       const k = source ?? "";
       if (!room.has(k)) {
@@ -2797,7 +2805,7 @@ export class ShadowService {
     const a = meta.anchors.find((x) => x.hash === hash);
     if (a) return { status: "anchored", checkpoint_hash: hash, covers_steps: a.count, ledger_id: a.ledgerId, block: a.blockHeight, block_time: a.blockTime, submitted_at: a.submittedAt };
     const r = meta.outbox.find((x) => x.hash === hash);
-    if (r) return { status: r.state === "failed" ? "failed" : r.lastErrorCode === "starter_limit" || r.lastErrorCode === "starter_source_limit" ? "over_limit" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : r.lastErrorCode === "search_refused" ? "Signed and recorded. Whether it reached Clockchain isn't known." : r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode) ? `Signed and recorded. ${HELD_NOTE}` : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
+    if (r) return { status: r.state === "failed" ? "failed" : r.lastErrorCode === "starter_limit" || r.lastErrorCode === "starter_source_limit" ? "over_limit" : "pending", checkpoint_hash: hash, covers_steps: r.body?.count ?? null, ledger_id: r.ledgerId, reason: reasonOf(r), note: r.state === "failed" ? `Not anchored. The record is intact${meta.state === "open" ? "; later checkpoints still bound it" : ""}.` : r.lastErrorCode === "search_refused" ? "Signed and recorded. Whether it reached Clockchain isn't known." : r.lastErrorCode !== null && AGENT_HOLDS.has(r.lastErrorCode) ? (heldSends(meta, r) ? `Signed and recorded. ${HELD_NOTE}` : "Signed and recorded. A later anchor covers these steps.") : "Signed and recorded; call shadow_checkpoint again later to anchor it." };
     if (refused) return { status: "not_anchored", checkpoint_hash: hash, covers_steps: meta.checkpoint?.body.count ?? null, code: refused.code, reason: refused.message };
     return { status: "not_anchored", checkpoint_hash: hash };
   }
