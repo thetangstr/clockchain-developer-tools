@@ -22,14 +22,14 @@ const refuse = (reason: string): never => {
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-// Canonical unpadded base64url only, so one assertion has exactly one spelling.
-function decode(segment: string): Buffer | null {
+// Canonical unpadded base64url only, so one assertion has exactly one spelling. Shared with dpop.ts.
+export function decode(segment: string): Buffer | null {
   if (!B64URL.test(segment)) return null;
   const bytes = Buffer.from(segment, "base64url");
   return bytes.toString("base64url") === segment ? bytes : null;
 }
 
-function decodeJson(segment: string): Record<string, unknown> | null {
+export function decodeJson(segment: string): Record<string, unknown> | null {
   const bytes = decode(segment);
   if (!bytes) return null;
   try {
@@ -41,7 +41,7 @@ function decodeJson(segment: string): Record<string, unknown> | null {
 }
 
 // RFC 7638: SHA-256 over the required members in lexicographic order, no whitespace.
-const thumbprint = (x: string) =>
+export const thumbprint = (x: string) =>
   createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
 
 const isSec = (v: unknown): v is number => Number.isSafeInteger(v);
@@ -58,6 +58,8 @@ function frozen<T>(v: T): T {
 export function jwtBearerProof(): KeyProof {
   return {
     verify({ assertion, audience, nowSec }) {
+      // A NaN would make every time check below false, so an expired assertion would pass. A server bug, not invalid_client.
+      if (!Number.isSafeInteger(nowSec)) throw new Error("nowSec must be whole seconds");
       if (typeof assertion !== "string" || assertion.length > MAX_ASSERTION_CHARS) return refuse("The assertion is malformed.");
       const parts = assertion.split(".");
       if (parts.length !== 3) return refuse("The assertion is malformed.");

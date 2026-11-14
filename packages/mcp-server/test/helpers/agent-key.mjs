@@ -35,6 +35,21 @@ export function makeAgentKey() {
         { iss: thumbprint, sub: thumbprint, aud, iat: issued, exp: exp ?? issued + 300, jti: jti ?? randomUUID(), ...claims },
       );
     },
+    /**
+     * An RFC 9449 DPoP proof for `htm` `htu`, with `ath` when `accessToken` is given. `header` and `claims` are merged over
+     * the defaults; set a member to undefined to drop it.
+     */
+    dpop(htm, htu, { accessToken, iat, jti, header = {}, claims = {} } = {}) {
+      return signJwt(
+        privateKey,
+        { alg: "EdDSA", typ: "dpop+jwt", jwk, ...header },
+        {
+          jti: jti ?? randomUUID(), htm, htu, iat: iat ?? Math.floor(Date.now() / 1000),
+          ...(accessToken === undefined ? {} : { ath: b64url(createHash("sha256").update(accessToken, "ascii").digest()) }),
+          ...claims,
+        },
+      );
+    },
     /** Base64 Ed25519 signature over the 32 hash bytes, in the form `verifySignature` accepts. */
     signHash: (hashHex) => sign(null, Buffer.from(hashHex, "hex"), privateKey).toString("base64"),
     signJwt: (header, claims) => signJwt(privateKey, header, claims),
