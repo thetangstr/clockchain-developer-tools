@@ -2131,6 +2131,12 @@ export class ShadowService {
     await this.session(ownerKey, sessionId, (meta) => {
       if (!this.agentSigns(meta)) throw NOT_AGENT_OWNER();
       const waiting = meta.awaitingSignature;
+      // The same signature over the latest signed checkpoint, resent because the reply was lost: write and queue nothing,
+      // and answer from what is already recorded.
+      if (!waiting && meta.checkpoint && meta.checkpoint.hash === input.hash && meta.checkpoint.signature === input.signature && meta.checkpoint.publicKey === key) {
+        made.target = meta.checkpoint.hash;
+        return;
+      }
       if (!waiting) throw new ShadowError("hash_mismatch", "No checkpoint of this session is waiting to be signed. Call shadow_checkpoint for the hash to sign.");
       if (input.hash !== waiting.hash) throw new ShadowError("hash_mismatch", `That is not the hash waiting to be signed. The current hash is ${waiting.hash}: sign it and call shadow_sign_checkpoint again.`);
       if (!verifySignature(key, waiting.hash, input.signature))

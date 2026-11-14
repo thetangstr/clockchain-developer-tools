@@ -92,8 +92,8 @@ test("checkpoint returns a hash to sign; signing it anchors", async () => {
   assert.equal(meta.checkpoint.publicKey, ag.key.publicKeyPem);
   assert.ok(fake.writes.some((w) => JSON.stringify(w).includes(r.sign.hash)), "the agent-signed hash reached the ledger");
   assert.ok(meta.anchors.some((a) => a.hash === r.sign.hash));
-  // Signing twice: nothing is waiting any more.
-  await rejects(svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: r.sign.hash, signature: ag.key.signHash(r.sign.hash) }), "hash_mismatch");
+  // Signing twice with the same signature is a retry (see the retry tests); nothing is waiting, so a different hash is refused.
+  await rejects(svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: "0".repeat(64), signature: ag.key.signHash("0".repeat(64)) }), "hash_mismatch");
 });
 
 test("sign shows count and head, so a step the agent didn't record changes them before it signs", async () => {
@@ -317,4 +317,64 @@ test("account owners are unaffected", async () => {
   assert.equal(closed.sign, undefined);
   assert.equal(closed.final_checkpoint.status, "anchored");
   assert.ok(closed.pin);
+});
+
+test("a repeated signature returns the original result and changes nothing", async () => {
+  const { svc, fake, book } = setup();
+  const ag = agentIn(book);
+  const s = await started(svc, ag.owner);
+  const { sign } = await svc.checkpoint(ag.owner, { session_id: s.session_id });
+  const call = { session_id: s.session_id, hash: sign.hash, signature: ag.key.signHash(sign.hash) };
+  const first = await svc.signCheckpoint(ag.owner, ag.akf, call);
+  assert.equal(first.checkpoint.status, "anchored");
+  const writes = fake.writes.length;
+  const metaBefore = JSON.stringify(metaOf(svc, ag.owner, s.session_id));
+  const again = await svc.signCheckpoint(ag.owner, ag.akf, { ...call });
+  assert.deepEqual(again.checkpoint, first.checkpoint);
+  assert.equal(again.anchors_today, first.anchors_today);
+  assert.equal(fake.writes.length, writes, "a retry anchors nothing more");
+  assert.equal(JSON.stringify(metaOf(svc, ag.owner, s.session_id)), metaBefore, "a retry writes nothing");
+});
+
+test("a repeated signature of the final checkpoint returns the same result and pin", async () => {
+  const { svc, fake, book } = setup();
+  const ag = agentIn(book);
+  const s = await started(svc, ag.owner);
+  const closed = await svc.close(ag.owner, { session_id: s.session_id, status: "succeeded" }, BASE);
+  const call = { session_id: s.session_id, hash: closed.sign.hash, signature: ag.key.signHash(closed.sign.hash) };
+  const first = await svc.signCheckpoint(ag.owner, ag.akf, call);
+  assert.ok(first.pin);
+  const writes = fake.writes.length;
+  const again = await svc.signCheckpoint(ag.owner, ag.akf, { ...call });
+  assert.equal(again.status, "closed");
+  assert.deepEqual(again.checkpoint, first.checkpoint);
+  assert.deepEqual(again.pin, first.pin);
+  assert.equal(again.anchors_today, first.anchors_today);
+  assert.equal(fake.writes.length, writes);
+});
+
+test("the same hash with a different signature, or an older hash, is still refused after signing", async () => {
+  const { svc, book } = setup();
+  const ag = agentIn(book);
+  const s = await started(svc, ag.owner);
+  const one = (await svc.checkpoint(ag.owner, { session_id: s.session_id })).sign.hash;
+  await svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: one, signature: ag.key.signHash(one) });
+  // Another valid-format signature over the same hash (another key's) is not a retry.
+  await rejects(svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: one, signature: makeAgentKey().signHash(one) }), "hash_mismatch");
+  // After a later checkpoint, the earlier hash's signature is no longer the latest.
+  await svc.record(ag.owner, { session_id: s.session_id, agent: "planner", kind: "message", content: "More." });
+  const two = (await svc.checkpoint(ag.owner, { session_id: s.session_id })).sign.hash;
+  await svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: two, signature: ag.key.signHash(two) });
+  await rejects(svc.signCheckpoint(ag.owner, ag.akf, { session_id: s.session_id, hash: one, signature: ag.key.signHash(one) }), "hash_mismatch");
+});
+
+test("a retry after the key is cancelled is still refused", async () => {
+  const { svc, book } = setup();
+  const ag = agentIn(book);
+  const s = await started(svc, ag.owner);
+  const { sign } = await svc.checkpoint(ag.owner, { session_id: s.session_id });
+  const call = { session_id: s.session_id, hash: sign.hash, signature: ag.key.signHash(sign.hash) };
+  await svc.signCheckpoint(ag.owner, ag.akf, call);
+  book.revoke(ag.akf);
+  await rejects(svc.signCheckpoint(ag.owner, ag.akf, { ...call }), "not_agent_owner");
 });
