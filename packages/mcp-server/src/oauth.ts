@@ -881,6 +881,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
 
   const ipOf = (req: IncomingMessage): string =>
     clientBucket(standaloneClientIp(req.headers, req.socket.remoteAddress, options.trustedProxy));
+  /** A new agent key's source (agent-keys/book.ts): a keyed hash of its address, so only the hash is ever kept. */
+  const sourceOf = (req: IncomingMessage): string =>
+    createHmac("sha256", options.signingSecret).update(`agent-key-source:v1\0${ipOf(req)}`, "utf8").digest("hex").slice(0, 32);
 
   function rateLimited(surface: string): void {
     options.onRateLimited?.();
@@ -1381,9 +1384,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   /**
    * client_credentials with an RFC 7523 client assertion (MCP_AGENT_KEYS=1): proof first, then single use of its jti,
    * then the book. A key that is replaced or revoked is refused; a key the book has never seen is admitted only within
-   * its address's hourly allowance. Every step from the replay check to the response is synchronous, so single use
-   * holds under concurrency. No refresh token: the agent signs a new assertion instead. Logs carry only the 16-hex
-   * agent id and the outcome, never the assertion or the token.
+   * its address's hourly allowance, with a keyed hash of that address as its source. Every step from the replay check to
+   * the response is synchronous, so single use holds under concurrency. No refresh token: the agent signs a new assertion
+   * instead. Logs carry only the 16-hex agent id and the outcome, never the assertion or the token.
    */
   function agentGrant(req: IncomingMessage, res: ServerResponse, params: Map<string, string>, keys: NonNullable<OAuthOptions["agentKeys"]>): void {
     const usedAssertions = replay?.usedAssertions;
@@ -1431,7 +1434,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         sendOAuthError(res, 429, "temporarily_unavailable", "Clockchain isn't taking new agent keys right now. Try again later, or reuse a key you already have.", { "retry-after": "3600" });
         return;
       }
-      entry = known ?? keys.book.admit(proven.publicKeyPem).entry;
+      entry = known ?? keys.book.admit(proven.publicKeyPem, sourceOf(req)).entry;
     } catch {
       log({ event: "oauth_agent_keys_unavailable" });
       sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });

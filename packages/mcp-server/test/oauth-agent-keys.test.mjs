@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -76,13 +77,13 @@ async function boot(env) {
 }
 
 /** The handler alone, with a controllable clock, a fresh key book and captured log events. */
-async function harness(agentKeys = {}) {
+async function harness(agentKeys = {}, more = {}) {
   let clock = Date.UTC(2026, 10, 13, 12, 0, 0);
   const logs = [];
   const book = new AgentKeyBook({ dir: path.join(tempDir("book"), "agent-keys"), now: () => new Date(clock) });
   const handler = createOAuthHandler({
     signingSecret: SECRET, publicUrl: PUBLIC, tokenTtlSeconds: 7 * 24 * 3600,
-    now: () => clock, log: (e) => logs.push(e),
+    now: () => clock, log: (e) => logs.push(e), ...more,
     agentKeys: { book, proof: jwtBearerProof(), newPerIpPerHour: 10, tokenTtlSeconds: 3600, ...agentKeys },
   });
   const server = createServer(async (req, res) => {
@@ -102,10 +103,10 @@ async function harness(agentKeys = {}) {
   };
 }
 
-const grant = (base, assertion, extra = {}) =>
+const grant = (base, assertion, extra = {}, headers = {}) =>
   fetch(`${base}/oauth/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
     body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: assertion, ...extra }),
   });
 
@@ -450,6 +451,33 @@ test("key_filed reports the book's filing state", async () => {
     assert.equal((await (await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).json()).key_filed, false);
     h.book.setFiling(agent.fingerprint, { state: "filed", ledgerId: "agent-key:v1:x", block: 7, filedAt: new Date().toISOString() });
     assert.equal((await (await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).json()).key_filed, true);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a new key records a keyed hash of the address it signed in from as its source, never the address", async () => {
+  const h = await harness({}, { trustedProxy: "127.0.0.1" });
+  try {
+    const from = (ip) => ({ "x-forwarded-for": ip });
+    const [a, b, c] = [makeAgentKey(), makeAgentKey(), makeAgentKey()];
+    assert.equal((await grant(h.url, a.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), {}, from("203.0.113.7"))).status, 200);
+    assert.equal((await grant(h.url, b.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), {}, from("203.0.113.7"))).status, 200);
+    assert.equal((await grant(h.url, c.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), {}, from("198.51.100.4"))).status, 200);
+    const [sa, sb, sc] = [a, b, c].map((k) => h.book.get(k.fingerprint).source);
+    assert.match(sa, /^[0-9a-f]{32}$/);
+    assert.equal(sb, sa, "two keys from one address share a source");
+    assert.match(sc, /^[0-9a-f]{32}$/);
+    assert.notEqual(sc, sa, "another address has another source");
+    const expected = (ip) => createHmac("sha256", SECRET).update(`agent-key-source:v1\0${ip}`).digest("hex").slice(0, 32);
+    assert.equal(sa, expected("203.0.113.7"));
+    assert.equal(sc, expected("198.51.100.4"));
+    // A known key signing in from elsewhere keeps its first source.
+    assert.equal((await grant(h.url, a.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), {}, from("192.0.2.1"))).status, 200);
+    assert.equal(h.book.get(a.fingerprint).source, sa);
+    // The address and its hash stay out of the logs.
+    const logged = JSON.stringify(h.logs);
+    for (const secret of ["203.0.113.7", "198.51.100.4", sa, sc]) assert.ok(!logged.includes(secret), "a log line carries an address or its hash");
   } finally {
     await h.close();
   }

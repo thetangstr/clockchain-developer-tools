@@ -11,7 +11,8 @@ import { ShadowService } from "../dist/shadow/service.js";
 import { createLogBudget } from "../dist/budget.js";
 import { ownerKeyOf } from "../dist/shadow/store.js";
 import { AgentKeyBook } from "../dist/agent-keys/book.js";
-import { fileKey } from "../dist/agent-keys/filing.js";
+import { StarterAnchors, fileKey } from "../dist/agent-keys/filing.js";
+import { StarterLimitError } from "../dist/shadow/ledger.js";
 import { hash } from "../dist/shadow/lib/profile.js";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 import { makeAgentKey } from "./helpers/agent-key.mjs";
@@ -276,4 +277,106 @@ test("an unreadable Starter count refuses agent anchors as over the allowance", 
   first.clock.t += 24 * 3_600_000;
   assert.equal((await svc.checkpoint(ag.owner, { session_id: s.session_id })).checkpoint.status, "anchored");
   assert.equal(JSON.parse(readFileSync(main, "utf8")).value.anchors, 3, "the filing, the start marker and the checkpoint");
+});
+
+// ---- the Starter allowance per address ---------------------------------------------------------------------------------
+
+const SRC_A = "a".repeat(32);
+const SRC_B = "b".repeat(32);
+const counter = (o = {}) => {
+  const clock = o.clock ?? { day: "2026-11-13" };
+  const stateDir = o.stateDir ?? mkdtempSync(path.join(tmpdir(), "starter-anchors-"));
+  return { clock, stateDir, starter: new StarterAnchors({ stateDir, max: o.max ?? 2000, perSource: o.perSource ?? 200, today: () => clock.day }) };
+};
+const refused = (reason) => (e) => e instanceof StarterLimitError && e.reason === reason;
+
+test("an address's share refuses at 200 while another address, and an agent with no address, still pass", () => {
+  const { starter } = counter();
+  for (let i = 0; i < 200; i++) {
+    starter.check(SRC_A);
+    starter.record(SRC_A);
+  }
+  assert.throws(() => starter.check(SRC_A), refused("source"));
+  starter.check(SRC_B);
+  starter.record(SRC_B);
+  starter.check();
+  starter.record();
+  assert.equal(starter.used(), 202, "every anchor counts toward the shared allowance");
+});
+
+test("the shared allowance still refuses, as daily, before any address's share", () => {
+  const { starter } = counter({ max: 3, perSource: 2 });
+  starter.record(SRC_A);
+  starter.record(SRC_B);
+  starter.record();
+  assert.throws(() => starter.check(), refused("daily"));
+  assert.throws(() => starter.check(SRC_A), refused("daily"));
+  assert.throws(() => starter.check("c".repeat(32)), refused("daily"));
+});
+
+test("a new UTC day resets the shared count and every address's share, and keeps only today's", () => {
+  const { starter, clock, stateDir } = counter({ max: 3, perSource: 1 });
+  starter.record(SRC_A);
+  starter.record(SRC_B);
+  assert.throws(() => starter.check(SRC_A), refused("source"));
+  clock.day = "2026-11-14";
+  starter.check(SRC_A);
+  starter.check(SRC_B);
+  assert.equal(starter.used(), 0);
+  starter.record(SRC_A);
+  const stored = JSON.parse(readFileSync(path.join(stateDir, STARTER_FILE), "utf8"));
+  assert.deepEqual(stored.value, { day: "2026-11-14", anchors: 1, sources: { [SRC_A]: 1 } }, "yesterday's addresses are gone");
+  // And a restart reads the shares back.
+  const again = counter({ stateDir, clock, max: 3, perSource: 1 }).starter;
+  assert.throws(() => again.check(SRC_A), refused("source"));
+  again.check(SRC_B);
+});
+
+test("a count file from before address shares loads, and its count goes on", () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "starter-anchors-"));
+  writeFileSync(path.join(stateDir, STARTER_FILE), `${JSON.stringify({ schema: "shadow-starter-anchors-v1", value: { day: "2026-11-13", anchors: 5 } })}\n`, { mode: 0o600 });
+  const { starter } = counter({ stateDir, max: 6, perSource: 1 });
+  assert.equal(starter.used(), 5);
+  starter.check(SRC_A);
+  starter.record(SRC_A);
+  assert.throws(() => starter.check(SRC_B), refused("daily"));
+  assert.deepEqual(JSON.parse(readFileSync(path.join(stateDir, STARTER_FILE), "utf8")).value, { day: "2026-11-13", anchors: 6, sources: { [SRC_A]: 1 } });
+});
+
+test("an unreadable count file still refuses every agent, with or without an address", () => {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "starter-anchors-"));
+  const main = path.join(stateDir, STARTER_FILE);
+  writeFileSync(main, "not json", { mode: 0o600 });
+  writeFileSync(`${main}.bak`, "not json either", { mode: 0o600 });
+  const { starter } = counter({ stateDir });
+  assert.throws(() => starter.check(), refused("daily"));
+  assert.throws(() => starter.check(SRC_A), refused("daily"));
+  starter.record(SRC_A);
+  assert.equal(readFileSync(main, "utf8"), "not json", "nothing is written over it");
+  // A bad share in the file makes it unreadable too.
+  const badShare = mkdtempSync(path.join(tmpdir(), "starter-anchors-"));
+  writeFileSync(path.join(badShare, STARTER_FILE), `${JSON.stringify({ schema: "shadow-starter-anchors-v1", value: { day: "2026-11-13", anchors: 1, sources: { [SRC_A]: -1 } } })}\n`, { mode: 0o600 });
+  assert.throws(() => counter({ stateDir: badShare }).starter.check(SRC_B), refused("daily"));
+});
+
+test("a key's filing payload carries nothing of its source", async () => {
+  const { book } = setup();
+  const fake = new FakeLedger();
+  const ctx = {
+    ledger: fake, budget: createLogBudget({}), reserve: () => {}, refund: () => {}, waitMs: 1000, tries: 3, backoffMs: [0],
+    sleep: async () => {}, deadline: Date.now() + 10_000,
+  };
+  const source = "d".repeat(32);
+  const key = makeAgentKey();
+  const { entry } = book.admit(key.publicKeyPem, source);
+  assert.equal(book.get(entry.fingerprint).source, source);
+  assert.equal((await fileKey(book, ctx, entry.fingerprint, "filed")).state, "filed");
+  const next = makeAgentKey();
+  book.replace(entry.fingerprint, next.publicKeyPem);
+  await fileKey(book, ctx, entry.fingerprint, "replaced", { newFp: next.fingerprint });
+  assert.equal(fake.records.length, 2);
+  for (const sent of [JSON.stringify(fake.records), JSON.stringify(fake.writes)]) {
+    assert.ok(!sent.includes(source), "the source value is not sent");
+    assert.ok(!sent.includes("source"), "nor a source field");
+  }
 });

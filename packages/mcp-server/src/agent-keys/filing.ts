@@ -66,55 +66,80 @@ function outcomeOf(o: Awaited<ReturnType<typeof anchorHash>>): FilingResult {
   return { state: o.maybeWritten ? "pending" : "unfiled", failure: o.failure };
 }
 
-type StarterFile = { day: string; anchors: number };
+/** One UTC day's count: every Starter anchor, and each address's (KeyEntry.source) share of them. */
+type StarterFile = { day: string; anchors: number; sources?: Record<string, number> };
+
+const SOURCE = /^[0-9a-f]{32}$/;
+const count = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+
+function validStarterFile(v: unknown): StarterFile {
+  const f = v as StarterFile;
+  if (!f || typeof f !== "object" || typeof f.day !== "string" || !count(f.anchors)) throw new Error("bad starter allowance file");
+  if (f.sources === undefined) return { day: f.day, anchors: f.anchors };
+  if (!f.sources || typeof f.sources !== "object" || Array.isArray(f.sources)) throw new Error("bad starter allowance file");
+  const sources: Record<string, number> = {};
+  for (const [k, n] of Object.entries(f.sources)) {
+    if (!SOURCE.test(k) || !count(n)) throw new Error("bad starter allowance file");
+    sources[k] = n;
+  }
+  return { day: f.day, anchors: f.anchors, sources };
+}
 
 /**
  * The Starter allowance: anchors per UTC day shared by every ak: owner, under the Shadow state dir so a restart keeps the
- * count. check() and record() are a LogBudget's: refuse before a write, count after one lands. Accounts never use it.
+ * count, and within it a share per address an agent first signed in from (its root key's source), so one address can't use
+ * up the whole day. check() and record() are a LogBudget's: refuse before a write, count after one lands. Accounts never
+ * use it. An agent with no source counts toward the shared allowance only. Only today's shares are kept.
  * One durable file, read once and then saved from memory, so a damaged file is set aside once and never rotated over its
  * good backup. A count that can't be read at all fails closed: the allowance reads as used up for the rest of that UTC day.
  */
 export class StarterAnchors {
   private readonly max: number;
+  private readonly perSource: number;
   private readonly today: () => string;
   private readonly file: DurableJsonFile<StarterFile>;
-  /** Today's count in memory, once read. */
+  /** The counts in memory, once read. */
   private value: StarterFile | undefined;
   /** The UTC day the file was found unreadable on. */
   private unreadableOn: string | undefined;
 
-  constructor(o: { stateDir: string; max: number; today: () => string }) {
+  constructor(o: { stateDir: string; max: number; perSource: number; today: () => string }) {
     this.max = o.max;
+    this.perSource = o.perSource;
     this.today = o.today;
     this.file = createDurableJsonFile<StarterFile>({
-      path: join(o.stateDir, "starter-anchors.json"), schema: "shadow-starter-anchors-v1", snapshot: () => this.value!, maxBytes: 4096,
-      validate: (v) => {
-        const f = v as StarterFile;
-        if (!f || typeof f !== "object" || typeof f.day !== "string" || !Number.isSafeInteger(f.anchors) || f.anchors < 0) throw new Error("bad starter allowance file");
-        return { day: f.day, anchors: f.anchors };
-      },
+      path: join(o.stateDir, "starter-anchors.json"), schema: "shadow-starter-anchors-v1", snapshot: () => this.value!, maxBytes: 512 * 1024,
+      validate: validStarterFile,
     });
   }
 
-  /** Throws StarterLimitError when today's allowance is used up, or today's count can't be read. */
-  check(): void {
-    if (this.used() >= this.max) throw new StarterLimitError();
+  /**
+   * Throws StarterLimitError ("daily") when today's allowance is used up or today's count can't be read, and ("source")
+   * when `source` has used its share.
+   */
+  check(source?: string): void {
+    const today = this.current(this.today());
+    if (today === null || today.anchors >= this.max) throw new StarterLimitError("daily");
+    if (source !== undefined && (today.sources?.[source] ?? 0) >= this.perSource) throw new StarterLimitError("source");
   }
 
-  record(): void {
+  record(source?: string): void {
     const day = this.today();
-    if (this.current(day) === null) return; // Unreadable today: check() refuses, so nothing is counted against it.
-    this.value = { day, anchors: this.used(day) + 1 };
+    const today = this.current(day);
+    if (today === null) return; // Unreadable today: check() refuses, so nothing is counted against it.
+    const sources = { ...today.sources };
+    if (source !== undefined) sources[source] = (sources[source] ?? 0) + 1;
+    this.value = { day, anchors: today.anchors + 1, ...(Object.keys(sources).length ? { sources } : {}) };
     this.file.save("now");
   }
 
   /** Today's count; the whole allowance when it can't be read. */
   used(day = this.today()): number {
-    return this.current(day) ?? this.max;
+    return this.current(day)?.anchors ?? this.max;
   }
 
-  /** Today's stored count, read from disk the first time; null when it couldn't be read today. */
-  private current(day: string): number | null {
+  /** Today's counts, read from disk the first time; a fresh day's when the stored ones are older; null when unreadable today. */
+  private current(day: string): StarterFile | null {
     if (this.value === undefined && this.unreadableOn === undefined) {
       try {
         this.value = this.file.load() ?? { day, anchors: 0 };
@@ -127,6 +152,6 @@ export class StarterAnchors {
       // A later day's count starts afresh whatever the unreadable file said.
       this.value = { day, anchors: 0 };
     }
-    return this.value.day === day ? this.value.anchors : 0;
+    return this.value.day === day ? this.value : { day, anchors: 0 };
   }
 }

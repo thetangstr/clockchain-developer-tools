@@ -314,6 +314,7 @@ All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString
 | `SHADOW_LEDGER_CLIENT_ID`, `SHADOW_LEDGER_WALLET_ID` | the delegated client | Shadow's own writer on the ledger. Set both. No email, and not the delegated id. |
 | `SHADOW_WITNESS_KEY_FILE` | off | Path to an Ed25519 private key (PKCS8 PEM), provisioned like any other secret. Set: it signs signed-in accounts' checkpoints, its public half is served at `/.well-known/clockchain-witness-key.json`, and every account's held `key.json` is removed, at start for those that don't come back (its operator id stays in `operator.json`). A file that won't load stops Shadow (`shadow_unavailable`). Unset: a key per account, as before, and that URL answers 404. Unsetting it later makes new per-account keys; removed ones don't come back. |
 | `SHADOW_STARTER_ANCHORS_PER_DAY` | 2000 | Only with `MCP_AGENT_KEYS=1`. Anchors per UTC day shared by every agent signed in with its own key (the Starter allowance); accounts never use it. Once it's used up, agents' checkpoints are still recorded and signed, and wait to be anchored. |
+| `SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY` | 200 | Only with `MCP_AGENT_KEYS=1`. Each address's share of the Starter allowance per UTC day: the agents whose first key signed in from one address (IPv6 by /64, behind `MCP_OAUTH_TRUSTED_PROXY` when set) share it. Only a keyed hash of the address is kept, in the key's book entry, never shown or filed. Once it's used up, those agents' checkpoints wait as above, and they're told to try tomorrow or sign in to an account. Keys made before this setting have no address and draw on the shared allowance only. |
 | `MCP_BYO_WRITES` | refuse | Emergency rollback only: `allow` lets a caller's own key write on the owned gateway again. |
 | `MCP_OAUTH` | off | `1` turns sign-in on. Needs `MCP_TOKEN_SIGNING_SECRET`. |
 | `MCP_OAUTH_APPROVALS_PER_HOUR` | 10 | Per IP. |
@@ -325,8 +326,9 @@ All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString
 | `MCP_METRICS_TOKEN` | off | Bearer token for `/metrics`, which answers 404 without one. See `alerts.md`. |
 | `OPENAI_APPS_CHALLENGE_TOKEN` | off | See "ChatGPT domain check". |
 
-`MCP_AGENT_KEYS`, `MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR`, `MCP_AGENT_KEYS_NEW_PER_HOUR`, `SHADOW_WITNESS_KEY_FILE` and `SHADOW_STARTER_ANCHORS_PER_DAY` aren't passed
-through `docker-compose.yml` yet, so setting them in SSM changes nothing until that wiring lands (after the founder's go).
+`MCP_AGENT_KEYS`, `MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR`, `MCP_AGENT_KEYS_NEW_PER_HOUR`, `SHADOW_WITNESS_KEY_FILE`, `SHADOW_STARTER_ANCHORS_PER_DAY` and
+`SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY` aren't passed through `docker-compose.yml` yet, so setting them in SSM changes
+nothing until that wiring lands (after the founder's go).
 
 A malformed Shadow setting stops Shadow from starting: every `/shadow` path answers 503, and the reason is in the log as
 `shadow_unavailable`. To apply a setting with no code change, deploy the same commit again: `compose-up.sh` reads SSM each

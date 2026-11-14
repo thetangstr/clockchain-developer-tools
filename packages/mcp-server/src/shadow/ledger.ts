@@ -209,10 +209,13 @@ export class AnchorLimitError extends Error {
   }
 }
 
-/** The Starter allowance every new agent (ak: owner) shares is used up for today, raised before a write is attempted. */
+/**
+ * The Starter allowance every new agent (ak: owner) shares is used up for today ("daily"), or the agent's address has used
+ * its share of it ("source"); raised before a write is attempted.
+ */
 export class StarterLimitError extends Error {
-  constructor() {
-    super("starter allowance reached");
+  constructor(readonly reason: "daily" | "source" = "daily") {
+    super(reason === "source" ? "starter allowance share reached" : "starter allowance reached");
     this.name = "StarterLimitError";
   }
 }
@@ -225,7 +228,7 @@ export type Failure = { kind: ErrorKind; code: string; retryAfterSeconds: number
 export function classifyFailure(e: unknown): Failure {
   const f = (kind: ErrorKind, code: string, retryAfterSeconds: number | null = null): Failure => ({ kind, code, retryAfterSeconds });
   if (e instanceof AnchorLimitError) return f("Credits", "anchor_limit");
-  if (e instanceof StarterLimitError) return f("Credits", "starter_limit");
+  if (e instanceof StarterLimitError) return f("Credits", e.reason === "source" ? "starter_source_limit" : "starter_limit");
   if (e instanceof BudgetExceededError) return f("Credits", "log_budget");
   if (e instanceof HashMismatchError) return f("Permanent", "hash_mismatch");
   if (e instanceof AuthError) return f("Auth", "http_401");

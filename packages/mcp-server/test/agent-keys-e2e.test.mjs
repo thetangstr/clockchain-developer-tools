@@ -4,7 +4,7 @@
 // same sessions, (d) no private key is kept on the server but the witness key the operator provides, (e) no tool result
 // or log line carries the token, the assertion or a cc_ token.
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash, createHmac, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -26,15 +26,15 @@ const JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 const ENV_KEYS = [
   "PORT", "MCP_PORT", "MCP_AUTH_TOKENS", "MCP_TOKEN_SIGNING_SECRET", "MCP_STATE_DIR", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_OAUTH_TRUSTED_PROXY",
   "MCP_REQUIRE_AUTH", "MCP_RATE_PER_MIN", "MCP_SURFACE", "MCP_AGENT_KEYS", "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR",
-  "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_WITNESS_KEY_FILE", "SHADOW_STARTER_ANCHORS_PER_DAY", "SHADOW_AUTO_LOG",
+  "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_WITNESS_KEY_FILE", "SHADOW_STARTER_ANCHORS_PER_DAY", "SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY", "SHADOW_AUTO_LOG",
   "SHADOW_PREVIEW_AUTO_LOG", "SHADOW_LAZY_AUTH", "SHADOW_ALLOW_NON_ACCT",
 ];
 // Loopback ports 19560-19569, which no other test uses; a busy one is skipped, five tries at most.
 const PORT_BASE = 19560;
 const AGENT_LINE = /^ *Agents that run code /;
 
-/** runHttp with OAuth, Shadow, agent keys and a witness key on, its state and the witness key file under `root`. */
-async function boot(root) {
+/** runHttp with OAuth, Shadow, agent keys and a witness key on, its state and the witness key file under `root`; `env` on top. */
+async function boot(root, env = {}) {
   const saved = {};
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
   const witnessFile = path.join(root, "witness-key.pem");
@@ -45,7 +45,7 @@ async function boot(root) {
     Object.assign(process.env, {
       MCP_PORT: String(PORT_BASE + attempt - 1), MCP_AUTH_TOKENS: "static-e2e-token", MCP_TOKEN_SIGNING_SECRET: SECRET,
       MCP_STATE_DIR: stateDir, MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_AGENT_KEYS: "1",
-      SHADOW_ENABLED: "1", SHADOW_STATE_DIR: path.join(stateDir, "shadow"), SHADOW_WITNESS_KEY_FILE: witnessFile,
+      SHADOW_ENABLED: "1", SHADOW_STATE_DIR: path.join(stateDir, "shadow"), SHADOW_WITNESS_KEY_FILE: witnessFile, ...env,
     });
     try {
       server = await runHttp();
@@ -227,6 +227,88 @@ test("an agent onboards from the instructions alone: one token call, signed chec
         assert.doesNotMatch(text, ccToken, `a ${where} carries a cc_ token`);
       }
     }
+  } finally {
+    for (const k of Object.keys(orig)) console[k] = orig[k];
+    await app?.close();
+    __setShadowLedgerForTests(undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("each address has its share of the Starter allowance: two agents from one address stop at the share, another address still anchors", async () => {
+  const fake = new FakeLedger();
+  __setShadowLedgerForTests(fake);
+  const captured = [];
+  const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error, debug: console.debug };
+  for (const k of Object.keys(orig)) console[k] = (...a) => { captured.push(format(...a)); };
+  const root = mkdtempSync(path.join(tmpdir(), "agent-keys-e2e-source-"));
+  const results = [];
+  let app;
+  try {
+    app = await boot(root, { MCP_OAUTH_TRUSTED_PROXY: "127.0.0.1", SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY: "2" });
+    const signIn = async (agent, ip) => {
+      const res = await fetch(`${app.url}/oauth/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip },
+        body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: agent.assertion(`${PUBLIC}/oauth/token`) }),
+      });
+      const body = await res.json();
+      assert.equal(res.status, 200, JSON.stringify(body));
+      return `Bearer ${body.access_token}`;
+    };
+    const call = async (authorization, name, args) => {
+      const res = await fetch(`${app.url}/shadow/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: ACCEPT, authorization },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+      });
+      const text = await res.text();
+      assert.equal(res.status, 200, text);
+      const data = text.split("\n").find((l) => l.startsWith("data:"));
+      const result = JSON.parse(data ? data.slice(5) : text).result;
+      results.push(result.content[0].text);
+      assert.notEqual(result.isError, true, `${name}: ${result.content[0].text}`);
+      return JSON.parse(result.content[0].text);
+    };
+    /** Starts a session (its key's filing and its start marker), then asks for a signed checkpoint. */
+    const run = async (agent, ip) => {
+      const cred = await signIn(agent, ip);
+      const s = await call(cred, "shadow_start_session", { title: "Find a flight", agents: [{ id: "planner" }] });
+      await call(cred, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "task", content: "Find a flight" });
+      const cp = await call(cred, "shadow_checkpoint", { session_id: s.session_id });
+      const signed = await call(cred, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) });
+      return { s, signed };
+    };
+    const SHARE_USED = "Agents from this address have used their share of today's Starter allowance. Try again tomorrow (UTC), or sign in to a Clockchain account.";
+
+    // The first agent's filing and start marker are the address's two.
+    const first = await run(makeAgentKey(), "203.0.113.7");
+    assert.equal(first.s.start_anchor.status, "anchored");
+    assert.equal(fake.writes.length, 2);
+    assert.equal(first.signed.checkpoint.status, "over_limit", JSON.stringify(first.signed));
+    assert.equal(first.signed.checkpoint.reason, SHARE_USED);
+    // A second agent from the same address: its filing is the third anchor in total, and it is refused.
+    const second = await run(makeAgentKey(), "203.0.113.7");
+    assert.notEqual(second.s.start_anchor.status, "anchored");
+    assert.equal(second.signed.checkpoint.status, "over_limit", JSON.stringify(second.signed));
+    assert.equal(second.signed.checkpoint.reason, SHARE_USED);
+    assert.equal(fake.writes.length, 2, "nothing more was written for that address");
+    // An agent from another address still anchors: its filing and start marker are that address's own two.
+    const other = makeAgentKey();
+    const third = await run(other, "198.51.100.4");
+    assert.equal(third.s.start_anchor.status, "anchored");
+    assert.equal(fake.writes.length, 4);
+    assert.equal(third.signed.checkpoint.reason, SHARE_USED, "and then its share is used too");
+
+    // The source is kept, but nowhere public: not in the lookup, a ledger write, a tool result or a log line.
+    const source = createHmac("sha256", SECRET).update("agent-key-source:v1\x00198.51.100.4").digest("hex").slice(0, 32);
+    const lookup = await (await fetch(`${app.url}/agent-keys/${other.fingerprint}.json`)).text();
+    for (const [where, text] of [["lookup", lookup], ["ledger write", JSON.stringify(fake.writes)], ...results.map((r) => ["tool result", r]), ...captured.map((l) => ["log line", l])]) {
+      assert.ok(!text.includes(source), `a ${where} carries the source`);
+      assert.ok(!text.includes("203.0.113.7") && !text.includes("198.51.100.4"), `a ${where} carries an address`);
+    }
+    assert.ok(!/"source"/.test(lookup), "the lookup has no source field");
+    assert.ok(!/"source"/.test(JSON.stringify(fake.writes)), "no ledger write has a source field");
   } finally {
     for (const k of Object.keys(orig)) console[k] = orig[k];
     await app?.close();

@@ -16,6 +16,11 @@ export type KeyEntry = {
   filing: KeyFiling;
   replacedBy?: string;
   revokedAt?: string;
+  /**
+   * A keyed hash of the address the agent first signed in from (oauth.ts), so the Starter allowance can give each address a
+   * share. Only a root key has one; never shown publicly or sent to Clockchain.
+   */
+  source?: string;
   /** A replaced or revoked event is filed once it has `filedAt`; until then it is waiting for Clockchain. */
   events: { action: "filed" | "replaced" | "revoked"; at: string; ledgerId?: string; block?: number; filedAt?: string }[];
 };
@@ -28,6 +33,7 @@ export class AgentKeyError extends Error {
 }
 
 const FINGERPRINT = /^[0-9a-f]{64}$/;
+const SOURCE = /^[0-9a-f]{32}$/;
 const SCHEMA = "agent-key-v1";
 const MAX_BYTES = 64 * 1024;
 
@@ -41,6 +47,7 @@ function validEntry(v: unknown): KeyEntry {
     typeof v.root !== "string" || !FINGERPRINT.test(v.root) ||
     (v.status !== "active" && v.status !== "replaced" && v.status !== "revoked") ||
     typeof v.firstSeenAt !== "string" ||
+    (v.source !== undefined && (typeof v.source !== "string" || !SOURCE.test(v.source))) ||
     !isObj(v.filing) || !Array.isArray(v.events)
   ) throw new Error("bad agent key file");
   return v as unknown as KeyEntry;
@@ -60,10 +67,12 @@ export class AgentKeyBook {
     return this.file(fp, () => { throw new Error("not loaded"); }).load() ?? null;
   }
 
-  admit(publicKeyPem: string): { entry: KeyEntry; created: boolean } {
+  /** A new key is stored with `source`; a known key keeps what it has. */
+  admit(publicKeyPem: string, source?: string): { entry: KeyEntry; created: boolean } {
     const fp = this.fingerprintOf(publicKeyPem);
     const existing = this.get(fp);
     if (existing) return { entry: existing, created: false };
+    if (source !== undefined && !SOURCE.test(source)) throw new AgentKeyError("invalid_source");
     const entry: KeyEntry = {
       fingerprint: fp,
       publicKeyPem,
@@ -72,6 +81,7 @@ export class AgentKeyBook {
       firstSeenAt: this.now().toISOString(),
       filing: { state: "unfiled" },
       events: [],
+      ...(source !== undefined ? { source } : {}),
     };
     this.save(entry);
     return { entry, created: true };

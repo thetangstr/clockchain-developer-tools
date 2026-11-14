@@ -127,3 +127,40 @@ test("setEventFiling records where a replace or revoke landed, and never sets a 
   // The event's own `at` is what its ledger hash was built from, so it never changes.
   assert.equal(book.get(a.fingerprint).events[0].at, at);
 });
+
+test("admit stores a new key's source, and a known key keeps its first one", () => {
+  const { book } = fresh();
+  const p = pem();
+  const first = "a".repeat(32);
+  const a = book.admit(p, first);
+  assert.equal(a.entry.source, first);
+  assert.equal(book.get(a.entry.fingerprint).source, first);
+  const b = book.admit(p, "b".repeat(32));
+  assert.equal(b.created, false);
+  assert.equal(b.entry.source, first);
+  assert.equal(book.get(a.entry.fingerprint).source, first);
+  // Without one, the entry has no source field at all; a replacement key never gets one of its own.
+  const plain = book.admit(pem()).entry;
+  assert.equal("source" in plain, false);
+  const next = book.replace(a.entry.fingerprint, pem());
+  assert.equal("source" in next, false);
+  assert.equal(book.get(next.root).source, first, "the root's source is the agent's");
+});
+
+test("an entry whose stored source isn't 32 lowercase hex characters is invalid; one without a source loads", () => {
+  const { dir, book } = fresh();
+  const withSource = book.admit(pem(), "c".repeat(32)).entry;
+  const without = book.admit(pem()).entry;
+  // As an entry written before sources existed: no field at all.
+  const again = new AgentKeyBook({ dir, now: () => new Date() });
+  assert.deepEqual(again.get(without.fingerprint), without);
+  for (const bad of ["C".repeat(32), "c".repeat(31), "c".repeat(64), 7, null, "203.0.113.7"]) {
+    const path = join(dir, `${withSource.fingerprint}.json`);
+    const stored = JSON.parse(readFileSync(path, "utf8"));
+    stored.value.source = bad;
+    writeFileSync(path, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
+    // Its backup still holds the good entry, so set that aside too: the bad file alone must not load.
+    writeFileSync(`${path}.bak`, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
+    assert.throws(() => new AgentKeyBook({ dir, now: () => new Date() }).get(withSource.fingerprint), undefined, `source ${JSON.stringify(bad)}`);
+  }
+});
