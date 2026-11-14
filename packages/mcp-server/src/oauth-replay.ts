@@ -13,7 +13,20 @@ import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableState
  * entries, writes a fresh snapshot and removes the journal; a journal past its bound is compacted the same way.
  * A torn last journal line (a crash mid-append) is skipped. A corrupt snapshot with no valid backup throws, and the
  * token endpoint then refuses closed. Ids are artifact jtis and family ids, never tokens.
+ *
+ * A set made with whenFull "refuse" (spent agent assertions) throws ReplayStateFullError from add() while it holds `cap`
+ * unexpired entries, instead of evicting one, so a flood can't push out a spent entry that is still valid. Opening such a
+ * set with more than `cap` live entries on disk (only possible if the cap constant was lowered) throws the same error, so
+ * the set fails to open and its endpoint refuses closed (503), as for a corrupt snapshot.
  */
+
+/** Thrown by add() on a set made with whenFull "refuse" that holds `cap` unexpired entries. Nothing was written. */
+export class ReplayStateFullError extends Error {
+  constructor() {
+    super("replay state is full");
+    this.name = "ReplayStateFullError";
+  }
+}
 
 export interface ExpiringSet {
   has(key: string): boolean;
@@ -30,25 +43,36 @@ function sweep(entries: Map<string, number>, now: number): void {
   for (const [k, e] of entries) if (now >= e) entries.delete(k);
 }
 
-/** Entries live until their expiry; past `cap`, the oldest entry is evicted first (best effort under a flood). */
-export function memoryExpiringSet(cap: number, nowSec: () => number): ExpiringSet {
+/**
+ * Entries live until their expiry. Past `cap`, "evict" (the default) drops the oldest entry first (best effort under a
+ * flood); "refuse" throws ReplayStateFullError instead.
+ */
+export function memoryExpiringSet(cap: number, nowSec: () => number, whenFull: "evict" | "refuse" = "evict"): ExpiringSet & { full(): boolean } {
   const entries = new Map<string, number>();
   let nextSweep = 0;
+  const full = () => {
+    const t = nowSec();
+    if (t >= nextSweep || entries.size >= cap) {
+      sweep(entries, t);
+      nextSweep = t + 60;
+    }
+    return entries.size >= cap;
+  };
   return {
     has: (key) => {
       const exp = entries.get(key);
       return exp !== undefined && nowSec() < exp;
     },
     add: (key, exp) => {
-      const t = nowSec();
-      if (t >= nextSweep || entries.size >= cap) {
-        sweep(entries, t);
-        nextSweep = t + 60;
+      if (full()) {
+        // Setting a key it already holds doesn't grow the set (a journal line repeating the snapshot, at boot).
+        if (whenFull === "refuse" && !entries.has(key)) throw new ReplayStateFullError();
+        while (whenFull === "evict" && entries.size >= cap) entries.delete(entries.keys().next().value as string);
       }
-      while (entries.size >= cap) entries.delete(entries.keys().next().value as string);
       entries.set(key, exp);
     },
     size: () => entries.size,
+    full,
   };
 }
 
@@ -58,11 +82,11 @@ function validEntry(value: unknown): value is [string, number] {
 }
 
 /** A set that survives restarts (see the module comment). Throws when its files cannot be opened or are corrupt. */
-export function durableExpiringSet(dir: string, name: string, cap: number, nowSec: () => number): ExpiringSet {
+export function durableExpiringSet(dir: string, name: string, cap: number, nowSec: () => number, whenFull: "evict" | "refuse" = "evict"): ExpiringSet {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   cleanStaleFiles(dir);
-  const memory = memoryExpiringSet(cap, nowSec);
+  const memory = memoryExpiringSet(cap, nowSec, whenFull);
   const live = new Map<string, number>(); // mirrors `memory`, for snapshots
   const journal = join(dir, `${name}.jsonl`);
   const snapshot = createDurableJsonFile<[string, number][]>({
@@ -82,7 +106,7 @@ export function durableExpiringSet(dir: string, name: string, cap: number, nowSe
   const remember = (key: string, exp: number) => {
     memory.add(key, exp);
     live.set(key, exp);
-    while (live.size > cap) live.delete(live.keys().next().value as string);
+    while (whenFull === "evict" && live.size > cap) live.delete(live.keys().next().value as string);
   };
   const compact = () => {
     snapshot.save("now"); // the merged state is durable before the journal goes
@@ -108,6 +132,8 @@ export function durableExpiringSet(dir: string, name: string, cap: number, nowSe
     has: (key) => memory.has(key),
     add: (key, exp) => {
       if (!ID.test(key) || !Number.isSafeInteger(exp)) throw new DurableStateError("bad replay-state entry");
+      // Not a DurableStateError, so the compact-and-retry below never catches it; and checked first, so it journals nothing.
+      if (whenFull === "refuse" && memory.full()) throw new ReplayStateFullError();
       const line = JSON.stringify([key, exp]);
       try {
         appendDurableLine(journal, line, JOURNAL_MAX_BYTES);

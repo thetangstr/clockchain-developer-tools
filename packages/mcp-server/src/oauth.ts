@@ -7,7 +7,7 @@ import {
   accountCreatedDay, AccountStore, AccountUnavailableError, cleanAccountName, cleanDisplayText, DEFAULT_MAX_ACCOUNTS, displayAccountName,
   hasLetterOrDigit, looksLikeAccountKey, shortAccountId, type Account,
 } from "./accounts.js";
-import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
+import { durableExpiringSet, memoryExpiringSet, ReplayStateFullError, type ExpiringSet } from "./oauth-replay.js";
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
 import { isAcctId, mintAgentToken, mintToken } from "./token.js";
 import { AgentKeyError, type AgentKeyBook, type KeyEntry } from "./agent-keys/book.js";
@@ -254,6 +254,8 @@ export interface OAuthOptions {
     newPerHour?: number;
     /** Starter token lifetime (default 3600). */
     tokenTtlSeconds?: number;
+    /** How many unexpired spent assertions are kept (default 100,000); past it new ones are refused. For tests only. */
+    spentAssertionsCap?: number;
   };
   /** Milliseconds clock, injectable for tests. */
   now?: () => number;
@@ -843,14 +845,15 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   // is set (production: <MCP_STATE_DIR>/oauth), so a restart cannot resurrect a spent or revoked token.
   let replay: { usedCodes: ExpiringSet; usedRefreshTokens: ExpiringSet; revokedFamilies: ExpiringSet; usedAssertions?: ExpiringSet } | undefined;
   try {
-    const make = (name: string, cap: number): ExpiringSet =>
-      options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec) : memoryExpiringSet(cap, nowSec);
+    const make = (name: string, cap: number, whenFull?: "evict" | "refuse"): ExpiringSet =>
+      options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec, whenFull) : memoryExpiringSet(cap, nowSec, whenFull);
     replay = {
       usedCodes: make("used-codes", 100_000),
       usedRefreshTokens: make("used-refresh", 200_000),
       revokedFamilies: make("revoked-families", 100_000),
-      // Spent agent client assertions, keyed sha256(fingerprint:jti), each until the assertion's own exp.
-      ...(agentKeys ? { usedAssertions: make("used-assertions", 100_000) } : {}),
+      // Spent agent client assertions, keyed sha256(fingerprint:jti), each until the assertion's own exp. Full, it refuses
+      // new ones rather than drop a spent one that is still valid.
+      ...(agentKeys ? { usedAssertions: make("used-assertions", agentKeys.spentAssertionsCap ?? 100_000, "refuse") } : {}),
     };
   } catch (e) {
     log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
@@ -1442,7 +1445,12 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     }
     try {
       usedAssertions.add(replayKey, proven.exp);
-    } catch {
+    } catch (e) {
+      if (e instanceof ReplayStateFullError) {
+        log({ event: "oauth_replay_state_full", set: "used-assertions" });
+        sendOAuthError(res, 503, "temporarily_unavailable", "Clockchain is taking too many agent sign-ins right now. Try again in a minute.", { "retry-after": "60" });
+        return;
+      }
       log({ event: "oauth_replay_state_write_failed" });
       sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
       return;

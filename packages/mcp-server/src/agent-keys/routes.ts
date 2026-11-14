@@ -9,7 +9,7 @@
 // Errors are {error, error_description}, and nothing here ever echoes or logs an assertion.
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { ExpiringSet } from "../oauth-replay.js";
+import { ReplayStateFullError, type ExpiringSet } from "../oauth-replay.js";
 import { ed25519PublicKeyDer, fingerprint } from "../shadow/lib/keys.js";
 import { limiter } from "../standalone-handshake/public-server.js";
 import { AgentKeyError, type AgentKeyBook, type KeyEntry } from "./book.js";
@@ -278,9 +278,15 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
     if (newPem !== undefined && !resuming && o.allowNewKey && !o.allowNewKey()) {
       return limited(res, "agent_key_new_global", "Clockchain isn't taking new agent keys right now. Try again later.", "3600");
     }
+    // If a replace's second spend fails after the first is written, the old key's assertion stays spent and the request
+    // fails closed, whether the set is full or the write failed.
     try {
       for (const a of spent) usedAssertions.add(a.key, a.exp);
-    } catch {
+    } catch (e) {
+      if (e instanceof ReplayStateFullError) {
+        log({ event: "agent_keys_replay_state_full" });
+        return fail(res, 503, "temporarily_unavailable", "Clockchain is taking too many key changes right now. Try again in a minute.", { "retry-after": "60" });
+      }
       log({ event: "agent_keys_replay_write_failed" });
       return unavailable(res);
     }

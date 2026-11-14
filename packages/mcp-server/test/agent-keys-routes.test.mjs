@@ -45,7 +45,7 @@ async function harness(o = {}) {
   svc.sweep();
   const logs = [];
   const routes = createAgentKeyRoutes({
-    book, proof: jwtBearerProof(), usedAssertions: memoryExpiringSet(1000, () => Math.floor(clock.t / 1000)),
+    book, proof: jwtBearerProof(), usedAssertions: o.usedAssertions ?? memoryExpiringSet(1000, () => Math.floor(clock.t / 1000)),
     publicUrl: PUBLIC, ipOf: () => "203.0.113.9", readJsonBody,
     ...(o.noFiling ? {} : { file: (fp, event, extra) => svc.fileAgentKeyEvent(fp, event, extra) }),
     lookupsPerMinute: o.lookups ?? 600, changesPerHour: o.changes ?? 20, now: () => clock.t, log: (e) => logs.push(e),
@@ -397,6 +397,27 @@ test("revoke shows status revoked with revokedAt", async () => {
     const after = makeAgentKey();
     const replace = await h.post(agent.fingerprint, "replace", { assertion: agent.assertion(actionUrl(agent.fingerprint, "replace"), naming(after)), new_public_key: after.publicKeyPem, new_key_assertion: proving(after, agent.fingerprint) });
     assert.equal(replace.status, 409);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a revoke when the spent-assertion list is full gets 503 and changes nothing", async () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const usedAssertions = memoryExpiringSet(1, nowSec, "refuse");
+  usedAssertions.add("held", nowSec() + 3600);
+  const h = await harness({ usedAssertions });
+  try {
+    const agent = h.agent();
+    const before = h.book.get(agent.fingerprint);
+    const res = await h.post(agent.fingerprint, "revoke", { assertion: agent.assertion(actionUrl(agent.fingerprint, "revoke")) });
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get("retry-after"), "60");
+    const body = await res.json();
+    assert.equal(body.error, "temporarily_unavailable");
+    assert.equal(body.error_description, "Clockchain is taking too many key changes right now. Try again in a minute.");
+    assert.ok(h.logs.some((e) => e.event === "agent_keys_replay_state_full"), JSON.stringify(h.logs));
+    assert.deepEqual(h.book.get(agent.fingerprint), before);
   } finally {
     await h.close();
   }

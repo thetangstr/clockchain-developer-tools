@@ -329,6 +329,35 @@ test("a replayed assertion is refused", async () => {
   }
 });
 
+test("past the spent-assertion cap a new sign-in gets 503, and a spent assertion stays spent", async () => {
+  const h = await harness({ spentAssertionsCap: 1 });
+  try {
+    const first = makeAgentKey();
+    const second = makeAgentKey();
+    const assertion = first.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() });
+    assert.equal((await grant(h.url, assertion)).status, 200);
+    const full = await grant(h.url, second.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }));
+    assert.equal(full.status, 503);
+    assert.equal(full.headers.get("retry-after"), "60");
+    const body = await full.json();
+    assert.equal(body.error, "temporarily_unavailable");
+    assert.equal(body.error_description, "Clockchain is taking too many agent sign-ins right now. Try again in a minute.");
+    assert.equal(body.access_token, undefined);
+    assert.ok(h.logs.some((e) => e.event === "oauth_replay_state_full" && e.set === "used-assertions"), JSON.stringify(h.logs));
+    // The flood never pushes out the spent assertion.
+    const again = await grant(h.url, assertion);
+    assert.equal(again.status, 401);
+    const refused = await again.json();
+    assert.equal(refused.error, "invalid_client");
+    assert.match(refused.error_description, /already used/);
+    // Once the first assertion has expired, there is room again.
+    h.advance(300_000);
+    assert.equal((await grant(h.url, second.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
 test("a bad proof is invalid_client and never mints", async () => {
   const h = await harness();
   try {
