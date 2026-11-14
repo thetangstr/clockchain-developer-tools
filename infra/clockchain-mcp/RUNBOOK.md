@@ -330,6 +330,9 @@ All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString
 `SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY` aren't passed through `docker-compose.yml` yet, so setting them in SSM changes
 nothing until that wiring lands (after the founder's go).
 
+To roll back to code from before the per-address share, delete `starter-anchors.json` in the Shadow state dir first: older code caps that file at 4 KiB and treats a bigger one as unreadable, which pauses every new agent for the rest of the UTC day.
+The counter file is capped at 512 KiB, enough for roughly 12,000 Starter anchors a day; above that its saves fail and a restart reads an older count, so don't raise `SHADOW_STARTER_ANCHORS_PER_DAY` past about 10,000 without raising the cap.
+
 A malformed Shadow setting stops Shadow from starting: every `/shadow` path answers 503, and the reason is in the log as
 `shadow_unavailable`. To apply a setting with no code change, deploy the same commit again: `compose-up.sh` reads SSM each
 time. A deploy that changes `docker-compose.yml` or `compose-up.sh` is refused as infra drift (exit 5). For a change that
