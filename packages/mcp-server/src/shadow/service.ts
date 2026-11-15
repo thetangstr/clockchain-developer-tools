@@ -1095,7 +1095,7 @@ export class ShadowService {
   start(): void {
     try {
       const held = this.store.migrateHeldKeys(this.now());
-      if (held.migrated || held.failed) this.log("shadow_held_keys_migrated", { owners: held.migrated, failed: held.failed });
+      if (held.migrated || held.failed || held.damaged) this.log("shadow_held_keys_migrated", { owners: held.migrated, failed: held.failed, damaged: held.damaged });
     } catch (e) {
       this.log("shadow_held_keys_migrate_failed", { error: (e as Error).name });
     }

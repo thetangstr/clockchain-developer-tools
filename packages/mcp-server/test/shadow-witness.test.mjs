@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -170,7 +170,7 @@ test("at start with the witness key, owners that never come back lose their key.
     assert.doesNotMatch(readFileSync(opFile, "utf8"), /PRIVATE KEY/);
   }
   const moved = logs.filter((l) => l.event === "shadow_held_keys_migrated");
-  assert.deepEqual(moved, [{ event: "shadow_held_keys_migrated", owners: 2, failed: 0 }], "counts only");
+  assert.deepEqual(moved, [{ event: "shadow_held_keys_migrated", owners: 2, failed: 0, damaged: 0 }], "counts only");
 
   // Once is enough: a second start finds nothing, changes nothing, and says nothing.
   const again = setup({ dir, fake, witness, logs });
@@ -460,4 +460,113 @@ test("without a witness key the route is 404; a bad key file keeps Shadow from s
       await bad.close();
     }
   }
+});
+
+// ---- A damaged old key.json (D7, FC5): with the witness key its private key is never used, so it goes, every copy ----
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const DAMAGED = "{not json";
+const heldIn = (dir, owner) => readdirSync(ownerDir(dir, owner)).filter((n) => n === "key.json" || n.startsWith("key.json."));
+
+/** Runs `fn` with console.error captured; returns the captured lines. */
+async function capturingErrors(fn) {
+  const lines = [];
+  const original = console.error;
+  console.error = (...args) => { lines.push(args.map(String).join(" ")); };
+  try {
+    await fn();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
+
+function damagedOwner(dir, owner = A) {
+  mkdirSync(ownerDir(dir, owner), { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(ownerDir(dir, owner), "key.json"), DAMAGED, { mode: 0o600 });
+}
+
+async function verifies(svc, owner = A) {
+  const { closed } = await shortSession(svc, owner);
+  const { packet, pin } = await packetOf(svc, closed.links);
+  assert.equal((await verifyPacket(packet, { pin })).result, "pass");
+  return closed;
+}
+
+test("with the witness key, a key.json with no readable backup is removed and the owner gets a fresh operator id", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-damaged-"));
+  damagedOwner(dir);
+  const logs = [];
+  const witness = loadWitnessKey(witnessFile());
+  let svc;
+  const errors = await capturingErrors(async () => {
+    ({ svc } = setup({ dir, witness, logs }));
+    svc.start();
+    svc.stop();
+  });
+  assert.deepEqual(heldIn(dir, A), [], "no key.json, .bak, quarantined or temp copy is left");
+  const op = JSON.parse(readFileSync(path.join(ownerDir(dir, A), "operator.json"), "utf8")).value;
+  assert.match(op.operatorId, UUID);
+  assert.deepEqual(logs.filter((l) => l.event === "shadow_held_keys_migrated"), [{ event: "shadow_held_keys_migrated", owners: 0, failed: 0, damaged: 1 }]);
+  const removed = errors.filter((l) => l.includes("shadow_damaged_key_removed"));
+  assert.equal(removed.length, 1, errors.join("\n"));
+  assert.ok(!removed[0].includes("not json"), "the file's contents are never logged");
+  assert.equal(JSON.parse(removed[0]).owner, ownerKeyOf(A).slice(0, 16));
+  const closed = await verifies(svc);
+  assert.equal(closed.pin.operatorId, op.operatorId);
+});
+
+test("with the witness key, a key.json damaged after start is removed on its owner's first use", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-damaged-use-"));
+  const logs = [];
+  const { svc } = setup({ dir, witness: loadWitnessKey(witnessFile()), logs });
+  svc.start();
+  svc.stop();
+  damagedOwner(dir);
+  let closed;
+  const errors = await capturingErrors(async () => { closed = await verifies(svc); });
+  assert.deepEqual(heldIn(dir, A), []);
+  assert.match(closed.pin.operatorId, UUID);
+  assert.equal(JSON.parse(readFileSync(path.join(ownerDir(dir, A), "operator.json"), "utf8")).value.operatorId, closed.pin.operatorId);
+  assert.equal(errors.filter((l) => l.includes("shadow_damaged_key_removed")).length, 1);
+});
+
+test("with the witness key, a damaged key.json with a good backup still moves the backup's operator id", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-damaged-bak-"));
+  const fake = new FakeLedger();
+  const legacy = setup({ dir, fake });
+  const id = (await shortSession(legacy.svc)).closed.pin.operatorId;
+  legacy.svc.stop();
+  const keyFile = path.join(ownerDir(dir, A), "key.json");
+  copyFileSync(keyFile, `${keyFile}.bak`);
+  writeFileSync(keyFile, DAMAGED, { mode: 0o600 });
+  const logs = [];
+  const errors = await capturingErrors(async () => {
+    const { svc } = setup({ dir, fake, witness: loadWitnessKey(witnessFile()), logs });
+    svc.start();
+    svc.stop();
+  });
+  assert.deepEqual(heldIn(dir, A), []);
+  assert.equal(JSON.parse(readFileSync(path.join(ownerDir(dir, A), "operator.json"), "utf8")).value.operatorId, id);
+  assert.deepEqual(logs.filter((l) => l.event === "shadow_held_keys_migrated"), [{ event: "shadow_held_keys_migrated", owners: 1, failed: 0, damaged: 0 }]);
+  assert.equal(errors.filter((l) => l.includes("shadow_damaged_key_removed")).length, 0);
+});
+
+test("without the witness key, a damaged key.json still refuses its owner, and nothing is removed", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-damaged-legacy-"));
+  damagedOwner(dir);
+  const keyFile = path.join(ownerDir(dir, A), "key.json");
+  const logs = [];
+  const { svc } = setup({ dir, logs });
+  const errors = await capturingErrors(async () => {
+    svc.start();
+    svc.stop();
+    await assert.rejects(svc.startSession(A, { title: "refused", agents: [{ id: "planner" }] }, BASE));
+    await assert.rejects(svc.startSession(A, { title: "refused again", agents: [{ id: "planner" }] }, BASE));
+  });
+  assert.equal(readFileSync(keyFile, "utf8"), DAMAGED, "the file stays as it was");
+  assert.ok(heldIn(dir, A).includes("key.json"));
+  assert.equal(existsSync(path.join(ownerDir(dir, A), "operator.json")), false);
+  assert.equal(logs.filter((l) => l.event === "shadow_held_keys_migrated").length, 0);
+  assert.equal(errors.filter((l) => l.includes("shadow_damaged_key_removed")).length, 0);
 });

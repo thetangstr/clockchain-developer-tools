@@ -16,7 +16,7 @@
 import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, rmSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { appendDurableLine, cleanStaleFiles, createDurableJsonFile } from "../handshake-core/durable-store.js";
+import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableStateError } from "../handshake-core/durable-store.js";
 import { isLogLevel, levelSetBy, type LevelSetBy, type LogLevel } from "./log-level.js";
 import type { KeyProvider } from "./lib/keys.js";
 import { keyProvider } from "./witness.js";
@@ -239,7 +239,7 @@ export class ShadowStore {
   operator(ownerKey: string, now: Date): Operator {
     const cached = this.operators.get(ownerKey);
     if (cached) return cached;
-    const op: Operator = this.witness ? { operatorId: this.witnessedOperatorId(ownerKey, now), keys: this.witness } : this.ownerKeyOperator(ownerKey, now);
+    const op: Operator = this.witness ? { operatorId: this.witnessedOperatorId(ownerKey, now).operatorId, keys: this.witness } : this.ownerKeyOperator(ownerKey, now);
     if (this.operators.size >= 512) this.operators.delete(this.operators.keys().next().value as string);
     this.operators.set(ownerKey, op);
     return op;
@@ -258,13 +258,18 @@ export class ShadowStore {
     });
   }
 
-  private witnessedOperatorId(ownerKey: string, now: Date): string {
+  /**
+   * `damaged`: key.json and its backup were both unreadable. Its private key would never be used again and its operator id
+   * can't be read, so the owner gets a new operator id and every copy of the file is removed (FC5).
+   */
+  private witnessedOperatorId(ownerKey: string, now: Date): { operatorId: string; damaged: boolean } {
     let current: OperatorFile | undefined;
+    let damaged = false;
     const file = this.operatorFile(ownerKey, () => current!);
     current = file.load();
     if (!current) {
       const keyPath = join(this.ownerDir(ownerKey), "key.json");
-      const old = createDurableJsonFile<OperatorFile>({
+      const heldKey = createDurableJsonFile<OperatorFile>({
         path: keyPath,
         schema: "shadow-operator-key-v1",
         snapshot: () => { throw new Error("key.json is never written with the witness key"); },
@@ -273,7 +278,19 @@ export class ShadowStore {
           return { operatorId: v.operatorId, createdAt: typeof v.createdAt === "string" ? v.createdAt : now.toISOString() };
         },
         maxBytes: KEY_MAX_BYTES,
-      }).load();
+      });
+      let old: OperatorFile | undefined;
+      try {
+        old = heldKey.load();
+      } catch (e) {
+        if (!(e instanceof DurableStateError)) throw e;
+        damaged = true;
+        console.error(JSON.stringify({
+          event: "shadow_damaged_key_removed",
+          owner: ownerKey.slice(0, 16),
+          note: "key.json and its backup were unreadable; a new operator id was issued and every copy removed",
+        }));
+      }
       // The retention clock (the file's age, in the sweep) carries over with the id.
       const since = old ? (mtimeOf(keyPath) ?? mtimeOf(`${keyPath}.bak`)) : undefined;
       current = old ?? { operatorId: randomUUID(), createdAt: now.toISOString() };
@@ -282,7 +299,7 @@ export class ShadowStore {
     }
     // Only once the id is durable elsewhere: key.json, its .bak, any quarantined or half-written copy.
     this.removeHeldKeys(ownerKey);
-    return current.operatorId;
+    return { operatorId: current.operatorId, damaged };
   }
 
   /**
@@ -290,16 +307,16 @@ export class ShadowStore {
    * operator.json as its next use would, so an owner that never comes back doesn't keep a private key on disk. Idempotent;
    * without the witness key, nothing. Returns counts only.
    */
-  migrateHeldKeys(now: Date): { migrated: number; failed: number } {
-    const counts = { migrated: 0, failed: 0 };
+  migrateHeldKeys(now: Date): { migrated: number; failed: number; damaged: number } {
+    const counts = { migrated: 0, failed: 0, damaged: 0 };
     const ownersDir = join(this.root, "owners");
     if (!this.witness || !existsSync(ownersDir)) return counts;
     for (const ownerKey of readdirSync(ownersDir)) {
       if (!OWNER_KEY.test(ownerKey)) continue;
       try {
         if (!readdirSync(join(ownersDir, ownerKey)).some((name) => name === "key.json" || name.startsWith("key.json."))) continue;
-        this.witnessedOperatorId(ownerKey, now);
-        counts.migrated++;
+        if (this.witnessedOperatorId(ownerKey, now).damaged) counts.damaged++;
+        else counts.migrated++;
       } catch {
         counts.failed++; // Left as it is: its next use, or the next start, tries again.
       }
