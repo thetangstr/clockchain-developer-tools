@@ -14,7 +14,6 @@ import { mintAgentToken, mintToken, mintTrialToken, mintHandshakeSessionToken } 
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { ASKED_INSTRUCTIONS, shadowOwnerFromClaims } from "../dist/shadow/mcp.js";
 import { ownerKeyOf } from "../dist/shadow/store.js";
-import { AgentKeyBook } from "../dist/agent-keys/book.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
 import { parseStrict } from "../dist/shadow/lib/profile.js";
@@ -372,8 +371,20 @@ async function bootAgentKeys(env = {}) {
   return {
     url,
     shadowDir,
-    /** The same public book the server reads (one file per key on disk), for replacing and revoking keys. */
-    book: new AgentKeyBook({ dir: path.join(stateDir, "agent-keys"), now: () => new Date() }),
+    /** Replaces `agent`'s key with `next`'s through the server's own route, signed by both keys. */
+    async replaceKey(agent, next) {
+      const aud = `${PUBLIC}/agent-keys/${agent.fingerprint}/replace`;
+      await keyChange(url, aud, {
+        assertion: agent.assertion(aud, { claims: { new_key: next.fingerprint } }),
+        new_public_key: next.publicKeyPem,
+        new_key_assertion: next.assertion(aud, { claims: { replaces: agent.fingerprint } }),
+      });
+    },
+    /** Cancels `agent`'s key through the server's own route. */
+    async revokeKey(agent) {
+      const aud = `${PUBLIC}/agent-keys/${agent.fingerprint}/revoke`;
+      await keyChange(url, aud, { assertion: agent.assertion(aud) });
+    },
     /** A Starter token for `agent` from the real client_credentials grant. */
     async tokenFor(agent) {
       const res = await fetch(`${url}/oauth/token`, {
@@ -391,6 +402,13 @@ async function bootAgentKeys(env = {}) {
       for (const k of ENV_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
     },
   };
+}
+
+/** POSTs a key change to the server's /agent-keys route for `aud` (its public URL) and expects it to succeed. */
+async function keyChange(url, aud, body) {
+  const res = await fetch(`${url}${new URL(aud).pathname}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const answer = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(answer));
 }
 
 const sessionDir = (app, ownerId, sessionId) => path.join(app.shadowDir, "owners", ownerKeyOf(ownerId), "sessions", sessionId);
@@ -458,7 +476,7 @@ test("an agent signs its own checkpoint over /shadow/mcp, with the key its token
     assert.equal(signed.checkpoint.checkpoint_hash, cp.sign.hash);
     // After replace, the old key's tokens stop, and the new key signs for the same records.
     const next = makeAgentKey();
-    app.book.replace(agent.fingerprint, next.publicKeyPem);
+    await app.replaceKey(agent, next);
     const nextToken = await app.tokenFor(next);
     const nextCred = { agent: next, token: nextToken };
     await call(app, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." }, nextCred);
@@ -480,7 +498,7 @@ test("after replace, a token from the new key owns the same sessions", async () 
     const oldToken = await app.tokenFor(first);
     const { value: s } = await call(app, "shadow_start_session", { title: "kept across keys" }, { agent: first, token: oldToken });
     const second = makeAgentKey();
-    app.book.replace(first.fingerprint, second.publicKeyPem);
+    await app.replaceKey(first, second);
     const newToken = await app.tokenFor(second);
     assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { agent: second, token: newToken })).value.title, "kept across keys");
     const { value: listed } = await call(app, "shadow_list_sessions", {}, { agent: second, token: newToken });
@@ -505,7 +523,7 @@ test("a token minted before revoke is refused after it", async () => {
     const token = await app.tokenFor(agent);
     assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent, token })).status, 200);
     assert.equal((await rpc(`${app.url}/mcp`, "tools/list", {}, { agent, token })).status, 200);
-    app.book.revoke(agent.fingerprint);
+    await app.revokeKey(agent);
     for (const endpoint of ["/shadow/mcp", "/mcp"]) {
       const res = await fetch(`${app.url}${endpoint}`, {
         method: "POST",
@@ -722,7 +740,7 @@ test("DPoP: a request's proof is checked once, so a refusal logs one line and a 
     });
     assert.equal(refusedLog.filter((l) => l.includes("agent_dpop_refused")).length, 1, refusedLog.join("\n"));
     // A good proof on a revoked key: spent by the first check, and the second check (the 401's) must not see it as reused.
-    app.book.revoke(agent.fingerprint);
+    await app.revokeKey(agent);
     const cancelledLog = await capturingLogs(async () => {
       const res = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent, token });
       assert.equal(res.status, 401);

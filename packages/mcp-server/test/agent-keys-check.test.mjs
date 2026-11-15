@@ -362,6 +362,13 @@ const FAILING = {
   not_from_agent: (env, ag) => {
     rmSync(path.join(env.keysDir, `${ag.fp}.json`), { force: true });
     rmSync(path.join(env.keysDir, `${ag.fp}.json.bak`), { force: true });
+    // The book keeps the files it read in memory, so a key file removed by hand is seen after a restart.
+    env.book = bookAt(env.clock, env.keysDir);
+    env.svc = new ShadowService({
+      stateDir: env.stateDir, ledger: () => env.fake, budget: () => createLogBudget({}),
+      now: () => new Date(env.clock.t), sleep: async () => {}, log: () => {}, agentKeys: env.book,
+    });
+    env.svc.sweep();
   },
   key_revoked_before: (env, ag) => {
     env.clock.t = T0 - 60_000;

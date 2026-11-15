@@ -1,8 +1,12 @@
 // The agent key book: a local, public-only record of the Ed25519 public keys agents sign in with. Clockchain holds no
 // private keys. One JSON file per key at <dir>/<fingerprint>.json, written with the handshake surfaces' durable writer
 // (0700 dirs, 0600 files, fsync, rename, .bak). `root` follows a replaced key back to the agent's first key.
+//
+// Each key's file object is kept in memory (at most MAX_CACHED, oldest dropped first), so a request reads no disk and the
+// object that saw a corrupt main file is the one that writes it. That makes this instance the only writer (one server
+// process per state directory): an operator who edits a key file by hand restarts the server.
 import { join } from "node:path";
-import { createDurableJsonFile } from "../handshake-core/durable-store.js";
+import { cleanStaleFiles, createDurableJsonFile, type DurableJsonFile } from "../handshake-core/durable-store.js";
 import { ed25519PublicKeyDer, fingerprint } from "../shadow/lib/keys.js";
 
 export type KeyStatus = "active" | "replaced" | "revoked";
@@ -36,6 +40,9 @@ const FINGERPRINT = /^[0-9a-f]{64}$/;
 const SOURCE = /^[0-9a-f]{32}$/;
 const SCHEMA = "agent-key-v1";
 const MAX_BYTES = 64 * 1024;
+const MAX_CACHED = 10_000;
+
+type Slot = { file: DurableJsonFile<KeyEntry>; entry: KeyEntry };
 
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
@@ -56,15 +63,33 @@ function validEntry(v: unknown): KeyEntry {
 export class AgentKeyBook {
   private readonly dir: string;
   private readonly now: () => Date;
+  private readonly maxCached: number;
+  /** fingerprint -> its one file object and entry, oldest first. */
+  private readonly slots = new Map<string, Slot>();
 
-  constructor(opts: { dir: string; now: () => Date }) {
+  /** `maxCached` is for tests only. */
+  constructor(opts: { dir: string; now: () => Date; maxCached?: number }) {
     this.dir = opts.dir;
     this.now = opts.now;
+    this.maxCached = opts.maxCached ?? MAX_CACHED;
+    cleanStaleFiles(this.dir);
   }
 
   get(fp: string): KeyEntry | null {
     if (!FINGERPRINT.test(fp)) return null;
-    return this.file(fp, () => { throw new Error("not loaded"); }).load() ?? null;
+    const cached = this.slots.get(fp);
+    if (cached) {
+      this.slots.delete(fp);
+      this.slots.set(fp, cached);
+      return structuredClone(cached.entry);
+    }
+    const slot = this.open(fp);
+    const entry = slot.file.load();
+    // An unknown key is not cached, so a flood of them costs no memory.
+    if (entry === undefined) return null;
+    slot.entry = entry;
+    this.keep(fp, slot);
+    return structuredClone(entry);
   }
 
   /** A new key is stored with `source`; a known key keeps what it has. */
@@ -168,11 +193,33 @@ export class AgentKeyBook {
     return entry;
   }
 
+  /** Writes through the key's own file object; on failure the slot is dropped, so the next get() reads the disk. */
   private save(entry: KeyEntry): void {
-    this.file(entry.fingerprint, () => entry).save("now");
+    const fp = entry.fingerprint;
+    let slot = this.slots.get(fp);
+    if (!slot) {
+      slot = this.open(fp);
+      slot.file.load();
+    }
+    slot.entry = structuredClone(entry);
+    try {
+      slot.file.save("now");
+    } catch (error) {
+      this.slots.delete(fp);
+      throw error;
+    }
+    this.keep(fp, slot);
   }
 
-  private file(fp: string, snapshot: () => KeyEntry) {
-    return createDurableJsonFile<KeyEntry>({ path: join(this.dir, `${fp}.json`), schema: SCHEMA, snapshot, validate: validEntry, maxBytes: MAX_BYTES });
+  private open(fp: string): Slot {
+    const slot = { entry: undefined } as unknown as Slot;
+    slot.file = createDurableJsonFile<KeyEntry>({ path: join(this.dir, `${fp}.json`), schema: SCHEMA, snapshot: () => slot.entry, validate: validEntry, maxBytes: MAX_BYTES });
+    return slot;
+  }
+
+  private keep(fp: string, slot: Slot): void {
+    this.slots.delete(fp);
+    this.slots.set(fp, slot);
+    while (this.slots.size > this.maxCached) this.slots.delete(this.slots.keys().next().value as string);
   }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -86,7 +86,7 @@ test("files are 0600", () => {
 });
 
 test("replace is safe to retry after an interruption", () => {
-  const { dir, book } = fresh();
+  let { dir, book } = fresh();
   const a = book.admit(pem()).entry;
   const newPem = pem();
   const newFp = fingerprint(newPem);
@@ -96,6 +96,8 @@ test("replace is safe to retry after an interruption", () => {
   stored.value.status = "replaced";
   stored.value.replacedBy = newFp;
   writeFileSync(path, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
+  // The book caches what it wrote, so the restart after the interruption is a new book.
+  book = new AgentKeyBook({ dir, now: () => new Date("2026-11-13T00:00:00Z") });
   assert.equal(book.get(a.fingerprint).status, "replaced");
   assert.equal(book.get(newFp), null);
   const b = book.replace(a.fingerprint, newPem);
@@ -163,4 +165,95 @@ test("an entry whose stored source isn't 32 lowercase hex characters is invalid;
     writeFileSync(`${path}.bak`, `${JSON.stringify(stored)}\n`, { mode: 0o600 });
     assert.throws(() => new AgentKeyBook({ dir, now: () => new Date() }).get(withSource.fingerprint), undefined, `source ${JSON.stringify(bad)}`);
   }
+});
+
+// ---- The cache (D2): one durable file object per key, so the corrupt-file guard is kept between reading and writing ----
+
+const NOW = () => new Date("2026-11-13T00:00:00Z");
+
+test("a corrupt key file with a good backup is never rotated over the backup", () => {
+  const { dir, book } = fresh();
+  const a = book.admit(pem()).entry;
+  book.setFiling(a.fingerprint, { state: "pending", ledgerId: "L1" });
+  const main = join(dir, `${a.fingerprint}.json`);
+  const goodBak = readFileSync(`${main}.bak`);
+  writeFileSync(main, `${JSON.stringify({ schema: "agent-key-v1", value: {} })}\n`, { mode: 0o600 });
+  const again = new AgentKeyBook({ dir, now: NOW });
+  assert.deepEqual(again.get(a.fingerprint), a, "the backup's entry");
+  again.setFiling(a.fingerprint, { state: "filed", ledgerId: "L2", block: 3, filedAt: "2026-11-13T00:00:02Z" });
+  assert.deepEqual(readFileSync(`${main}.bak`), goodBak, "the good backup is kept");
+  assert.equal(JSON.parse(readFileSync(main, "utf8")).value.filing.ledgerId, "L2");
+  assert.equal(new AgentKeyBook({ dir, now: NOW }).get(a.fingerprint).filing.state, "filed");
+});
+
+test("a second get() of a key reads the cache", () => {
+  const { dir, book } = fresh();
+  const a = book.admit(pem()).entry;
+  assert.deepEqual(book.get(a.fingerprint), a);
+  unlinkSync(join(dir, `${a.fingerprint}.json`));
+  assert.deepEqual(book.get(a.fingerprint), a);
+  // A key the book has never seen is not cached: a flood of unknown fingerprints costs no memory, and a later file is read.
+  const later = pem();
+  const fp = fingerprint(later);
+  assert.equal(book.get(fp), null);
+  new AgentKeyBook({ dir, now: NOW }).admit(later);
+  assert.equal(book.get(fp).fingerprint, fp);
+});
+
+test("changing what get() or a change returned changes nothing stored", () => {
+  const { book } = fresh();
+  const admitted = book.admit(pem()).entry;
+  const fp = admitted.fingerprint;
+  const copy = structuredClone(admitted);
+  admitted.status = "revoked";
+  const got = book.get(fp);
+  got.status = "revoked";
+  got.events.push({ action: "revoked", at: "x" });
+  got.filing.state = "filed";
+  assert.deepEqual(book.get(fp), copy);
+  const revoked = book.revoke(fp);
+  revoked.events.length = 0;
+  assert.equal(book.get(fp).events.length, 1);
+});
+
+test("a failed save leaves the book as the disk says", () => {
+  const { dir, book } = fresh();
+  const a = book.admit(pem()).entry;
+  // Too big to write: the save throws before anything reaches the disk.
+  assert.throws(() => book.setFiling(a.fingerprint, { state: "pending", ledgerId: "x".repeat(70_000) }));
+  assert.deepEqual(book.get(a.fingerprint).filing, { state: "unfiled" });
+  // The failed key's file object was dropped, so what is on disk now is what the book reads.
+  new AgentKeyBook({ dir, now: NOW }).setFiling(a.fingerprint, { state: "pending", ledgerId: "L9" });
+  assert.throws(() => book.setFiling(a.fingerprint, { state: "pending", ledgerId: "x".repeat(70_000) }));
+  assert.equal(book.get(a.fingerprint).filing.ledgerId, "L9");
+});
+
+test("opening the book removes temp files and quarantined copies older than 7 days, and keeps newer ones", () => {
+  const { dir, book } = fresh();
+  const a = book.admit(pem()).entry;
+  const main = join(dir, `${a.fingerprint}.json`);
+  const day = 86_400_000;
+  const tmp = `${main}.123.abc.tmp`;
+  const old = `${main}.corrupt-${Date.now() - 8 * day}`;
+  const recent = `${main}.corrupt-${Date.now() - 6 * day}`;
+  for (const f of [tmp, old, recent]) writeFileSync(f, "x", { mode: 0o600 });
+  new AgentKeyBook({ dir, now: NOW });
+  assert.equal(existsSync(tmp), false);
+  assert.equal(existsSync(old), false);
+  assert.equal(existsSync(recent), true);
+  assert.equal(existsSync(main), true);
+  // A book over a directory that doesn't exist yet opens.
+  new AgentKeyBook({ dir: join(dir, "not-yet"), now: NOW });
+});
+
+test("past the cache's cap the oldest key is dropped and still loads from disk", () => {
+  const { dir } = fresh();
+  const book = new AgentKeyBook({ dir, now: NOW, maxCached: 2 });
+  const [k1, k2, k3] = [pem(), pem(), pem()].map((p) => book.admit(p).entry.fingerprint);
+  const other = new AgentKeyBook({ dir, now: NOW });
+  for (const fp of [k1, k2, k3]) other.setFiling(fp, { state: "pending", ledgerId: "L5" });
+  assert.equal(book.get(k1).filing.ledgerId, "L5", "dropped, so read from disk");
+  assert.equal(book.get(k3).filing.state, "unfiled", "still cached");
+  // Reading k1 again made it the newest, so k2 was dropped next.
+  assert.equal(book.get(k2).filing.ledgerId, "L5");
 });
