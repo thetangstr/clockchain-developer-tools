@@ -601,6 +601,31 @@ test("with the witness key, a key.json that can't be opened for a moment (EACCES
   assert.equal(closed.pin.operatorId, id);
 });
 
+test("with the witness key, a key.json whose permissions drifted (0644) is never removed: chmod fixes it", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-mode-"));
+  const legacy = setup({ dir });
+  const id = (await shortSession(legacy.svc)).closed.pin.operatorId;
+  legacy.svc.stop();
+  const keyFile = path.join(ownerDir(dir, A), "key.json");
+  for (const f of [keyFile, `${keyFile}.bak`]) if (existsSync(f)) chmodSync(f, 0o644);
+  const bytes = readFileSync(keyFile);
+  const logs = [];
+  let svc;
+  const errors = await capturingErrors(async () => {
+    ({ svc } = setup({ dir, witness: loadWitnessKey(witnessFile()), logs }));
+    svc.start();
+    svc.stop();
+  });
+  assert.equal(errors.filter((l) => l.includes("shadow_damaged_key_removed")).length, 0);
+  assert.equal(existsSync(path.join(ownerDir(dir, A), "operator.json")), false, "no new operator id");
+  assert.deepEqual(readFileSync(keyFile), bytes, "the key file is left as it was");
+  assert.equal(logs.filter((l) => l.event === "shadow_held_keys_migrated")[0]?.damaged, 0);
+  // Private again, its operator id moves over as usual.
+  for (const f of [keyFile, `${keyFile}.bak`]) if (existsSync(f)) chmodSync(f, 0o600);
+  const closed = await verifies(svc);
+  assert.equal(closed.pin.operatorId, id);
+});
+
 test("a corrupt key.json is logged by its error's name only, never a word of the file", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-redact-"));
   const marker = "PRIVATEKEYBYTESMARKER";

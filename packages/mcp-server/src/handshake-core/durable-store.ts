@@ -148,10 +148,13 @@ function ensurePrivateDirectory(path: string): void {
  * file is not a private regular file within `maxBytes`, or does not parse or validate. For a reader that must not touch a
  * bad file each time it looks (agent-keys/book.ts's sweep).
  */
+/** The file's type or permissions are wrong, not its bytes: an operator can fix it (chmod), so it is never "damaged". */
+class DurableFileShapeError extends Error {}
+
 export function readDurableFile<T>(file: string, schema: string, maxBytes: number, validate: (value: unknown) => T): T {
   const link = lstatSync(file);
-  if (!link.isFile() || link.isSymbolicLink()) throw new Error("not a regular file");
-  if ((link.mode & 0o077) !== 0) throw new Error("file is readable by others");
+  if (!link.isFile() || link.isSymbolicLink()) throw new DurableFileShapeError("not a regular file");
+  if ((link.mode & 0o077) !== 0) throw new DurableFileShapeError("file is readable by others");
   if (link.size > maxBytes) throw new Error("file exceeds the size bound");
   const parsed = JSON.parse(readFileSync(file, "utf8")) as { schema?: unknown; value?: unknown };
   if (parsed === null || typeof parsed !== "object" || parsed.schema !== schema) throw new Error("unknown schema");
@@ -161,8 +164,8 @@ export function readDurableFile<T>(file: string, schema: string, maxBytes: numbe
 /**
  * For a caller that acts on damage (removes the file, or stops rereading it) after load() threw: true only when neither
  * `path` nor its .bak is valid and at least one holds bytes that were read and fail readDurableFile's checks. A copy
- * that couldn't be read at all (EACCES, EMFILE, EIO) may be fine a moment later: that error is thrown. Opt-in; load()
- * is unchanged.
+ * that couldn't be read at all (EACCES, EMFILE, EIO) may be fine a moment later, and one that isn't a private regular
+ * file is fixed with chmod: those errors are thrown. Opt-in; load() is unchanged.
  */
 export function durableFileDamaged(path: string, schema: string, maxBytes: number, validate: (value: unknown) => unknown): boolean {
   let bad = false;
@@ -173,7 +176,7 @@ export function durableFileDamaged(path: string, schema: string, maxBytes: numbe
     } catch (error) {
       const { code, syscall } = error as NodeJS.ErrnoException;
       if (code === "ENOENT") continue;
-      if (syscall !== undefined) throw error;
+      if (syscall !== undefined || error instanceof DurableFileShapeError) throw error;
       bad = true;
     }
   }
