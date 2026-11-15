@@ -1662,9 +1662,10 @@ test("compose wrapper: witness key absent = no key file, no override, no SHADOW_
     env: { SHADOW_WITNESS_KEY_FILE: "/app/witness/witness-key.pem" },
   });
   try {
-    // A copy left by an earlier start with the parameter present.
+    // A copy left by an earlier start with the parameter present, and a stage file from a start that died mid-write.
     await mkdir(env.EXPECTED_WITNESS_DIR, { mode: 0o700 });
     await writeFile(path.join(env.EXPECTED_WITNESS_DIR, "witness-key.pem"), witnessKeyPem, { mode: 0o400 });
+    await writeFile(path.join(env.EXPECTED_WITNESS_DIR, ".witness-key.Ab12Cd"), witnessKeyPem, { mode: 0o600 });
 
     const result = await run(wrapper, [], { cwd: temp, env });
 
@@ -1672,6 +1673,7 @@ test("compose wrapper: witness key absent = no key file, no override, no SHADOW_
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n", "env-check found no key file and no variable");
     assert.match((await readFile(dockerArgsFile, "utf8")).trim(), /^-f \S+docker-compose\.yml up -d --build --wait --wait-timeout 180$/);
     assert.equal(await pathExists(path.join(env.EXPECTED_WITNESS_DIR, "witness-key.pem")), false, "the stale copy is removed");
+    assert.deepEqual(await readdir(env.EXPECTED_WITNESS_DIR), [], "the leftover stage file is removed");
   } finally {
     await rm(temp, { recursive: true, force: true });
   }
@@ -1694,6 +1696,9 @@ for (const onlyArgs of [[], ["--only", "mcp"]]) {
       env: { FAKE_WITNESS_KEY: witnessKeyPem, EXPECT_WITNESS_KEY: "1", ...(onlyArgs.length ? { EXPECT_MCP_ONLY: "1" } : {}) },
     });
     try {
+      // A stage file from a start that died mid-write: the env-check sees only witness-key.pem.
+      await mkdir(env.EXPECTED_WITNESS_DIR, { mode: 0o700 });
+      await writeFile(path.join(env.EXPECTED_WITNESS_DIR, ".witness-key.Ab12Cd"), witnessKeyPem, { mode: 0o600 });
       const result = await run(wrapper, onlyArgs, { cwd: temp, env });
 
       assert.equal(result.code, 0, result.stderr);

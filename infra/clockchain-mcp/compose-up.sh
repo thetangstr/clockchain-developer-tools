@@ -463,6 +463,8 @@ materialize_host_secrets() {
 # refusals name the parameter only.
 materialize_witness_key() {
   local error_file payload pem der_hex stage
+  # A stage file (a private key) left by a start that died mid-write, whether or not the parameter exists now.
+  rm -f "${CLOCKCHAIN_MCP_WITNESS_DIR}"/.witness-key.*
   error_file="$(mktemp)"
   if ! payload="$(fetch_secret "$SHADOW_WITNESS_KEY_PARAM" 2>"$error_file")"; then
     if grep -q 'ParameterNotFound' "$error_file"; then

@@ -515,6 +515,33 @@ test("a revoked key cannot mint, nor a replaced one", async () => {
   }
 });
 
+test("a key revoked, or replaced, before a restart that finds its main file damaged still cannot mint", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const dir = path.join(tempDir("book"), "agent-keys");
+  const book = new AgentKeyBook({ dir, now: () => new Date() });
+  const before = await harness({ book });
+  const revoked = makeAgentKey();
+  const old = makeAgentKey();
+  try {
+    for (const key of [revoked, old]) assert.equal((await grant(before.url, key.assertion(TOKEN_ENDPOINT, { iat: before.nowSec() }))).status, 200);
+    book.revoke(revoked.fingerprint);
+    book.replace(old.fingerprint, makeAgentKey().publicKeyPem);
+  } finally {
+    await before.close();
+  }
+  for (const key of [revoked, old]) writeFileSync(path.join(dir, `${key.fingerprint}.json`), "{not json", { mode: 0o600 });
+  const after = await harness({ book: new AgentKeyBook({ dir, now: () => new Date() }) });
+  try {
+    for (const key of [revoked, old]) {
+      const res = await grant(after.url, key.assertion(TOKEN_ENDPOINT, { iat: after.nowSec() }));
+      assert.equal(res.status, 401);
+      assert.equal((await res.json()).error, "invalid_client");
+    }
+  } finally {
+    await after.close();
+  }
+});
+
 test("no refresh_token is returned", async () => {
   const h = await harness();
   try {

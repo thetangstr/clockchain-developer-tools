@@ -16,8 +16,8 @@ import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableState
  *
  * A set made with whenFull "refuse" (spent agent assertions) throws ReplayStateFullError from add() while it holds `cap`
  * unexpired entries, instead of evicting one, so a flood can't push out a spent entry that is still valid. Opening such a
- * set with more than `cap` live entries on disk (only possible if the cap constant was lowered) throws the same error, so
- * the set fails to open and its endpoint refuses closed (503), as for a corrupt snapshot.
+ * set with more than `cap` live entries on disk, in its snapshot or its journal (only possible if the cap constant was
+ * lowered), throws the same error, so the set fails to open and its endpoint refuses closed (503), as for a corrupt snapshot.
  */
 
 /** Thrown by add() on a set made with whenFull "refuse" that holds `cap` unexpired entries. Nothing was written. */
@@ -129,12 +129,15 @@ export function durableExpiringSet(dir: string, name: string, cap: number, nowSe
   if (existsSync(journal)) {
     for (const line of readFileSync(journal, "utf8").split("\n")) {
       if (!line) continue;
+      let entry: unknown;
       try {
-        const entry = JSON.parse(line) as unknown;
-        if (validEntry(entry) && now < entry[1]) remember(entry[0], entry[1]);
+        entry = JSON.parse(line);
       } catch {
         // A torn final line from a crash mid-append: that entry's response never left.
+        continue;
       }
+      // Outside the try: a refusing set past its cap throws ReplayStateFullError and fails to open, as for a snapshot.
+      if (validEntry(entry) && now < entry[1]) remember(entry[0], entry[1]);
     }
   }
   compact();

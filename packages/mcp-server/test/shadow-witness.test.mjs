@@ -4,8 +4,9 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -614,4 +615,40 @@ test("a corrupt key.json is logged by its error's name only, never a word of the
   assert.ok(corrupt.length > 0, errors.join("\n"));
   for (const line of errors) assert.ok(!line.includes(marker), line);
   assert.equal(JSON.parse(corrupt[0]).reason, "SyntaxError");
+});
+
+test("with the witness key, a key.json whose load failed for a moment (EMFILE) but whose bytes are good is never removed", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-emfile-"));
+  const legacy = setup({ dir });
+  const id = (await shortSession(legacy.svc)).closed.pin.operatorId;
+  legacy.svc.stop();
+  const keyFile = path.join(ownerDir(dir, A), "key.json");
+  const bytes = readFileSync(keyFile);
+  // load() reads each copy once and fails on every one; the recheck that follows reads them fine.
+  let failures = [keyFile, `${keyFile}.bak`].filter((f) => existsSync(f)).length;
+  const real = fs.readFileSync;
+  t.mock.method(fs, "readFileSync", function (file, ...rest) {
+    if (failures > 0 && /key\.json(\.bak)?$/.test(String(file))) {
+      failures--;
+      throw Object.assign(new Error("too many open files"), { code: "EMFILE", errno: -24, syscall: "open" });
+    }
+    return real.call(this, file, ...rest);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const logs = [];
+  let svc;
+  const errors = await capturingErrors(async () => {
+    ({ svc } = setup({ dir, witness: loadWitnessKey(witnessFile()), logs }));
+    svc.start();
+    svc.stop();
+  });
+  assert.equal(failures, 0, "the injected failure was hit");
+  assert.deepEqual(logs.filter((l) => l.event === "shadow_held_keys_migrated"), [{ event: "shadow_held_keys_migrated", owners: 0, failed: 1, damaged: 0 }]);
+  assert.equal(errors.filter((l) => l.includes("shadow_damaged_key_removed")).length, 0);
+  assert.equal(existsSync(path.join(ownerDir(dir, A), "operator.json")), false, "no new operator id");
+  assert.deepEqual(readFileSync(keyFile), bytes, "the key file is left as it was");
+  // Its next use moves the same operator id over.
+  const closed = await verifies(svc);
+  assert.equal(closed.pin.operatorId, id);
 });

@@ -7,7 +7,7 @@
 // process per state directory): an operator who edits a key file by hand restarts the server.
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { cleanStaleFiles, createDurableJsonFile, readDurableFile, type DurableJsonFile } from "../handshake-core/durable-store.js";
+import { cleanStaleFiles, createDurableJsonFile, durableFileDamaged, readDurableFile, type DurableJsonFile } from "../handshake-core/durable-store.js";
 import { ed25519PublicKeyDer, fingerprint } from "../shadow/lib/keys.js";
 
 export type KeyStatus = "active" | "replaced" | "revoked";
@@ -71,6 +71,12 @@ export class AgentKeyBook {
   private readonly maxCached: number;
   /** fingerprint -> its one file object and entry, oldest first. */
   private readonly slots = new Map<string, Slot>();
+  /**
+   * fingerprint -> the error its load threw, for a key whose file and .bak are both damaged (at most maxCached, oldest
+   * dropped first). The public key route asks for any fingerprint, so a damaged key is copied and logged once, not on
+   * every call. A successful save clears it.
+   */
+  private readonly damaged = new Map<string, unknown>();
 
   /** `maxCached` is for tests only. */
   constructor(opts: { dir: string; now: () => Date; maxCached?: number }) {
@@ -88,8 +94,23 @@ export class AgentKeyBook {
       this.slots.set(fp, cached);
       return structuredClone(cached.entry);
     }
+    if (this.damaged.has(fp)) throw this.damaged.get(fp);
     const slot = this.open(fp);
-    const entry = slot.file.load();
+    let entry: KeyEntry | undefined;
+    try {
+      entry = slot.file.load();
+    } catch (error) {
+      // Only bytes that were read and are bad: a copy that couldn't be read (EMFILE) is tried again next time.
+      let damaged = false;
+      try {
+        damaged = durableFileDamaged(join(this.dir, `${fp}.json`), SCHEMA, MAX_BYTES, (v) => validEntry(fp, v));
+      } catch { /* not readable now */ }
+      if (damaged) {
+        this.damaged.set(fp, error);
+        while (this.damaged.size > this.maxCached) this.damaged.delete(this.damaged.keys().next().value as string);
+      }
+      throw error;
+    }
     // An unknown key is not cached, so a flood of them costs no memory.
     if (entry === undefined) return null;
     slot.entry = entry;
@@ -178,6 +199,7 @@ export class AgentKeyBook {
       old.replacedBy = newFp;
       old.events.push({ action: "replaced", at });
       this.save(old);
+      this.save(old); // so the .bak is replaced too (see revoke)
     }
     const fresh: KeyEntry = { fingerprint: newFp, publicKeyPem: newPem, root: old.root, status: "active", firstSeenAt: at, filing: { state: "unfiled" }, events: [] };
     this.save(fresh);
@@ -191,6 +213,9 @@ export class AgentKeyBook {
     entry.status = "revoked";
     entry.revokedAt = at;
     entry.events.push({ action: "revoked", at });
+    // Twice, so the .bak holds the revocation too: a damaged main file restores from the .bak, which must not be the
+    // active key it was, or the next sign-in would write it back as active.
+    this.save(entry);
     this.save(entry);
     return entry;
   }
@@ -260,6 +285,7 @@ export class AgentKeyBook {
       this.slots.delete(fp);
       throw error;
     }
+    this.damaged.delete(fp);
     this.keep(fp, slot);
   }
 

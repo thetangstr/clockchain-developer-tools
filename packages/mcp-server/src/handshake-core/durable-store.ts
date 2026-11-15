@@ -158,6 +158,28 @@ export function readDurableFile<T>(file: string, schema: string, maxBytes: numbe
   return validate(parsed.value);
 }
 
+/**
+ * For a caller that acts on damage (removes the file, or stops rereading it) after load() threw: true only when neither
+ * `path` nor its .bak is valid and at least one holds bytes that were read and fail readDurableFile's checks. A copy
+ * that couldn't be read at all (EACCES, EMFILE, EIO) may be fine a moment later: that error is thrown. Opt-in; load()
+ * is unchanged.
+ */
+export function durableFileDamaged(path: string, schema: string, maxBytes: number, validate: (value: unknown) => unknown): boolean {
+  let bad = false;
+  for (const file of [path, `${path}.bak`]) {
+    try {
+      readDurableFile(file, schema, maxBytes, validate);
+      return false;
+    } catch (error) {
+      const { code, syscall } = error as NodeJS.ErrnoException;
+      if (code === "ENOENT") continue;
+      if (syscall !== undefined) throw error;
+      bad = true;
+    }
+  }
+  return bad;
+}
+
 export interface DurableJsonFile<T> {
   /** The stored value, or undefined when no file exists yet. Throws DurableStateError on unrecoverable corruption. */
   load(): T | undefined;

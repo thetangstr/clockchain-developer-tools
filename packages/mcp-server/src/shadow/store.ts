@@ -16,7 +16,7 @@
 import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, lstatSync, openSync, readFileSync, readdirSync, rmSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableStateError } from "../handshake-core/durable-store.js";
+import { appendDurableLine, cleanStaleFiles, createDurableJsonFile, DurableStateError, durableFileDamaged } from "../handshake-core/durable-store.js";
 import { isLogLevel, levelSetBy, type LevelSetBy, type LogLevel } from "./log-level.js";
 import type { KeyProvider } from "./lib/keys.js";
 import { keyProvider } from "./witness.js";
@@ -269,14 +269,15 @@ export class ShadowStore {
     current = file.load();
     if (!current) {
       const keyPath = join(this.ownerDir(ownerKey), "key.json");
+      const validate = (v: unknown): OperatorFile => {
+        if (!isObj(v) || typeof v.operatorId !== "string") throw new Error("bad key file");
+        return { operatorId: v.operatorId, createdAt: typeof v.createdAt === "string" ? v.createdAt : now.toISOString() };
+      };
       const heldKey = createDurableJsonFile<OperatorFile>({
         path: keyPath,
         schema: "shadow-operator-key-v1",
         snapshot: () => { throw new Error("key.json is never written with the witness key"); },
-        validate: (v) => {
-          if (!isObj(v) || typeof v.operatorId !== "string") throw new Error("bad key file");
-          return { operatorId: v.operatorId, createdAt: typeof v.createdAt === "string" ? v.createdAt : now.toISOString() };
-        },
+        validate,
         maxBytes: KEY_MAX_BYTES,
         redactReasons: true,
       });
@@ -285,15 +286,10 @@ export class ShadowStore {
         old = heldKey.load();
       } catch (e) {
         if (!(e instanceof DurableStateError)) throw e;
-        // Damaged means bytes that were read and are bad. A file that couldn't be read at all (EACCES, EMFILE, EIO) may be
-        // fine a moment later: that error goes up, the owner counts as failed, and nothing is removed.
-        for (const file of [keyPath, `${keyPath}.bak`]) {
-          try {
-            readFileSync(file);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          }
-        }
+        // Damaged means bytes that were read and are bad, checked again from the bytes on disk. A copy that couldn't
+        // be read at all (EACCES, EMFILE, EIO), or one that is good now, may have failed for a moment: the owner counts
+        // as failed, and nothing is removed.
+        if (!durableFileDamaged(keyPath, "shadow-operator-key-v1", KEY_MAX_BYTES, validate)) throw e;
         damaged = true;
         console.error(JSON.stringify({
           event: "shadow_damaged_key_removed",

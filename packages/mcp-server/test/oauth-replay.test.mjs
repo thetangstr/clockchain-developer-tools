@@ -89,6 +89,16 @@ test("a refusing durable set with more live entries on disk than its cap fails t
   assert.equal(durableExpiringSet(dir, "used-assertions", 2, () => c.now()).size(), 2);
 });
 
+test("a refusing durable set whose journal holds more live entries than its cap fails to open, and drops none", () => {
+  const c = clock();
+  const dir = mkdtempSync(path.join(tmpdir(), "oauth-replay-"));
+  const entries = [["a", c.t + 100], ["b", c.t + 200], ["c", c.t + 300]];
+  const journal = path.join(dir, "used-assertions.jsonl");
+  writeFileSync(journal, entries.map((e) => JSON.stringify(e)).join("\n") + "\n", { mode: 0o600 });
+  assert.throws(() => durableExpiringSet(dir, "used-assertions", 2, () => c.now(), "refuse"), ReplayStateFullError);
+  assert.equal(readFileSync(journal, "utf8").trim().split("\n").length, 3, "the journal is kept as it was");
+});
+
 test("addAll records every entry or none: a refusing set without room for all of them takes none", () => {
   const c = clock();
   for (const make of [

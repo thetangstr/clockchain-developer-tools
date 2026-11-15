@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -396,3 +398,52 @@ test("a corrupt key file is logged by its error's name only, never a word of the
   assert.ok(lines.some((l) => l.includes("handshake_state_corrupt") && JSON.parse(l).reason === "SyntaxError"), lines.join("\n"));
   for (const l of lines) assert.ok(!l.includes(marker), l);
 });
+
+// ---- A doubly-bad key file is read once, and a cancelled key stays cancelled (final review items 1, 3) ----
+
+test("a key file whose main and backup are both bad is read, copied and logged once, however often it is asked for", (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const { dir, book: writer } = fresh();
+  const fp = writer.admit(pem()).entry.fingerprint;
+  writer.signedIn(fp); // a .bak exists
+  writeFileSync(join(dir, `${fp}.json`), "{not json", { mode: 0o600 });
+  writeFileSync(join(dir, `${fp}.json.bak`), "{not json either", { mode: 0o600 });
+  const book = new AgentKeyBook({ dir, now: () => new Date() });
+  const first = (() => { try { book.get(fp); } catch (e) { return e; } })();
+  assert.ok(first instanceof Error);
+  for (let i = 0; i < 99; i++) assert.throws(() => book.get(fp), (e) => e.name === first.name && e.message === first.message);
+  assert.equal(readdirSync(dir).filter((n) => n.includes(".corrupt-")).length, 1, "one quarantined copy");
+  assert.equal(errors.mock.calls.filter((c) => String(c.arguments[0]).includes('"path":"' + join(dir, `${fp}.json`) + '"') && String(c.arguments[0]).includes("handshake_state_corrupt")).length, 1, "one log line for the main file");
+  assert.equal(book.slots.size, 0);
+});
+
+test("a key that couldn't be read for a moment (EMFILE) is not remembered as bad", (t) => {
+  t.mock.method(console, "error", () => {});
+  const { dir, book: writer } = fresh();
+  const fp = writer.admit(pem()).entry.fingerprint;
+  const real = fs.readFileSync;
+  let failing = true;
+  t.mock.method(fs, "readFileSync", function (file, ...rest) {
+    if (failing && String(file).includes(fp)) throw Object.assign(new Error("too many open files"), { code: "EMFILE", errno: -24, syscall: "open" });
+    return real.call(this, file, ...rest);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const book = new AgentKeyBook({ dir, now: () => new Date() });
+  assert.throws(() => book.get(fp));
+  failing = false;
+  assert.equal(book.get(fp).fingerprint, fp);
+});
+
+for (const cancel of ["revoke", "replace"]) {
+  test(`a ${cancel}d key stays ${cancel}d when its main file is damaged: the backup holds the new status too`, (t) => {
+    t.mock.method(console, "error", () => {});
+    const { dir, book } = fresh();
+    const fp = book.admit(pem()).entry.fingerprint;
+    if (cancel === "revoke") book.revoke(fp);
+    else book.replace(fp, pem());
+    writeFileSync(join(dir, `${fp}.json`), "{not json", { mode: 0o600 });
+    const restarted = new AgentKeyBook({ dir, now: () => new Date() });
+    assert.equal(restarted.get(fp).status, cancel === "revoke" ? "revoked" : "replaced");
+  });
+}
