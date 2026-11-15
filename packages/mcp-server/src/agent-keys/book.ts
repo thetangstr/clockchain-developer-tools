@@ -7,7 +7,7 @@
 // process per state directory): an operator who edits a key file by hand restarts the server.
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { cleanStaleFiles, createDurableJsonFile, type DurableJsonFile } from "../handshake-core/durable-store.js";
+import { cleanStaleFiles, createDurableJsonFile, readDurableFile, type DurableJsonFile } from "../handshake-core/durable-store.js";
 import { ed25519PublicKeyDer, fingerprint } from "../shadow/lib/keys.js";
 
 export type KeyStatus = "active" | "replaced" | "revoked";
@@ -21,6 +21,8 @@ export type KeyEntry = {
   filing: KeyFiling;
   replacedBy?: string;
   revokedAt?: string;
+  /** The last token grant to a key it already knew (oauth.ts); a new key's first sign-in is its firstSeenAt. Never shown publicly. */
+  lastSignInAt?: string;
   /**
    * A keyed hash of the address the agent first signed in from (oauth.ts), so the Starter allowance can give each address a
    * share. Only a root key has one; never shown publicly or sent to Clockchain.
@@ -56,6 +58,7 @@ function validEntry(fp: string, v: unknown): KeyEntry {
     typeof v.root !== "string" || !FINGERPRINT.test(v.root) ||
     (v.status !== "active" && v.status !== "replaced" && v.status !== "revoked") ||
     typeof v.firstSeenAt !== "string" ||
+    (v.lastSignInAt !== undefined && typeof v.lastSignInAt !== "string") ||
     (v.source !== undefined && (typeof v.source !== "string" || !SOURCE.test(v.source))) ||
     !isObj(v.filing) || !Array.isArray(v.events)
   ) throw new Error("bad agent key file");
@@ -112,6 +115,14 @@ export class AgentKeyBook {
     };
     this.save(entry);
     return { entry, created: true };
+  }
+
+  /** Records a token grant to a key the book already has (one write), so the unused-key sweep keeps it. */
+  signedIn(fp: string): KeyEntry {
+    const entry = this.must(fp);
+    entry.lastSignInAt = this.now().toISOString();
+    this.save(entry);
+    return entry;
   }
 
   rootOf(fp: string): string | null {
@@ -186,36 +197,41 @@ export class AgentKeyBook {
 
   /**
    * Removes keys nobody used: an active root key, with no replacement, no events and no filing (not even a pending one),
-   * first seen before `firstSeenBefore`, for which `inUse` (Shadow has an owner for it) is false. A file that can't be read
-   * is kept. Synchronous from the check to the unlink, so no grant or route can come in between. Returns how many it removed.
+   * first seen and last signed in before `firstSeenBefore`, for which `inUse` (Shadow has an owner for it) is false. A file
+   * that can't be read is kept and counted in `unreadable`; the sweep reads each file without caching, quarantining or
+   * logging it, so an hourly sweep never copies a bad file again. Synchronous from the check to the unlink, so no grant or
+   * route can come in between.
    */
-  forgetUnused(opts: { firstSeenBefore: Date; inUse: (fp: string) => boolean }): number {
-    if (!existsSync(this.dir)) return 0;
+  forgetUnused(opts: { firstSeenBefore: Date; inUse: (fp: string) => boolean }): { removed: number; unreadable: number } {
+    const counts = { removed: 0, unreadable: 0 };
+    if (!existsSync(this.dir)) return counts;
     const before = opts.firstSeenBefore.getTime();
-    let removed = 0;
     for (const name of readdirSync(this.dir)) {
       const fp = /^([0-9a-f]{64})\.json$/.exec(name)?.[1];
       if (!fp) continue;
       const path = join(this.dir, name);
-      let entry: KeyEntry | null;
+      let entry: KeyEntry;
       try {
         // An unused key is written once, at admit, so a file written since the cutoff isn't opened.
         if (statSync(path).mtimeMs >= before) continue;
-        entry = this.get(fp);
+        const cached = this.slots.get(fp);
+        entry = cached ? cached.entry : readDurableFile(path, SCHEMA, MAX_BYTES, (v) => validEntry(fp, v));
       } catch {
+        counts.unreadable++;
         continue;
       }
       if (
-        !entry || entry.status !== "active" || entry.root !== fp || entry.replacedBy !== undefined || entry.events.length > 0 ||
-        entry.filing.state !== "unfiled" || !(Date.parse(entry.firstSeenAt) < before) || opts.inUse(fp)
+        entry.status !== "active" || entry.root !== fp || entry.replacedBy !== undefined || entry.events.length > 0 ||
+        entry.filing.state !== "unfiled" || !(Date.parse(entry.firstSeenAt) < before) ||
+        (entry.lastSignInAt !== undefined && !(Date.parse(entry.lastSignInAt) < before)) || opts.inUse(fp)
       ) continue;
       // The backup first: an interruption between the two leaves the main file, never a backup to restore it from.
       rmSync(`${path}.bak`, { force: true });
       rmSync(path, { force: true });
       this.slots.delete(fp);
-      removed++;
+      counts.removed++;
     }
-    return removed;
+    return counts;
   }
 
   private fingerprintOf(pem: string): string {
@@ -249,7 +265,7 @@ export class AgentKeyBook {
 
   private open(fp: string): Slot {
     const slot = { entry: undefined } as unknown as Slot;
-    slot.file = createDurableJsonFile<KeyEntry>({ path: join(this.dir, `${fp}.json`), schema: SCHEMA, snapshot: () => slot.entry, validate: (v) => validEntry(fp, v), maxBytes: MAX_BYTES });
+    slot.file = createDurableJsonFile<KeyEntry>({ path: join(this.dir, `${fp}.json`), schema: SCHEMA, snapshot: () => slot.entry, validate: (v) => validEntry(fp, v), maxBytes: MAX_BYTES, redactReasons: true });
     return slot;
   }
 

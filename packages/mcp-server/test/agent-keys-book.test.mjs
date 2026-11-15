@@ -296,7 +296,7 @@ test("forgetUnused removes only a key nobody used, and keeps every key with hist
     firstSeenBefore: new Date(T0 - 30 * DAY),
     inUse: (fp) => { asked.push(fp); return fp === kept.inUse; },
   });
-  assert.equal(removed, 1);
+  assert.deepEqual(removed, { removed: 1, unreadable: 1 });
   assert.equal(reader.get(unused), null);
   assert.equal(existsSync(join(dir, `${unused}.json`)), false);
   assert.equal(existsSync(join(dir, `${unused}.json.bak`)), false);
@@ -311,10 +311,10 @@ test("forgetUnused removes only a key nobody used, and keeps every key with hist
   clock.t = T0;
   assert.ok(statSync(join(dir, `${written}.json`)).mtimeMs > T0 - 30 * DAY);
   const newer = new AgentKeyBook({ dir, now: () => new Date(clock.t) });
-  assert.equal(newer.forgetUnused({ firstSeenBefore: new Date(T0 - 30 * DAY), inUse: (fp) => fp === kept.inUse }), 0);
+  assert.equal(newer.forgetUnused({ firstSeenBefore: new Date(T0 - 30 * DAY), inUse: (fp) => fp === kept.inUse }).removed, 0);
   assert.equal(newer.get(written).fingerprint, written);
   // An empty or missing directory is nothing to do.
-  assert.equal(new AgentKeyBook({ dir: join(dir, "none"), now: () => new Date() }).forgetUnused({ firstSeenBefore: new Date(), inUse: () => false }), 0);
+  assert.deepEqual(new AgentKeyBook({ dir: join(dir, "none"), now: () => new Date() }).forgetUnused({ firstSeenBefore: new Date(), inUse: () => false }), { removed: 0, unreadable: 0 });
 });
 
 // ---- A key file that isn't that key's (Task 10 item 1) ----
@@ -337,4 +337,62 @@ test("a key file whose public key doesn't hash to its fingerprint, or whose fing
   book.setFiling(b.fingerprint, { state: "pending", ledgerId: "L1" });
   write(b.fingerprint, { ...b, publicKeyPem: a.publicKeyPem });
   assert.equal(new AgentKeyBook({ dir, now: () => new Date() }).get(b.fingerprint).publicKeyPem, b.publicKeyPem);
+});
+
+// ---- The sweep reads what it keeps without touching it (Task 10 items 11, 14) ----
+
+test("forgetUnused keeps a key that signed in within the cutoff, however old it is", () => {
+  const DAY = 86_400_000;
+  const T0 = Date.parse("2026-11-13T00:00:00Z");
+  const clock = { t: T0 - 40 * DAY };
+  const dir = join(mkdtempSync(join(tmpdir(), "agent-keys-")), "agent-keys");
+  const book = new AgentKeyBook({ dir, now: () => new Date(clock.t) });
+  const recent = book.admit(pem()).entry.fingerprint;
+  const stale = book.admit(pem()).entry.fingerprint;
+  clock.t = T0 - 35 * DAY;
+  book.signedIn(stale);
+  clock.t = T0 - 2 * DAY;
+  assert.equal(book.signedIn(recent).lastSignInAt, new Date(clock.t).toISOString());
+  clock.t = T0;
+  const old = (T0 - 31 * DAY) / 1000;
+  for (const name of readdirSync(dir)) utimesSync(join(dir, name), old, old);
+  const reader = new AgentKeyBook({ dir, now: () => new Date(clock.t) });
+  assert.deepEqual(reader.forgetUnused({ firstSeenBefore: new Date(T0 - 30 * DAY), inUse: () => false }), { removed: 1, unreadable: 0 });
+  assert.equal(reader.get(recent).fingerprint, recent);
+  assert.equal(reader.get(stale), null);
+});
+
+test("the sweep never quarantines or re-logs a bad key file, counts it apart, and caches none of the old keys it keeps", (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const DAY = 86_400_000;
+  const T0 = Date.parse("2026-11-13T00:00:00Z");
+  const dir = join(mkdtempSync(join(tmpdir(), "agent-keys-")), "agent-keys");
+  const writer = new AgentKeyBook({ dir, now: () => new Date(T0 - 31 * DAY) });
+  const bad = writer.admit(pem()).entry.fingerprint;
+  const pending = writer.admit(pem()).entry.fingerprint;
+  writer.setFiling(pending, { state: "pending", ledgerId: "L1" });
+  writeFileSync(join(dir, `${bad}.json`), "{not json", { mode: 0o600 });
+  const old = (T0 - 31 * DAY) / 1000;
+  for (const name of readdirSync(dir)) utimesSync(join(dir, name), old, old);
+  const book = new AgentKeyBook({ dir, now: () => new Date(T0) });
+  for (let hour = 0; hour < 3; hour++) {
+    assert.deepEqual(book.forgetUnused({ firstSeenBefore: new Date(T0 - 30 * DAY), inUse: () => false }), { removed: 0, unreadable: 1 });
+  }
+  assert.deepEqual(readdirSync(dir).filter((n) => n.includes(".corrupt-")), [], "no quarantined copy");
+  assert.equal(errors.mock.calls.filter((c) => String(c.arguments[0]).includes("handshake_state_corrupt")).length, 0);
+  assert.equal(book.slots.size, 0, "nothing the sweep read was cached");
+  assert.ok(existsSync(join(dir, `${bad}.json`)));
+  assert.equal(book.get(pending).filing.state, "pending");
+});
+
+test("a corrupt key file is logged by its error's name only, never a word of the file", (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const { dir, book } = fresh();
+  const fp = book.admit(pem()).entry.fingerprint;
+  const marker = "SECRETMARKERBYTES";
+  writeFileSync(join(dir, `${fp}.json`), `{"schema":"agent-key-v1","value":{"x":"${marker}"`, { mode: 0o600 });
+  assert.throws(() => new AgentKeyBook({ dir, now: () => new Date() }).get(fp));
+  const lines = errors.mock.calls.map((c) => String(c.arguments[0]));
+  assert.ok(lines.some((l) => l.includes("handshake_state_corrupt") && JSON.parse(l).reason === "SyntaxError"), lines.join("\n"));
+  for (const l of lines) assert.ok(!l.includes(marker), l);
 });

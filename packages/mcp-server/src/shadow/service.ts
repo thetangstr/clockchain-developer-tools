@@ -1044,6 +1044,8 @@ export class ShadowService {
   /** Link bodies built (not served from the cache), for tests and logs. */
   linkBuildCount = 0;
   private timer: NodeJS.Timeout | undefined;
+  /** Agent key files the last sweep couldn't read, so the count is logged only when it changes. */
+  private unreadableAgentKeys = 0;
   private idlePassRunning = false;
   /** Accounts being deleted, or deleted since this process started: nothing new starts under them. Their tokens stop at the end of the delete. */
   private readonly deletedOwners = new Set<string>();
@@ -1124,11 +1126,14 @@ export class ShadowService {
     this.log("shadow_sweep", { removed: r.removed, bytes: r.bytes });
     if (this.agentKeys) {
       try {
-        const keys = this.agentKeys.forgetUnused({
+        const { removed, unreadable } = this.agentKeys.forgetUnused({
           firstSeenBefore: new Date(this.now().getTime() - UNUSED_AGENT_KEY_MS),
           inUse: (fp) => this.store.hasOwner(ownerKeyOf(`ak:${fp}`)),
         });
-        if (keys > 0) this.log("agent_keys_forgotten", { keys });
+        if (removed > 0) this.log("agent_keys_forgotten", { keys: removed });
+        // Kept and counted apart; said once when the count changes, not every hour.
+        if (unreadable !== this.unreadableAgentKeys) this.log("agent_keys_unreadable", { files: unreadable });
+        this.unreadableAgentKeys = unreadable;
       } catch (e) {
         this.log("agent_keys_forget_failed", { error: (e as Error).name });
       }

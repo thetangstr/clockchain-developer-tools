@@ -278,12 +278,22 @@ export class ShadowStore {
           return { operatorId: v.operatorId, createdAt: typeof v.createdAt === "string" ? v.createdAt : now.toISOString() };
         },
         maxBytes: KEY_MAX_BYTES,
+        redactReasons: true,
       });
       let old: OperatorFile | undefined;
       try {
         old = heldKey.load();
       } catch (e) {
         if (!(e instanceof DurableStateError)) throw e;
+        // Damaged means bytes that were read and are bad. A file that couldn't be read at all (EACCES, EMFILE, EIO) may be
+        // fine a moment later: that error goes up, the owner counts as failed, and nothing is removed.
+        for (const file of [keyPath, `${keyPath}.bak`]) {
+          try {
+            readFileSync(file);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+        }
         damaged = true;
         console.error(JSON.stringify({
           event: "shadow_damaged_key_removed",
@@ -341,6 +351,7 @@ export class ShadowStore {
         return v as unknown as KeyFile;
       },
       maxBytes: KEY_MAX_BYTES,
+      redactReasons: true,
     });
     current = file.load();
     if (!current) {

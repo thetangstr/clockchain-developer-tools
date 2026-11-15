@@ -739,3 +739,30 @@ test("a corrupt agent replay set turns off agent sign-in only: chat sign-in keep
     }
   }
 });
+
+test("a known key's sign-in records when it signed in, so the unused-key sweep keeps a key whose first session is still starting", async () => {
+  const h = await harness();
+  try {
+    const DAY = 86_400_000;
+    const used = makeAgentKey();
+    const idle = makeAgentKey();
+    for (const agent of [used, idle]) assert.equal((await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+    assert.equal(h.book.get(used.fingerprint).lastSignInAt, undefined, "a new key's first sign-in is its firstSeenAt: one write");
+    h.advance(31 * DAY);
+    // Signed in again 31 days later; its first startSession is in flight when the hourly sweep runs.
+    assert.equal((await grant(h.url, used.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+    const now = h.nowSec() * 1000;
+    assert.equal(h.book.get(used.fingerprint).lastSignInAt, new Date(now).toISOString());
+    // Every file looks old, so the rules decide, not the mtime prefilter.
+    const old = (now - 31 * DAY) / 1000;
+    for (const name of readdirSync(h.book.dir)) utimesSync(path.join(h.book.dir, name), old, old);
+    const swept = h.book.forgetUnused({ firstSeenBefore: new Date(now - 30 * DAY), inUse: () => false });
+    assert.deepEqual(swept, { removed: 1, unreadable: 0 });
+    assert.ok(h.book.get(used.fingerprint), "signed in within 30 days: kept");
+    assert.equal(h.book.get(idle.fingerprint), null, "not signed in since: removed");
+    // Not shown publicly.
+    assert.ok(!JSON.stringify((await import("../dist/agent-keys/routes.js")).keyView(h.book.get(used.fingerprint))).includes("lastSignInAt"));
+  } finally {
+    await h.close();
+  }
+});

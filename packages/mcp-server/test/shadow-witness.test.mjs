@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -569,4 +569,49 @@ test("without the witness key, a damaged key.json still refuses its owner, and n
   assert.equal(existsSync(path.join(ownerDir(dir, A), "operator.json")), false);
   assert.equal(logs.filter((l) => l.event === "shadow_held_keys_migrated").length, 0);
   assert.equal(errors.filter((l) => l.includes("shadow_damaged_key_removed")).length, 0);
+});
+
+test("with the witness key, a key.json that can't be opened for a moment (EACCES) is never removed: the owner counts as failed", { skip: process.getuid?.() === 0 && "root reads any file" }, async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-eacces-"));
+  const legacy = setup({ dir });
+  const id = (await shortSession(legacy.svc)).closed.pin.operatorId;
+  legacy.svc.stop();
+  const keyFile = path.join(ownerDir(dir, A), "key.json");
+  const bytes = readFileSync(keyFile);
+  chmodSync(keyFile, 0o000);
+  const logs = [];
+  let svc;
+  try {
+    const errors = await capturingErrors(async () => {
+      ({ svc } = setup({ dir, witness: loadWitnessKey(witnessFile()), logs }));
+      svc.start();
+      svc.stop();
+      await assert.rejects(svc.startSession(A, { title: "not yet", agents: [{ id: "planner" }] }, BASE));
+    });
+    assert.deepEqual(logs.filter((l) => l.event === "shadow_held_keys_migrated"), [{ event: "shadow_held_keys_migrated", owners: 0, failed: 1, damaged: 0 }]);
+    assert.equal(errors.filter((l) => l.includes("shadow_damaged_key_removed")).length, 0);
+    assert.equal(existsSync(path.join(ownerDir(dir, A), "operator.json")), false, "no new operator id");
+  } finally {
+    if (existsSync(keyFile)) chmodSync(keyFile, 0o600);
+  }
+  assert.deepEqual(readFileSync(keyFile), bytes, "the key file is left as it was");
+  // Readable again, its operator id moves over as usual.
+  const closed = await verifies(svc);
+  assert.equal(closed.pin.operatorId, id);
+});
+
+test("a corrupt key.json is logged by its error's name only, never a word of the file", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "shadow-witness-redact-"));
+  const marker = "PRIVATEKEYBYTESMARKER";
+  mkdirSync(ownerDir(dir, A), { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(ownerDir(dir, A), "key.json"), `{"schema":"shadow-operator-key-v1","value":{"privateKeyPem":"${marker}"`, { mode: 0o600 });
+  const errors = await capturingErrors(async () => {
+    const { svc } = setup({ dir, witness: loadWitnessKey(witnessFile()) });
+    svc.start();
+    svc.stop();
+  });
+  const corrupt = errors.filter((l) => l.includes("handshake_state_corrupt"));
+  assert.ok(corrupt.length > 0, errors.join("\n"));
+  for (const line of errors) assert.ok(!line.includes(marker), line);
+  assert.equal(JSON.parse(corrupt[0]).reason, "SyntaxError");
 });

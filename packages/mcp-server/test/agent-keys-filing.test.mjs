@@ -1,6 +1,8 @@
 // Each agent key is filed on Clockchain before any record it owns or signed is anchored, so a checker can see the key existed
 // before the record. New agents (ak: owners) share one daily Starter allowance of anchors, filings included, apart from accounts.
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,6 +10,9 @@ import test from "node:test";
 import { ApiError } from "@clockchain/core";
 
 import { ShadowService } from "../dist/shadow/service.js";
+import { runHttp } from "../dist/http.js";
+import { mintAgentToken } from "../dist/token.js";
+import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { createLogBudget } from "../dist/budget.js";
 import { ownerKeyOf } from "../dist/shadow/store.js";
 import { AgentKeyBook } from "../dist/agent-keys/book.js";
@@ -544,4 +549,66 @@ test("the sweep removes a key nobody used after 30 days, and keeps one whose age
   const again = book.admit(unused.key.publicKeyPem);
   assert.equal(again.created, true);
   assert.equal(again.entry.firstSeenAt, new Date(clock.t).toISOString());
+});
+
+test("over HTTP, a removed key's token gets 401 on /shadow/mcp and /mcp", async () => {
+  const ENV = ["PORT", "MCP_PORT", "MCP_AUTH_TOKENS", "MCP_TOKEN_SIGNING_SECRET", "MCP_STATE_DIR", "MCP_OAUTH", "MCP_PUBLIC_URL", "MCP_AGENT_KEYS", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_WITNESS_KEY_FILE"];
+  const saved = {};
+  for (const k of ENV) { saved[k] = process.env[k]; delete process.env[k]; }
+  const SECRET = "agent-keys-filing-http-secret";
+  const stateDir = mkdtempSync(path.join(tmpdir(), "agent-keys-filing-http-"));
+  const keysDir = path.join(stateDir, "agent-keys");
+  // A key admitted 40 days ago and never used, with a token from back then still unexpired (as a clock would not allow,
+  // but a token is only as good as its key).
+  const agent = makeAgentKey();
+  const admitted = Date.now() - 40 * DAY_MS;
+  new AgentKeyBook({ dir: keysDir, now: () => new Date(admitted) }).admit(agent.publicKeyPem);
+  aged(keysDir, agent.fingerprint, admitted);
+  const { token } = mintAgentToken(SECRET, 3600, Math.floor(Date.now() / 1000), randomUUID(), agent.fingerprint, agent.thumbprint);
+  __setShadowLedgerForTests(new FakeLedger());
+  Object.assign(process.env, {
+    MCP_PORT: "0", MCP_AUTH_TOKENS: "static-filing-token", MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: stateDir, MCP_OAUTH: "1",
+    MCP_PUBLIC_URL: BASE, MCP_AGENT_KEYS: "1", SHADOW_ENABLED: "1", SHADOW_STATE_DIR: path.join(stateDir, "shadow"),
+  });
+  let server;
+  try {
+    server = await runHttp();
+    if (!server.listening) await once(server, "listening");
+    const url = `http://127.0.0.1:${server.address().port}`;
+    assert.equal(existsSync(path.join(keysDir, `${agent.fingerprint}.json`)), false, "the start-up sweep removed it");
+    for (const endpoint of ["/shadow/mcp", "/mcp"]) {
+      const res = await fetch(`${url}${endpoint}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json", accept: "application/json, text/event-stream",
+          authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${BASE}${endpoint}`, { accessToken: token }),
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      assert.equal(res.status, 401, endpoint);
+      await res.arrayBuffer();
+    }
+  } finally {
+    server?.closeAllConnections?.();
+    if (server) await new Promise((r) => server.close(r));
+    for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("the sweep says once how many key files it can't read, not every hour, and copies none of them", () => {
+  // A bad file found by a server started after it went bad (a running server reads its own cached entry).
+  const keysDir = mkdtempSync(path.join(tmpdir(), "agent-keys-filing-keys-"));
+  const clock = { t: Date.UTC(2026, 10, 13, 12, 0, 0) };
+  const t0 = clock.t;
+  const bad = agentIn(new AgentKeyBook({ dir: keysDir, now: () => new Date(t0) }));
+  writeFileSync(path.join(keysDir, `${bad.akf}.json`), "{not json", { mode: 0o600 });
+  aged(keysDir, bad.akf, t0);
+  const logs = [];
+  const { svc } = setup({ keysDir, clock, log: (event, fields) => logs.push({ event, ...fields }) });
+  clock.t = t0 + 31 * DAY_MS;
+  for (let hour = 0; hour < 3; hour++) svc.sweep();
+  assert.deepEqual(logs.filter((l) => l.event === "agent_keys_unreadable"), [{ event: "agent_keys_unreadable", files: 1 }]);
+  assert.deepEqual(readdirSync(keysDir).filter((n) => n.includes(".corrupt-")), []);
+  assert.ok(existsSync(path.join(keysDir, `${bad.akf}.json`)), "kept");
 });

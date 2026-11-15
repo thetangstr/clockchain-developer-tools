@@ -1483,7 +1483,8 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         sendOAuthError(res, 429, "temporarily_unavailable", "Clockchain isn't taking new agent keys right now. Try again later, or reuse a key you already have.", { "retry-after": "3600" });
         return;
       }
-      entry = known ?? keys.book.admit(proven.publicKeyPem, sourceOf(req)).entry;
+      // A known key's sign-in is recorded (one write), so the unused-key sweep can't remove it while its first session starts.
+      entry = known ? keys.book.signedIn(fp) : keys.book.admit(proven.publicKeyPem, sourceOf(req)).entry;
     } catch {
       log({ event: "oauth_agent_keys_unavailable" });
       sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
