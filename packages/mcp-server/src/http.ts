@@ -89,7 +89,9 @@ import { runtimeShadowLedger, shadowLedgerIdentity } from "./shadow/ledger.js";
 import { loadWitnessKey } from "./shadow/witness.js";
 import { fingerprint } from "./shadow/lib/keys.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
-import { AgentKeyBook, type KeyEntry } from "./agent-keys/book.js";
+import { AgentKeyBook, AgentKeyError, type KeyEntry } from "./agent-keys/book.js";
+import { verifyDpopProof } from "./agent-keys/dpop.js";
+import { ReplayStateFullError } from "./oauth-replay.js";
 import { jwtBearerProof } from "./agent-keys/proof.js";
 import { createAgentKeyRoutes } from "./agent-keys/routes.js";
 import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
@@ -188,10 +190,18 @@ export function matchStaticToken(
   return apiKey.length > 0 && tokens.includes(apiKey) ? apiKey : undefined;
 }
 
+/** The token in `Authorization: DPoP <token>` (RFC 9449 §7.1), or "". */
+export function presentedDpopToken(headers: { authorization?: string | string[] }): string {
+  const dpop = /^DPoP\s+(\S+)$/i.exec(firstHeader(headers.authorization));
+  return dpop ? dpop[1] : "";
+}
+
 /**
  * The credential the caller presented as an MCP token — the `x-api-key` value or
- * the `Authorization: Bearer <token>` value (x-api-key wins if both are set).
- * Empty string when neither is present. Used by the forgiving auth fallback.
+ * the `Authorization: Bearer <token>` value (x-api-key wins if both are set), else
+ * a signed Clockchain token under the DPoP scheme (an agent's). Never any other
+ * DPoP value, so the scheme can't reach the bring-your-own-key fallback.
+ * Empty string when none is present. Used by the forgiving auth fallback.
  */
 export function presentedApiKey(
   headers: { authorization?: string | string[]; "x-api-key"?: string | string[] },
@@ -199,7 +209,9 @@ export function presentedApiKey(
   const apiKey = firstHeader(headers["x-api-key"]).trim();
   if (apiKey) return apiKey;
   const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
-  return bearer ? bearer[1].trim() : "";
+  if (bearer) return bearer[1].trim();
+  const dpop = presentedDpopToken(headers);
+  return looksLikeSelfServe(dpop) ? dpop : "";
 }
 
 /**
@@ -1120,9 +1132,13 @@ export async function runHttp(): Promise<Server> {
   // passed) so the caller can rate-limit on the token's `jti` WITHOUT re-verifying.
   // An agent-key token (`akf`, from the client_credentials grant) is an agent on the Starter plan, with `agentRoot`
   // the root key that owns its records; its key must still be active in the book.
+  // A token bound to a key (`cnf`, every agent token) needs the DPoP scheme and a valid, unspent proof from that key;
+  // `dpopRefused` is the reason (never echoing the proof), `dpopScheme` whether the DPoP scheme was used.
   type AuthOutcome =
     | { ok: false }
     | { ok: false; agentKeyCancelled: true }
+    | { ok: false; dpopRefused: string; dpopScheme: boolean }
+    | { ok: false; unavailable: true; full: boolean }
     | { ok: true; reason: "static_token" }
     | { ok: true; reason: "demo_token_v1"; payload: TokenPayload }
     | { ok: true; reason: "agent_key"; payload: TokenPayload; agentRoot: string }
@@ -1144,7 +1160,55 @@ export async function runHttp(): Promise<Server> {
     if (!entry) return "unusable";
     return entry.status === "active" ? { root: entry.root } : "cancelled";
   };
+  // RFC 9449 at the resource (D1-c): a token with `cnf`, an agent token, or any token under the DPoP scheme must come as
+  // "Authorization: DPoP <token>" with a proof for this method and URL (MCP_PUBLIC_URL plus the path), signed by the key
+  // in `cnf`, with `ath` for this token, used once. Undefined when that holds (the proof is then spent) or doesn't apply.
+  const dpopRefusal = (req: IncomingMessage, presented: string, payload: TokenPayload): AuthOutcome | undefined => {
+    const dpopScheme = presentedDpopToken(req.headers) === presented;
+    if (payload.cnf === undefined && !(agentKeyBook && payload.akf !== undefined) && !dpopScheme) return undefined;
+    const refused = (reason: string): AuthOutcome => {
+      console.error(JSON.stringify({ event: "agent_dpop_refused", path: pathOf(req.url) }));
+      return { ok: false, dpopRefused: reason, dpopScheme };
+    };
+    if (!dpopScheme) return refused('This agent token is bound to your key: send it as "Authorization: DPoP <token>" with a DPoP proof on every request.');
+    if (payload.cnf === undefined || oauthConfig.kind !== "ready") {
+      return refused(payload.akf !== undefined ? "This agent token isn't bound to a key. Sign in again for a new one." : "Only an agent token bound to a key can be sent with DPoP.");
+    }
+    let proof: ReturnType<typeof verifyDpopProof>;
+    try {
+      proof = verifyDpopProof({
+        proof: req.headers.dpop, htm: req.method ?? "", htu: `${oauthConfig.publicUrl}${pathOf(req.url)}`,
+        nowSec: Math.floor(Date.now() / 1000), accessToken: presented,
+      });
+    } catch (e) {
+      if (e instanceof AgentKeyError) return refused(e.message);
+      throw e;
+    }
+    if (proof.jkt !== payload.cnf.jkt) return refused("The DPoP proof is signed by another key than the one this token is bound to.");
+    const spent = oauth?.usedDpopProofs;
+    // Agent keys off: no token is taken with a key. On, but the proof set couldn't open: refuse closed.
+    if (!spent) return agentKeyBook ? { ok: false, unavailable: true, full: false } : refused("This server isn't taking agent tokens.");
+    if (spent.has(proof.replayKey)) return refused("This DPoP proof was already used. Send a new one with every request.");
+    try {
+      spent.add(proof.replayKey, proof.replayExp);
+    } catch (e) {
+      const full = e instanceof ReplayStateFullError;
+      console.error(JSON.stringify({ event: full ? "agent_dpop_replay_state_full" : "agent_dpop_replay_state_write_failed" }));
+      return { ok: false, unavailable: true, full };
+    }
+    return undefined;
+  };
+  // Once per request: the 401 paths ask again, and must neither spend a proof twice nor log a second refusal.
+  const authOutcomes = new WeakMap<IncomingMessage, AuthOutcome>();
   const checkAuth = (req: IncomingMessage): AuthOutcome => {
+    let outcome = authOutcomes.get(req);
+    if (!outcome) {
+      outcome = verifyAuth(req);
+      authOutcomes.set(req, outcome);
+    }
+    return outcome;
+  };
+  const verifyAuth = (req: IncomingMessage): AuthOutcome => {
     if (isAuthorized(req.headers, tokens)) return { ok: true, reason: "static_token" };
     if (!selfServeEnabled) return { ok: false };
     const presented = presentedApiKey(req.headers);
@@ -1155,6 +1219,8 @@ export async function runHttp(): Promise<Server> {
     // Off with free keys (network.ts): a token with no account behind it spends the server's own credits. Accounts' tokens keep working.
     if (v1.valid && !FREE_TOKENS && !v1.payload.acct) return { ok: false };
     if (v1.valid) {
+      const refusal = dpopRefusal(req, presented, v1.payload);
+      if (refusal) return refusal;
       const agent = agentKeyOf(v1.payload);
       if (agent === "cancelled") return { ok: false, agentKeyCancelled: true };
       if (agent === "unusable") return { ok: false };
@@ -1193,6 +1259,26 @@ export async function runHttp(): Promise<Server> {
   const agentKeyCancelledUnauthorized = (res: ServerResponse, req: IncomingMessage): void => {
     res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store", ...oauth?.challenge(pathOf(req.url), true) });
     res.end(JSON.stringify({ error: "invalid_token", message: "This agent key was cancelled or replaced. Use a key that is still active." }));
+  };
+  // An agent token without a good DPoP proof (401, RFC 9449 §7.1: a DPoP challenge, then the path's Bearer one), or a
+  // proof set that is full or can't be written (503). In the same places as the cancelled-key 401.
+  const agentDpopRefused = (res: ServerResponse, req: IncomingMessage, auth: AuthOutcome): boolean => {
+    if (auth.ok) return false;
+    if ("unavailable" in auth) {
+      res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
+      res.end(JSON.stringify({
+        error: "temporarily_unavailable",
+        message: auth.full ? "Clockchain is taking too many agent requests right now. Try again in a minute." : "Clockchain can't check agent requests right now. Try again shortly.",
+      }));
+      return true;
+    }
+    if (!("dpopRefused" in auth)) return false;
+    const error = auth.dpopScheme ? "invalid_dpop_proof" : "invalid_token";
+    const bearer = oauth?.challenge(pathOf(req.url), true)?.["www-authenticate"];
+    const challenge = `DPoP algs="EdDSA", error="${error}"${bearer ? `, ${bearer}` : ""}`;
+    res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store", "www-authenticate": challenge });
+    res.end(JSON.stringify({ error, message: auth.dpopRefused }));
+    return true;
   };
 
   // ---- /shadow/* (hosted Shadow) -------------------------------------------
@@ -1235,6 +1321,7 @@ export async function runHttp(): Promise<Server> {
     if (req && agentKeyBook) {
       const auth = checkAuth(req);
       if (!auth.ok && "agentKeyCancelled" in auth) return agentKeyCancelledUnauthorized(res, req);
+      if (agentDpopRefused(res, req, auth)) return;
     }
     if (!oauth || !req || oauthConfig.kind !== "ready") return mcpUnauthorized(res, req);
     const base = oauthConfig.publicUrl;
@@ -1309,6 +1396,7 @@ export async function runHttp(): Promise<Server> {
       const v1 = verifyToken(signingSecret, presented);
       if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
       if (v1.valid) {
+        if (dpopRefusal(req, presented, v1.payload)) return { ok: false };
         const agent = agentKeyOf(v1.payload);
         if (agent === "cancelled" || agent === "unusable") return { ok: false };
         return signed(v1.payload, agent && !v1.payload.acct ? agent.root : undefined);
@@ -2052,6 +2140,7 @@ export async function runHttp(): Promise<Server> {
         agentKeyCancelledUnauthorized(res, req);
         return;
       }
+      if (agentDpopRefused(res, req, auth)) return;
       const presented = presentedApiKey(req.headers);
       // A malformed or expired signed-token-shaped credential must never fall
       // through as BYO: that would erase its session/role/tool restrictions.

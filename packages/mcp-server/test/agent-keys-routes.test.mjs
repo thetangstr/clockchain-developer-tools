@@ -705,17 +705,20 @@ test("on the real server, a key's token stops after replace and the new key's wo
     assert.equal((await send()).status, 401, "single use through the server's own spent-assertion set");
 
     // The old key's token is refused on the next call; the new key mints, and owns the same root.
-    const call = (token) => fetch(`${s.url}/mcp`, {
+    const call = (token, agent) => fetch(`${s.url}/mcp`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}` },
+      headers: {
+        "content-type": "application/json", accept: "application/json, text/event-stream",
+        authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${PUBLIC}/mcp`, { accessToken: token }),
+      },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
-    assert.equal((await call(oldToken)).status, 401);
+    assert.equal((await call(oldToken, old)).status, 401);
     const fresh = await grant(s.url, next);
     const freshBody = await fresh.json();
     assert.equal(fresh.status, 200, JSON.stringify(freshBody));
     assert.equal(freshBody.agent_id, old.fingerprint.slice(0, 16));
-    assert.equal((await call(freshBody.access_token)).status, 200);
+    assert.equal((await call(freshBody.access_token, next)).status, 200);
   } finally {
     await s.close();
   }

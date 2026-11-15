@@ -144,12 +144,15 @@ test("an agent onboards from the instructions alone: one token call, signed chec
     assert.equal(issued.expires_in, 3600);
     assert.equal(issued.refresh_token, undefined);
     assert.match(issued.agent_id, /^[0-9a-f]{16}$/);
-    const cred = `Bearer ${issued.access_token}`;
+    const cred = issued.access_token;
 
-    const rpc = async (method, params, authorization = cred) => {
+    const rpc = async (method, params, token = cred) => {
       const res = await fetch(`${app.url}/shadow/mcp`, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: ACCEPT, authorization },
+        headers: {
+          "content-type": "application/json", accept: ACCEPT,
+          authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${PUBLIC}/shadow/mcp`, { accessToken: token }),
+        },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
       });
       const text = await res.text();
@@ -157,8 +160,8 @@ test("an agent onboards from the instructions alone: one token call, signed chec
       const data = text.split("\n").find((l) => l.startsWith("data:"));
       return JSON.parse(data ? data.slice(5) : text).result;
     };
-    const call = async (name, args, authorization) => {
-      const result = await rpc("tools/call", { name, arguments: args }, authorization);
+    const call = async (name, args, token) => {
+      const result = await rpc("tools/call", { name, arguments: args }, token);
       const text = result.content[0].text;
       results.push(text);
       const value = JSON.parse(text);
@@ -211,7 +214,7 @@ test("an agent onboards from the instructions alone: one token call, signed chec
     const again = await tokenCall();
     assert.notEqual(again.access_token, issued.access_token);
     assert.equal(again.agent_id, issued.agent_id);
-    const listed = await call("shadow_list_sessions", {}, `Bearer ${again.access_token}`);
+    const listed = await call("shadow_list_sessions", {}, again.access_token);
     assert.deepEqual(listed.sessions.map((x) => x.session_id), [s.session_id]);
 
     // AT-7(d): no private key on the server's disk, but the witness key file the operator provided (here, this test).
@@ -254,12 +257,15 @@ test("each address has its share of the Starter allowance: two agents from one a
       });
       const body = await res.json();
       assert.equal(res.status, 200, JSON.stringify(body));
-      return `Bearer ${body.access_token}`;
+      return { agent, token: body.access_token };
     };
-    const call = async (authorization, name, args) => {
+    const call = async ({ agent, token }, name, args) => {
       const res = await fetch(`${app.url}/shadow/mcp`, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: ACCEPT, authorization },
+        headers: {
+          "content-type": "application/json", accept: ACCEPT,
+          authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${PUBLIC}/shadow/mcp`, { accessToken: token }),
+        },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
       });
       const text = await res.text();

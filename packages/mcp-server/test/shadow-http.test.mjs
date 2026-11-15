@@ -2,7 +2,7 @@
 // identity (acct, jti, static token; never sub), the tool surface, and the public capability links.
 import assert from "node:assert/strict";
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -47,8 +47,12 @@ async function boot(env) {
   };
 }
 
-function headersFor(cred) {
+/** `{ agent, token }` is an agent token: "Authorization: DPoP <token>" and a fresh proof for `method` `url` from the agent's key. */
+function headersFor(cred, url, method = "POST") {
   if (!cred) return {};
+  if (cred.agent) {
+    return { authorization: `DPoP ${cred.token}`, dpop: cred.agent.dpop(method, `${PUBLIC}${new URL(url).pathname}`, { accessToken: cred.token }) };
+  }
   if (cred.bearer) return { authorization: `Bearer ${cred.bearer}` };
   if (cred.apiKey) return { "x-api-key": cred.apiKey };
   return cred.headers;
@@ -57,7 +61,7 @@ function headersFor(cred) {
 async function rpc(url, method, params = {}, cred) {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: ACCEPT, ...headersFor(cred) },
+    headers: { "content-type": "application/json", accept: ACCEPT, ...headersFor(cred, url) },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   const text = await res.text();
@@ -413,19 +417,20 @@ test("an agent token opens /shadow/mcp and owns by ak:<root>", async () => {
   try {
     const agent = makeAgentKey();
     const token = await app.tokenFor(agent);
-    const tools = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token });
+    const tools = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent, token });
     assert.equal(tools.status, 200, JSON.stringify(tools.body));
     // With sign-in on, every endpoint lists clockchain_delete_account; for an agent it answers ACCOUNT_REQUIRED. With
     // agent keys on, shadow_sign_checkpoint is listed too.
     assert.deepEqual(tools.body.result.tools.map((t) => t.name).sort(), [...SHADOW_TOOLS, "clockchain_delete_account", "shadow_sign_checkpoint"].sort());
-    assert.equal((await call(app, "clockchain_delete_account", { confirm: true }, { bearer: token })).value.error, "ACCOUNT_REQUIRED");
-    const { value: s } = await call(app, "shadow_start_session", { title: "agent's" }, { bearer: token });
+    assert.equal((await call(app, "clockchain_delete_account", { confirm: true }, { agent, token })).value.error, "ACCOUNT_REQUIRED");
+    const { value: s } = await call(app, "shadow_start_session", { title: "agent's" }, { agent, token });
     assert.ok(existsSync(sessionDir(app, `ak:${agent.fingerprint}`, s.session_id)), "stored under ak:<root>");
     // Another token from the same key is the same owner; another agent and an account are not.
     const again = await app.tokenFor(agent);
-    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { apiKey: again })).value.title, "agent's");
-    const stranger = await app.tokenFor(makeAgentKey());
-    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: stranger })).value.error, "SHADOW_NOT_FOUND");
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { agent, token: again })).value.title, "agent's");
+    const strangerAgent = makeAgentKey();
+    const stranger = await app.tokenFor(strangerAgent);
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { agent: strangerAgent, token: stranger })).value.error, "SHADOW_NOT_FOUND");
     assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: acctToken() })).value.error, "SHADOW_NOT_FOUND");
   } finally {
     await app.close();
@@ -439,25 +444,27 @@ test("an agent signs its own checkpoint over /shadow/mcp, with the key its token
   try {
     const agent = makeAgentKey();
     const token = await app.tokenFor(agent);
-    const { value: s } = await call(app, "shadow_start_session", { title: "agent's", agents: [{ id: "planner" }] }, { bearer: token });
-    await call(app, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "task", content: "Find flights" }, { bearer: token });
-    const { value: cp } = await call(app, "shadow_checkpoint", { session_id: s.session_id }, { bearer: token });
+    const { value: s } = await call(app, "shadow_start_session", { title: "agent's", agents: [{ id: "planner" }] }, { agent, token });
+    await call(app, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "task", content: "Find flights" }, { agent, token });
+    const { value: cp } = await call(app, "shadow_checkpoint", { session_id: s.session_id }, { agent, token });
     assert.match(cp.sign.hash, /^[0-9a-f]{64}$/);
     // A token of another agent can't see the session; an account isn't an agent owner.
-    const stranger = await app.tokenFor(makeAgentKey());
-    assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { bearer: stranger })).value.error, "SHADOW_NOT_FOUND");
+    const strangerAgent = makeAgentKey();
+    const stranger = await app.tokenFor(strangerAgent);
+    assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { agent: strangerAgent, token: stranger })).value.error, "SHADOW_NOT_FOUND");
     assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { bearer: acctToken() })).value.error, "not_agent_owner");
-    const { value: signed } = await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { bearer: token });
+    const { value: signed } = await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp.sign.hash, signature: agent.signHash(cp.sign.hash) }, { agent, token });
     assert.equal(signed.checkpoint.status, "anchored", JSON.stringify(signed));
     assert.equal(signed.checkpoint.checkpoint_hash, cp.sign.hash);
     // After replace, the old key's tokens stop, and the new key signs for the same records.
     const next = makeAgentKey();
     app.book.replace(agent.fingerprint, next.publicKeyPem);
     const nextToken = await app.tokenFor(next);
-    await call(app, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." }, { bearer: nextToken });
-    const { value: cp2 } = await call(app, "shadow_checkpoint", { session_id: s.session_id }, { bearer: nextToken });
-    assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp2.sign.hash, signature: agent.signHash(cp2.sign.hash) }, { bearer: nextToken })).value.error, "bad_signature");
-    const { value: signed2 } = await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp2.sign.hash, signature: next.signHash(cp2.sign.hash) }, { bearer: nextToken });
+    const nextCred = { agent: next, token: nextToken };
+    await call(app, "shadow_record", { session_id: s.session_id, agent: "planner", kind: "message", content: "TAP at 389 EUR." }, nextCred);
+    const { value: cp2 } = await call(app, "shadow_checkpoint", { session_id: s.session_id }, nextCred);
+    assert.equal((await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp2.sign.hash, signature: agent.signHash(cp2.sign.hash) }, nextCred)).value.error, "bad_signature");
+    const { value: signed2 } = await call(app, "shadow_sign_checkpoint", { session_id: s.session_id, hash: cp2.sign.hash, signature: next.signHash(cp2.sign.hash) }, nextCred);
     assert.equal(signed2.checkpoint.status, "anchored", JSON.stringify(signed2));
   } finally {
     await app.close();
@@ -471,17 +478,17 @@ test("after replace, a token from the new key owns the same sessions", async () 
   try {
     const first = makeAgentKey();
     const oldToken = await app.tokenFor(first);
-    const { value: s } = await call(app, "shadow_start_session", { title: "kept across keys" }, { bearer: oldToken });
+    const { value: s } = await call(app, "shadow_start_session", { title: "kept across keys" }, { agent: first, token: oldToken });
     const second = makeAgentKey();
     app.book.replace(first.fingerprint, second.publicKeyPem);
     const newToken = await app.tokenFor(second);
-    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { bearer: newToken })).value.title, "kept across keys");
-    const { value: listed } = await call(app, "shadow_list_sessions", {}, { bearer: newToken });
+    assert.equal((await call(app, "shadow_get_session", { session_id: s.session_id }, { agent: second, token: newToken })).value.title, "kept across keys");
+    const { value: listed } = await call(app, "shadow_list_sessions", {}, { agent: second, token: newToken });
     assert.deepEqual(listed.sessions.map((x) => x.session_id), [s.session_id]);
-    const { value: s2 } = await call(app, "shadow_start_session", { title: "new key" }, { bearer: newToken });
+    const { value: s2 } = await call(app, "shadow_start_session", { title: "new key" }, { agent: second, token: newToken });
     assert.ok(existsSync(sessionDir(app, `ak:${first.fingerprint}`, s2.session_id)), "still owned by the first key, the root");
     // Replacing usually follows a compromise: the old key's tokens stop working at once.
-    const refused = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: oldToken });
+    const refused = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent: first, token: oldToken });
     assert.equal(refused.status, 401);
     assert.deepEqual(refused.body, { error: "invalid_token", message: CANCELLED });
   } finally {
@@ -496,13 +503,13 @@ test("a token minted before revoke is refused after it", async () => {
   try {
     const agent = makeAgentKey();
     const token = await app.tokenFor(agent);
-    assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token })).status, 200);
-    assert.equal((await rpc(`${app.url}/mcp`, "tools/list", {}, { bearer: token })).status, 200);
+    assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent, token })).status, 200);
+    assert.equal((await rpc(`${app.url}/mcp`, "tools/list", {}, { agent, token })).status, 200);
     app.book.revoke(agent.fingerprint);
     for (const endpoint of ["/shadow/mcp", "/mcp"]) {
       const res = await fetch(`${app.url}${endpoint}`, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: ACCEPT, authorization: `Bearer ${token}` },
+        headers: { "content-type": "application/json", accept: ACCEPT, ...headersFor({ agent, token }, `${app.url}${endpoint}`) },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
       });
       assert.equal(res.status, 401, endpoint);
@@ -520,8 +527,9 @@ test("a starter token cannot call timer_set or alarm_set on /mcp", async () => {
   __setShadowLedgerForTests(new FakeLedger());
   const app = await bootAgentKeys();
   try {
-    const token = await app.tokenFor(makeAgentKey());
-    const list = await rpc(`${app.url}/mcp`, "tools/list", {}, { bearer: token });
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    const list = await rpc(`${app.url}/mcp`, "tools/list", {}, { agent, token });
     assert.equal(list.body.result.tools.length, 50, "the tool list is unchanged");
     const calls = [
       ["timer_set", { delay_ms: 60_000 }],
@@ -529,7 +537,7 @@ test("a starter token cannot call timer_set or alarm_set on /mcp", async () => {
       ["timer_list", {}],
     ];
     for (const [name, args] of calls) {
-      const result = await mcpCall(app, name, args, { bearer: token });
+      const result = await mcpCall(app, name, args, { agent, token });
       assert.equal(result.isError, true, name);
       const body = JSON.parse(result.content[0].text);
       assert.equal(body.error, "not_on_starter", name);
@@ -558,18 +566,245 @@ test("account tokens are unchanged", async () => {
   }
 });
 
-test("with MCP_AGENT_KEYS off, an akf token gains nothing: Shadow says account_required and /mcp treats it as a demo token", async () => {
+test("with MCP_AGENT_KEYS off, an agent token gains nothing: bound to a key, it is refused on Shadow and /mcp, with a proof or without", async () => {
   __setShadowLedgerForTests(new FakeLedger());
   const app = await bootAgentKeys({ MCP_AGENT_KEYS: undefined });
   try {
     const agent = makeAgentKey();
     const { token } = mintAgentToken(SECRET, 3600, Math.floor(Date.now() / 1000), randomUUID(), agent.fingerprint, agent.thumbprint);
-    const shadow = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token });
-    assert.equal(shadow.status, 403);
-    assert.equal(shadow.body.error, "account_required");
-    const result = await mcpCall(app, "timer_list", {}, { bearer: token });
-    assert.doesNotMatch(result.content[0].text, /not_on_starter/, "today's demo-token rules");
+    for (const cred of [{ bearer: token }, { agent, token }]) {
+      assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, cred)).status, 401);
+      assert.equal((await rpc(`${app.url}/mcp`, "tools/call", { name: "timer_list", arguments: {} }, cred)).status, 401);
+    }
     assert.equal(existsSync(path.join(app.shadowDir, "owners", ownerKeyOf(`ak:${agent.fingerprint}`))), false);
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+// ---- DPoP (RFC 9449): every agent request carries a proof from the agent's own key ----
+
+const DPOP_AS_BEARER = 'This agent token is bound to your key: send it as "Authorization: DPoP <token>" with a DPoP proof on every request.';
+
+/** Captures console output while `fn` runs. */
+async function capturingLogs(fn) {
+  const captured = [];
+  const originals = {};
+  for (const name of ["log", "error", "warn", "info", "debug"]) {
+    originals[name] = console[name];
+    console[name] = (...args) => { captured.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")); };
+  }
+  try {
+    await fn(captured);
+  } finally {
+    Object.assign(console, originals);
+  }
+  return captured;
+}
+
+/** A raw request with the given headers, answering status, headers and parsed body. */
+async function raw(url, headers, { method = "POST", rpcMethod = "tools/list" } = {}) {
+  const res = await fetch(url, {
+    method,
+    headers: { accept: ACCEPT, ...(method === "POST" ? { "content-type": "application/json" } : {}), ...headers },
+    ...(method === "POST" ? { body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: rpcMethod, params: {} }) } : {}),
+  });
+  const text = await res.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = text; }
+  return { status: res.status, headers: res.headers, body };
+}
+
+test("DPoP: an agent token with a valid proof works on /shadow/mcp and /mcp", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent, token })).status, 200);
+    assert.equal((await call(app, "shadow_start_session", { title: "with a proof" }, { agent, token })).isError, false);
+    assert.equal((await rpc(`${app.url}/mcp`, "tools/list", {}, { agent, token })).status, 200);
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: an agent token sent as Bearer or x-api-key gets 401 that says to send it as DPoP, and never echoes the token", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    const answers = [];
+    const log = await capturingLogs(async () => {
+      for (const endpoint of ["/shadow/mcp", "/mcp"]) {
+        for (const headers of [{ authorization: `Bearer ${token}` }, { "x-api-key": token }]) {
+          const res = await raw(`${app.url}${endpoint}`, { ...headers, dpop: agent.dpop("POST", `${PUBLIC}${endpoint}`, { accessToken: token }) });
+          answers.push(res);
+          assert.equal(res.status, 401, endpoint);
+          const challenge = res.headers.get("www-authenticate") ?? "";
+          assert.match(challenge, /^DPoP algs="EdDSA", error="invalid_token", Bearer resource_metadata=/, endpoint);
+          assert.equal(res.headers.get("cache-control"), "no-store");
+          assert.deepEqual(res.body, { error: "invalid_token", message: DPOP_AS_BEARER }, endpoint);
+        }
+      }
+    });
+    for (const text of [...log, ...answers.map((a) => JSON.stringify(a.body))]) assert.ok(!text.includes(token), "the token is echoed");
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: a missing or wrong proof gets 401 invalid_dpop_proof", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    const other = makeAgentKey();
+    const otherToken = await app.tokenFor(other);
+    const SHADOW = `${PUBLIC}/shadow/mcp`;
+    const now = Math.floor(Date.now() / 1000);
+    const cases = [
+      ["no proof", {}, undefined],
+      ["ath for another token", { dpop: agent.dpop("POST", SHADOW, { accessToken: otherToken }) }, undefined],
+      ["htu for /mcp", { dpop: agent.dpop("POST", `${PUBLIC}/mcp`, { accessToken: token }) }, undefined],
+      ["htm POST on a GET", { dpop: agent.dpop("POST", SHADOW, { accessToken: token }) }, "GET"],
+      ["signed by another key", { dpop: other.dpop("POST", SHADOW, { accessToken: token }) }, undefined],
+      ["iat 120 s old", { dpop: agent.dpop("POST", SHADOW, { accessToken: token, iat: now - 120 }) }, undefined],
+    ];
+    for (const [label, headers, method] of cases) {
+      const res = await raw(`${app.url}/shadow/mcp`, { authorization: `DPoP ${token}`, ...headers }, { method });
+      assert.equal(res.status, 401, label);
+      assert.match(res.headers.get("www-authenticate") ?? "", /^DPoP algs="EdDSA", error="invalid_dpop_proof", Bearer /, label);
+      assert.equal(res.body.error, "invalid_dpop_proof", label);
+      assert.ok(typeof res.body.message === "string" && res.body.message.length > 0, label);
+    }
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: the same proof sent twice is refused the second time", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    const headers = { authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${PUBLIC}/shadow/mcp`, { accessToken: token }) };
+    assert.equal((await raw(`${app.url}/shadow/mcp`, headers)).status, 200);
+    const again = await raw(`${app.url}/shadow/mcp`, headers);
+    assert.equal(again.status, 401);
+    assert.equal(again.body.error, "invalid_dpop_proof");
+    assert.match(again.body.message, /already used/);
+    // On /mcp too: a proof spent there is spent everywhere.
+    const mcp = { authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${PUBLIC}/mcp`, { accessToken: token }) };
+    assert.equal((await raw(`${app.url}/mcp`, mcp)).status, 200);
+    assert.match((await raw(`${app.url}/mcp`, mcp)).body.message, /already used/);
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: a request's proof is checked once, so a refusal logs one line and a cancelled key still reads as cancelled", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    const refusedLog = await capturingLogs(async () => {
+      assert.equal((await raw(`${app.url}/shadow/mcp`, { authorization: `DPoP ${token}` })).status, 401);
+    });
+    assert.equal(refusedLog.filter((l) => l.includes("agent_dpop_refused")).length, 1, refusedLog.join("\n"));
+    // A good proof on a revoked key: spent by the first check, and the second check (the 401's) must not see it as reused.
+    app.book.revoke(agent.fingerprint);
+    const cancelledLog = await capturingLogs(async () => {
+      const res = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent, token });
+      assert.equal(res.status, 401);
+      assert.deepEqual(res.body, { error: "invalid_token", message: CANCELLED });
+    });
+    assert.equal(cancelledLog.some((l) => l.includes("already used")), false, cancelledLog.join("\n"));
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: when the spent-proof set is full, an agent request gets 503 and nothing runs", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  // The proof set on disk already holds its cap (200,000) of live entries, so the server opens it full.
+  const stateDir = mkdtempSync(path.join(tmpdir(), "shadow-ak-full-"));
+  const oauthDir = path.join(stateDir, "oauth");
+  mkdirSync(oauthDir, { recursive: true, mode: 0o700 });
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const entries = Array.from({ length: 200_000 }, (_, i) => [`seed-${i}`, exp]);
+  writeFileSync(path.join(oauthDir, "used-dpop.json"), `${JSON.stringify({ schema: "oauth-used-dpop-v1", value: entries })}\n`, { mode: 0o600 });
+  const app = await bootAgentKeys({ MCP_STATE_DIR: stateDir });
+  try {
+    const agent = makeAgentKey();
+    // Sign-in spends a proof too, so it is refused first.
+    const signIn = await fetch(`${app.url}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", dpop: agent.dpop("POST", `${PUBLIC}/oauth/token`) },
+      body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: agent.assertion(`${PUBLIC}/oauth/token`) }),
+    });
+    assert.equal(signIn.status, 503);
+    // A token minted for the key (as an earlier sign-in would have): its request is refused with 503 too.
+    const { token } = mintAgentToken(SECRET, 3600, Math.floor(Date.now() / 1000), randomUUID(), agent.fingerprint, agent.thumbprint);
+    for (const endpoint of ["/shadow/mcp", "/mcp"]) {
+      const res = await rpc(`${app.url}${endpoint}`, "tools/list", {}, { agent, token });
+      assert.equal(res.status, 503, endpoint);
+      assert.deepEqual(res.body, { error: "temporarily_unavailable", message: "Clockchain is taking too many agent requests right now. Try again in a minute." }, endpoint);
+    }
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: account tokens are unchanged as Bearer, and refused under the DPoP scheme (they have no cnf)", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const account = acctToken();
+    assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: account })).status, 200);
+    const agent = makeAgentKey();
+    const res = await raw(`${app.url}/shadow/mcp`, { authorization: `DPoP ${account}`, dpop: agent.dpop("POST", `${PUBLIC}/shadow/mcp`, { accessToken: account }) });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.error, "invalid_dpop_proof");
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: a value that is not a Clockchain token under the DPoP scheme gets the ordinary 401, never the bring-your-own path", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const none = await raw(`${app.url}/mcp`, {}, { rpcMethod: "tools/call" });
+    const dpop = await raw(`${app.url}/mcp`, { authorization: "DPoP not-a-cc-token" }, { rpcMethod: "tools/call" });
+    assert.equal(dpop.status, 401);
+    assert.deepEqual(dpop.body, none.body, "the same 401 as no credential");
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: in open mode (local use) an agent token still needs its proof", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys({ MCP_AUTH_TOKENS: "" });
+  try {
+    const agent = makeAgentKey();
+    const token = await app.tokenFor(agent);
+    assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token })).status, 401);
+    assert.equal((await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { agent, token })).status, 200);
   } finally {
     await app.close();
     __setShadowLedgerForTests(undefined);
