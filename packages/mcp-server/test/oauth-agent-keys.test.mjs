@@ -662,3 +662,47 @@ test("past the spent-proof cap a new sign-in gets 503 naming the proof set, and 
     await h.close();
   }
 });
+
+test("a client_id that isn't the assertion's iss is invalid_client; the key's own thumbprint, or none, mints (RFC 7523 §3)", async () => {
+  const h = await harness();
+  try {
+    const agent = makeAgentKey();
+    const other = makeAgentKey();
+    for (const client_id of [other.thumbprint, "some-registered-client", ""]) {
+      const res = await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), { client_id });
+      const body = await res.json();
+      assert.equal(res.status, 401, client_id);
+      assert.equal(body.error, "invalid_client");
+      assert.equal(body.error_description, "client_id must be the assertion's iss (your key's thumbprint), or left out.");
+    }
+    assert.equal(h.book.get(agent.fingerprint), null, "a refused sign-in admits no key");
+    assert.ok(h.logs.some((e) => e.event === "oauth_agent_token_refused" && e.outcome === "client_id_mismatch"));
+    assert.equal((await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), { client_id: agent.thumbprint })).status, 200);
+    assert.equal((await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a sign-in refused because a spent set is full admits no key and spends no new-key allowance", async () => {
+  for (const [cap, set] of [[{ spentAssertionsCap: 1 }, "used-assertions"], [{ spentDpopCap: 1 }, "used-dpop"]]) {
+    const h = await harness({ ...cap, newPerIpPerHour: 2 });
+    try {
+      assert.equal((await grant(h.url, makeAgentKey().assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+      // Three new keys refused: had any been admitted, its allowance spent, the third would get 429.
+      for (let i = 0; i < 3; i++) {
+        const refused = makeAgentKey();
+        const full = await grant(h.url, refused.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }));
+        assert.equal(full.status, 503, set);
+        assert.equal(h.book.get(refused.fingerprint), null, `${set}: no key admitted`);
+      }
+      assert.ok(h.logs.some((e) => e.event === "oauth_replay_state_full" && e.set === set), JSON.stringify(h.logs));
+      // Room again (both sets' first entries have expired): a new key mints on the address's second allowance.
+      const second = makeAgentKey();
+      h.advance(301_000);
+      assert.equal((await grant(h.url, second.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200, set);
+    } finally {
+      await h.close();
+    }
+  }
+});

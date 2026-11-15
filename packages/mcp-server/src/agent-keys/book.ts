@@ -47,11 +47,12 @@ type Slot = { file: DurableJsonFile<KeyEntry>; entry: KeyEntry };
 
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
-function validEntry(v: unknown): KeyEntry {
+/** A key file's entry, which must be the key its file is named for: its public key hashes to `fp`. */
+function validEntry(fp: string, v: unknown): KeyEntry {
   if (
     !isObj(v) ||
-    typeof v.fingerprint !== "string" || !FINGERPRINT.test(v.fingerprint) ||
-    typeof v.publicKeyPem !== "string" ||
+    v.fingerprint !== fp ||
+    typeof v.publicKeyPem !== "string" || !ed25519PublicKeyDer(v.publicKeyPem) || fingerprint(v.publicKeyPem) !== fp ||
     typeof v.root !== "string" || !FINGERPRINT.test(v.root) ||
     (v.status !== "active" && v.status !== "replaced" && v.status !== "revoked") ||
     typeof v.firstSeenAt !== "string" ||
@@ -248,7 +249,7 @@ export class AgentKeyBook {
 
   private open(fp: string): Slot {
     const slot = { entry: undefined } as unknown as Slot;
-    slot.file = createDurableJsonFile<KeyEntry>({ path: join(this.dir, `${fp}.json`), schema: SCHEMA, snapshot: () => slot.entry, validate: validEntry, maxBytes: MAX_BYTES });
+    slot.file = createDurableJsonFile<KeyEntry>({ path: join(this.dir, `${fp}.json`), schema: SCHEMA, snapshot: () => slot.entry, validate: (v) => validEntry(fp, v), maxBytes: MAX_BYTES });
     return slot;
   }
 

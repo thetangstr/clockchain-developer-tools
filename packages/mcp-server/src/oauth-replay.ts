@@ -32,6 +32,10 @@ export interface ExpiringSet {
   has(key: string): boolean;
   /** Records `key` until `exp`. The durable set writes it to disk first and throws if it cannot. */
   add(key: string, exp: number): void;
+  /** Records every entry or none: the durable set writes them in one journal append. */
+  addAll(entries: readonly (readonly [string, number])[]): void;
+  /** True when a set made with whenFull "refuse" would refuse a new entry now; always false for "evict". */
+  full(): boolean;
   size(): number;
 }
 
@@ -47,32 +51,39 @@ function sweep(entries: Map<string, number>, now: number): void {
  * Entries live until their expiry. Past `cap`, "evict" (the default) drops the oldest entry first (best effort under a
  * flood); "refuse" throws ReplayStateFullError instead.
  */
-export function memoryExpiringSet(cap: number, nowSec: () => number, whenFull: "evict" | "refuse" = "evict"): ExpiringSet & { full(): boolean } {
+export function memoryExpiringSet(cap: number, nowSec: () => number, whenFull: "evict" | "refuse" = "evict"): ExpiringSet & { roomFor(n: number): boolean } {
   const entries = new Map<string, number>();
   let nextSweep = 0;
-  const full = () => {
+  /** Whether `n` more entries fit under `cap`, after sweeping the expired ones when that is due or they wouldn't fit. */
+  const roomFor = (n: number) => {
     const t = nowSec();
-    if (t >= nextSweep || entries.size >= cap) {
+    if (t >= nextSweep || entries.size + n > cap) {
       sweep(entries, t);
       nextSweep = t + 60;
     }
-    return entries.size >= cap;
+    return entries.size + n <= cap;
+  };
+  const add = (key: string, exp: number) => {
+    if (!roomFor(1)) {
+      // Setting a key it already holds doesn't grow the set (a journal line repeating the snapshot, at boot).
+      if (whenFull === "refuse" && !entries.has(key)) throw new ReplayStateFullError();
+      while (whenFull === "evict" && entries.size >= cap) entries.delete(entries.keys().next().value as string);
+    }
+    entries.set(key, exp);
   };
   return {
     has: (key) => {
       const exp = entries.get(key);
       return exp !== undefined && nowSec() < exp;
     },
-    add: (key, exp) => {
-      if (full()) {
-        // Setting a key it already holds doesn't grow the set (a journal line repeating the snapshot, at boot).
-        if (whenFull === "refuse" && !entries.has(key)) throw new ReplayStateFullError();
-        while (whenFull === "evict" && entries.size >= cap) entries.delete(entries.keys().next().value as string);
-      }
-      entries.set(key, exp);
+    add,
+    addAll: (items) => {
+      if (whenFull === "refuse" && !roomFor(items.filter(([key]) => !entries.has(key)).length)) throw new ReplayStateFullError();
+      for (const [key, exp] of items) add(key, exp);
     },
     size: () => entries.size,
-    full,
+    full: () => whenFull === "refuse" && !roomFor(1),
+    roomFor,
   };
 }
 
@@ -128,22 +139,27 @@ export function durableExpiringSet(dir: string, name: string, cap: number, nowSe
   }
   compact();
 
+  /** Every entry in one fsync'd append (lines, so a torn last one is skipped at boot), remembered only once it is written. */
+  const addAll = (items: readonly (readonly [string, number])[]) => {
+    for (const [key, exp] of items) if (!ID.test(key) || !Number.isSafeInteger(exp)) throw new DurableStateError("bad replay-state entry");
+    // Not a DurableStateError, so the compact-and-retry below never catches it; and checked first, so it journals nothing.
+    if (whenFull === "refuse" && !memory.roomFor(items.length)) throw new ReplayStateFullError();
+    const lines = items.map((item) => JSON.stringify(item)).join("\n");
+    try {
+      appendDurableLine(journal, lines, JOURNAL_MAX_BYTES);
+    } catch (error) {
+      if (!(error instanceof DurableStateError)) throw error;
+      compact(); // past its bound: fold the journal into a snapshot, then append to a fresh one
+      appendDurableLine(journal, lines, JOURNAL_MAX_BYTES);
+    }
+    for (const [key, exp] of items) remember(key, exp);
+  };
+
   return {
     has: (key) => memory.has(key),
-    add: (key, exp) => {
-      if (!ID.test(key) || !Number.isSafeInteger(exp)) throw new DurableStateError("bad replay-state entry");
-      // Not a DurableStateError, so the compact-and-retry below never catches it; and checked first, so it journals nothing.
-      if (whenFull === "refuse" && memory.full()) throw new ReplayStateFullError();
-      const line = JSON.stringify([key, exp]);
-      try {
-        appendDurableLine(journal, line, JOURNAL_MAX_BYTES);
-      } catch (error) {
-        if (!(error instanceof DurableStateError)) throw error;
-        compact(); // past its bound: fold the journal into a snapshot, then append to a fresh one
-        appendDurableLine(journal, line, JOURNAL_MAX_BYTES);
-      }
-      remember(key, exp);
-    },
+    add: (key, exp) => addAll([[key, exp]]),
+    addAll,
     size: () => memory.size(),
+    full: () => memory.full(),
   };
 }

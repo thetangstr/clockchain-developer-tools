@@ -49,6 +49,7 @@ const MAX_BODY_BYTES = 16 * 1024;
 const RETRY_MS = 60_000;
 const MAX_RETRY_KEYS = 10_000;
 const CHANGE_OF = { replace: "replaced", revoke: "revoked" } as const;
+const ONE_AUD = "The assertion's aud must be this URL as a single string, not an array.";
 
 type EventView = { action: KeyEntry["events"][number]["action"]; at: string; state: "filed" | "pending"; ledgerId?: string; block?: number; filedAt?: string };
 
@@ -212,6 +213,8 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
       if (e instanceof AgentKeyError) return refuse("bad_proof", 401, "invalid_client", e.message);
       throw e;
     }
+    // RFC 7523 lets a token endpoint take an aud array; a key route takes only its own URL, as one string.
+    if (typeof proven.claims.aud !== "string") return refuse("aud_not_string", 401, "invalid_client", ONE_AUD);
     if (fingerprint(proven.publicKeyPem) !== fp) {
       return refuse("other_key", 401, "invalid_client", action === "replace"
         ? "The assertion must be signed by the key being replaced."
@@ -238,6 +241,7 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
         if (e instanceof AgentKeyError) return refuse("bad_new_key_proof", 401, "invalid_client", `new_key_assertion: ${e.message}`);
         throw e;
       }
+      if (typeof provenNew.claims.aud !== "string") return refuse("aud_not_string", 401, "invalid_client", `new_key_assertion: ${ONE_AUD}`);
       if (provenNew.publicKeyPem !== newPem) {
         return refuse("other_new_key_signer", 401, "invalid_client", "new_key_assertion must be signed by the key in new_public_key.");
       }
@@ -278,10 +282,9 @@ export function createAgentKeyRoutes(o: AgentKeyRoutesOptions): (req: IncomingMe
     if (newPem !== undefined && !resuming && o.allowNewKey && !o.allowNewKey()) {
       return limited(res, "agent_key_new_global", "Clockchain isn't taking new agent keys right now. Try again later.", "3600");
     }
-    // If a replace's second spend fails after the first is written, the old key's assertion stays spent and the request
-    // fails closed, whether the set is full or the write failed.
+    // A replace's two assertions are spent in one write, so a full set or a failed write spends neither and changes nothing.
     try {
-      for (const a of spent) usedAssertions.add(a.key, a.exp);
+      usedAssertions.addAll(spent.map((a) => [a.key, a.exp] as const));
     } catch (e) {
       if (e instanceof ReplayStateFullError) {
         log({ event: "agent_keys_replay_state_full" });

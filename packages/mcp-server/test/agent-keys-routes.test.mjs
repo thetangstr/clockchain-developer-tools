@@ -423,6 +423,72 @@ test("a revoke when the spent-assertion list is full gets 503 and changes nothin
   }
 });
 
+test("a key route takes only an assertion whose aud is its URL as one string, never an array", async () => {
+  const h = await harness();
+  try {
+    const old = h.agent();
+    const next = makeAgentKey();
+    const url = actionUrl(old.fingerprint, "replace");
+    const tries = [
+      [old.assertion(url, naming(next, { claims: { aud: [url] } })), proving(next, old.fingerprint)],
+      [old.assertion(url, naming(next)), proving(next, old.fingerprint, { claims: { aud: [url] } })],
+    ];
+    for (const [assertion, newKeyAssertion] of tries) {
+      const res = await h.post(old.fingerprint, "replace", { assertion, new_public_key: next.publicKeyPem, new_key_assertion: newKeyAssertion });
+      const body = await res.json();
+      assert.equal(res.status, 401, JSON.stringify(body));
+      assert.equal(body.error, "invalid_client");
+      assert.match(body.error_description, /aud must be this URL as a single string/);
+    }
+    const revoke = actionUrl(old.fingerprint, "revoke");
+    const res = await h.post(old.fingerprint, "revoke", { assertion: old.assertion(revoke, { claims: { aud: [revoke] } }) });
+    assert.equal(res.status, 401);
+    assert.equal(h.book.get(old.fingerprint).status, "active", "nothing changed");
+    // A refusal spends nothing: the same assertions with aud as a string go through.
+    const ok = await h.post(old.fingerprint, "replace", { assertion: old.assertion(url, naming(next)), new_public_key: next.publicKeyPem, new_key_assertion: proving(next, old.fingerprint) });
+    assert.equal(ok.status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a replace spends both assertions in one write: one that fails spends neither, and the same request then goes through", async () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const inner = memoryExpiringSet(1000, nowSec);
+  let failing = true;
+  const writes = [];
+  const usedAssertions = {
+    has: (k) => inner.has(k),
+    add: () => { throw new Error("a replace must spend its two assertions in one write"); },
+    addAll: (entries) => {
+      writes.push(entries.length);
+      if (failing) throw new Error("disk full");
+      inner.addAll(entries);
+    },
+    full: () => inner.full(),
+    size: () => inner.size(),
+  };
+  const h = await harness({ usedAssertions });
+  try {
+    const old = h.agent();
+    const next = makeAgentKey();
+    const url = actionUrl(old.fingerprint, "replace");
+    const body = { assertion: old.assertion(url, naming(next)), new_public_key: next.publicKeyPem, new_key_assertion: proving(next, old.fingerprint) };
+    const failed = await h.post(old.fingerprint, "replace", body);
+    assert.equal(failed.status, 503);
+    assert.equal(inner.size(), 0, "neither assertion was spent");
+    assert.equal(h.book.get(old.fingerprint).status, "active");
+    assert.equal(h.book.get(next.fingerprint), null);
+    failing = false;
+    assert.equal((await h.post(old.fingerprint, "replace", body)).status, 200);
+    assert.deepEqual(writes, [2, 2], "one write of both, each time");
+    assert.equal(inner.size(), 2);
+    assert.equal((await h.post(old.fingerprint, "replace", body)).status, 401, "then both are spent");
+  } finally {
+    await h.close();
+  }
+});
+
 test("lookup never includes private material", async () => {
   const h = await harness();
   try {

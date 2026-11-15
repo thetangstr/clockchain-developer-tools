@@ -316,3 +316,25 @@ test("forgetUnused removes only a key nobody used, and keeps every key with hist
   // An empty or missing directory is nothing to do.
   assert.equal(new AgentKeyBook({ dir: join(dir, "none"), now: () => new Date() }).forgetUnused({ firstSeenBefore: new Date(), inUse: () => false }), 0);
 });
+
+// ---- A key file that isn't that key's (Task 10 item 1) ----
+
+test("a key file whose public key doesn't hash to its fingerprint, or whose fingerprint isn't its file name, is corrupt", () => {
+  const { dir, book } = fresh();
+  const a = book.admit(pem()).entry;
+  const b = book.admit(pem()).entry;
+  const write = (fp, value) => writeFileSync(join(dir, `${fp}.json`), `${JSON.stringify({ schema: "agent-key-v1", value })}\n`, { mode: 0o600 });
+  const unreadable = (e) => e?.name === "DurableStateError";
+  // A's file with B's public key under A's fingerprint: not A's key, and never taken as it.
+  write(a.fingerprint, { ...a, publicKeyPem: b.publicKeyPem });
+  assert.throws(() => new AgentKeyBook({ dir, now: () => new Date() }).get(a.fingerprint), unreadable);
+  // B's whole, valid entry under A's file name.
+  write(a.fingerprint, b);
+  assert.throws(() => new AgentKeyBook({ dir, now: () => new Date() }).get(a.fingerprint), unreadable);
+  // B's own file is untouched and still reads.
+  assert.equal(new AgentKeyBook({ dir, now: () => new Date() }).get(b.fingerprint).publicKeyPem, b.publicKeyPem);
+  // With a good backup, the backup is read, as for any corrupt file.
+  book.setFiling(b.fingerprint, { state: "pending", ledgerId: "L1" });
+  write(b.fingerprint, { ...b, publicKeyPem: a.publicKeyPem });
+  assert.equal(new AgentKeyBook({ dir, now: () => new Date() }).get(b.fingerprint).publicKeyPem, b.publicKeyPem);
+});

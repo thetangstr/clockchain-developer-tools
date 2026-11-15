@@ -1425,6 +1425,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       if (e instanceof AgentKeyError) return refuse("bad_proof", e.message);
       throw e;
     }
+    // RFC 7523 §3: a client_id, when sent, names the assertion's issuer (the key's thumbprint).
+    const jkt = jwkThumbprintOfPem(proven.publicKeyPem);
+    if (params.has("client_id") && params.get("client_id") !== jkt) {
+      return refuse("client_id_mismatch", "client_id must be the assertion's iss (your key's thumbprint), or left out.");
+    }
     const refuseDpop = (description: string): void => {
       log({ event: "oauth_agent_token_refused", outcome: "bad_dpop" });
       sendOAuthError(res, 400, "invalid_dpop_proof", description);
@@ -1437,7 +1442,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       if (e instanceof AgentKeyError) return refuseDpop(e.message);
       throw e;
     }
-    if (dpop.jkt !== jwkThumbprintOfPem(proven.publicKeyPem)) return refuseDpop("Sign the DPoP proof with the same key as the client assertion.");
+    if (dpop.jkt !== jkt) return refuseDpop("Sign the DPoP proof with the same key as the client assertion.");
     const fp = fingerprint(proven.publicKeyPem);
     const replayKey = sha256b64url(`${fp}:${proven.jti}`);
     if (usedAssertions.has(replayKey)) {
@@ -1445,6 +1450,13 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       return;
     }
     if (usedDpopProofs.has(dpop.replayKey)) return refuseDpop("This DPoP proof was already used.");
+    const full = (set: string): void => {
+      log({ event: "oauth_replay_state_full", set });
+      sendOAuthError(res, 503, "temporarily_unavailable", "Clockchain is taking too many agent sign-ins right now. Try again in a minute.", { "retry-after": "60" });
+    };
+    // Room in both sets first, so a sign-in refused for it admits no key and spends no new-key allowance.
+    if (usedDpopProofs.full()) return full("used-dpop");
+    if (usedAssertions.full()) return full("used-assertions");
     let entry: KeyEntry;
     try {
       const known = keys.book.get(fp);
@@ -1475,11 +1487,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       set = "used-assertions";
       usedAssertions.add(replayKey, proven.exp);
     } catch (e) {
-      if (e instanceof ReplayStateFullError) {
-        log({ event: "oauth_replay_state_full", set });
-        sendOAuthError(res, 503, "temporarily_unavailable", "Clockchain is taking too many agent sign-ins right now. Try again in a minute.", { "retry-after": "60" });
-        return;
-      }
+      if (e instanceof ReplayStateFullError) return full(set);
       log({ event: "oauth_replay_state_write_failed" });
       sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
       return;
