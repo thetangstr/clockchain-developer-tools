@@ -1,6 +1,7 @@
 // An agent onboards from the server's own instructions, with no person, over the real runHttp wiring: it reads them in
 // /llms.txt and /shadow/connect, makes its own Ed25519 key, gets a token with one signed assertion, records and signs its
-// checkpoints, and anyone with the links can check the result. Then AT-7: (a) a second token from the same key sees the
+// checkpoints through the MCP SDK with the example client (examples/agent-key-client.mjs, run as it is: a DPoP proof on
+// every request), and anyone with the links can check the result. Then AT-7: (a) a second token from the same key sees the
 // same sessions, (d) no private key is kept on the server but the witness key the operator provides, (e) no tool result
 // or log line carries the token, the assertion or a cc_ token.
 import assert from "node:assert/strict";
@@ -18,6 +19,9 @@ import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { parseStrict } from "../dist/shadow/lib/profile.js";
 import { FakeLedger } from "./helpers/shadow-fake-ledger.mjs";
 import { makeAgentKey } from "./helpers/agent-key.mjs";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { agentKey, dpopFetch, tokenSource } from "../examples/agent-key-client.mjs";
 
 const SECRET = "agent-keys-e2e-secret";
 const PUBLIC = "https://mcp.example.test";
@@ -115,7 +119,8 @@ test("an agent onboards from the instructions alone: one token call, signed chec
       for (const fact of ["Ed25519", "private half", "/oauth/token", "grant_type=client_credentials", `client_assertion_type=${JWT_BEARER}`, "client_assertion=",
         "token_endpoint", "/shadow/mcp", "sign.hash", "shadow_checkpoint", "shadow_close_session", "shadow_sign_checkpoint", "/agent-keys/<fingerprint>.json",
         "never sees", "/replace", "new_key_assertion", "new_public_key", "/revoke", "sign.count", "sign.head",
-        "standard base64, 88 characters ending ==", "including its final newline", "under the issuer from the OAuth metadata", "8 to 128 characters"]) {
+        "standard base64, 88 characters ending ==", "including its final newline", "under the issuer from the OAuth metadata", "8 to 128 characters",
+        "DPoP", "dpop+jwt", "htm", "htu", "ath"]) {
         assert.ok(joined.includes(fact), `${name} names ${fact}`);
       }
       assert.doesNotMatch(joined, /verified|independent|validator/i, name);
@@ -126,42 +131,52 @@ test("an agent onboards from the instructions alone: one token call, signed chec
     assert.equal(meta.token_endpoint, `${PUBLIC}/oauth/token`);
     assert.ok(meta.grant_types_supported.includes("client_credentials"));
     const agent = makeAgentKey();
-    const tokenCall = async () => {
-      const assertion = agent.assertion(meta.token_endpoint);
-      secrets.push(assertion);
-      const res = await fetch(`${app.url}/oauth/token`, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", dpop: agent.dpop("POST", meta.token_endpoint) },
-        body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: assertion }),
-      });
-      const body = await res.json();
-      assert.equal(res.status, 200, JSON.stringify(body));
-      secrets.push(body.access_token);
-      return body;
+    // The example client, unmodified, with the same key. The test reaches the server at 127.0.0.1 while its public URL
+    // is PUBLIC, so the token is posted to the loopback URL and each proof's htu is the public URL plus the path.
+    const key = agentKey(agent.privateKey);
+    assert.equal(key.thumbprint, agent.thumbprint);
+    // Every DPoP proof and assertion the client makes is kept (AT-7e), by handing the example the same key, recording.
+    const proofs = [];
+    const recorded = {
+      ...key,
+      dpop: (...args) => { const proof = key.dpop(...args); proofs.push(proof); secrets.push(proof); return proof; },
+      assertion: (aud) => { const assertion = key.assertion(aud); secrets.push(assertion); return assertion; },
     };
-    const issued = await tokenCall();
+    const issuedTokens = [];
+    /** The example's token source, keeping each token it got for AT-7e. */
+    const signIn = () => {
+      const get = tokenSource(recorded, meta.token_endpoint, { postTo: `${app.url}/oauth/token` });
+      return async () => {
+        const token = await get();
+        if (!issuedTokens.includes(token)) { issuedTokens.push(token); secrets.push(token); }
+        return token;
+      };
+    };
+    /** An MCP SDK client over the example's dpopFetch. */
+    const connectClient = async (getToken) => {
+      const client = new Client({ name: "e2e-agent", version: "1" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`${app.url}/shadow/mcp`), {
+        fetch: dpopFetch(recorded, getToken, { htuOf: (u) => PUBLIC + new URL(u).pathname }),
+      }));
+      return client;
+    };
+    const client = await connectClient(signIn());
+    // What the token endpoint answers, as the example's tokenSource reads it.
+    const issuedRes = await fetch(`${app.url}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", dpop: recorded.dpop("POST", meta.token_endpoint) },
+      body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: recorded.assertion(meta.token_endpoint) }),
+    });
+    const issued = await issuedRes.json();
+    assert.equal(issuedRes.status, 200, JSON.stringify(issued));
+    secrets.push(issued.access_token);
     assert.equal(issued.token_type, "DPoP");
     assert.equal(issued.expires_in, 3600);
     assert.equal(issued.refresh_token, undefined);
     assert.match(issued.agent_id, /^[0-9a-f]{16}$/);
-    const cred = issued.access_token;
 
-    const rpc = async (method, params, token = cred) => {
-      const res = await fetch(`${app.url}/shadow/mcp`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json", accept: ACCEPT,
-          authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${PUBLIC}/shadow/mcp`, { accessToken: token }),
-        },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-      });
-      const text = await res.text();
-      assert.equal(res.status, 200, text);
-      const data = text.split("\n").find((l) => l.startsWith("data:"));
-      return JSON.parse(data ? data.slice(5) : text).result;
-    };
-    const call = async (name, args, token) => {
-      const result = await rpc("tools/call", { name, arguments: args }, token);
+    const call = async (name, args, as = client) => {
+      const result = await as.callTool({ name, arguments: args });
       const text = result.content[0].text;
       results.push(text);
       const value = JSON.parse(text);
@@ -170,7 +185,7 @@ test("an agent onboards from the instructions alone: one token call, signed chec
     };
 
     // The tool list tells the agent it signs, on the two tools that hand it a hash.
-    const { tools } = await rpc("tools/list", {});
+    const { tools } = await client.listTools();
     const described = Object.fromEntries(tools.map((t) => [t.name, t.description]));
     assert.ok(described.shadow_sign_checkpoint);
     for (const name of ["shadow_checkpoint", "shadow_close_session"]) assert.match(described[name], /shadow_sign_checkpoint/, name);
@@ -211,22 +226,25 @@ test("an agent onboards from the instructions alone: one token call, signed chec
     assert.ok(!(await entry.text()).includes("PRIVATE KEY"));
 
     // AT-7(a): a second token from the same key is the same agent, and sees the session.
-    const again = await tokenCall();
-    assert.notEqual(again.access_token, issued.access_token);
-    assert.equal(again.agent_id, issued.agent_id);
-    const listed = await call("shadow_list_sessions", {}, again.access_token);
+    const second = await connectClient(signIn());
+    assert.equal(issuedTokens.length, 2);
+    assert.notEqual(issuedTokens[1], issuedTokens[0]);
+    const listed = await call("shadow_list_sessions", {}, second);
     assert.deepEqual(listed.sessions.map((x) => x.session_id), [s.session_id]);
+    await second.close();
+    await client.close();
+    assert.ok(proofs.length >= 10, `${proofs.length} proofs sent`);
 
     // AT-7(d): no private key on the server's disk, but the witness key file the operator provided (here, this test).
     const holding = filesUnder(root).filter((f) => readFileSync(f).includes("PRIVATE KEY"));
     assert.deepEqual(holding, [app.witnessFile]);
 
-    // AT-7(e): no tool result and no log line carries the token, the assertion, or any cc_ token.
+    // AT-7(e): no tool result and no log line carries a token, an assertion, a DPoP proof, or any cc_ token.
     assert.ok(captured.some((l) => l.includes("oauth_token_issued")), "the server's log lines were captured");
     const ccToken = /(?<![A-Za-z0-9_-])cc_[A-Za-z0-9._-]{20,}/;
     for (const [where, texts] of [["tool result", results], ["log line", captured]]) {
       for (const text of texts) {
-        for (const secret of secrets) assert.ok(!text.includes(secret), `a ${where} carries a token or assertion`);
+        for (const secret of secrets) assert.ok(!text.includes(secret), `a ${where} carries a token, assertion or proof`);
         assert.doesNotMatch(text, ccToken, `a ${where} carries a cc_ token`);
       }
     }

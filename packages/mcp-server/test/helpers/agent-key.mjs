@@ -22,6 +22,8 @@ export function makeAgentKey() {
   const jwk = { kty, crv, x };
   const thumbprint = jwkThumbprint(jwk);
   return {
+    /** For handing this same key to a client under test (the example client); tests never print it. */
+    privateKey,
     publicKeyPem,
     fingerprint: fingerprint(publicKeyPem),
     jwk,

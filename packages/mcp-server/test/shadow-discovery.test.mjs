@@ -257,7 +257,8 @@ test("how an agent signs in with its own key is shown only with agent keys on, i
       "8 to 128 characters", "sign.count", "sign.head", "check count and head match your own record, and don't sign if they don't"]) {
       assert.ok(joined.includes(fact), `names ${fact}`);
     }
-    assert.doesNotMatch(joined, /base64url/);
+    // The signature is standard base64: base64url is named only for the DPoP proof's ath.
+    assert.doesNotMatch(joined.replace("ath the base64url SHA-256", ""), /base64url/);
     // A period right after a URL reads as part of it.
     assert.doesNotMatch(joined, /https?:\/\/\S*\.(?=\s|$)/m);
     lines.splice(at, block.length + 1);
