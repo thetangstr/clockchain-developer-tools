@@ -57,15 +57,13 @@ async function boot(env = {}) {
   for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
   __resetSharedLogBudget();
   const gateway = await fakeGateway();
-  const probe = createServer().listen(0, "127.0.0.1");
-  await once(probe, "listening");
-  const port = probe.address().port;
-  await new Promise((r) => probe.close(r));
+  // Port 0: the server takes a free port itself, so no other test can grab it between a probe and the listen.
   Object.assign(process.env, {
-    MCP_PORT: String(port), MCP_AUTH_TOKENS: STATIC, MCP_REQUIRE_AUTH: "1", MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: mkdtempSync(path.join(tmpdir(), "byo-")),
+    MCP_PORT: "0", MCP_AUTH_TOKENS: STATIC, MCP_REQUIRE_AUTH: "1", MCP_TOKEN_SIGNING_SECRET: SECRET, MCP_STATE_DIR: mkdtempSync(path.join(tmpdir(), "byo-")),
     CLOCKCHAIN_ENDPOINT: gateway.url, CLOCKCHAIN_SUBSTRATE: "anchoring-gateway", CLOCKCHAIN_API_KEY: "delegated-key", CLOCKCHAIN_CLIENT_ID: DELEGATED, CLOCKCHAIN_WALLET_ID: DELEGATED, CLOCKCHAIN_SIGNING_SECRET: "gateway-secret", STANDALONE_CLOCK_RESYNC_MS: "0",
   }, env);
   const server = await runHttp();
+  // once() rejects on "error", so a failed listen fails the test instead of hanging the file.
   if (!server.listening) await once(server, "listening");
   return {
     url: `http://127.0.0.1:${server.address().port}`, gateway,
