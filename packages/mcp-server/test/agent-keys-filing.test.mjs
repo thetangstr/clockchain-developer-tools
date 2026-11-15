@@ -1,7 +1,7 @@
 // Each agent key is filed on Clockchain before any record it owns or signed is anchored, so a checker can see the key existed
 // before the record. New agents (ak: owners) share one daily Starter allowance of anchors, filings included, apart from accounts.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -31,7 +31,7 @@ function setup(o = {}) {
   const book = o.noBook ? undefined : new AgentKeyBook({ dir: keysDir, now: () => new Date(clock.t) });
   const svc = new ShadowService({
     stateDir: dir, ledger: () => fake, budget: () => createLogBudget({}), limits: o.limits, now: () => new Date(clock.t),
-    sleep: async () => {}, log: () => {}, ...(book ? { agentKeys: book } : {}),
+    sleep: async () => {}, log: o.log ?? (() => {}), ...(book ? { agentKeys: book } : {}),
   });
   svc.sweep();
   return { svc, fake, clock, dir, keysDir, book };
@@ -502,4 +502,46 @@ test("the hourly pass leaves an open session held by an account-style limit to t
   await svc.closeIdle();
   assert.equal(fake.writes.length, writes);
   assert.equal(JSON.stringify(metaOf(svc, b.owner, s.session_id)), before);
+});
+
+// ---- The hourly sweep forgets keys nobody used (D5): 30 days after first seen, and only with no Shadow owner ----
+
+const DAY_MS = 86_400_000;
+/** Backdates a key's files to its admit time, as they would be 31 days on. */
+const aged = (keysDir, fp, t) => {
+  for (const name of readdirSync(keysDir)) if (name.startsWith(fp)) utimesSync(path.join(keysDir, name), t / 1000, t / 1000);
+};
+
+test("the sweep removes a key nobody used after 30 days, and keeps one whose agent has a session still waiting", async () => {
+  const logs = [];
+  const { svc, book, clock, keysDir, fake } = setup({ limits: { maxStarterAnchorsPerDay: 0 }, log: (event, fields) => logs.push({ event, ...fields }) });
+  const t0 = clock.t;
+  const unused = agentIn(book);
+  const waiting = agentIn(book);
+  // Two days later its agent starts a session; the Starter allowance holds it, so its key is still unfiled.
+  clock.t = t0 + 2 * DAY_MS;
+  const s = await started(svc, waiting.owner);
+  assert.equal(s.start_anchor.status, "pending");
+  assert.equal(fake.writes.length, 0);
+  assert.equal(book.get(waiting.akf).filing.state, "unfiled");
+  for (const ag of [unused, waiting]) aged(keysDir, ag.akf, t0);
+
+  clock.t = t0 + 29 * DAY_MS;
+  svc.sweep();
+  assert.ok(book.get(unused.akf), "29 days: kept");
+  clock.t = t0 + 31 * DAY_MS;
+  svc.sweep();
+  assert.equal(book.get(unused.akf), null, "31 days and never used: gone");
+  assert.equal(existsSync(path.join(keysDir, `${unused.akf}.json`)), false);
+  assert.ok(book.get(waiting.akf), "its owner has a session: kept");
+  assert.ok(existsSync(path.join(keysDir, `${waiting.akf}.json`)));
+  const forgotten = logs.filter((l) => l.event === "agent_keys_forgotten");
+  assert.deepEqual(forgotten, [{ event: "agent_keys_forgotten", keys: 1 }], "a count only, no fingerprint");
+  svc.sweep();
+  assert.equal(logs.filter((l) => l.event === "agent_keys_forgotten").length, 1, "nothing removed, nothing logged");
+  // The removed key is unknown now, so its tokens stop (agentKeyOf answers "unusable" for a key that isn't in the book),
+  // and a new sign-in from it is admitted as a new key.
+  const again = book.admit(unused.key.publicKeyPem);
+  assert.equal(again.created, true);
+  assert.equal(again.entry.firstSeenAt, new Date(clock.t).toISOString());
 });

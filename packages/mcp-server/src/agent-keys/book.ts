@@ -5,6 +5,7 @@
 // Each key's file object is kept in memory (at most MAX_CACHED, oldest dropped first), so a request reads no disk and the
 // object that saw a corrupt main file is the one that writes it. That makes this instance the only writer (one server
 // process per state directory): an operator who edits a key file by hand restarts the server.
+import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { cleanStaleFiles, createDurableJsonFile, type DurableJsonFile } from "../handshake-core/durable-store.js";
 import { ed25519PublicKeyDer, fingerprint } from "../shadow/lib/keys.js";
@@ -180,6 +181,40 @@ export class AgentKeyBook {
     entry.events.push({ action: "revoked", at });
     this.save(entry);
     return entry;
+  }
+
+  /**
+   * Removes keys nobody used: an active root key, with no replacement, no events and no filing (not even a pending one),
+   * first seen before `firstSeenBefore`, for which `inUse` (Shadow has an owner for it) is false. A file that can't be read
+   * is kept. Synchronous from the check to the unlink, so no grant or route can come in between. Returns how many it removed.
+   */
+  forgetUnused(opts: { firstSeenBefore: Date; inUse: (fp: string) => boolean }): number {
+    if (!existsSync(this.dir)) return 0;
+    const before = opts.firstSeenBefore.getTime();
+    let removed = 0;
+    for (const name of readdirSync(this.dir)) {
+      const fp = /^([0-9a-f]{64})\.json$/.exec(name)?.[1];
+      if (!fp) continue;
+      const path = join(this.dir, name);
+      let entry: KeyEntry | null;
+      try {
+        // An unused key is written once, at admit, so a file written since the cutoff isn't opened.
+        if (statSync(path).mtimeMs >= before) continue;
+        entry = this.get(fp);
+      } catch {
+        continue;
+      }
+      if (
+        !entry || entry.status !== "active" || entry.root !== fp || entry.replacedBy !== undefined || entry.events.length > 0 ||
+        entry.filing.state !== "unfiled" || !(Date.parse(entry.firstSeenAt) < before) || opts.inUse(fp)
+      ) continue;
+      // The backup first: an interruption between the two leaves the main file, never a backup to restore it from.
+      rmSync(`${path}.bak`, { force: true });
+      rmSync(path, { force: true });
+      this.slots.delete(fp);
+      removed++;
+    }
+    return removed;
   }
 
   private fingerprintOf(pem: string): string {

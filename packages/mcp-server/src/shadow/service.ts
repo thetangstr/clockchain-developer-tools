@@ -92,6 +92,9 @@ export const DEFAULT_SHADOW_LIMITS: ShadowLimits = {
   maxStarterAnchorsPerSourcePerDay: 200,
 };
 
+/** An agent key nobody used (agent-keys/book.ts forgetUnused) is removed this long after it was first seen. */
+export const UNUSED_AGENT_KEY_MS = 30 * 24 * 60 * 60_000;
+
 const RUN_STATUSES = ["succeeded", "failed", "cancelled", "timed_out", "unknown"] as const;
 const AGENT_KINDS = new Set(["task.assigned", "agent.prompt", "agent.message", "agent.tool.call", "agent.tool.result", "artifact.created"]);
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
@@ -1119,6 +1122,17 @@ export class ShadowService {
     this.lastSweepMs = this.now().getTime();
     this.ownerUsage.clear();
     this.log("shadow_sweep", { removed: r.removed, bytes: r.bytes });
+    if (this.agentKeys) {
+      try {
+        const keys = this.agentKeys.forgetUnused({
+          firstSeenBefore: new Date(this.now().getTime() - UNUSED_AGENT_KEY_MS),
+          inUse: (fp) => this.store.hasOwner(ownerKeyOf(`ak:${fp}`)),
+        });
+        if (keys > 0) this.log("agent_keys_forgotten", { keys });
+      } catch (e) {
+        this.log("agent_keys_forget_failed", { error: (e as Error).name });
+      }
+    }
     return r;
   }
 

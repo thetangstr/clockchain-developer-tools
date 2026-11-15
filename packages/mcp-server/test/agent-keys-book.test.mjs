@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -256,4 +256,63 @@ test("past the cache's cap the oldest key is dropped and still loads from disk",
   assert.equal(book.get(k3).filing.state, "unfiled", "still cached");
   // Reading k1 again made it the newest, so k2 was dropped next.
   assert.equal(book.get(k2).filing.ledgerId, "L5");
+});
+
+// ---- Forgetting keys nobody used (D5, FC4): only an active, unfiled root with no history, first seen long ago ----
+
+test("forgetUnused removes only a key nobody used, and keeps every key with history, a filing, an owner or a bad file", () => {
+  const DAY = 86_400_000;
+  const T0 = Date.parse("2026-11-13T00:00:00Z");
+  const clock = { t: T0 - 31 * DAY };
+  const dir = join(mkdtempSync(join(tmpdir(), "agent-keys-")), "agent-keys");
+  const book = new AgentKeyBook({ dir, now: () => new Date(clock.t) });
+  const admitted = () => book.admit(pem()).entry.fingerprint;
+  const kept = {};
+  kept.revoked = admitted();
+  book.revoke(kept.revoked);
+  kept.replaced = admitted();
+  kept.replacement = book.replace(kept.replaced, pem()).fingerprint;
+  kept.filedEvent = admitted();
+  book.setFiling(kept.filedEvent, { state: "filed", ledgerId: "L1", block: 1, filedAt: "2026-10-13T00:00:00Z" });
+  book.setFiling(kept.filedEvent, { state: "unfiled" }); // a filed event, though the filing reads unfiled
+  kept.pending = admitted();
+  book.setFiling(kept.pending, { state: "pending", ledgerId: "L2" });
+  kept.filed = admitted();
+  book.setFiling(kept.filed, { state: "filed", ledgerId: "L3", block: 2 });
+  kept.inUse = admitted();
+  kept.unreadable = admitted();
+  const unused = admitted();
+  book.setFiling(unused, { state: "unfiled" }); // so it has a .bak as well
+  clock.t = T0 - 29 * DAY;
+  kept.young = admitted();
+  clock.t = T0;
+  writeFileSync(join(dir, `${kept.unreadable}.json`), "not json", { mode: 0o600 });
+  // Every file looks old to the mtime prefilter, so each key is kept by its own rule, not by the prefilter.
+  const old = (T0 - 31 * DAY) / 1000;
+  for (const name of readdirSync(dir)) utimesSync(join(dir, name), old, old);
+  const reader = new AgentKeyBook({ dir, now: () => new Date(clock.t) });
+  const asked = [];
+  const removed = reader.forgetUnused({
+    firstSeenBefore: new Date(T0 - 30 * DAY),
+    inUse: (fp) => { asked.push(fp); return fp === kept.inUse; },
+  });
+  assert.equal(removed, 1);
+  assert.equal(reader.get(unused), null);
+  assert.equal(existsSync(join(dir, `${unused}.json`)), false);
+  assert.equal(existsSync(join(dir, `${unused}.json.bak`)), false);
+  assert.deepEqual(asked.sort(), [kept.inUse, unused].sort(), "only a key that passes every other rule is asked about");
+  for (const [label, fp] of Object.entries(kept)) {
+    assert.ok(existsSync(join(dir, `${fp}.json`)), label);
+    if (label !== "unreadable") assert.equal(reader.get(fp).fingerprint, fp, label);
+  }
+  // A file written since the cutoff isn't even opened, whatever it says inside.
+  clock.t = T0 - 31 * DAY;
+  const written = book.admit(pem()).entry.fingerprint;
+  clock.t = T0;
+  assert.ok(statSync(join(dir, `${written}.json`)).mtimeMs > T0 - 30 * DAY);
+  const newer = new AgentKeyBook({ dir, now: () => new Date(clock.t) });
+  assert.equal(newer.forgetUnused({ firstSeenBefore: new Date(T0 - 30 * DAY), inUse: (fp) => fp === kept.inUse }), 0);
+  assert.equal(newer.get(written).fingerprint, written);
+  // An empty or missing directory is nothing to do.
+  assert.equal(new AgentKeyBook({ dir: join(dir, "none"), now: () => new Date() }).forgetUnused({ firstSeenBefore: new Date(), inUse: () => false }), 0);
 });

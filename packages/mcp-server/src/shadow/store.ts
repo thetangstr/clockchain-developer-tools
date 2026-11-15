@@ -214,6 +214,11 @@ export class ShadowStore {
     return join(this.root, "owners", ownerKey);
   }
 
+  /** Whether Shadow keeps anything for this owner: sessions, settings or an operator file, alive or in retention. */
+  hasOwner(ownerKey: string): boolean {
+    return existsSync(this.ownerDir(ownerKey));
+  }
+
   sessionDir(ownerKey: string, sessionId: string): string {
     if (!isSessionId(sessionId)) throw new Error("bad session id");
     return join(this.ownerDir(ownerKey), "sessions", sessionId);
