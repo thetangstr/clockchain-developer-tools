@@ -626,11 +626,12 @@ async function boot(env) {
   };
 }
 
-const grant = (base, assertion) =>
+/** The client_credentials grant for `agent`: a fresh client assertion and a DPoP proof from the same key. */
+const grant = (base, agent) =>
   fetch(`${base}/oauth/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: assertion }),
+    headers: { "content-type": "application/x-www-form-urlencoded", dpop: agent.dpop("POST", `${PUBLIC}/oauth/token`) },
+    body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: agent.assertion(`${PUBLIC}/oauth/token`) }),
   });
 
 test("routes 404 when MCP_AGENT_KEYS is off", async () => {
@@ -654,18 +655,18 @@ test("on the real server, keys made by replace count toward the hourly ceiling o
   const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_AGENT_KEYS: "1", MCP_AGENT_KEYS_NEW_PER_HOUR: "2" });
   try {
     const old = makeAgentKey();
-    assert.equal((await grant(s.url, old.assertion(`${PUBLIC}/oauth/token`))).status, 200, "one new key");
+    assert.equal((await grant(s.url, old)).status, 200, "one new key");
     const next = makeAgentKey();
     const replaced = await fetch(`${s.url}/agent-keys/${old.fingerprint}/replace`, {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ assertion: old.assertion(actionUrl(old.fingerprint, "replace"), naming(next)), new_public_key: next.publicKeyPem, new_key_assertion: proving(next, old.fingerprint) }),
     });
     assert.equal(replaced.status, 200, "two");
-    const third = await grant(s.url, makeAgentKey().assertion(`${PUBLIC}/oauth/token`));
+    const third = await grant(s.url, makeAgentKey());
     assert.equal(third.status, 429, "the ceiling is shared with replace");
     assert.equal((await third.json()).error, "temporarily_unavailable");
     // The key the replace made is known now, so it still mints.
-    assert.equal((await grant(s.url, next.assertion(`${PUBLIC}/oauth/token`))).status, 200);
+    assert.equal((await grant(s.url, next)).status, 200);
     const later = makeAgentKey();
     const again = await fetch(`${s.url}/agent-keys/${next.fingerprint}/replace`, {
       method: "POST", headers: { "content-type": "application/json" },
@@ -681,7 +682,7 @@ test("on the real server, a key's token stops after replace and the new key's wo
   const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, MCP_AGENT_KEYS: "1" });
   try {
     const old = makeAgentKey();
-    const minted = await grant(s.url, old.assertion(`${PUBLIC}/oauth/token`));
+    const minted = await grant(s.url, old);
     assert.equal(minted.status, 200);
     const { access_token: oldToken } = await minted.json();
     const looked = await fetch(`${s.url}/agent-keys/${old.fingerprint}.json`);
@@ -710,7 +711,7 @@ test("on the real server, a key's token stops after replace and the new key's wo
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     assert.equal((await call(oldToken)).status, 401);
-    const fresh = await grant(s.url, next.assertion(`${PUBLIC}/oauth/token`));
+    const fresh = await grant(s.url, next);
     const freshBody = await fresh.json();
     assert.equal(fresh.status, 200, JSON.stringify(freshBody));
     assert.equal(freshBody.agent_id, old.fingerprint.slice(0, 16));

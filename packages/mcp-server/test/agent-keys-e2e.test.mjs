@@ -131,7 +131,7 @@ test("an agent onboards from the instructions alone: one token call, signed chec
       secrets.push(assertion);
       const res = await fetch(`${app.url}/oauth/token`, {
         method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
+        headers: { "content-type": "application/x-www-form-urlencoded", dpop: agent.dpop("POST", meta.token_endpoint) },
         body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: assertion }),
       });
       const body = await res.json();
@@ -140,7 +140,7 @@ test("an agent onboards from the instructions alone: one token call, signed chec
       return body;
     };
     const issued = await tokenCall();
-    assert.equal(issued.token_type, "Bearer");
+    assert.equal(issued.token_type, "DPoP");
     assert.equal(issued.expires_in, 3600);
     assert.equal(issued.refresh_token, undefined);
     assert.match(issued.agent_id, /^[0-9a-f]{16}$/);
@@ -249,7 +249,7 @@ test("each address has its share of the Starter allowance: two agents from one a
     const signIn = async (agent, ip) => {
       const res = await fetch(`${app.url}/oauth/token`, {
         method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip },
+        headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": ip, dpop: agent.dpop("POST", `${PUBLIC}/oauth/token`) },
         body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: agent.assertion(`${PUBLIC}/oauth/token`) }),
       });
       const body = await res.json();

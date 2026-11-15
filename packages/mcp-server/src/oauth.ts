@@ -11,6 +11,7 @@ import { durableExpiringSet, memoryExpiringSet, ReplayStateFullError, type Expir
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
 import { isAcctId, mintAgentToken, mintToken } from "./token.js";
 import { AgentKeyError, type AgentKeyBook, type KeyEntry } from "./agent-keys/book.js";
+import { jwkThumbprintOfPem, verifyDpopProof } from "./agent-keys/dpop.js";
 import type { KeyProof } from "./agent-keys/proof.js";
 import { fingerprint } from "./shadow/lib/keys.js";
 
@@ -256,6 +257,8 @@ export interface OAuthOptions {
     tokenTtlSeconds?: number;
     /** How many unexpired spent assertions are kept (default 100,000); past it new ones are refused. For tests only. */
     spentAssertionsCap?: number;
+    /** How many unexpired spent DPoP proofs are kept (default 200,000); past it new ones are refused. For tests only. */
+    spentDpopCap?: number;
   };
   /** Milliseconds clock, injectable for tests. */
   now?: () => number;
@@ -278,6 +281,11 @@ export interface OAuthHandler {
    * is single use everywhere. Undefined when agent keys are off or the replay state couldn't be opened.
    */
   readonly usedAssertions: ExpiringSet | undefined;
+  /**
+   * Spent DPoP proofs (agentKeys set), keyed by verifyDpopProof's replayKey, shared by the token grant and every agent
+   * request, so each proof is single use everywhere. Undefined when agent keys are off or the replay state couldn't be opened.
+   */
+  readonly usedDpopProofs: ExpiringSet | undefined;
   /**
    * Takes one from the hourly allowance of new agent keys from every address (agentKeys set): false once it is used up.
    * The token grant spends it on a key the book has never seen, and /agent-keys/<fp>/replace on the key it makes.
@@ -843,7 +851,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
 
   // Single-use and revocation bookkeeping. Entries live until the artifact itself expires. Durable when replayDir
   // is set (production: <MCP_STATE_DIR>/oauth), so a restart cannot resurrect a spent or revoked token.
-  let replay: { usedCodes: ExpiringSet; usedRefreshTokens: ExpiringSet; revokedFamilies: ExpiringSet; usedAssertions?: ExpiringSet } | undefined;
+  let replay: { usedCodes: ExpiringSet; usedRefreshTokens: ExpiringSet; revokedFamilies: ExpiringSet; usedAssertions?: ExpiringSet; usedDpopProofs?: ExpiringSet } | undefined;
   try {
     const make = (name: string, cap: number, whenFull?: "evict" | "refuse"): ExpiringSet =>
       options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec, whenFull) : memoryExpiringSet(cap, nowSec, whenFull);
@@ -854,6 +862,8 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       // Spent agent client assertions, keyed sha256(fingerprint:jti), each until the assertion's own exp. Full, it refuses
       // new ones rather than drop a spent one that is still valid.
       ...(agentKeys ? { usedAssertions: make("used-assertions", agentKeys.spentAssertionsCap ?? 100_000, "refuse") } : {}),
+      // Spent DPoP proofs (RFC 9449), keyed sha256(jkt:jti), each until iat + 61 s. Refuses when full, like the assertions.
+      ...(agentKeys ? { usedDpopProofs: make("used-dpop", agentKeys.spentDpopCap ?? 200_000, "refuse") } : {}),
     };
   } catch (e) {
     log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
@@ -943,7 +953,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     grant_types_supported: ["authorization_code", "refresh_token", ...(agentKeys ? ["client_credentials"] : [])],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none", ...(agentKeys ? ["private_key_jwt"] : [])],
-    ...(agentKeys ? { token_endpoint_auth_signing_alg_values_supported: ["EdDSA"] } : {}),
+    ...(agentKeys ? { token_endpoint_auth_signing_alg_values_supported: ["EdDSA"], dpop_signing_alg_values_supported: ["EdDSA"] } : {}),
     authorization_response_iss_parameter_supported: true,
     service_documentation: `${base}/llms.txt`,
   };
@@ -1385,15 +1395,16 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   }
 
   /**
-   * client_credentials with an RFC 7523 client assertion (MCP_AGENT_KEYS=1): proof first, then single use of its jti,
-   * then the book. A key that is replaced or revoked is refused; a key the book has never seen is admitted only within
+   * client_credentials with an RFC 7523 client assertion and an RFC 9449 DPoP proof from the same key (MCP_AGENT_KEYS=1):
+   * both proofs first, then single use of each, then the book; the token is bound to the key (`cnf.jkt`). A key that is replaced or revoked is refused; a key the book has never seen is admitted only within
    * its address's hourly allowance, with a keyed hash of that address as its source. Every step from the replay check to
    * the response is synchronous, so single use holds under concurrency. No refresh token: the agent signs a new assertion
    * instead. Logs carry only the 16-hex agent id and the outcome, never the assertion or the token.
    */
   function agentGrant(req: IncomingMessage, res: ServerResponse, params: Map<string, string>, keys: NonNullable<OAuthOptions["agentKeys"]>): void {
     const usedAssertions = replay?.usedAssertions;
-    if (!usedAssertions) {
+    const usedDpopProofs = replay?.usedDpopProofs;
+    if (!usedAssertions || !usedDpopProofs) {
       // Without durable replay state a spent assertion could come back after a restart: refuse closed.
       sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
       return;
@@ -1414,12 +1425,26 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       if (e instanceof AgentKeyError) return refuse("bad_proof", e.message);
       throw e;
     }
+    const refuseDpop = (description: string): void => {
+      log({ event: "oauth_agent_token_refused", outcome: "bad_dpop" });
+      sendOAuthError(res, 400, "invalid_dpop_proof", description);
+    };
+    let dpop: ReturnType<typeof verifyDpopProof>;
+    try {
+      dpop = verifyDpopProof({ proof: req.headers.dpop, htm: "POST", htu: tokenEndpoint, nowSec: nowSec() });
+    } catch (e) {
+      // The verifier's reasons never echo the proof.
+      if (e instanceof AgentKeyError) return refuseDpop(e.message);
+      throw e;
+    }
+    if (dpop.jkt !== jwkThumbprintOfPem(proven.publicKeyPem)) return refuseDpop("Sign the DPoP proof with the same key as the client assertion.");
     const fp = fingerprint(proven.publicKeyPem);
     const replayKey = sha256b64url(`${fp}:${proven.jti}`);
     if (usedAssertions.has(replayKey)) {
       refuse("replayed", "This client assertion was already used. Sign a new one with a fresh jti.");
       return;
     }
+    if (usedDpopProofs.has(dpop.replayKey)) return refuseDpop("This DPoP proof was already used.");
     let entry: KeyEntry;
     try {
       const known = keys.book.get(fp);
@@ -1443,11 +1468,15 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
       return;
     }
+    // The proof first: a refused assertion write then leaves only a spent proof, and the agent signs a new one.
+    let set = "used-dpop";
     try {
+      usedDpopProofs.add(dpop.replayKey, dpop.replayExp);
+      set = "used-assertions";
       usedAssertions.add(replayKey, proven.exp);
     } catch (e) {
       if (e instanceof ReplayStateFullError) {
-        log({ event: "oauth_replay_state_full", set: "used-assertions" });
+        log({ event: "oauth_replay_state_full", set });
         sendOAuthError(res, 503, "temporarily_unavailable", "Clockchain is taking too many agent sign-ins right now. Try again in a minute.", { "retry-after": "60" });
         return;
       }
@@ -1456,11 +1485,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       return;
     }
     const agentId = entry.root.slice(0, 16);
-    const { token: accessToken } = mintAgentToken(options.signingSecret, agentTokenTtl, nowSec(), randomUUID(), fp);
+    const { token: accessToken } = mintAgentToken(options.signingSecret, agentTokenTtl, nowSec(), randomUUID(), fp, dpop.jkt);
     log({ event: "oauth_token_issued", grant: "client_credentials", agent_id: agentId });
     sendJson(res, 200, {
       access_token: accessToken,
-      token_type: "Bearer",
+      token_type: "DPoP",
       expires_in: agentTokenTtl,
       agent_id: agentId,
       key_filed: entry.filing.state === "filed",
@@ -1659,6 +1688,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     },
     accounts,
     usedAssertions: replay?.usedAssertions,
+    usedDpopProofs: replay?.usedDpopProofs,
     allowNewAgentKey: agentKeys ? () => allowNewAgentKeyGlobal("agent-key:all") : undefined,
     challenge(path, tokenPresented) {
       if (!mcpPaths.includes(path)) return undefined;

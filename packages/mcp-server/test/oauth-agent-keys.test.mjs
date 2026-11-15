@@ -16,7 +16,7 @@ import { createOAuthHandler, loadOAuthConfig } from "../dist/oauth.js";
 import { mintAgentToken, verifyToken } from "../dist/token.js";
 import { AgentKeyBook } from "../dist/agent-keys/book.js";
 import { jwtBearerProof } from "../dist/agent-keys/proof.js";
-import { makeAgentKey } from "./helpers/agent-key.mjs";
+import { makeAgentKey as makeTestAgentKey } from "./helpers/agent-key.mjs";
 
 const SECRET = "oauth-agent-keys-test-secret";
 const PUBLIC = "https://mcp.example.test";
@@ -103,12 +103,42 @@ async function harness(agentKeys = {}, more = {}) {
   };
 }
 
-const grant = (base, assertion, extra = {}, headers = {}) =>
-  fetch(`${base}/oauth/token`, {
+// Each assertion remembers the agent that signed it, so grant() can add that agent's DPoP proof by default.
+const signers = new Map();
+function makeAgentKey() {
+  const agent = makeTestAgentKey();
+  const sign = agent.assertion;
+  agent.assertion = (aud, opts) => {
+    const assertion = sign(aud, opts);
+    signers.set(assertion, agent);
+    return assertion;
+  };
+  return agent;
+}
+const iatOf = (jwt) => {
+  try {
+    return JSON.parse(Buffer.from(jwt.split(".")[1], "base64url")).iat;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * The client_credentials grant. Unless `headers` names `dpop` (undefined sends none), it carries a DPoP proof from the
+ * assertion's own agent for POST TOKEN_ENDPOINT, issued at the assertion's iat.
+ */
+const grant = (base, assertion, extra = {}, headers = {}) => {
+  const agent = signers.get(assertion);
+  const all = { "content-type": "application/x-www-form-urlencoded" };
+  if (agent && !("dpop" in headers)) all.dpop = agent.dpop("POST", TOKEN_ENDPOINT, { iat: iatOf(assertion) });
+  for (const [k, v] of Object.entries(headers)) if (v !== undefined) all[k] = v;
+  return fetch(`${base}/oauth/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+    headers: all,
     body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: assertion, ...extra }),
   });
+};
+
 
 // ---- config -----------------------------------------------------------------
 
@@ -168,15 +198,33 @@ test("a wrong MCP_AGENT_KEYS keeps sign-in serving, leaves the grant off, and sa
   }
 });
 
-test("mintAgentToken carries akf, verifies unchanged, and refuses a malformed fingerprint", () => {
+test("mintAgentToken carries akf and cnf.jkt, verifies unchanged, and refuses a malformed fingerprint or jkt", () => {
   const fp = "ab".repeat(32);
-  const { token, payload } = mintAgentToken(SECRET, 3600, 1_800_000_000, "jti-0001", fp);
-  assert.deepEqual(payload, { v: 1, tier: "demo", iat: 1_800_000_000, exp: 1_800_003_600, jti: "jti-0001", akf: fp });
+  const jkt = "A".repeat(43);
+  const { token, payload } = mintAgentToken(SECRET, 3600, 1_800_000_000, "jti-0001", fp, jkt);
+  assert.deepEqual(payload, { v: 1, tier: "demo", iat: 1_800_000_000, exp: 1_800_003_600, jti: "jti-0001", akf: fp, cnf: { jkt } });
   const verified = verifyToken(SECRET, token, 1_800_000_001);
   assert.equal(verified.valid, true);
   assert.equal(verified.payload.akf, fp);
+  assert.deepEqual(verified.payload.cnf, { jkt });
   for (const bad of ["", "ab".repeat(31), "AB".repeat(32), `${"ab".repeat(32)}0`, "zz".repeat(32)]) {
-    assert.throws(() => mintAgentToken(SECRET, 3600, 1_800_000_000, "jti-0001", bad), /akf/, bad);
+    assert.throws(() => mintAgentToken(SECRET, 3600, 1_800_000_000, "jti-0001", bad, jkt), /akf/, bad);
+  }
+  for (const bad of [undefined, "", "A".repeat(42), "A".repeat(44), `${"A".repeat(42)}=`, `${"A".repeat(42)}+`]) {
+    assert.throws(() => mintAgentToken(SECRET, 3600, 1_800_000_000, "jti-0001", fp, bad), /jkt/, String(bad));
+  }
+});
+
+test("verifyToken refuses a cnf that is not exactly { jkt: <43 base64url> }", () => {
+  // A token signed with the real secret but carrying a malformed cnf, built as mintToken builds tokens.
+  const signed = (payload) => {
+    const seg = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    return `cc_${seg}.${createHmac("sha256", SECRET).update(seg).digest("base64url")}`;
+  };
+  const base = { v: 1, tier: "demo", iat: 1_800_000_000, exp: 1_800_003_600, jti: "jti-0001", akf: "ab".repeat(32) };
+  assert.equal(verifyToken(SECRET, signed({ ...base, cnf: { jkt: "A".repeat(43) } }), 1_800_000_001).valid, true);
+  for (const cnf of [{}, { jkt: "x" }, { jkt: "A".repeat(43), x5t: "y" }, "A".repeat(43), null, [], { jkt: 1 }]) {
+    assert.deepEqual(verifyToken(SECRET, signed({ ...base, cnf }), 1_800_000_001), { valid: false, reason: "bad cnf" }, JSON.stringify(cnf));
   }
 });
 
@@ -193,13 +241,14 @@ test("one call from a fresh key returns a Starter token with akf", async () => {
     assert.equal(res.status, 200, JSON.stringify(body));
     assert.equal(res.headers.get("cache-control"), "no-store");
     assert.deepEqual(Object.keys(body).sort(), ["access_token", "agent_id", "expires_in", "key_filed", "token_type"]);
-    assert.equal(body.token_type, "Bearer");
+    assert.equal(body.token_type, "DPoP");
     assert.equal(body.expires_in, 3600);
     assert.equal(body.agent_id, agent.fingerprint.slice(0, 16));
     assert.equal(body.key_filed, false);
     const verified = verifyToken(SECRET, body.access_token);
     assert.equal(verified.valid, true);
     assert.equal(verified.payload.akf, agent.fingerprint);
+    assert.deepEqual(verified.payload.cnf, { jkt: agent.thumbprint });
     assert.equal(verified.payload.exp - verified.payload.iat, 3600);
     assert.equal(verified.payload.acct, undefined);
     // The key is in the book on the state volume.
@@ -209,7 +258,7 @@ test("one call from a fresh key returns a Starter token with akf", async () => {
   }
 });
 
-test("metadata advertises client_credentials and private_key_jwt only when enabled", async () => {
+test("metadata advertises client_credentials, private_key_jwt and DPoP only when enabled", async () => {
   const off = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
   let offMeta;
   try {
@@ -239,6 +288,7 @@ test("metadata advertises client_credentials and private_key_jwt only when enabl
         grant_types_supported: ["authorization_code", "refresh_token", "client_credentials"],
         token_endpoint_auth_methods_supported: ["none", "private_key_jwt"],
         token_endpoint_auth_signing_alg_values_supported: ["EdDSA"],
+        dpop_signing_alg_values_supported: ["EdDSA"],
       }, route);
     }
   } finally {
@@ -281,7 +331,9 @@ test("the response and server log never contain the assertion", async () => {
     const agent = makeAgentKey();
     const assertion = agent.assertion(TOKEN_ENDPOINT);
     const wrongAudience = agent.assertion("https://elsewhere.test/oauth/token");
-    const ok = await grant(s.url, assertion);
+    const proof = agent.dpop("POST", TOKEN_ENDPOINT);
+    const badProof = makeAgentKey().dpop("POST", TOKEN_ENDPOINT);
+    const ok = await grant(s.url, assertion, {}, { dpop: proof });
     const okText = await ok.text();
     assert.equal(ok.status, 200, okText);
     const replayed = await grant(s.url, assertion);
@@ -290,14 +342,17 @@ test("the response and server log never contain the assertion", async () => {
     const refused = await grant(s.url, wrongAudience);
     const refusedText = await refused.text();
     assert.equal(refused.status, 401);
+    const badProofRes = await grant(s.url, agent.assertion(TOKEN_ENDPOINT), {}, { dpop: badProof });
+    const badProofText = await badProofRes.text();
+    assert.equal(badProofRes.status, 400);
     const accessToken = JSON.parse(okText).access_token;
     const log = captured.join("\n");
     assert.ok(log.includes("oauth_token_issued"), "the issue is logged");
-    for (const secret of [assertion, wrongAudience]) {
+    for (const secret of [assertion, wrongAudience, proof, badProof]) {
       const signature = secret.split(".")[2];
-      for (const [label, text] of [["log", log], ["ok", okText], ["replayed", replayedText], ["refused", refusedText]]) {
-        assert.equal(text.includes(secret), false, `${label} carries an assertion`);
-        assert.equal(text.includes(signature), false, `${label} carries an assertion signature`);
+      for (const [label, text] of [["log", log], ["ok", okText], ["replayed", replayedText], ["refused", refusedText], ["bad proof", badProofText]]) {
+        assert.equal(text.includes(secret), false, `${label} carries an assertion or proof`);
+        assert.equal(text.includes(signature), false, `${label} carries an assertion or proof signature`);
       }
     }
     assert.equal(log.includes(accessToken), false, "the log carries the access token");
@@ -507,6 +562,102 @@ test("a new key records a keyed hash of the address it signed in from as its sou
     // The address and its hash stay out of the logs.
     const logged = JSON.stringify(h.logs);
     for (const secret of ["203.0.113.7", "198.51.100.4", sa, sc]) assert.ok(!logged.includes(secret), "a log line carries an address or its hash");
+  } finally {
+    await h.close();
+  }
+});
+
+// ---- DPoP at sign-in (RFC 9449): the token is bound to the agent's key -----------------
+
+test("each bad DPoP proof gets 400 invalid_dpop_proof, mints nothing and admits no key", async () => {
+  const h = await harness();
+  try {
+    const agent = makeAgentKey();
+    const other = makeAgentKey();
+    const now = h.nowSec();
+    const cases = [
+      ["no proof", undefined],
+      ["two proofs", `${agent.dpop("POST", TOKEN_ENDPOINT, { iat: now })}, ${agent.dpop("POST", TOKEN_ENDPOINT, { iat: now })}`],
+      ["another key", other.dpop("POST", TOKEN_ENDPOINT, { iat: now })],
+      ["another URL", agent.dpop("POST", `${PUBLIC}/shadow/mcp`, { iat: now })],
+      ["another method", agent.dpop("GET", TOKEN_ENDPOINT, { iat: now })],
+      ["120 s old", agent.dpop("POST", TOKEN_ENDPOINT, { iat: now - 120 })],
+    ];
+    for (const [label, dpop] of cases) {
+      const res = await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: now }), {}, { dpop });
+      const body = await res.json();
+      assert.equal(res.status, 400, label);
+      assert.equal(body.error, "invalid_dpop_proof", label);
+      assert.ok(typeof body.error_description === "string" && body.error_description.length > 0, label);
+      assert.equal(body.access_token, undefined, label);
+    }
+    assert.equal(h.book.get(agent.fingerprint), null, "no refused call admits the key");
+    assert.ok(h.logs.some((e) => e.event === "oauth_agent_token_refused" && e.outcome === "bad_dpop"), JSON.stringify(h.logs));
+    const otherKey = await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: now }), {}, { dpop: other.dpop("POST", TOKEN_ENDPOINT, { iat: now }) });
+    assert.equal((await otherKey.json()).error_description, "Sign the DPoP proof with the same key as the client assertion.");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a grant with a valid proof is a DPoP token bound to the agent's key", async () => {
+  const h = await harness();
+  try {
+    const agent = makeAgentKey();
+    const res = await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }));
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.token_type, "DPoP");
+    assert.equal(verifyToken(SECRET, body.access_token, h.nowSec()).payload.cnf.jkt, agent.thumbprint);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a refused proof leaves its assertion unspent", async () => {
+  const h = await harness();
+  try {
+    const agent = makeAgentKey();
+    const assertion = agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() });
+    assert.equal((await grant(h.url, assertion, {}, { dpop: agent.dpop("GET", TOKEN_ENDPOINT, { iat: h.nowSec() }) })).status, 400);
+    assert.equal((await grant(h.url, assertion)).status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a replayed proof is refused even with a fresh assertion", async () => {
+  const h = await harness();
+  try {
+    const agent = makeAgentKey();
+    const proof = agent.dpop("POST", TOKEN_ENDPOINT, { iat: h.nowSec() });
+    assert.equal((await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), {}, { dpop: proof })).status, 200);
+    const again = await grant(h.url, agent.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }), {}, { dpop: proof });
+    assert.equal(again.status, 400);
+    assert.deepEqual(await again.json(), { error: "invalid_dpop_proof", error_description: "This DPoP proof was already used." });
+  } finally {
+    await h.close();
+  }
+});
+
+test("past the spent-proof cap a new sign-in gets 503 naming the proof set, and its assertion stays unspent", async () => {
+  const h = await harness({ spentDpopCap: 1 });
+  try {
+    const first = makeAgentKey();
+    const second = makeAgentKey();
+    assert.equal((await grant(h.url, first.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200);
+    const assertion = second.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() });
+    const full = await grant(h.url, assertion);
+    assert.equal(full.status, 503);
+    assert.equal(full.headers.get("retry-after"), "60");
+    const body = await full.json();
+    assert.equal(body.error, "temporarily_unavailable");
+    assert.equal(body.error_description, "Clockchain is taking too many agent sign-ins right now. Try again in a minute.");
+    assert.equal(body.access_token, undefined);
+    assert.ok(h.logs.some((e) => e.event === "oauth_replay_state_full" && e.set === "used-dpop"), JSON.stringify(h.logs));
+    // The proof is spent before the assertion, so the refused assertion can sign in once there is room.
+    h.advance(61_000);
+    assert.equal((await grant(h.url, assertion, {}, { dpop: second.dpop("POST", TOKEN_ENDPOINT, { iat: h.nowSec() }) })).status, 200);
   } finally {
     await h.close();
   }

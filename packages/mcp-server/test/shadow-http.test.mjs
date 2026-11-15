@@ -374,7 +374,7 @@ async function bootAgentKeys(env = {}) {
     async tokenFor(agent) {
       const res = await fetch(`${url}/oauth/token`, {
         method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
+        headers: { "content-type": "application/x-www-form-urlencoded", dpop: agent.dpop("POST", `${PUBLIC}/oauth/token`) },
         body: new URLSearchParams({ grant_type: "client_credentials", client_assertion_type: JWT_BEARER, client_assertion: agent.assertion(`${PUBLIC}/oauth/token`) }),
       });
       const body = await res.json();
@@ -563,7 +563,7 @@ test("with MCP_AGENT_KEYS off, an akf token gains nothing: Shadow says account_r
   const app = await bootAgentKeys({ MCP_AGENT_KEYS: undefined });
   try {
     const agent = makeAgentKey();
-    const { token } = mintAgentToken(SECRET, 3600, Math.floor(Date.now() / 1000), randomUUID(), agent.fingerprint);
+    const { token } = mintAgentToken(SECRET, 3600, Math.floor(Date.now() / 1000), randomUUID(), agent.fingerprint, agent.thumbprint);
     const shadow = await rpc(`${app.url}/shadow/mcp`, "tools/list", {}, { bearer: token });
     assert.equal(shadow.status, 403);
     assert.equal(shadow.body.error, "account_required");
