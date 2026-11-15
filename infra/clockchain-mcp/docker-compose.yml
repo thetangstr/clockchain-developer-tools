@@ -125,6 +125,18 @@ services:
       MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR: "${MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR:-}"
       MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR: "${MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR:-}"
       MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3"
+      # Agent keys (src/oauth.ts): an agent signs in with its own key. Off unless MCP_AGENT_KEYS=1 exists in SSM
+      # ("" == absent == off; needs MCP_OAUTH=1). Limits ("" = defaults: 10 new keys per IP an hour, 200 in all).
+      # Read the RUNBOOK's "Turning on agent keys" before setting any of these.
+      MCP_AGENT_KEYS: "${MCP_AGENT_KEYS:-}"
+      MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "${MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR:-}"
+      MCP_AGENT_KEYS_NEW_PER_HOUR: "${MCP_AGENT_KEYS_NEW_PER_HOUR:-}"
+      # The Starter allowance agents share ("" = defaults: 2000 anchors a day, 200 per address).
+      SHADOW_STARTER_ANCHORS_PER_DAY: "${SHADOW_STARTER_ANCHORS_PER_DAY:-}"
+      SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY: "${SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY:-}"
+      # Clockchain's witness key ("" = off: a key per account). compose-up.sh never exports it: only
+      # docker-compose.witness.yml sets it, with the read-only mount, when /clockchain/mcp/SHADOW_WITNESS_KEY exists.
+      SHADOW_WITNESS_KEY_FILE: "${SHADOW_WITNESS_KEY_FILE:-}"
       TELEMETRY_CLOSE_URL: "${TELEMETRY_CLOSE_URL:-}"
       TELEMETRY_CLOSE_BACKOFF_MS: "${TELEMETRY_CLOSE_BACKOFF_MS:-}"
       TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS: "${TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS:-}"

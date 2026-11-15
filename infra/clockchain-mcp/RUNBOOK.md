@@ -312,7 +312,7 @@ All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString
 | `SHADOW_ANCHORS_PER_DAY`, `SHADOW_ANCHORS_PER_SESSION` | 60, 100; with either logging flag 400, 300 | Per account and session, on every endpoint: the flags raise them for the listed paths too. |
 | `SHADOW_LOG_STEPS_PER_MIN` | 90 | `shadow_log_step` calls per account, with either logging flag. |
 | `SHADOW_LEDGER_CLIENT_ID`, `SHADOW_LEDGER_WALLET_ID` | the delegated client | Shadow's own writer on the ledger. Set both. No email, and not the delegated id. |
-| `SHADOW_WITNESS_KEY_FILE` | off | Path to an Ed25519 private key (PKCS8 PEM), provisioned like any other secret. Set: it signs signed-in accounts' checkpoints, its public half is served at `/.well-known/clockchain-witness-key.json`, and every account's held `key.json` is removed, at start for those that don't come back (its operator id stays in `operator.json`). A file that won't load stops Shadow (`shadow_unavailable`). Unset: a key per account, as before, and that URL answers 404. Unsetting it later makes new per-account keys; removed ones don't come back. |
+| `SHADOW_WITNESS_KEY_FILE` | off | Not an SSM parameter here: store the key itself as `/clockchain/mcp/SHADOW_WITNESS_KEY` (see "Turning on agent keys"), and `compose-up.sh` writes it to a file, mounts it read-only and sets this to `/app/witness/witness-key.pem` (`docker-compose.witness.yml`). Path to an Ed25519 private key (PKCS8 PEM). Set: it signs signed-in accounts' checkpoints, its public half is served at `/.well-known/clockchain-witness-key.json`, and every account's held `key.json` is removed, at start for those that don't come back (its operator id stays in `operator.json`). A file that won't load stops Shadow (`shadow_unavailable`). Unset: a key per account, as before, and that URL answers 404. Unsetting it later makes new per-account keys; removed ones don't come back. |
 | `SHADOW_STARTER_ANCHORS_PER_DAY` | 2000 | Only with `MCP_AGENT_KEYS=1`. Anchors per UTC day shared by every agent signed in with its own key (the Starter allowance); accounts never use it. Once it's used up, agents' checkpoints are still recorded and signed, and wait to be anchored. |
 | `SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY` | 200 | Only with `MCP_AGENT_KEYS=1`. Each address's share of the Starter allowance per UTC day: the agents whose first key signed in from one address (IPv6 by /64, behind `MCP_OAUTH_TRUSTED_PROXY` when set) share it. Only a keyed hash of the address is kept, in the key's book entry, never shown or filed. Once it's used up, those agents' checkpoints wait as above, and they're told to try tomorrow or sign in to an account. Keys made before this setting have no address and draw on the shared allowance only. |
 | `MCP_BYO_WRITES` | refuse | Emergency rollback only: `allow` lets a caller's own key write on the owned gateway again. |
@@ -326,9 +326,9 @@ All are optional SSM parameters under `/clockchain/mcp/`, stored as SecureString
 | `MCP_METRICS_TOKEN` | off | Bearer token for `/metrics`, which answers 404 without one. See `alerts.md`. |
 | `OPENAI_APPS_CHALLENGE_TOKEN` | off | See "ChatGPT domain check". |
 
-`MCP_AGENT_KEYS`, `MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR`, `MCP_AGENT_KEYS_NEW_PER_HOUR`, `SHADOW_WITNESS_KEY_FILE`, `SHADOW_STARTER_ANCHORS_PER_DAY` and
-`SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY` aren't passed through `docker-compose.yml` yet, so setting them in SSM changes
-nothing until that wiring lands (after the founder's go).
+`MCP_AGENT_KEYS`, `MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR`, `MCP_AGENT_KEYS_NEW_PER_HOUR`, `SHADOW_STARTER_ANCHORS_PER_DAY` and
+`SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY` are optional reads like the rest; absent, `mcp` gets them empty, which the server
+reads as unset. The witness key is the one exception, above. Don't set any of them before reading "Turning on agent keys".
 
 To roll back to code from before the per-address share, delete `starter-anchors.json` in the Shadow state dir first: older code caps that file at 4 KiB and treats a bigger one as unreadable, which pauses every new agent for the rest of the UTC day.
 The counter file is capped at 512 KiB, enough for roughly 12,000 Starter anchors a day; above that its saves fail and a restart reads an older count, so don't raise `SHADOW_STARTER_ANCHORS_PER_DAY` past about 10,000 without raising the cap.
@@ -379,6 +379,62 @@ Only the logging tools, the instructions, the footer and the sign-in wording are
   in, but tokens already issued still work on Shadow and `/mcp` until they expire, and so do those of deleted accounts,
   because nothing checks the deleted list while sign-in is off. Its sweep goes on.
 - **Stop logging by default:** set `SHADOW_AUTO_LOG` and `SHADOW_PREVIEW_AUTO_LOG` to `0`, then deploy. Nothing is deleted.
+
+### Turning on agent keys
+
+With none of these parameters in SSM, `mcp` runs exactly as before: no witness key, no mount, agent keys off.
+
+**The production rule.** Every deploy below needs the founder's go first, and a notice to the travel orchestrator before
+it starts. None of this touches the frozen routes `/handshake/mcp`, `/next/handshake/mcp` and `/acm4/*`; keep it that way, and
+don't ship a change to them in the same deploy. The first deploy with this wiring changes `docker-compose.yml` and
+`compose-up.sh`, so a code-only deploy refuses it as infra drift (exit 5). It affects only `mcp`, so `--allow-infra-drift` is
+the right flag.
+
+**The order.** The witness key goes in first, and is backed up before it's used. Agent keys come after.
+
+1. Make the key on an operator machine, never on the box, and back it up:
+   ```bash
+   openssl genpkey -algorithm ed25519 -out witness-key.pem
+   openssl pkey -in witness-key.pem -pubout          # keep this public half with the backup
+   ```
+   Store the file as the SecureString `/clockchain/mcp/SHADOW_WITNESS_KEY` (`--value file://witness-key.pem`). Put a second,
+   encrypted copy wherever the founder keeps offline secrets, and check that the copy reads back (`openssl pkey -in <copy>
+   -noout`). Then delete the working file. `compose-up.sh` refuses any other kind of key, and never prints it.
+2. Take the usual backup ("Back up Shadow and accounts"). It's the last one holding accounts' own keys, so handle it as that
+   section says. Deploy. `compose-up.sh` writes the key to `/run/clockchain-mcp-witness/witness-key.pem` (tmpfs; dir 0700,
+   file 0400; rewritten from SSM on every start), adds `docker-compose.witness.yml`, and `mcp` mounts it read-only at
+   `/app/witness`. Check that `/.well-known/clockchain-witness-key.json` shows the public half you kept, and that the log has
+   no `shadow_unavailable`.
+3. Only then set `MCP_AGENT_KEYS=1` (with `MCP_OAUTH=1` already on), and the limits if the defaults don't suit, and deploy.
+   Check that `/llms.txt` says how an agent signs in, and run the client example below once against the box.
+
+**Turning on the witness key can't be undone.** At start, Shadow deletes every account's held `key.json` (ruling 15); the
+operator id stays in `operator.json`. Deleting the parameter later turns the witness key off (the next start removes the
+box's copy and the mount), but the deleted keys don't come back: accounts get new keys of their own.
+
+**Back up and rotate the witness key.** SSM holds the live copy and the offline copy is the backup; the box's copy comes back
+from SSM on every start, so there's nothing on the box to back up. The server knows one witness key at a time. Records it
+witnessed under an older key then read as `legacy`, not "Witnessed by Clockchain", though their signatures still check
+against the key in their own packets. Losing the key has the same effect, which is why the backup comes first. So rotate
+only if the key may have been exposed: make and back up a new key as in step 1, replace the SSM value, deploy, and check the
+public half at `/.well-known/clockchain-witness-key.json`. Keep every old public half with the backup, so earlier packets
+can still be matched to Clockchain. Delete the old private key once the new one is served.
+
+**Agent tokens need DPoP.** An agent token works only with a DPoP proof (RFC 9449) from the agent's own key, at the token
+endpoint and on every request; there's no setting to turn that off. A working client for the MCP TypeScript SDK is
+`packages/mcp-server/examples/agent-key-client.mjs`, so point agent builders there. Chat-app sign-in doesn't change.
+
+**One process per state volume.** One server keeps the key book (`agent-keys`), the replay sets under `oauth/` (`used-dpop`
+among them) and the Starter counters in memory, and it's their only writer. Never run a second `mcp` container on the
+`mcp_state` volume, even briefly: no `--scale mcp=2`, and no `docker run` against the volume while `mcp` runs. Compose doesn't
+stop it, so it's on whoever deploys. Once `agent-keys` exists, add it to the backup's `tar` list.
+
+**The Starter counter ceiling.** `starter-anchors.json` is capped at 512 KiB, which is about 10,000 Starter anchors a day.
+Past that its saves fail and a restart reads an older count, so keep `SHADOW_STARTER_ANCHORS_PER_DAY` at 10,000 or less
+unless the cap in the code is raised first.
+
+**Turning agent keys off:** set `MCP_AGENT_KEYS` to `0` and deploy. The agent sign-in grant goes away, and the key files
+stay on the volume.
 
 ### Rollback with state present
 
