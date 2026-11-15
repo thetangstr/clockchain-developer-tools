@@ -243,7 +243,7 @@ test("flag on: the discovery files' URLs follow MCP_PUBLIC_URL, not a forged Hos
 
 test("how an agent signs in with its own key is shown only with agent keys on, in eight lines, under this base", () => {
   const base = "https://mcp.clockchain.network/staging";
-  for (const [off, on] of [[connectInstructions(base, CHAT), connectInstructions(base, CHAT, false, true)], [installTxtWithShadow(base, CHAT), installTxtWithShadow(base, CHAT, false, true)]]) {
+  for (const [off, on] of [[connectInstructions(base, CHAT), connectInstructions(base, CHAT, false, base)], [installTxtWithShadow(base, CHAT), installTxtWithShadow(base, CHAT, false, base)]]) {
     assert.ok(!off.includes("Agents that run code") && !off.includes("/oauth/token") && !off.includes("shadow_sign_checkpoint"));
     const lines = on.split("\n");
     const at = lines.findIndex((l) => /^ *Agents that run code /.test(l));

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -701,6 +701,39 @@ test("a sign-in refused because a spent set is full admits no key and spends no 
       const second = makeAgentKey();
       h.advance(301_000);
       assert.equal((await grant(h.url, second.assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }))).status, 200, set);
+    } finally {
+      await h.close();
+    }
+  }
+});
+
+test("CORS on /oauth/token allows the DPoP header, and nothing else changes", async () => {
+  const h = await harness();
+  try {
+    const pre = await fetch(`${h.url}/oauth/token`, { method: "OPTIONS", headers: { origin: "https://app.example", "access-control-request-method": "POST", "access-control-request-headers": "dpop" } });
+    assert.equal(pre.status, 204);
+    assert.equal(pre.headers.get("access-control-allow-headers"), "authorization, content-type, mcp-protocol-version, dpop");
+  } finally {
+    await h.close();
+  }
+});
+
+test("a corrupt agent replay set turns off agent sign-in only: chat sign-in keeps its replay state", async () => {
+  for (const name of ["used-dpop", "used-assertions"]) {
+    const replayDir = tempDir("replay");
+    writeFileSync(path.join(replayDir, `${name}.json`), "{not json", { mode: 0o600 });
+    const h = await harness({}, { replayDir });
+    try {
+      const res = await grant(h.url, makeAgentKey().assertion(TOKEN_ENDPOINT, { iat: h.nowSec() }));
+      assert.equal(res.status, 503, name);
+      assert.ok(h.logs.some((e) => e.event === "oauth_replay_state_unavailable" && e.set === name), JSON.stringify(h.logs));
+      // A chat code exchange is answered on its merits (a bad code), not refused for missing replay state.
+      const chat = await fetch(`${h.url}/oauth/token`, {
+        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "authorization_code", code: "bogus", client_id: "c", redirect_uri: "https://app.example/cb", code_verifier: "v".repeat(43) }),
+      });
+      assert.notEqual(chat.status, 503, name);
+      assert.notEqual((await chat.json()).error, "temporarily_unavailable", name);
     } finally {
       await h.close();
     }

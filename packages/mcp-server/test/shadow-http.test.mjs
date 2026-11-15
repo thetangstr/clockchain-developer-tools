@@ -828,3 +828,56 @@ test("DPoP: in open mode (local use) an agent token still needs its proof", asyn
     __setShadowLedgerForTests(undefined);
   }
 });
+
+test("DPoP: an agent over its rate limit gets 429 before its proof is spent, so a flood doesn't fill the proof set", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  // The proof set on disk is four short of its cap (200,000).
+  const stateDir = mkdtempSync(path.join(tmpdir(), "shadow-ak-rl-"));
+  const oauthDir = path.join(stateDir, "oauth");
+  mkdirSync(oauthDir, { recursive: true, mode: 0o700 });
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const entries = Array.from({ length: 199_996 }, (_, i) => [`seed-${i}`, exp]);
+  writeFileSync(path.join(oauthDir, "used-dpop.json"), `${JSON.stringify({ schema: "oauth-used-dpop-v1", value: entries })}\n`, { mode: 0o600 });
+  const app = await bootAgentKeys({ MCP_STATE_DIR: stateDir, MCP_RATE_PER_MIN: "1" });
+  const listCall = (cred) => rpc(`${app.url}/shadow/mcp`, "tools/call", { name: "shadow_list_sessions", arguments: {} }, cred);
+  try {
+    const a = makeAgentKey();
+    const aToken = await app.tokenFor(a); // spends one proof
+    assert.equal((await listCall({ agent: a, token: aToken })).status, 200); // and one more
+    for (let i = 0; i < 4; i++) {
+      const limited = await listCall({ agent: a, token: aToken });
+      assert.equal(limited.status, 429, `request ${i + 2}`);
+      assert.equal(limited.body.error, "rate_limited");
+    }
+    assert.equal((await rpc(`${app.url}/mcp`, "tools/call", { name: "get_time", arguments: {} }, { agent: a, token: aToken })).status, 429, "/mcp too");
+    // The 429s spent no proofs, so the set still has room for another agent's sign-in and first call.
+    const b = makeAgentKey();
+    const bToken = await app.tokenFor(b);
+    assert.equal((await listCall({ agent: b, token: bToken })).status, 200);
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});
+
+test("DPoP: a trial or handshake-session token under the DPoP scheme gets 401, as an account token does; as Bearer it is unchanged", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const app = await bootAgentKeys();
+  try {
+    const agent = makeAgentKey();
+    const now = Math.floor(Date.now() / 1000);
+    const trial = mintTrialToken(SECRET, { eph: "did:key:z6Mk-test", ch: "web" }).token;
+    const scoped = mintHandshakeSessionToken(SECRET, { invitationId: randomUUID(), statementDigest: "a".repeat(64), iat: now, exp: now + 600, jti: randomUUID() }).token;
+    for (const token of [trial, scoped]) {
+      const bearer = await raw(`${app.url}/mcp`, { authorization: `Bearer ${token}` }, { rpcMethod: "tools/list" });
+      assert.equal(bearer.status, 200);
+      const res = await raw(`${app.url}/mcp`, { authorization: `DPoP ${token}`, dpop: agent.dpop("POST", `${PUBLIC}/mcp`, { accessToken: token }) }, { rpcMethod: "tools/list" });
+      assert.equal(res.status, 401);
+      assert.equal(res.body.error, "invalid_dpop_proof");
+      assert.equal(res.body.message, "Only an agent token bound to a key can be sent with DPoP.");
+    }
+  } finally {
+    await app.close();
+    __setShadowLedgerForTests(undefined);
+  }
+});

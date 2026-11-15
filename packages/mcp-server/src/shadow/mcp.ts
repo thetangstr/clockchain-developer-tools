@@ -181,6 +181,11 @@ export interface ShadowHttpDeps {
   };
   /** The OAuth account store, for clockchain_delete_account on every endpoint. */
   accounts?: AccountStore;
+  /**
+   * MCP_PUBLIC_URL, with agent keys on: the guide's agent-key URLs are built on it, since it is what the server checks an
+   * agent's assertion aud and DPoP htu against, not the Host or X-Forwarded-Prefix the guide was read through.
+   */
+  agentKeysBase?: string;
   /** SHADOW_PREVIEW_AUTO_LOG=1: serves PREVIEW_PATH like /shadow/mcp, and PREVIEW_CHAT_PATH (with `chat`) like the chat endpoint. */
   preview?: boolean;
   chat?: {
@@ -745,7 +750,7 @@ export function createShadowHttpHandler(deps: ShadowHttpDeps): (req: IncomingMes
     if (deps.chat && (path === deps.chat.path || (deps.preview && path === PREVIEW_CHAT_PATH))) return mcp(req, res, path, deps.chat);
     if (path === "/shadow/connect" && req.method === "GET") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300", "x-content-type-options": "nosniff" });
-      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog?.paths.has("/shadow/mcp") === true, deps.service.agentKeysOn));
+      res.end(connectInstructions(publicBaseUrl(req.headers), deps.chat?.path, deps.autoLog?.paths.has("/shadow/mcp") === true, deps.service.agentKeysOn ? deps.agentKeysBase : undefined));
       return;
     }
     // The log summary of a session, by the same capability as its viewer. Only with SHADOW_AUTO_LOG=1.

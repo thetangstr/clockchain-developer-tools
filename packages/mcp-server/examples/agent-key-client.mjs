@@ -5,6 +5,8 @@
 //   const transport = new StreamableHTTPClientTransport(new URL("https://mcp.clockchain.network/shadow/mcp"),
 //     { fetch: dpopFetch(key, token) });
 //   await new Client({ name: "my-agent", version: "1" }).connect(transport);
+// Use the URLs /shadow/connect and the OAuth metadata give: they are on the server's public URL (MCP_PUBLIC_URL), which
+// it checks every assertion's aud and every proof's htu against, so by default each proof's htu is the URL called.
 import { createHash, createPublicKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 const b64u = (b) => Buffer.from(b).toString("base64url");
 const now = () => Math.floor(Date.now() / 1000);

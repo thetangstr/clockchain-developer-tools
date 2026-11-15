@@ -399,6 +399,12 @@ export function createRateLimiter(perMin: number, windowMs = 60_000) {
       e.count += cost;
       return { allowed: true, limit: perMin, remaining: perMin - e.count, resetAt: e.resetAt };
     },
+    /** The refusal allow() would give `key` for one unit now, without charging anything; undefined while it has room. */
+    peek(key: string, now: number = Date.now()): RateLimitResult | undefined {
+      const e = hits.get(key);
+      if (perMin <= 0 || !e || now >= e.resetAt || e.count + 1 <= perMin) return undefined;
+      return { allowed: false, limit: perMin, remaining: Math.max(0, perMin - e.count), resetAt: e.resetAt };
+    },
   };
 }
 
@@ -1139,6 +1145,7 @@ export async function runHttp(): Promise<Server> {
     | { ok: false; agentKeyCancelled: true }
     | { ok: false; dpopRefused: string; dpopScheme: boolean }
     | { ok: false; unavailable: true; full: boolean }
+    | { ok: false; rateLimited: RateLimitResult }
     | { ok: true; reason: "static_token" }
     | { ok: true; reason: "demo_token_v1"; payload: TokenPayload }
     | { ok: true; reason: "agent_key"; payload: TokenPayload; agentRoot: string }
@@ -1148,7 +1155,7 @@ export async function runHttp(): Promise<Server> {
   // replacing usually follows a compromise: the agent signs in again with its current key, whose tokens own the same
   // records through the shared root. A key missing from the book, or a book that can't be read, is refused too.
   // Agent keys off: no book, and an akf token is an ordinary demo token, as before (undefined here).
-  const agentKeyOf = (payload: TokenPayload): { root: string } | "cancelled" | "unusable" | undefined => {
+  const agentKeyOf = (payload: Pick<TokenPayload, "akf">): { root: string } | "cancelled" | "unusable" | undefined => {
     if (!agentKeyBook || payload.akf === undefined) return undefined;
     let entry: KeyEntry | null;
     try {
@@ -1163,7 +1170,7 @@ export async function runHttp(): Promise<Server> {
   // RFC 9449 at the resource (D1-c): a token with `cnf`, an agent token, or any token under the DPoP scheme must come as
   // "Authorization: DPoP <token>" with a proof for this method and URL (MCP_PUBLIC_URL plus the path), signed by the key
   // in `cnf`, with `ath` for this token, used once. Undefined when that holds (the proof is then spent) or doesn't apply.
-  const dpopRefusal = (req: IncomingMessage, presented: string, payload: TokenPayload): AuthOutcome | undefined => {
+  const dpopRefusal = (req: IncomingMessage, presented: string, payload: Pick<TokenPayload, "cnf" | "akf" | "acct">): AuthOutcome | undefined => {
     const dpopScheme = presentedDpopToken(req.headers) === presented;
     if (payload.cnf === undefined && !(agentKeyBook && payload.akf !== undefined) && !dpopScheme) return undefined;
     const refused = (reason: string): AuthOutcome => {
@@ -1185,6 +1192,13 @@ export async function runHttp(): Promise<Server> {
       throw e;
     }
     if (proof.jkt !== payload.cnf.jkt) return refused("The DPoP proof is signed by another key than the one this token is bound to.");
+    // The agent's own rate bucket (the one /mcp and /shadow charge) before the proof is spent, so a flood that gets 429
+    // doesn't fill the proof set.
+    const agent = payload.acct === undefined ? agentKeyOf(payload) : undefined;
+    if (typeof agent === "object") {
+      const limited = limiter.peek(callerPrincipalId(req.headers, clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy), `ak:${agent.root}`));
+      if (limited) return { ok: false, rateLimited: limited };
+    }
     const spent = oauth?.usedDpopProofs;
     // Agent keys off: no token is taken with a key. On, but the proof set couldn't open: refuse closed.
     if (!spent) return agentKeyBook ? { ok: false, unavailable: true, full: false } : refused("This server isn't taking agent tokens.");
@@ -1230,9 +1244,10 @@ export async function runHttp(): Promise<Server> {
     }
     const v2 = verifyTrialToken(signingSecret, presented);
     if (v2.valid && !FREE_TOKENS) return { ok: false };
-    if (v2.valid) return { ok: true, trial: v2.payload };
+    // Neither has cnf, so neither may come under the DPoP scheme (refused as an account token is).
+    if (v2.valid) return dpopRefusal(req, presented, {}) ?? { ok: true, trial: v2.payload };
     const v3 = verifyHandshakeSessionToken(signingSecret, presented);
-    if (v3.valid) return { ok: true, scope: v3.payload };
+    if (v3.valid) return dpopRefusal(req, presented, {}) ?? { ok: true, scope: v3.payload };
     return { ok: false };
   };
 
@@ -1264,6 +1279,13 @@ export async function runHttp(): Promise<Server> {
   // proof set that is full or can't be written (503). In the same places as the cancelled-key 401.
   const agentDpopRefused = (res: ServerResponse, req: IncomingMessage, auth: AuthOutcome): boolean => {
     if (auth.ok) return false;
+    if ("rateLimited" in auth) {
+      rlEvents.inc({ surface: bounded("mcp_call", RL_SURFACES) });
+      const headers = rateLimitHeaders(auth.rateLimited);
+      res.writeHead(429, { "content-type": "application/json", ...headers });
+      res.end(JSON.stringify({ error: "rate_limited", retry_after_seconds: Number(headers["Retry-After"]) }));
+      return true;
+    }
     if ("unavailable" in auth) {
       res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
       res.end(JSON.stringify({
@@ -1402,7 +1424,7 @@ export async function runHttp(): Promise<Server> {
         return signed(v1.payload, agent && !v1.payload.acct ? agent.root : undefined);
       }
       const v2 = verifyTrialToken(signingSecret, presented);
-      if (v2.valid) return signed(v2.payload);
+      if (v2.valid) return dpopRefusal(req, presented, {}) ? { ok: false } : signed(v2.payload);
       return { ok: false };
     }
     return { ok: true, ownerId: `open:${createHash("sha256").update(presented).digest("hex")}`, rateKey: callerPrincipalId(req.headers, ip) };
@@ -1457,6 +1479,7 @@ export async function runHttp(): Promise<Server> {
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
         ...(shadowPreview ? { preview: true } : {}),
         ...(oauth?.accounts ? { accounts: oauth.accounts } : {}),
+        ...(agentKeyBook && oauthConfig.kind === "ready" ? { agentKeysBase: oauthConfig.publicUrl } : {}),
         ...(shadowConfig.autoLog ? {
           autoLog: {
             // Per endpoint: only these paths get the logging tools and instructions.
@@ -1493,7 +1516,7 @@ export async function runHttp(): Promise<Server> {
   // accounts only). Anything else serves the plain files, byte for byte. URLs come from MCP_PUBLIC_URL, never the Host.
   const shadowPublicUrl = shadowHandler && oauthConfig.kind === "ready" ? oauthConfig.publicUrl : undefined;
   // With agent keys on (the book exists only then), the Shadow section also says how an agent signs in with its own key.
-  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog, agentKeyBook !== undefined) : INSTALL_TXT;
+  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog, agentKeyBook ? shadowPublicUrl : undefined) : INSTALL_TXT;
   const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : MCP_MANIFEST, null, 2);
 
   // The public book's routes (MCP_AGENT_KEYS=1): lookups, and replace and revoke signed by the agent's own key, filed on

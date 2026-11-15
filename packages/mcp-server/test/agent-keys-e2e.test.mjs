@@ -340,3 +340,41 @@ test("each address has its share of the Starter allowance: two agents from one a
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the guide's agent URLs are the server's public URL, whatever host or prefix served it, so the example's defaults work as they are", async () => {
+  __setShadowLedgerForTests(new FakeLedger());
+  const root = mkdtempSync(path.join(tmpdir(), "agent-keys-e2e-host-"));
+  const realFetch = globalThis.fetch;
+  let app;
+  try {
+    app = await boot(root);
+    // Where each public name reaches this server (DNS and a proxy that strips /next, for the test).
+    const routes = [[PUBLIC, app.url], ["https://other.example/next", app.url], ["https://mcp-aws.clockchain.network", app.url]];
+    globalThis.fetch = (url, init) => {
+      let href = url instanceof URL ? url.href : String(url);
+      for (const [from, to] of routes) if (href.startsWith(`${from}/`)) { href = to + href.slice(from.length); break; }
+      return realFetch(href, init);
+    };
+    for (const headers of [{ "x-forwarded-host": "mcp-aws.clockchain.network" }, { "x-forwarded-host": "other.example", "x-forwarded-prefix": "/next" }]) {
+      const guide = await (await realFetch(`${app.url}/shadow/connect`, { headers })).text();
+      const block = agentBlock(guide).join("\n");
+      for (const u of block.match(/https?:\/\/[^\s"{}]+/g)) assert.ok(u.startsWith(`${PUBLIC}/`), `${JSON.stringify(headers)}: ${u}`);
+      const tokenEndpoint = /POST one form to (\S+): grant_type/.exec(block)[1];
+      const shadow = /new DPoP proof on every request to (\S+) /.exec(block)[1];
+      // The example as an agent would use it: the guide's URLs, no postTo, no htuOf.
+      const key = agentKey();
+      const client = new Client({ name: "guided-agent", version: "1" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(shadow), { fetch: dpopFetch(key, tokenSource(key, tokenEndpoint)) }));
+      const { tools } = await client.listTools();
+      assert.ok(tools.some((t) => t.name === "shadow_start_session"));
+      const started = await client.callTool({ name: "shadow_start_session", arguments: { title: "guided" } });
+      assert.notEqual(started.isError, true, started.content[0].text);
+      await client.close();
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    await app?.close();
+    __setShadowLedgerForTests(undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
+});

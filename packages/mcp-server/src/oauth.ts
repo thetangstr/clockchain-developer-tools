@@ -761,7 +761,7 @@ function parseParams(type: string, text: string): Map<string, string> | undefine
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "authorization, content-type, mcp-protocol-version",
+  "access-control-allow-headers": "authorization, content-type, mcp-protocol-version, dpop",
   "access-control-max-age": "600",
 };
 
@@ -851,23 +851,32 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
 
   // Single-use and revocation bookkeeping. Entries live until the artifact itself expires. Durable when replayDir
   // is set (production: <MCP_STATE_DIR>/oauth), so a restart cannot resurrect a spent or revoked token.
-  let replay: { usedCodes: ExpiringSet; usedRefreshTokens: ExpiringSet; revokedFamilies: ExpiringSet; usedAssertions?: ExpiringSet; usedDpopProofs?: ExpiringSet } | undefined;
+  // Each agent set opens on its own: one that can't turns agent sign-in and agent requests off (503), never chat sign-in.
+  const make = (name: string, cap: number, whenFull?: "evict" | "refuse"): ExpiringSet =>
+    options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec, whenFull) : memoryExpiringSet(cap, nowSec, whenFull);
+  const agentSet = (name: string, cap: number): ExpiringSet | undefined => {
+    try {
+      return make(name, cap, "refuse");
+    } catch (e) {
+      log({ event: "oauth_replay_state_unavailable", set: name, error: (e as Error)?.name ?? "error" });
+      return undefined;
+    }
+  };
+  let replay: { usedCodes: ExpiringSet; usedRefreshTokens: ExpiringSet; revokedFamilies: ExpiringSet } | undefined;
   try {
-    const make = (name: string, cap: number, whenFull?: "evict" | "refuse"): ExpiringSet =>
-      options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec, whenFull) : memoryExpiringSet(cap, nowSec, whenFull);
     replay = {
       usedCodes: make("used-codes", 100_000),
       usedRefreshTokens: make("used-refresh", 200_000),
       revokedFamilies: make("revoked-families", 100_000),
-      // Spent agent client assertions, keyed sha256(fingerprint:jti), each until the assertion's own exp. Full, it refuses
-      // new ones rather than drop a spent one that is still valid.
-      ...(agentKeys ? { usedAssertions: make("used-assertions", agentKeys.spentAssertionsCap ?? 100_000, "refuse") } : {}),
-      // Spent DPoP proofs (RFC 9449), keyed sha256(jkt:jti), each until iat + 61 s. Refuses when full, like the assertions.
-      ...(agentKeys ? { usedDpopProofs: make("used-dpop", agentKeys.spentDpopCap ?? 200_000, "refuse") } : {}),
     };
   } catch (e) {
     log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
   }
+  // Spent agent client assertions, keyed sha256(fingerprint:jti), each until the assertion's own exp. Full, it refuses
+  // new ones rather than drop a spent one that is still valid.
+  const usedAssertionSet = agentKeys ? agentSet("used-assertions", agentKeys.spentAssertionsCap ?? 100_000) : undefined;
+  // Spent DPoP proofs (RFC 9449), keyed sha256(jkt:jti), each until iat + 61 s. Refuses when full, like the assertions.
+  const usedDpopProofSet = agentKeys ? agentSet("used-dpop", agentKeys.spentDpopCap ?? 200_000) : undefined;
 
   const mcpPaths: readonly string[] = [...MCP_PATHS, ...(options.extraPaths ?? []), ...(options.chatPaths ?? [])];
   const chatResources = new Set((options.chatPaths ?? []).map((p) => `${base}${p}`));
@@ -1402,8 +1411,8 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
    * instead. Logs carry only the 16-hex agent id and the outcome, never the assertion or the token.
    */
   function agentGrant(req: IncomingMessage, res: ServerResponse, params: Map<string, string>, keys: NonNullable<OAuthOptions["agentKeys"]>): void {
-    const usedAssertions = replay?.usedAssertions;
-    const usedDpopProofs = replay?.usedDpopProofs;
+    const usedAssertions = usedAssertionSet;
+    const usedDpopProofs = usedDpopProofSet;
     if (!usedAssertions || !usedDpopProofs) {
       // Without durable replay state a spent assertion could come back after a restart: refuse closed.
       sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
@@ -1695,8 +1704,8 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       return true;
     },
     accounts,
-    usedAssertions: replay?.usedAssertions,
-    usedDpopProofs: replay?.usedDpopProofs,
+    usedAssertions: usedAssertionSet,
+    usedDpopProofs: usedDpopProofSet,
     allowNewAgentKey: agentKeys ? () => allowNewAgentKeyGlobal("agent-key:all") : undefined,
     challenge(path, tokenPresented) {
       if (!mcpPaths.includes(path)) return undefined;

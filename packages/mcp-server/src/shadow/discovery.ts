@@ -48,10 +48,12 @@ function agentKeyLines(base: string, shadow: string): string[] {
 
 /**
  * The guide's lines. `base` has no trailing slash. `autoLog` is SHADOW_AUTO_LOG=1, which puts logging on by default on the
- * two endpoints named here. `agentKeys` is MCP_AGENT_KEYS=1: then the guide also says how an agent signs in with its own
- * key. These files never name the hand-added /shadow/preview/* endpoints.
+ * two endpoints named here. `agentKeysBase` is set with MCP_AGENT_KEYS=1, to MCP_PUBLIC_URL: then the guide also says how
+ * an agent signs in with its own key, with every URL under that base, the one the server checks each assertion's aud and
+ * DPoP proof's htu against, whatever host or prefix served the guide. These files never name the hand-added
+ * /shadow/preview/* endpoints.
  */
-function guideLines(base: string, chatPath: string | undefined, autoLog: boolean, agentKeys: boolean): string[] {
+function guideLines(base: string, chatPath: string | undefined, autoLog: boolean, agentKeysBase: string | undefined): string[] {
   const shadow = `${base}${SHADOW_PATH}`;
   const chat = chatPath ? `${base}${chatPath}` : undefined;
   return [
@@ -71,7 +73,7 @@ function guideLines(base: string, chatPath: string | undefined, autoLog: boolean
       `  curl -X POST ${base}/token`,
     ]),
     "",
-    ...(agentKeys ? [...agentKeyLines(base, shadow), ""] : []),
+    ...(agentKeysBase !== undefined ? [...agentKeyLines(agentKeysBase, `${agentKeysBase}${SHADOW_PATH}`), ""] : []),
     ...(chat
       ? [
           "claude.ai: add a custom connector with the claude.ai URL above. claude.ai",
@@ -120,13 +122,13 @@ function wrap(text: string): string[] {
 }
 
 /** GET /shadow/connect, as plain text. */
-export function connectInstructions(base: string, chatPath?: string, autoLog = false, agentKeys = false): string {
-  return ["Hosted Shadow: connect with sign-in", "", ...guideLines(base, chatPath, autoLog, agentKeys), ""].join("\n");
+export function connectInstructions(base: string, chatPath?: string, autoLog = false, agentKeysBase?: string): string {
+  return ["Hosted Shadow: connect with sign-in", "", ...guideLines(base, chatPath, autoLog, agentKeysBase), ""].join("\n");
 }
 
 /** The section /llms.txt and /install.txt carry when Shadow is on. Ends with a blank line. */
-export function shadowInstallSection(base: string, chatPath?: string, autoLog = false, agentKeys = false): string {
-  const body = guideLines(base, chatPath, autoLog, agentKeys).map((l) => (l ? `  ${l}` : ""));
+export function shadowInstallSection(base: string, chatPath?: string, autoLog = false, agentKeysBase?: string): string {
+  const body = guideLines(base, chatPath, autoLog, agentKeysBase).map((l) => (l ? `  ${l}` : ""));
   return [
     "SHADOW — a flight recorder for AI agents, on this same host:",
     ...body,
@@ -137,9 +139,9 @@ export function shadowInstallSection(base: string, chatPath?: string, autoLog = 
 }
 
 /** /llms.txt and /install.txt with Shadow: INSTALL_TXT, byte for byte, with one section added. */
-export function installTxtWithShadow(base: string, chatPath?: string, autoLog = false, agentKeys = false): string {
+export function installTxtWithShadow(base: string, chatPath?: string, autoLog = false, agentKeysBase?: string): string {
   const at = INSTALL_TXT.indexOf(INSERT_BEFORE);
-  const section = shadowInstallSection(base, chatPath, autoLog, agentKeys);
+  const section = shadowInstallSection(base, chatPath, autoLog, agentKeysBase);
   return at < 0 ? `${INSTALL_TXT}\n${section}` : `${INSTALL_TXT.slice(0, at)}${section}${INSTALL_TXT.slice(at)}`;
 }
 
