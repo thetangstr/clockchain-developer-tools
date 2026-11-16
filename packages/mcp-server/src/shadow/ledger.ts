@@ -233,7 +233,8 @@ export function classifyFailure(e: unknown): Failure {
   if (e instanceof HashMismatchError) return f("Permanent", "hash_mismatch");
   if (e instanceof AuthError) return f("Auth", "http_401");
   if (e instanceof InsufficientCreditsError) return f("Credits", "credits");
-  if (e instanceof RateLimitError) return f("RateLimited", "http_429", e.retryAfter ?? null);
+  // A used-up plan (PLAN_QUOTA_EXHAUSTED and the like) is named as such: it won't come back within minutes, as a burst limit does.
+  if (e instanceof RateLimitError) return f("RateLimited", /QUOTA_EXHAUSTED/i.test(String((e.body as { code?: unknown } | undefined)?.code ?? "")) ? "quota_exhausted" : "http_429", e.retryAfter ?? null);
   if (e instanceof PoolDegradedError) return f("PoolDegraded", "pool_degraded");
   if (e instanceof ApiError) {
     if (e.name === "TimeoutError") return f("Transient", "timeout");
@@ -349,7 +350,7 @@ export async function anchorHash(o: AnchorRequest): Promise<AnchorOutcome> {
     } catch (e) {
       last = classifyFailure(e);
       const stop = last.kind === "Auth" || last.kind === "Credits" || last.kind === "Permanent" ||
-        (last.kind === "RateLimited" && (last.retryAfterSeconds ?? 0) > 3);
+        (last.kind === "RateLimited" && (last.code === "quota_exhausted" || (last.retryAfterSeconds ?? 0) > 3));
       if (stop || attempt === o.tries - 1 || Date.now() >= o.deadline) break;
       await o.sleep(last.kind === "RateLimited" && last.retryAfterSeconds ? last.retryAfterSeconds * 1000 : o.backoffMs[Math.min(attempt, o.backoffMs.length - 1)]);
     }

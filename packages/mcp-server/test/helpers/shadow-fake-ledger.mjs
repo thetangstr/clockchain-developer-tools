@@ -3,7 +3,7 @@
 // or, with gatewayTimes, the forms the gateway has used: createdTimestamp as "DD-MM-YYYY HH:MM:SS:mmm UTC" and the
 // block time with a +00:00 offset.
 import { randomUUID, createHash } from "node:crypto";
-import { ApiError } from "@clockchain/core";
+import { ApiError, RateLimitError } from "@clockchain/core";
 
 export class FakeLedger {
   records = [];
@@ -13,6 +13,8 @@ export class FakeLedger {
   confirm = true; // false leaves new writes pending (no block yet)
   degraded = false;
   failNextLog = null; // an Error thrown by the next log()
+  rateLimited = null; // { body, retryAfter }: every log() is refused with a 429 until this is cleared
+  refusedLogs = 0;
   failBlockReads = false;
   gatewayTimes = false;
   base = Date.UTC(2026, 10, 2, 12, 0, 0);
@@ -44,6 +46,10 @@ export class FakeLedger {
       const e = this.failNextLog;
       this.failNextLog = null;
       throw e;
+    }
+    if (this.rateLimited) {
+      this.refusedLogs++;
+      throw new RateLimitError("Rate limit exceeded", 429, this.rateLimited.body, this.rateLimited.retryAfter);
     }
     this.writes.push({ ...entry });
     const h = ++this.height;
