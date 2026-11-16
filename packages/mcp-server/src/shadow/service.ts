@@ -107,6 +107,10 @@ const META_ROOM = 64 * 1024;
 const MAX_PASSES = 10;
 /** A closed session's row that keeps failing waits this many sweep intervals at most between tries. */
 const MAX_RETRY_WAIT_INTERVALS = 6;
+/** How long one 429 pauses every send on this server when Clockchain gives no Retry-After: a used-up plan, or a burst limit. */
+const QUOTA_PAUSE_MS = 15 * 60_000;
+const RATE_LIMIT_PAUSE_MS = 60_000;
+const MAX_PAUSE_MS = 60 * 60_000;
 const COLLECTOR_STEP_HEADROOM = 500;
 const ONLINE_TIMEOUT_MS = 20_000;
 const LINKS_NOTE = "Anyone with these links can read the whole record until it is deleted, 30 days after the session started, unless the person deletes it sooner or revokes the links first (shadow_delete_session, shadow_revoke_links).";
@@ -1047,6 +1051,8 @@ export class ShadowService {
   /** Agent key files the last sweep couldn't read, so the count is logged only when it changes. */
   private unreadableAgentKeys = 0;
   private idlePassRunning = false;
+  /** Set by a 429 (pauseSends): until then nothing is sent to Clockchain, and what is owed waits, unspent. */
+  private sendsPausedUntil = 0;
   /** Accounts being deleted, or deleted since this process started: nothing new starts under them. Their tokens stop at the end of the delete. */
   private readonly deletedOwners = new Set<string>();
 
@@ -1632,9 +1638,10 @@ export class ShadowService {
           let error: { errorKind: string; errorCode: string } | null = null;
           if (outcome.kind === "anchored") receipt = receiptPayload(m.sessionId, outcome.receipt);
           else if (outcome.kind === "pending") m.outbox.push(this.row("start", m.startHash, null, { state: "pending", ledgerId: outcome.ledgerId, submittedAt: outcome.submittedAt, attempts: 1, sendStarted: true }));
+          else if (outcome.kind === "failed" && outcome.failure.code === "sends_paused") m.outbox.push(this.row("start", m.startHash, null));
           else {
             error = { errorKind: outcome.failure.kind, errorCode: outcome.failure.code };
-            const ours = WAITING_CODES.has(outcome.failure.code);
+            const ours = WAITING_CODES.has(outcome.failure.code) || outcome.failure.kind === "RateLimited";
             const unconfirmed = outcome.kind === "unconfirmed";
             m.outbox.push(this.row("start", m.startHash, null, { attempts: ours ? 0 : 1, lastErrorKind: outcome.failure.kind, lastErrorCode: unconfirmed ? "search_refused" : outcome.failure.code, sendStarted: outcome.kind === "unconfirmed" || outcome.maybeWritten }));
           }
@@ -2580,6 +2587,8 @@ export class ShadowService {
    * owner's daily anchors like any other.
    */
   private async anchorNetwork(ownerKey: string, sessionId: string, row: OutboxRow, deadline: number, keys: (string | undefined)[] | null): Promise<AnchorOutcome> {
+    const paused = this.pausedFailure();
+    if (paused) return { kind: "failed", failure: paused, maybeWritten: row.sendStarted !== false };
     const day = this.today();
     let ledger: ShadowLedger;
     try {
@@ -2593,10 +2602,35 @@ export class ShadowService {
       const held = await this.fileFirst(keys, anchoring, row);
       if (held) return held;
     }
-    return anchorHash({
+    const outcome = await anchorHash({
       ...anchoring, referenceId: referenceId(sessionId), hash: row.hash, label: row.kind === "start" ? START_LABEL : ANCHOR_LABEL,
       ledgerId: row.state === "pending" ? row.ledgerId : null, uncertain: row.sendStarted !== false,
     });
+    if (outcome.kind === "failed" && outcome.failure.kind === "RateLimited") this.pauseSends(outcome.failure);
+    return outcome;
+  }
+
+  /**
+   * One 429 pauses every send on this server, so a backlog can't keep spending requests on a limit, or use up a fresh plan
+   * the moment it resets: for Clockchain's Retry-After when it gives one, else 15 minutes for a used-up plan and a minute for
+   * a burst limit; at least a minute, at most an hour, plus up to a fifth more so servers don't all come back at once.
+   */
+  private pauseSends(f: Failure): void {
+    const base = f.retryAfterSeconds ? f.retryAfterSeconds * 1000 : f.code === "quota_exhausted" ? QUOTA_PAUSE_MS : RATE_LIMIT_PAUSE_MS;
+    const ms = Math.min(Math.max(base, RATE_LIMIT_PAUSE_MS), MAX_PAUSE_MS);
+    const until = this.now().getTime() + ms * (1 + Math.random() / 5);
+    if (until <= this.sendsPausedUntil) return;
+    this.sendsPausedUntil = until;
+    this.log("shadow_sends_paused", { code: f.code, seconds: Math.round(ms / 1000) });
+  }
+
+  /**
+   * While sends are paused, what a send would have come back with: "sends_paused", never Clockchain's own refusal, since
+   * nothing was sent. A row it comes back for is left as it was (applyOutcome); nothing about it goes into the record.
+   */
+  private pausedFailure(): Failure | null {
+    const left = this.sendsPausedUntil - this.now().getTime();
+    return left > 0 ? { kind: "RateLimited", code: "sends_paused", retryAfterSeconds: Math.ceil(left / 1000) } : null;
   }
 
   /**
@@ -2651,7 +2685,12 @@ export class ShadowService {
       if (!fp) return wait();
       try {
         const filing = await this.locks.run(`agent-key:${fp}`, () => fileKey(book, anchoring, fp, "filed"));
-        if (filing.state !== "filed") return wait(filing.failure);
+        if (filing.state !== "filed") {
+          // The row says it waits on the filing; the log says why the filing didn't go through.
+          if (filing.failure && !OWN_LIMITS.has(filing.failure.code)) this.log("shadow_agent_key_filing_refused", { code: filing.failure.code });
+          if (filing.failure?.kind === "RateLimited") this.pauseSends(filing.failure);
+          return wait(filing.failure);
+        }
       } catch {
         this.log("shadow_agent_key_filing_error", {});
         return wait();
@@ -2711,6 +2750,7 @@ export class ShadowService {
     const deadline = o.deadline ?? Date.now() + ANCHOR_BUDGET_MS;
     for (;;) {
       if (Date.now() >= deadline) return; // What is left stays queued for the next call.
+      if (this.pausedFailure()) return; // Clockchain said 429: everything waits for the pause to end, unspent (pauseSends).
       const next = await this.session(ownerKey, sessionId, (meta) => {
         const row = nextRow(meta, tried, o.asked ? null : this.now().getTime(), o.held === true);
         if (!row) return null;
@@ -2751,6 +2791,14 @@ export class ShadowService {
   private applyOutcome(meta: SessionMeta, rowId: string, outcome: AnchorOutcome): boolean {
     const row = meta.outbox.find((r) => r.id === rowId);
     if (!row) return false;
+    // Not sent: sends were paused by a 429 (pauseSends). The row stays as it was, holds and tries included, and waits.
+    if (outcome.kind === "failed" && outcome.failure.code === "sends_paused") {
+      if (!outcome.maybeWritten && row.sendStarted !== false) {
+        row.sendStarted = false;
+        this.store.writeMeta(meta);
+      }
+      return true;
+    }
     let halt = false;
     // What held an agent's row (its key, or the Starter allowance) is over once the row is tried again; the outcome says what's next.
     if (row.lastErrorCode !== null && AGENT_HOLDS.has(row.lastErrorCode)) Object.assign(row, { lastErrorKind: null, lastErrorCode: null });
@@ -2776,6 +2824,8 @@ export class ShadowService {
       row.nextTryAt = this.retryAt(row);
     } else {
       const f = outcome.failure;
+      // A row refused by a 429 again says so once in the record: a long outage can't fill the session with retries.
+      const again = f.kind === "RateLimited" && row.lastErrorKind === "RateLimited";
       row.lastErrorKind = f.kind;
       row.lastErrorCode = f.code;
       if (!outcome.maybeWritten) row.sendStarted = false;
@@ -2789,10 +2839,11 @@ export class ShadowService {
       if (closed) row.nextTryAt = this.retryAt(row);
       // Our own limits, and an agent's key still being filed, are not Clockchain failures: the row waits, and nothing goes into the record.
       if (!WAITING_CODES.has(f.code)) {
-        row.attempts++;
+        // A 429 says nothing about the row: the pause holds every send, and the row keeps its tries and its hourly retry.
+        if (f.kind !== "RateLimited") row.attempts++;
         const failed = f.kind === "Permanent" || (!closed && row.attempts >= MAX_PASSES);
         if (failed) row.state = "failed";
-        if (meta.state === "open")
+        if (meta.state === "open" && !again)
           this.appendStep(meta, "clockchain.error", "collector", {
             marker: row.kind, hash: row.hash, errorKind: f.kind, errorCode: f.code,
             outcome: failed ? "not anchored; later steps take their upper bound from the next anchor" : "will retry",
