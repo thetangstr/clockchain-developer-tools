@@ -403,7 +403,9 @@ export async function prefetchOnline(
         if (!(e instanceof RateLimitError) || /QUOTA_EXHAUSTED/i.test(code) || n >= 8) throw e;
         const wait = Math.min(e.retryAfter ? e.retryAfter * 1000 : 200 * 2 ** n, 4_000);
         if (Date.now() + wait >= deadline) throw e;
-        await new Promise<void>((resolve) => setTimeout(resolve, wait).unref());
+        // Not unref'd: while every read waits here, this wait may be all that keeps a short-lived process (a CLI) alive.
+        // It is at most 4 s and never runs past the deadline.
+        await new Promise<void>((resolve) => setTimeout(resolve, wait));
       }
     }
   };

@@ -1,6 +1,7 @@
 // Shadow's search through the network's ledger search (GET /search/ledger), used when SHADOW_NETWORK_SEARCH_URL is set.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { ClockchainClient, RateLimitError } from "@clockchain/core";
 import {
   NETWORK_SEARCH_MAX_PASSES,
@@ -215,6 +216,36 @@ test("the verifier waits out the network's 429s on receipt and block reads inste
   assert.ok(limited > 0, "the fake did rate-limit");
   assert.equal(online.receiptsChecked, 30, "every receipt read in the end");
   assert.equal((await online.search(REF)).length, 30);
+});
+
+test("while every read is waiting out a 429, the wait keeps a short-lived process alive until the reads finish", () => {
+  // In its own process, so nothing else holds the event loop (as in a CLI): one receipt, refused three times, so once
+  // the search is done the only thing pending is the back-off wait. A wait that didn't hold the loop let the process
+  // exit with the verify still pending.
+  const script = `
+    import { RateLimitError } from "@clockchain/core";
+    import { prefetchOnline, withNetworkWitness } from ${JSON.stringify(new URL("../dist/shadow/ledger.js", import.meta.url).href)};
+    const REF = ${JSON.stringify(REF)};
+    const fetchImpl = async () => new Response(JSON.stringify({ currentPage: 0, totalPages: 1, size: 100, totalElements: 1,
+      content: [{ ledgerId: "L1", clientId: "own", assetReferenceId: REF, assetHash: "h" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    let refused = 0;
+    const base = {
+      searchAsset: async () => { throw new Error("unused"); },
+      getLedgerEntry: async (id) => {
+        if (refused++ < 3) throw new RateLimitError("Rate limit exceeded", 429, undefined, 0);
+        return { ledgerId: id, clientId: "own", assetHash: "h", blockHeight: "5", createdTimestamp: "1794015120193" };
+      },
+      getBlock: async () => ({ blockTime: "1794015120193" }),
+      buildEvidencePackage: async () => ({}),
+      verifyPackage: async () => ({ valid: true }),
+    };
+    const online = await prefetchOnline(withNetworkWitness(base, { baseUrl: "https://search.test", clientIds: ["own"], fetchImpl }),
+      { network: "staging", referenceId: REF, ledgerIds: ["L1"], timeoutMs: 15000, concurrency: 1 });
+    console.log("receiptsChecked=" + online.receiptsChecked);
+  `;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: new URL("..", import.meta.url), encoding: "utf8", timeout: 20000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /receiptsChecked=1/);
 });
 
 test("a search or read that fails after the verifier's deadline doesn't become an unhandled rejection", async () => {
