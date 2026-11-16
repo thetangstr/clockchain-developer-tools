@@ -85,6 +85,11 @@ services:
       SHADOW_ACCOUNT_MAX_BYTES: "${SHADOW_ACCOUNT_MAX_BYTES:-}"
       SHADOW_SESSION_STARTS_PER_DAY: "${SHADOW_SESSION_STARTS_PER_DAY:-}"
       SHADOW_LINK_CONCURRENCY: "${SHADOW_LINK_CONCURRENCY:-}"
+      # The network: SHADOW_NETWORK=mainnet changes the pages and new sessions; see the RUNBOOK before setting it.
+      SHADOW_NETWORK: "${SHADOW_NETWORK:-}"
+      MCP_MAX_OPEN_STREAMS: "${MCP_MAX_OPEN_STREAMS:-}"
+      MCP_MAINNET_FREE_TOKENS: "${MCP_MAINNET_FREE_TOKENS:-}"
+      SHADOW_IDLE_CLOSE_HOURS: "${SHADOW_IDLE_CLOSE_HOURS:-}"
       # Sign-up from the chat (claude.ai "Sign in when needed"): SHADOW_LAZY_AUTH=1 adds /shadow/chat/mcp, which
       # connects and lists tools before sign-in. "" = off (no such path; /shadow/mcp is unchanged either way).
       SHADOW_LAZY_AUTH: "${SHADOW_LAZY_AUTH:-}"
@@ -97,6 +102,16 @@ services:
       SHADOW_ANCHORS_PER_DAY: "${SHADOW_ANCHORS_PER_DAY:-}"
       SHADOW_ANCHORS_PER_SESSION: "${SHADOW_ANCHORS_PER_SESSION:-}"
       SHADOW_LOG_STEPS_PER_MIN: "${SHADOW_LOG_STEPS_PER_MIN:-}"
+      # SHADOW_AUTO_LOG reaches the paths directories list, so a listed server must not set it. SHADOW_PREVIEW_AUTO_LOG=1
+      # instead adds /shadow/preview/mcp and /shadow/preview/chat/mcp, added by hand and logging by default, and leaves
+      # the listed paths as they are: there the person asks, chat by chat. "" = off (no such paths).
+      SHADOW_PREVIEW_AUTO_LOG: "${SHADOW_PREVIEW_AUTO_LOG:-}"
+      # The client and wallet hosted Shadow anchors under, set together ("" = the delegated CLOCKCHAIN_CLIENT_ID below). They
+      # go on a public ledger, so no email. /mcp callers can't name them. The gateway needs no change for a new id.
+      SHADOW_LEDGER_CLIENT_ID: "${SHADOW_LEDGER_CLIENT_ID:-}"
+      SHADOW_LEDGER_WALLET_ID: "${SHADOW_LEDGER_WALLET_ID:-}"
+      # OpenAI's domain check: served as plain text at /.well-known/openai-apps-challenge. "" = off (the route isn't there).
+      OPENAI_APPS_CHALLENGE_TOKEN: "${OPENAI_APPS_CHALLENGE_TOKEN:-}"
       # Emergency rollback only: "allow" lets a caller's own key write on the owned gateway again. Unset refuses.
       MCP_BYO_WRITES: "${MCP_BYO_WRITES:-}"
       # OAuth 2.1 sign-in for ChatGPT / Claude Code connectors (src/oauth.ts). Off unless
@@ -110,6 +125,18 @@ services:
       MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR: "${MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR:-}"
       MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR: "${MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR:-}"
       MCP_OAUTH_TRUSTED_PROXY: "172.30.0.3"
+      # Agent keys (src/oauth.ts): an agent signs in with its own key. Off unless MCP_AGENT_KEYS=1 exists in SSM
+      # ("" == absent == off; needs MCP_OAUTH=1). Limits ("" = defaults: 10 new keys per IP an hour, 200 in all).
+      # Read the RUNBOOK's "Turning on agent keys" before setting any of these.
+      MCP_AGENT_KEYS: "${MCP_AGENT_KEYS:-}"
+      MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "${MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR:-}"
+      MCP_AGENT_KEYS_NEW_PER_HOUR: "${MCP_AGENT_KEYS_NEW_PER_HOUR:-}"
+      # The Starter allowance agents share ("" = defaults: 2000 anchors a day, 200 per address).
+      SHADOW_STARTER_ANCHORS_PER_DAY: "${SHADOW_STARTER_ANCHORS_PER_DAY:-}"
+      SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY: "${SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY:-}"
+      # Clockchain's witness key ("" = off: a key per account). compose-up.sh never exports it: only
+      # docker-compose.witness.yml sets it, with the read-only mount, when /clockchain/mcp/SHADOW_WITNESS_KEY exists.
+      SHADOW_WITNESS_KEY_FILE: "${SHADOW_WITNESS_KEY_FILE:-}"
       TELEMETRY_CLOSE_URL: "${TELEMETRY_CLOSE_URL:-}"
       TELEMETRY_CLOSE_BACKOFF_MS: "${TELEMETRY_CLOSE_BACKOFF_MS:-}"
       TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS: "${TELEMETRY_CLOSE_ATTEMPT_TIMEOUT_MS:-}"

@@ -243,7 +243,7 @@ test("finding 3: /shadow/mcp needs a signed-in account; POST /token and static t
     }
     const page = await fetch(`${app.url}/shadow/connect`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /connect with sign-in[\s\S]*cannot be revoked/);
+    assert.match(await page.text(), /connect with sign-in[\s\S]*revokes the link/);
     const ok = await post(`${app.url}/shadow/mcp`, rpcCall("shadow_list_sessions", {}), { authorization: `Bearer ${acctToken()}` });
     assert.equal(ok.status, 200);
     // No credential is still /mcp's 401 (that is what starts an OAuth client's sign-in).

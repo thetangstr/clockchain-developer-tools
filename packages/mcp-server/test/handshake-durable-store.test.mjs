@@ -219,3 +219,19 @@ test("handle map: the cap holds, and a tampered record never resolves", () => {
   const other = createHandleMap({ label: "other/h", prefix: "tsth_", limit: 2, now: () => now, path });
   assert.equal(other.resolve(a), undefined);
 });
+
+test("a corrupt file's log line keeps its error message by default, and gives only the error's name with redactReasons", (t) => {
+  const errors = quietly(t);
+  const dir = scratch();
+  const state = { value: { n: 1 } };
+  fileFor(dir, state).save("now");
+  const path = join(dir, "nested", "state.json");
+  writeFileSync(path, '{ "marker-in-file": ', { mode: 0o600 });
+  assert.throws(() => fileFor(dir, state).load(), DurableStateError);
+  const reasons = () => errors.mock.calls.map((c) => JSON.parse(c.arguments[0])).filter((e) => e.event === "handshake_state_corrupt").map((e) => e.reason);
+  assert.equal(reasons().length, 1);
+  assert.notEqual(reasons()[0], "SyntaxError", "the handshake callers' line is as before: the message");
+  errors.mock.resetCalls();
+  assert.throws(() => fileFor(dir, state, { redactReasons: true }).load(), DurableStateError);
+  assert.deepEqual(reasons(), ["SyntaxError"]);
+});

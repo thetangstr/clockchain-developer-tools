@@ -264,9 +264,15 @@ export function formatTime(t: [number, number]): string | null {
 // Both become the canonical UTC form; an ISO time with an offset is moved to UTC. Anything else is kept as it is, and
 // a verifier then takes no time bound from it.
 const GATEWAY_TIME = /^([0-9]{2})-([0-9]{2})-([0-9]{4})[_ ]([0-9]{2}):([0-9]{2}):([0-9]{2}):([0-9]{3})(?: UTC)?$/;
+// The Clockchain network's API writes block and creation times as epoch milliseconds ("1793987846082").
+const EPOCH_MS = /^[0-9]{13}$/;
 export function normalizeGatewayTime(v: unknown): string | null {
   if (v == null || v === '') return null;
   const s = String(v);
+  if (EPOCH_MS.test(s)) {
+    const ms = Number(s), sec = Math.floor(ms / 1000);
+    return formatTime([sec, (ms - sec * 1000) * 1_000_000]) ?? s;
+  }
   const g = GATEWAY_TIME.exec(s);
   const t = g ? parseTimeIn(`${g[3]}-${g[2]}-${g[1]}T${g[4]}:${g[5]}:${g[6]}.${g[7]}Z`, false) : parseTimeIn(s, true);
   return (t && formatTime(t)) ?? s;

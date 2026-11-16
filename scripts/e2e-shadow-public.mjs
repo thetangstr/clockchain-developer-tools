@@ -125,7 +125,7 @@ const missing = (text, phrases) => {
 async function checkDiscovery(r, base) {
   const shadow = `${base}/shadow/mcp`;
   const chat = `${base}/shadow/chat/mcp`;
-  const facts = [shadow, chat, "Sign in when needed", "Register automatically", `${base}/token`, "An account is required", "30 days", "cannot be revoked"];
+  const facts = [shadow, chat, "Sign in when needed", "Register automatically", `${base}/token`, "An account is required", "30 days", "revokes the link"];
 
   const llms = await http(`${base}/llms.txt`);
   const gaps = missing(llms.text, facts);

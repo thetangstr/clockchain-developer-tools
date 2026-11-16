@@ -33,7 +33,7 @@ export function buildServer(
     version: "0.1.0",
   });
   // MCP_SURFACE controls which tools are exposed (CLO-99):
-  //   "full" (default) — all 42 tools, the full testnet surface.
+  //   "full" (default) — every tool, the full testnet surface (test/coverage.test.mjs pins the count).
   //   "product"        — only get_time, the production-safe slice.
   // The default path ("full" or unset) is byte-for-byte behavior-identical to pre-CLO-99.
   const surface = (process.env.MCP_SURFACE ?? "full") as "full" | "product";

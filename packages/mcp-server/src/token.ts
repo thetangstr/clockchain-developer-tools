@@ -50,6 +50,18 @@ export interface TokenPayload {
    * present but not in this exact format.
    */
   acct?: string;
+  /**
+   * Optional agent key fingerprint (64 lowercase hex, `fingerprint()` in shadow/lib/keys.ts): the Ed25519 key whose
+   * signed client assertion proved possession when this token was minted. Set ONLY by the OAuth token endpoint's
+   * client_credentials grant, through {@link mintAgentToken}; nothing a caller sends to `POST /token` can set it.
+   */
+  akf?: string;
+  /**
+   * RFC 9449 confirmation: the RFC 7638 thumbprint of the key every request must carry a DPoP proof from. Set ONLY on
+   * agent tokens, by {@link mintAgentToken}; account tokens never have it. {@link verifyToken} rejects a `cnf` that is
+   * present but not exactly `{ jkt: <43 base64url> }`.
+   */
+  cnf?: { jkt: string };
 }
 
 /** The exact `acct` claim format: `acct_` + 22 base64url characters. */
@@ -98,6 +110,33 @@ export function mintToken(
   return { token: `${PREFIX}${seg}.${sign(seg, secret)}`, payload };
 }
 
+const AKF_PATTERN = /^[0-9a-f]{64}$/;
+const JKT_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+const validCnf = (cnf: unknown): boolean =>
+  cnf !== null && typeof cnf === "object" && !Array.isArray(cnf) && Object.keys(cnf).length === 1 &&
+  typeof (cnf as { jkt?: unknown }).jkt === "string" && JKT_PATTERN.test((cnf as { jkt: string }).jkt);
+
+/**
+ * Mint a Starter token for an agent that proved it holds its own key (the OAuth client_credentials grant). The token
+ * is an ordinary v:1 token plus `akf`, the proving key's fingerprint, and `cnf.jkt`, the same key's JWK thumbprint that
+ * binds it to DPoP proofs (RFC 9449). Throws when `akf` is not 64 lowercase hex characters or `jkt` not 43 base64url.
+ */
+export function mintAgentToken(
+  secret: string,
+  ttlSeconds: number,
+  nowSec: number,
+  jti: string,
+  akf: string,
+  jkt: string,
+): { token: string; payload: TokenPayload } {
+  if (typeof akf !== "string" || !AKF_PATTERN.test(akf)) throw new Error("mintAgentToken: malformed akf");
+  if (typeof jkt !== "string" || !JKT_PATTERN.test(jkt)) throw new Error("mintAgentToken: malformed jkt");
+  const payload: TokenPayload = { v: 1, tier: "demo", iat: nowSec, exp: nowSec + ttlSeconds, jti, akf, cnf: { jkt } };
+  const seg = b64url(Buffer.from(JSON.stringify(payload), "utf8"));
+  return { token: `${PREFIX}${seg}.${sign(seg, secret)}`, payload };
+}
+
 /**
  * Verify a self-serve token: correct shape, valid signature (constant-time), and
  * not expired. Returns the payload when valid, else a reason. Never throws.
@@ -135,6 +174,9 @@ export function verifyToken(
   }
   if (payload.acct !== undefined && !isAcctId(payload.acct)) {
     return { valid: false, reason: "bad acct" };
+  }
+  if (payload.cnf !== undefined && !validCnf(payload.cnf)) {
+    return { valid: false, reason: "bad cnf" };
   }
   return { valid: true, payload };
 }

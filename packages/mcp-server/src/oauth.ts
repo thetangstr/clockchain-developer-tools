@@ -1,3 +1,4 @@
+import { ON_MAINNET } from "./network.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -6,9 +7,13 @@ import {
   accountCreatedDay, AccountStore, AccountUnavailableError, cleanAccountName, cleanDisplayText, DEFAULT_MAX_ACCOUNTS, displayAccountName,
   hasLetterOrDigit, looksLikeAccountKey, shortAccountId, type Account,
 } from "./accounts.js";
-import { durableExpiringSet, memoryExpiringSet, type ExpiringSet } from "./oauth-replay.js";
+import { durableExpiringSet, memoryExpiringSet, ReplayStateFullError, type ExpiringSet } from "./oauth-replay.js";
 import { clientBucket, limiter, standaloneClientIp } from "./standalone-handshake/public-server.js";
-import { isAcctId, mintToken } from "./token.js";
+import { isAcctId, mintAgentToken, mintToken } from "./token.js";
+import { AgentKeyError, type AgentKeyBook, type KeyEntry } from "./agent-keys/book.js";
+import { jwkThumbprintOfPem, verifyDpopProof } from "./agent-keys/dpop.js";
+import type { KeyProof } from "./agent-keys/proof.js";
+import { fingerprint } from "./shadow/lib/keys.js";
 
 /**
  * OAuth 2.1 sign-in for MCP clients (ChatGPT custom connectors, Claude Code).
@@ -28,7 +33,9 @@ import { isAcctId, mintToken } from "./token.js";
  *                 approve gets that account's `acct`. An HttpOnly __Host- cookie
  *                 only selects the account; each app still needs its own click.
  *                 An account key (shown once) signs in on other devices.
- *   token         authorization_code + refresh_token (rotating, reuse-detected)
+ *   token         authorization_code + refresh_token (rotating, reuse-detected), and with MCP_AGENT_KEYS=1
+ *                 client_credentials: an agent proves it holds its own Ed25519 key with an RFC 7523 client
+ *                 assertion and gets a one-hour Starter token (`akf`), no person and no refresh token
  *
  * Every artifact is `<prefix><b64url(json)>.<b64url(hmac)>`, keyed by a key
  * derived from MCP_TOKEN_SIGNING_SECRET under its own label, so no artifact can
@@ -75,7 +82,23 @@ export type OAuthConfig =
       /** The account cookie's name (see accountCookieName). */
       cookieName: string;
       trustedProxy?: string;
+      /** MCP_AGENT_KEYS=1: the client_credentials grant for agent keys. Absent when off or misconfigured. */
+      agentKeys?: AgentKeysConfig;
+      /** Why agent keys are off despite MCP_AGENT_KEYS being set (a bad value). OAuth itself stays up. */
+      agentKeysProblem?: string;
     };
+
+export interface AgentKeysConfig {
+  enabled: boolean;
+  /** New keys admitted per IP per hour (MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR, default 10). Known keys don't count. */
+  newPerIpPerHour: number;
+  /** New keys admitted per hour from every address, by the token grant and by replace (MCP_AGENT_KEYS_NEW_PER_HOUR, default 200). */
+  newPerHour: number;
+  /** Starter token lifetime, seconds. */
+  tokenTtl: 3600;
+  /** The agent key book: <MCP_STATE_DIR>/agent-keys, next to the accounts and the OAuth replay state. */
+  dir: string;
+}
 
 /** An https origin (http only on loopback, for local runs) with no path, query or credentials. */
 /**
@@ -140,6 +163,20 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     counts[name] = raw === "" ? fallback : Number(raw);
   }
   const trustedProxy = (env.MCP_OAUTH_TRUSTED_PROXY ?? "").trim();
+  const stateDir = (env.MCP_STATE_DIR ?? "").trim() || "/app/state";
+  // Agent keys: "" / "0" / absent = off, and then nothing else about OAuth changes. A bad value turns only agent keys
+  // off (reported in agentKeysProblem): it must never take sign-in, refresh or deleted-account checks down with it.
+  const agentKeysFlag = (env.MCP_AGENT_KEYS ?? "").trim();
+  let agentKeys: AgentKeysConfig | undefined;
+  let agentKeysProblem: string | undefined;
+  if (agentKeysFlag !== "" && agentKeysFlag !== "0") {
+    const raw = (env.MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR ?? "").trim();
+    const rawAll = (env.MCP_AGENT_KEYS_NEW_PER_HOUR ?? "").trim();
+    if (agentKeysFlag !== "1") agentKeysProblem = "MCP_AGENT_KEYS must be 1 or 0";
+    else if (raw !== "" && !/^[1-9][0-9]{0,4}$/.test(raw)) agentKeysProblem = "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR must be a whole number from 1 to 99999";
+    else if (rawAll !== "" && !/^[1-9][0-9]{0,4}$/.test(rawAll)) agentKeysProblem = "MCP_AGENT_KEYS_NEW_PER_HOUR must be a whole number from 1 to 99999";
+    else agentKeys = { enabled: true, newPerIpPerHour: raw === "" ? 10 : Number(raw), newPerHour: rawAll === "" ? 200 : Number(rawAll), tokenTtl: 3600, dir: join(stateDir, "agent-keys") };
+  }
   return {
     kind: "ready",
     publicUrl,
@@ -148,10 +185,12 @@ export function loadOAuthConfig(env: Record<string, string | undefined>, signing
     accountsPerIpPerHour: counts.MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR,
     keyAttemptsPerIpPerHour: counts.MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR,
     // Accounts and replay state live on the state volume, next to the handshake and Shadow state.
-    accountsDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "accounts"),
-    replayDir: join((env.MCP_STATE_DIR ?? "").trim() || "/app/state", "oauth"),
+    accountsDir: join(stateDir, "accounts"),
+    replayDir: join(stateDir, "oauth"),
     cookieName,
     ...(trustedProxy ? { trustedProxy } : {}),
+    ...(agentKeys ? { agentKeys } : {}),
+    ...(agentKeysProblem ? { agentKeysProblem } : {}),
   };
 }
 
@@ -185,8 +224,14 @@ export interface OAuthOptions {
    * sign-in for one of them (its `resource`) gets the one-click create page, the name coming later from the chat.
    */
   chatPaths?: readonly string[];
-  /** SHADOW_AUTO_LOG=1: the sign-in pages say that the app logs its chats and tool activity by default once connected. */
+  /** More MCP paths, served and challenged like /mcp and /shadow/mcp (SHADOW_PREVIEW_AUTO_LOG: the preview endpoint). */
+  extraPaths?: readonly string[];
+  /** SHADOW_AUTO_LOG=1: a sign-in with no resource says the app is told to log by default, as it may be for any endpoint. */
   autoLog?: boolean;
+  /** The MCP paths that log by default: a sign-in for one of them (its `resource`) says so, and one for any other path doesn't. */
+  autoLogPaths?: readonly string[];
+  /** Hosted Shadow is on: where logging isn't on by default, the small print says Shadow records only when asked. */
+  shadowAsked?: boolean;
   /**
    * Where spent codes, spent refresh tokens and revoked families are kept across restarts (src/oauth-replay.ts).
    * Unset: memory only (tests). Set but unusable: the token endpoint refuses closed (503).
@@ -196,6 +241,25 @@ export interface OAuthOptions {
   refreshesPerFamilyPerHour?: number;
   /** Refresh grants per IP per hour (default 30). */
   refreshesPerIpPerHour?: number;
+  /**
+   * The client_credentials grant for agent keys (MCP_AGENT_KEYS=1). Unset: the grant is unsupported and the metadata
+   * does not mention it, exactly as before.
+   */
+  agentKeys?: {
+    /** The public key book; the same instance the rest of the server reads. */
+    book: AgentKeyBook;
+    proof: KeyProof;
+    /** New keys admitted per IP per hour (default 10). Keys already in the book don't count. */
+    newPerIpPerHour?: number;
+    /** New keys admitted per hour from every address (default 200), shared with replace through allowNewAgentKey. */
+    newPerHour?: number;
+    /** Starter token lifetime (default 3600). */
+    tokenTtlSeconds?: number;
+    /** How many unexpired spent assertions are kept (default 100,000); past it new ones are refused. For tests only. */
+    spentAssertionsCap?: number;
+    /** How many unexpired spent DPoP proofs are kept (default 200,000); past it new ones are refused. For tests only. */
+    spentDpopCap?: number;
+  };
   /** Milliseconds clock, injectable for tests. */
   now?: () => number;
   log?: (event: Record<string, unknown>) => void;
@@ -212,6 +276,21 @@ export interface OAuthHandler {
   challenge(path: string, tokenPresented: boolean): Record<string, string> | undefined;
   /** The account store the sign-in page uses (undefined when unusable), shared with the chat account tools. */
   readonly accounts: AccountStore | undefined;
+  /**
+   * Spent agent client assertions (agentKeys set), the one set the token grant and /agent-keys/* share, so each assertion
+   * is single use everywhere. Undefined when agent keys are off or the replay state couldn't be opened.
+   */
+  readonly usedAssertions: ExpiringSet | undefined;
+  /**
+   * Spent DPoP proofs (agentKeys set), keyed by verifyDpopProof's replayKey, shared by the token grant and every agent
+   * request, so each proof is single use everywhere. Undefined when agent keys are off or the replay state couldn't be opened.
+   */
+  readonly usedDpopProofs: ExpiringSet | undefined;
+  /**
+   * Takes one from the hourly allowance of new agent keys from every address (agentKeys set): false once it is used up.
+   * The token grant spends it on a key the book has never seen, and /agent-keys/<fp>/replace on the key it makes.
+   */
+  readonly allowNewAgentKey: (() => boolean) | undefined;
 }
 
 type ArtifactKind = "client" | "request" | "code" | "refresh" | "grant" | "cookie";
@@ -475,6 +554,8 @@ interface ConsentView {
   oneClick?: boolean;
   /** Logging is on by default once connected (SHADOW_AUTO_LOG=1): said in the open, and in "What this allows". */
   autoLog?: boolean;
+  /** The person asks, chat by chat: said in "What this allows". */
+  shadowAsked?: boolean;
 }
 
 const requestField = (token: string): string => `<input type="hidden" name="request" value="${escapeHtml(token)}">`;
@@ -494,21 +575,21 @@ function appLine(app: string, redirectHost: string): string {
 
 /** The most important thing a person agrees to when logging is on by default: never folded away. */
 function loggingConsent(app: string, tag: "p class=\"who\"" | "p"): string {
-  return `<${tag}><strong>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off.</strong> Records are kept 30 days, and anyone holding a record’s link can read them.</p>`;
+  return `<${tag}><strong>Once connected, ${app} is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off. Some apps only start when you ask.</strong> Records are kept 30 days, and anyone holding a record’s link can read them.</p>`;
 }
 
 /** The small print: testnet, then what allowing means (the reviewed wording, unchanged), folded. */
-function smallPrint(app: string, redirectHost: string, autoLog?: boolean): string {
+function smallPrint(app: string, redirectHost: string, autoLog?: boolean, shadowAsked?: boolean): string {
   return `<footer class="foot">
-<p>Free testnet · only fingerprints go on the Clockchain ledger</p>
+<p>${ON_MAINNET ? "Only" : "Free testnet · only"} fingerprints go on the Clockchain ledger</p>
 <details class="more">
 <summary>What this allows</summary>
 <ul>${autoLog ? `
-<li>Once connected, ${app} logs its chats and tool activity to Clockchain Shadow by default, until you turn it off. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}
-<li>${app} can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps.</li>
-<li>${app} can read and add to every Shadow record in this account, including records made from other apps.</li>
-<li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>
-<li>Shadow keeps the records of your agents’ work for 30 days.</li>
+<li>Once connected, ${app} is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off. Some apps only start when you ask. Records are kept 30 days, and anyone holding a record’s link can read them.</li>` : ""}${!autoLog && shadowAsked ? `
+<li>Shadow records a task only when you ask for it, in that chat.</li>` : ""}
+<li>${app} can use Clockchain’s ${ON_MAINNET ? "tools on this account: recording and anchoring" : "testnet tools on this account: recording, anchoring and timestamps"}.</li>
+<li>${app} can read, add to and delete every Shadow record in this account, including records made from other apps, and can delete the account.</li>
+${ON_MAINNET ? "" : "<li>Its writes are paid from Clockchain’s free testnet pool, not by you.</li>\n"}<li>Shadow keeps the records of your agents’ work for 30 days. You can delete a record or your account sooner, from the chat.</li>
 <li>Only fingerprints go on the Clockchain ledger, never the content itself.</li>
 </ul>
 <p>Only continue if you just started connecting from this app and <code>${escapeHtml(redirectHost)}</code> is where you expect to return. The app’s name comes from the app; Clockchain doesn’t verify it.</p>
@@ -540,7 +621,7 @@ ${requestField(v.requestToken)}
 <button type="submit" name="decision" value="cancel" class="link">Cancel</button>
 </div>
 </form>
-${smallPrint(app, v.redirectHost, v.autoLog)}`);
+${smallPrint(app, v.redirectHost, v.autoLog, v.shadowAsked)}`);
   }
   return htmlDocument(title, `${head}
 <div class="flow">
@@ -566,7 +647,7 @@ ${requestField(v.requestToken)}
 </form>
 </div>
 </div>
-${smallPrint(app, v.redirectHost, v.autoLog)}`);
+${smallPrint(app, v.redirectHost, v.autoLog, v.shadowAsked)}`);
 }
 
 interface KeyView {
@@ -680,7 +761,7 @@ function parseParams(type: string, text: string): Map<string, string> | undefine
 const CORS_HEADERS: Record<string, string> = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "authorization, content-type, mcp-protocol-version",
+  "access-control-allow-headers": "authorization, content-type, mcp-protocol-version, dpop",
   "access-control-max-age": "600",
 };
 
@@ -709,6 +790,11 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   // Every refresh mints a fresh access token, so refreshes are capped per family (one approval's chain) and per IP.
   const allowFamilyRefresh = limiter(options.refreshesPerFamilyPerHour ?? 30, 60 * 60_000, now);
   const allowIpRefresh = limiter(options.refreshesPerIpPerHour ?? 30, 60 * 60_000, now);
+  // Agent keys: only a key the book has never seen counts against its address.
+  const agentKeys = options.agentKeys;
+  const allowNewAgentKey = limiter(agentKeys?.newPerIpPerHour ?? 10, 60 * 60_000, now);
+  const allowNewAgentKeyGlobal = limiter(agentKeys?.newPerHour ?? 200, 60 * 60_000, now);
+  const agentTokenTtl = agentKeys?.tokenTtlSeconds ?? 3600;
 
   // Accounts (src/accounts.ts). Opened once at boot; if that fails the approval page answers 503 and the rest of
   // OAuth (discovery, registration, refresh) keeps working.
@@ -765,10 +851,19 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
 
   // Single-use and revocation bookkeeping. Entries live until the artifact itself expires. Durable when replayDir
   // is set (production: <MCP_STATE_DIR>/oauth), so a restart cannot resurrect a spent or revoked token.
+  // Each agent set opens on its own: one that can't turns agent sign-in and agent requests off (503), never chat sign-in.
+  const make = (name: string, cap: number, whenFull?: "evict" | "refuse"): ExpiringSet =>
+    options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec, whenFull) : memoryExpiringSet(cap, nowSec, whenFull);
+  const agentSet = (name: string, cap: number): ExpiringSet | undefined => {
+    try {
+      return make(name, cap, "refuse");
+    } catch (e) {
+      log({ event: "oauth_replay_state_unavailable", set: name, error: (e as Error)?.name ?? "error" });
+      return undefined;
+    }
+  };
   let replay: { usedCodes: ExpiringSet; usedRefreshTokens: ExpiringSet; revokedFamilies: ExpiringSet } | undefined;
   try {
-    const make = (name: string, cap: number): ExpiringSet =>
-      options.replayDir ? durableExpiringSet(options.replayDir, name, cap, nowSec) : memoryExpiringSet(cap, nowSec);
     replay = {
       usedCodes: make("used-codes", 100_000),
       usedRefreshTokens: make("used-refresh", 200_000),
@@ -777,11 +872,20 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
   } catch (e) {
     log({ event: "oauth_replay_state_unavailable", error: (e as Error)?.name ?? "error" });
   }
+  // Spent agent client assertions, keyed sha256(fingerprint:jti), each until the assertion's own exp. Full, it refuses
+  // new ones rather than drop a spent one that is still valid.
+  const usedAssertionSet = agentKeys ? agentSet("used-assertions", agentKeys.spentAssertionsCap ?? 100_000) : undefined;
+  // Spent DPoP proofs (RFC 9449), keyed sha256(jkt:jti), each until iat + 61 s. Refuses when full, like the assertions.
+  const usedDpopProofSet = agentKeys ? agentSet("used-dpop", agentKeys.spentDpopCap ?? 200_000) : undefined;
 
-  const mcpPaths: readonly string[] = [...MCP_PATHS, ...(options.chatPaths ?? [])];
+  const mcpPaths: readonly string[] = [...MCP_PATHS, ...(options.extraPaths ?? []), ...(options.chatPaths ?? [])];
   const chatResources = new Set((options.chatPaths ?? []).map((p) => `${base}${p}`));
   /** A sign-in started by a chat endpoint's 401 (its resource): the create page needs no name. */
   const fromChat = (request: RequestBlob): boolean => request.rs !== undefined && chatResources.has(request.rs);
+  const autoLogResources = new Set((options.autoLogPaths ?? []).map((p) => `${base}${p}`));
+  /** Whether the endpoint this sign-in is for logs by default. No endpoint named: only with SHADOW_AUTO_LOG, as it may be one that does. */
+  const logsByDefault = (request: RequestBlob): boolean =>
+    request.rs === undefined || request.rs === `${base}/` ? options.autoLog === true : autoLogResources.has(request.rs);
   const resourceHrefs = new Set([`${base}/`, ...mcpPaths.map((p) => `${base}${p}`)]);
   /** undefined = absent; null = not one of ours; else the normalized href. */
   function resourceParam(values: string[]): string | undefined | null {
@@ -799,6 +903,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
 
   const ipOf = (req: IncomingMessage): string =>
     clientBucket(standaloneClientIp(req.headers, req.socket.remoteAddress, options.trustedProxy));
+  /** A new agent key's source (agent-keys/book.ts): a keyed hash of its address, so only the hash is ever kept. */
+  const sourceOf = (req: IncomingMessage): string =>
+    createHmac("sha256", options.signingSecret).update(`agent-key-source:v1\0${ipOf(req)}`, "utf8").digest("hex").slice(0, 32);
 
   function rateLimited(surface: string): void {
     options.onRateLimited?.();
@@ -842,16 +949,20 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
 
   // ---- discovery ----------------------------------------------------------
 
+  // An agent's client assertion names this exact URL as its audience, so staging and production never accept each
+  // other's assertions.
+  const tokenEndpoint = `${base}/oauth/token`;
   const serverMetadata = {
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,
-    token_endpoint: `${base}/oauth/token`,
+    token_endpoint: tokenEndpoint,
     registration_endpoint: `${base}/oauth/register`,
     response_types_supported: ["code"],
     response_modes_supported: ["query"],
-    grant_types_supported: ["authorization_code", "refresh_token"],
+    grant_types_supported: ["authorization_code", "refresh_token", ...(agentKeys ? ["client_credentials"] : [])],
     code_challenge_methods_supported: ["S256"],
-    token_endpoint_auth_methods_supported: ["none"],
+    token_endpoint_auth_methods_supported: ["none", ...(agentKeys ? ["private_key_jwt"] : [])],
+    ...(agentKeys ? { token_endpoint_auth_signing_alg_values_supported: ["EdDSA"], dpop_signing_alg_values_supported: ["EdDSA"] } : {}),
     authorization_response_iss_parameter_supported: true,
     service_documentation: `${base}/llms.txt`,
   };
@@ -1000,7 +1111,8 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       ...(o.error ? { error: o.error } : {}),
       ...(o.keyOpen ? { keyOpen: true } : {}),
       ...(fromChat(request) ? { oneClick: true } : {}),
-      ...(options.autoLog ? { autoLog: true } : {}),
+      ...(logsByDefault(request) ? { autoLog: true } : {}),
+      ...(options.shadowAsked ? { shadowAsked: true } : {}),
     }));
   }
 
@@ -1211,7 +1323,7 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         key: created.key,
         requestToken,
         grant,
-        ...(options.autoLog ? { autoLog: true } : {}),
+        ...(logsByDefault(request) ? { autoLog: true } : {}),
       }));
       return;
     }
@@ -1291,6 +1403,117 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
     }, { "cache-control": "no-store", pragma: "no-cache" });
   }
 
+  /**
+   * client_credentials with an RFC 7523 client assertion and an RFC 9449 DPoP proof from the same key (MCP_AGENT_KEYS=1):
+   * both proofs first, then single use of each, then the book; the token is bound to the key (`cnf.jkt`). A key that is replaced or revoked is refused; a key the book has never seen is admitted only within
+   * its address's hourly allowance, with a keyed hash of that address as its source. Every step from the replay check to
+   * the response is synchronous, so single use holds under concurrency. No refresh token: the agent signs a new assertion
+   * instead. Logs carry only the 16-hex agent id and the outcome, never the assertion or the token.
+   */
+  function agentGrant(req: IncomingMessage, res: ServerResponse, params: Map<string, string>, keys: NonNullable<OAuthOptions["agentKeys"]>): void {
+    const usedAssertions = usedAssertionSet;
+    const usedDpopProofs = usedDpopProofSet;
+    if (!usedAssertions || !usedDpopProofs) {
+      // Without durable replay state a spent assertion could come back after a restart: refuse closed.
+      sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
+      return;
+    }
+    const refuse = (outcome: string, description: string, agentId?: string): void => {
+      log({ event: "oauth_agent_token_refused", outcome, ...(agentId ? { agent_id: agentId } : {}) });
+      sendOAuthError(res, 401, "invalid_client", description);
+    };
+    if (params.get("client_assertion_type") !== "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" || !params.has("client_assertion")) {
+      refuse("no_assertion", "Send client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer and a client_assertion signed with your agent key.");
+      return;
+    }
+    let proven: { publicKeyPem: string; jti: string; exp: number };
+    try {
+      proven = keys.proof.verify({ assertion: params.get("client_assertion") as string, audience: tokenEndpoint, nowSec: nowSec() });
+    } catch (e) {
+      // The proof's reasons never echo the assertion.
+      if (e instanceof AgentKeyError) return refuse("bad_proof", e.message);
+      throw e;
+    }
+    // RFC 7523 §3: a client_id, when sent, names the assertion's issuer (the key's thumbprint).
+    const jkt = jwkThumbprintOfPem(proven.publicKeyPem);
+    if (params.has("client_id") && params.get("client_id") !== jkt) {
+      return refuse("client_id_mismatch", "client_id must be the assertion's iss (your key's thumbprint), or left out.");
+    }
+    const refuseDpop = (description: string): void => {
+      log({ event: "oauth_agent_token_refused", outcome: "bad_dpop" });
+      sendOAuthError(res, 400, "invalid_dpop_proof", description);
+    };
+    let dpop: ReturnType<typeof verifyDpopProof>;
+    try {
+      dpop = verifyDpopProof({ proof: req.headers.dpop, htm: "POST", htu: tokenEndpoint, nowSec: nowSec() });
+    } catch (e) {
+      // The verifier's reasons never echo the proof.
+      if (e instanceof AgentKeyError) return refuseDpop(e.message);
+      throw e;
+    }
+    if (dpop.jkt !== jkt) return refuseDpop("Sign the DPoP proof with the same key as the client assertion.");
+    const fp = fingerprint(proven.publicKeyPem);
+    const replayKey = sha256b64url(`${fp}:${proven.jti}`);
+    if (usedAssertions.has(replayKey)) {
+      refuse("replayed", "This client assertion was already used. Sign a new one with a fresh jti.");
+      return;
+    }
+    if (usedDpopProofs.has(dpop.replayKey)) return refuseDpop("This DPoP proof was already used.");
+    const full = (set: string): void => {
+      log({ event: "oauth_replay_state_full", set });
+      sendOAuthError(res, 503, "temporarily_unavailable", "Clockchain is taking too many agent sign-ins right now. Try again in a minute.", { "retry-after": "60" });
+    };
+    // Room in both sets first, so a sign-in refused for it admits no key and spends no new-key allowance.
+    if (usedDpopProofs.full()) return full("used-dpop");
+    if (usedAssertions.full()) return full("used-assertions");
+    let entry: KeyEntry;
+    try {
+      const known = keys.book.get(fp);
+      if (known && known.status !== "active") {
+        refuse(`key_${known.status}`, known.status === "revoked" ? "This agent key was cancelled." : "This agent key was replaced. Sign with the new key.", known.root.slice(0, 16));
+        return;
+      }
+      if (!known && !allowNewAgentKey(`agent-key:${ipOf(req)}`)) {
+        rateLimited("agent_key");
+        sendOAuthError(res, 429, "temporarily_unavailable", "Too many new agent keys from this address. Try again later, or reuse a key you already have.", { "retry-after": "3600" });
+        return;
+      }
+      if (!known && !allowNewAgentKeyGlobal("agent-key:all")) {
+        rateLimited("agent_key_global");
+        sendOAuthError(res, 429, "temporarily_unavailable", "Clockchain isn't taking new agent keys right now. Try again later, or reuse a key you already have.", { "retry-after": "3600" });
+        return;
+      }
+      // A known key's sign-in is recorded (one write), so the unused-key sweep can't remove it while its first session starts.
+      entry = known ? keys.book.signedIn(fp) : keys.book.admit(proven.publicKeyPem, sourceOf(req)).entry;
+    } catch {
+      log({ event: "oauth_agent_keys_unavailable" });
+      sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
+      return;
+    }
+    // The proof first: a refused assertion write then leaves only a spent proof, and the agent signs a new one.
+    let set = "used-dpop";
+    try {
+      usedDpopProofs.add(dpop.replayKey, dpop.replayExp);
+      set = "used-assertions";
+      usedAssertions.add(replayKey, proven.exp);
+    } catch (e) {
+      if (e instanceof ReplayStateFullError) return full(set);
+      log({ event: "oauth_replay_state_write_failed" });
+      sendOAuthError(res, 503, "temporarily_unavailable", "The token service is unavailable. Try again shortly.", { "retry-after": "60" });
+      return;
+    }
+    const agentId = entry.root.slice(0, 16);
+    const { token: accessToken } = mintAgentToken(options.signingSecret, agentTokenTtl, nowSec(), randomUUID(), fp, dpop.jkt);
+    log({ event: "oauth_token_issued", grant: "client_credentials", agent_id: agentId });
+    sendJson(res, 200, {
+      access_token: accessToken,
+      token_type: "DPoP",
+      expires_in: agentTokenTtl,
+      agent_id: agentId,
+      key_filed: entry.filing.state === "filed",
+    }, { "cache-control": "no-store", pragma: "no-cache" });
+  }
+
   async function token(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!allowTokenCall(`token:${ipOf(req)}`)) {
       rateLimited("token");
@@ -1312,6 +1535,8 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       sendOAuthError(res, 400, "invalid_request", "Malformed body, or a parameter appears more than once.");
       return;
     }
+    // An agent authenticates with its own key, not a registered client_id.
+    if (agentKeys && params.get("grant_type") === "client_credentials") return agentGrant(req, res, params, agentKeys);
 
     // Public clients send client_id in the body; tolerate HTTP Basic carrying it (no secret exists).
     let clientId = params.get("client_id");
@@ -1389,13 +1614,17 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
         sendOAuthError(res, 400, "invalid_grant", "The authorization code was already used.");
         return;
       }
+      if (accounts?.isDeleted(code.acct)) {
+        sendOAuthError(res, 400, "invalid_grant", "This Clockchain account was deleted.");
+        return;
+      }
       if (!mark(usedCodes, code.jti, code.exp)) return;
       issueTokens(res, "authorization_code", { cid, n: client.n, acct: code.acct, rs: code.rs ?? resource, fam: code.jti });
       return;
     }
     if (grant === "refresh_token") {
       const refresh = unseal<RefreshBlob>("refresh", params.get("refresh_token"));
-      if (!refresh || !safeEqual(refresh.cid, cid) || revokedFamilies.has(refresh.fam)) {
+      if (!refresh || !safeEqual(refresh.cid, cid) || revokedFamilies.has(refresh.fam) || accounts?.isDeleted(refresh.acct)) {
         sendOAuthError(res, 400, "invalid_grant", "The refresh token is invalid, expired, or revoked.");
         return;
       }
@@ -1476,6 +1705,9 @@ export function createOAuthHandler(options: OAuthOptions): OAuthHandler {
       return true;
     },
     accounts,
+    usedAssertions: usedAssertionSet,
+    usedDpopProofs: usedDpopProofSet,
+    allowNewAgentKey: agentKeys ? () => allowNewAgentKeyGlobal("agent-key:all") : undefined,
     challenge(path, tokenPresented) {
       if (!mcpPaths.includes(path)) return undefined;
       const metadataUrl = `${base}/.well-known/oauth-protected-resource${path}`;

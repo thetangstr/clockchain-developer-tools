@@ -185,6 +185,12 @@ export type Entitlement =
       plan: Plan;
     }
   | {
+      /** An agent signed in with its own key (MCP_AGENT_KEYS): the Starter plan, which never reaches KEEPER_TOOLS. */
+      kind: "authenticated";
+      reason: "agent_key";
+      plan: "starter";
+    }
+  | {
       kind: "anonymous_trial";
       sessionId: string;
       ephemeralDid: string;
@@ -219,6 +225,17 @@ export function buildAccountRequired(
   return { error: "account_required", reason, tool, upgradeUrl, claim, message };
 }
 
+/** Why a Starter (agent key) caller can't run a keeper tool. There is no trial session, so no claim to forward. */
+export interface StarterLimitBody {
+  error: "not_on_starter";
+  tool: string;
+  message: string;
+}
+
+const STARTER_LIMIT_MESSAGE =
+  "This tool isn't part of the Starter plan an agent's own key gets. It keeps, shares or exports records, or sets " +
+  "timers and alarms that run later on Clockchain's credits. A signed-in Clockchain account can use it.";
+
 /**
  * The MCP tool-result shape (mirrors `ok`/`fail` in tools.ts) so the gate can
  * return a structured tool error without importing the SDK. `isError: true`
@@ -227,12 +244,12 @@ export function buildAccountRequired(
 export interface ToolErrorResult {
   isError: true;
   content: { type: "text"; text: string }[];
-  /** Structured payload mirrored for programmatic clients (the HTTP 402 body). */
-  structuredContent: AccountRequiredBody;
+  /** Structured payload mirrored for programmatic clients (the HTTP 402 body, or a Starter refusal). */
+  structuredContent: AccountRequiredBody | StarterLimitBody;
 }
 
-/** Wrap an account-required body as a structured MCP tool error (LLD §6.2). */
-export function keeperToolError(body: AccountRequiredBody): ToolErrorResult {
+/** Wrap an account-required body (or a Starter refusal) as a structured MCP tool error (LLD §6.2). */
+export function keeperToolError(body: AccountRequiredBody | StarterLimitBody): ToolErrorResult {
   return {
     isError: true,
     content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
@@ -261,21 +278,31 @@ export interface KeeperGate {
  * Build the keeper gate for a resolved entitlement.
  *
  *   - authenticated  -> no gate (every tool allowed; LLD §6.1/§13).
+ *   - agent_key (Starter) -> keeper tools refused with a plain message; no claim.
  *   - anonymous_trial -> keeper tools blocked with a structured 402 carrying a
  *     freshly-minted, forwardable claim (LLD §6.2). Generation/read tools below
  *     the ceiling always pass.
  *
  * `mintClaimFor()` returns the forwardable claim token for THIS session; it is
  * called lazily (only when a keeper tool is actually hit) so non-keeper calls
- * never pay the signing cost.
+ * never pay the signing cost. Only an anonymous trial needs it.
  */
 export function buildKeeperGate(
   entitlement: Entitlement,
-  mintClaimFor: () => string | Promise<string>,
+  mintClaimFor?: () => string | Promise<string>,
 ): KeeperGate {
+  if (entitlement.kind === "authenticated" && entitlement.reason === "agent_key") {
+    return {
+      async check(tool: string): Promise<ToolErrorResult | undefined> {
+        if (!classifyTool(tool).keeper) return undefined;
+        return keeperToolError({ error: "not_on_starter", tool, message: STARTER_LIMIT_MESSAGE });
+      },
+    };
+  }
   if (entitlement.kind === "authenticated") {
     return { check: async () => undefined };
   }
+  if (!mintClaimFor) throw new Error("buildKeeperGate: an anonymous trial gate needs mintClaimFor");
   return {
     async check(tool: string): Promise<ToolErrorResult | undefined> {
       if (!classifyTool(tool).keeper) return undefined;

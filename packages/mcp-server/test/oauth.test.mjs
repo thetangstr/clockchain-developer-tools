@@ -1084,7 +1084,9 @@ test("CORS: * without credentials on metadata, register and token only; never on
 const SECURE_CLEAR = "__Host-cc_acct=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax";
 const keyHashOf = (key) => createHash("sha256").update(key).digest("hex");
 const codeOf = (res) => new URL(res.headers.get("location")).searchParams.get("code");
-const tokenAcct = (issued) => verifyToken(SECRET, issued.body.access_token).payload.acct;
+// Checks the signature and shape but not the expiry (nowSec 0): harness() runs on a fixed clock (2 Nov 2026), so its
+// 7-day tokens would read as expired against the real clock from 9 Nov 2026. Expiry has its own tests.
+const tokenAcct = (issued) => verifyToken(SECRET, issued.body.access_token, 0).payload.acct;
 
 test("accounts: a second app in the same browser, and a key sign-in from a new browser, get the same acct", async () => {
   const s = await boot({ MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC });
@@ -1401,7 +1403,7 @@ test("accounts: every page states what the app may do, and every account page an
     const signedIn = await openConsent(h.url, { cookie: person.cookie });
     const tools = /can use Clockchain’s testnet tools on this account: recording, anchoring and timestamps\./;
     const pool = /Its writes are paid from Clockchain’s free testnet pool, not by you\./;
-    const shadow = /<li>ChatGPT can read and add to every Shadow record in this account, including records made from other apps\.<\/li>/;
+    const shadow = /<li>ChatGPT can read, add to and delete every Shadow record in this account, including records made from other apps, and can delete the account\.<\/li>/;
     // The create page (with the key sign-in form) and the signed-in Approve page both say it plainly.
     for (const page of [fresh, signedIn]) {
       assert.match(page.html, tools);
@@ -2101,7 +2103,7 @@ const CHAT_CHALLENGE = `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-pr
 const chatOn = (extra = {}) => ({ ...shadowOn(), MCP_OAUTH: "1", MCP_PUBLIC_URL: PUBLIC, SHADOW_LAZY_AUTH: "1", ...extra });
 const rpc = (method, params, id = 1) => ({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, ...(params ? { params } : {}) });
 const callTool = (name, args = {}) => rpc("tools/call", { name, arguments: args });
-const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_signup_help", "clockchain_whoami"];
+const ACCOUNT_TOOLS = ["clockchain_create_account", "clockchain_delete_account", "clockchain_log_level", "clockchain_signup_help", "clockchain_whoami"];
 
 /** A tool call on the chat endpoint with a token. Every raw result is pushed to `seen`, for the secret scan. */
 async function chatTool(base, token, name, args, seen) {
@@ -2174,7 +2176,7 @@ test("chat sign-in on: initialize, tools/list and ping work without a token; eve
     assert.deepEqual((await rpcResult(await mcpPost(s.url, rpc("ping"), {}, CHAT))).result, {});
     const tools = (await rpcResult(await mcpPost(s.url, rpc("tools/list"), {}, CHAT))).result.tools.map((t) => t.name).sort();
     assert.deepEqual(tools.filter((n) => n.startsWith("clockchain_")), ACCOUNT_TOOLS);
-    assert.equal(tools.length, 10, "the seven Shadow tools and the three account tools");
+    assert.equal(tools.length, 14, "the nine Shadow tools and the five account tools");
 
     // The 401 every refused request gets on /shadow/mcp, with the chat path's metadata URL instead.
     const expected = await snapshot(await mcpPost(s.url, callTool("shadow_start_session", { title: "x" }), {}, "/shadow/mcp"));
@@ -2256,10 +2258,10 @@ test("chat sign-in, as claude.ai does it: tools/list, create_account -> 401 -> o
       await chatTool(s.url, person.token, name, args, seen);
     }
     assert.match(seen.at(-2), /shown only in that window/);
-    // The same token on /shadow/mcp: the same account and sessions, and no account tools there.
+    // The same token on /shadow/mcp: the same account and sessions, and of the account tools only the one to leave and the logging level.
     const plainTools = (await rpcResult(await mcpPost(s.url, rpc("tools/list"), { authorization: `Bearer ${person.token}` }, "/shadow/mcp"))).result.tools.map((t) => t.name);
-    assert.equal(plainTools.length, 7);
-    assert.equal(plainTools.some((n) => n.startsWith("clockchain_")), false);
+    assert.equal(plainTools.length, 11);
+    assert.deepEqual(plainTools.filter((n) => n.startsWith("clockchain_")).sort(), ["clockchain_delete_account", "clockchain_log_level"]);
     assert.equal((await shadowCall(s.url, "shadow_get_session", { session_id: started.value.session_id }, person.token)).isError, false);
 
     // The scan: no account key, access or refresh token, cookie, code, grant or request token in any tool result,

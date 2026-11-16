@@ -138,11 +138,19 @@ test("the mcp service carries the handshake v2 receipts env and compose-up reads
   }
 });
 
+test("/metrics: the token reaches the mcp service from an optional SSM secret, so absent means the route stays 404", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  assert.match(mcpBlock, /^\s+MCP_METRICS_TOKEN:\s*"\$\{MCP_METRICS_TOKEN:-\}"\s*$/m);
+  assert.match(up, /^read_optional_secret MCP_METRICS_TOKEN \/clockchain\/mcp\/MCP_METRICS_TOKEN$/m);
+});
+
 test("hosted Shadow: the mcp service carries SHADOW_* (empty default = off) and compose-up reads each optionally", async () => {
   const source = await readFile(composeFile, "utf8");
   const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
   const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
-  for (const name of ["SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_MAX_BYTES", "SHADOW_ACCOUNT_MAX_BYTES", "SHADOW_SESSION_STARTS_PER_DAY", "SHADOW_LINK_CONCURRENCY", "SHADOW_LAZY_AUTH", "SHADOW_ANON_PER_MINUTE", "SHADOW_AUTO_LOG", "SHADOW_ANCHORS_PER_DAY", "SHADOW_ANCHORS_PER_SESSION", "SHADOW_LOG_STEPS_PER_MIN", "MCP_BYO_WRITES"]) {
+  for (const name of ["SHADOW_NETWORK", "MCP_MAX_OPEN_STREAMS", "MCP_MAINNET_FREE_TOKENS", "SHADOW_IDLE_CLOSE_HOURS", "SHADOW_ENABLED", "SHADOW_STATE_DIR", "SHADOW_MAX_BYTES", "SHADOW_ACCOUNT_MAX_BYTES", "SHADOW_SESSION_STARTS_PER_DAY", "SHADOW_LINK_CONCURRENCY", "SHADOW_LAZY_AUTH", "SHADOW_ANON_PER_MINUTE", "SHADOW_AUTO_LOG", "SHADOW_ANCHORS_PER_DAY", "SHADOW_ANCHORS_PER_SESSION", "SHADOW_LOG_STEPS_PER_MIN", "SHADOW_PREVIEW_AUTO_LOG", "SHADOW_LEDGER_CLIENT_ID", "SHADOW_LEDGER_WALLET_ID", "OPENAI_APPS_CHALLENGE_TOKEN", "MCP_BYO_WRITES"]) {
     assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
     assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
     assert.doesNotMatch(up, new RegExp(`^read_(secret|optional_secret|required_env) ${name} `, "m"), name);
@@ -232,4 +240,72 @@ test("H-REQ-01: the enrollment key reaches only mcp; the relay binding (default 
 test("the comment on SHADOW_AUTO_LOG states the defaults the server uses", async () => {
   const text = (await readFile(composeFile, "utf8")).replace(/\s*#\s*/g, " ");
   assert.match(text, /anchors default to 400 per account per day and 300 per session \(without it, 60 and 100\), and shadow_log_step to 90 calls per account per minute/);
+});
+
+// Agent keys (packages/mcp-server/src/oauth.ts, src/shadow/service.ts): each setting reaches only the mcp service with an
+// empty default, and the server reads "" exactly like unset (MCP_AGENT_KEYS "" = off; a limit "" = its default).
+const AGENT_KEY_ENV_NAMES = [
+  "MCP_AGENT_KEYS",
+  "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR",
+  "MCP_AGENT_KEYS_NEW_PER_HOUR",
+  "SHADOW_STARTER_ANCHORS_PER_DAY",
+  "SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY",
+];
+
+test("agent keys: the mcp service carries the five settings (empty default = off) and compose-up reads each optionally", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  for (const name of AGENT_KEY_ENV_NAMES) {
+    assert.match(mcpBlock, new RegExp(`^\\s+${name}:\\s*"\\$\\{${name}:-\\}"\\s*$`, "m"), `mcp environment must carry ${name}`);
+    assert.equal(source.match(new RegExp(`^\\s+${name}:`, "gm"))?.length, 1, `${name} reaches only mcp`);
+    assert.match(up, new RegExp(`^read_optional_env ${name} /clockchain/mcp/${name}$`, "m"), `compose-up must read ${name} optionally`);
+    assert.doesNotMatch(up, new RegExp(`^\\s*(export ${name}=|read_(secret|optional_secret|required_env) ${name} )`, "m"), name);
+  }
+});
+
+// The witness key (SHADOW_WITNESS_KEY_FILE): with /clockchain/mcp/SHADOW_WITNESS_KEY absent there is no mount, no mount
+// source and no value. compose-up.sh writes the key file and adds docker-compose.witness.yml only when the parameter exists.
+test("witness key: empty in the base file; only the override sets the fixed path and mounts the key read-only", async () => {
+  const source = await readFile(composeFile, "utf8");
+  const mcpBlock = source.slice(source.indexOf("  mcp:"), source.indexOf("  host:"));
+  assert.match(mcpBlock, /^\s+SHADOW_WITNESS_KEY_FILE:\s*"\$\{SHADOW_WITNESS_KEY_FILE:-\}"\s*$/m);
+  assert.equal(source.match(/^\s+SHADOW_WITNESS_KEY_FILE:/gm)?.length, 1);
+  assert.doesNotMatch(source, /\/app\/witness|clockchain-mcp-witness|CLOCKCHAIN_MCP_WITNESS_DIR/, "the base file never mounts the witness key");
+  const mcpVolumes = mcpBlock.slice(mcpBlock.indexOf("    volumes:"), mcpBlock.indexOf("    expose:"));
+  assert.deepEqual(mcpVolumes.match(/^\s+- .+$/gm)?.map((l) => l.trim()), ["- mcp_state:/app/state"]);
+
+  const override = await readFile(new URL("../clockchain-mcp/docker-compose.witness.yml", import.meta.url), "utf8");
+  const body = override.replace(/^\s*#.*$/gm, "").replace(/\n\s*\n/g, "\n").trim();
+  assert.equal(
+    body,
+    [
+      "services:",
+      "  mcp:",
+      "    environment:",
+      "      SHADOW_WITNESS_KEY_FILE: /app/witness/witness-key.pem",
+      "    volumes:",
+      "      - ${CLOCKCHAIN_MCP_WITNESS_DIR:-/run/clockchain-mcp-witness}:/app/witness:ro",
+    ].join("\n"),
+    "the override touches only mcp: the fixed in-container path and one read-only mount",
+  );
+});
+
+test("witness key: compose-up reads the key optionally, never takes the path from SSM, and adds the override only with the key", async () => {
+  const up = await readFile(new URL("../clockchain-mcp/compose-up.sh", import.meta.url), "utf8");
+  assert.match(up, /^SHADOW_WITNESS_KEY_PARAM="\$\{SHADOW_WITNESS_KEY_PARAM:-\/clockchain\/mcp\/SHADOW_WITNESS_KEY\}"$/m);
+  assert.match(up, /^CLOCKCHAIN_MCP_WITNESS_DIR="\$\{CLOCKCHAIN_MCP_WITNESS_DIR:-\/run\/clockchain-mcp-witness\}"$/m);
+  // The path is fixed by the override; an inherited value can never point mcp at a file that isn't mounted.
+  assert.match(up, /^unset SHADOW_WITNESS_KEY_FILE$/m);
+  assert.doesNotMatch(up, /read_[a-z_]+ SHADOW_WITNESS_KEY_FILE|export SHADOW_WITNESS_KEY_FILE|SHADOW_WITNESS_KEY_FILE=/);
+  assert.doesNotMatch(up, /^read_(secret|optional_secret|optional_env) SHADOW_WITNESS_KEY\b/m, "the PEM is never exported into the environment");
+  assert.match(up, /^materialize_witness_key$/m);
+  const fn = up.slice(up.indexOf("materialize_witness_key() {"), up.indexOf("\n}\n", up.indexOf("materialize_witness_key() {")));
+  assert.match(fn, /ParameterNotFound/);
+  assert.match(fn, /COMPOSE_FILES\+=\(-f "\$WITNESS_COMPOSE_FILE"\)/);
+  assert.equal(up.match(/COMPOSE_FILES\+=/g)?.length, 1, "the override is added in one place only");
+  // Both modes recreate mcp, so both use the same file list.
+  for (const line of up.split("\n").filter((l) => /exec docker compose/.test(l))) {
+    assert.match(line, /docker compose "\$\{COMPOSE_FILES\[@\]\}" up /, line);
+  }
 });

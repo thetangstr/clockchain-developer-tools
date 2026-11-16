@@ -1,0 +1,19 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "___DRAFT_WARNING": "DO NOT feed this file to mcp-publisher yet. Remove this key first, and publish only after the privacy, terms and support pages are live and production runs Shadow with SHADOW_AUTO_LOG unset. See infra/clockchain-mcp/RUNBOOK.md, \"Publishing to the MCP registry\".",
+  "name": "network.clockchain/shadow",
+  "title": "Clockchain Shadow",
+  "description": "A flight recorder for AI agents: a checkable record of a task you ask it to record. Testnet.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/thetangstr/clockchain-developer-tools",
+    "source": "github"
+  },
+  "websiteUrl": "https://mcp.clockchain.network",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.clockchain.network/shadow/mcp"
+    }
+  ]
+}

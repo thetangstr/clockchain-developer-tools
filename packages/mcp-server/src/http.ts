@@ -1,3 +1,4 @@
+import { FREE_TOKENS, NETWORK_PROBLEM, ON_MAINNET } from "./network.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
@@ -69,6 +70,7 @@ import { buildStandaloneDiscovery, clientBucket, createStandaloneHttpHandler, li
 import { createRuntimeStandaloneCoordinator } from "./standalone-handshake/coordinator.js";
 import { normalizeRelayBaseUrl } from "./handshake/relay.js";
 import { MetricsRegistry, bounded } from "./metrics.js";
+import { getSharedLogBudget } from "./budget.js";
 import { createStatusCache, type PerformanceSnapshot, type StatusDeps } from "./status.js";
 import { renderStatusPage } from "./status-page.js";
 import { V2_PUBLIC_TOOL_NAMES } from "./agent-handshake/v2/public-tools.js";
@@ -82,9 +84,16 @@ import {
 } from "./agent-contract/server-card.js";
 import { createContractEvidenceRoutes, createObserverFeedLimiter, parsePerMinute } from "./agent-contract/evidence-routes.js";
 import { diskBudgetProblem, loadShadowConfig, ShadowService } from "./shadow/service.js";
-import { createShadowHttpHandler, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
-import { runtimeShadowLedger } from "./shadow/ledger.js";
+import { createShadowHttpHandler, PREVIEW_CHAT_PATH, PREVIEW_PATH, publicBaseUrl, shadowOwnerFromClaims, type ShadowAuth } from "./shadow/mcp.js";
+import { runtimeShadowLedger, shadowLedgerIdentity } from "./shadow/ledger.js";
+import { loadWitnessKey } from "./shadow/witness.js";
+import { fingerprint } from "./shadow/lib/keys.js";
 import { createOAuthHandler, loadOAuthConfig, type OAuthHandler } from "./oauth.js";
+import { AgentKeyBook, AgentKeyError, type KeyEntry } from "./agent-keys/book.js";
+import { verifyDpopProof } from "./agent-keys/dpop.js";
+import { ReplayStateFullError } from "./oauth-replay.js";
+import { jwtBearerProof } from "./agent-keys/proof.js";
+import { createAgentKeyRoutes } from "./agent-keys/routes.js";
 import { isOversizedBatch, writeBatchTooLarge } from "./jsonrpc-limits.js";
 
 /**
@@ -112,20 +121,17 @@ const firstHeader = (h: string | string[] | undefined): string =>
 export const pathOf = (url: string | undefined): string => (url ?? "").split("?")[0];
 
 /**
- * Best-effort client IP for rate limiting. Behind the GCP load balancer / Cloud
- * Run, the socket's remote address is a Google proxy IP (identical for every
- * caller), so keying limits on it would create a single global bucket. The real
- * client is the first entry of `X-Forwarded-For`. This is for abuse mitigation,
- * not auth — XFF is client-spoofable, but spoofing only rotates the rate-limit
- * key, and actual tool usage is independently capped per token + at the gateway.
+ * Client IP for rate limiting. `X-Forwarded-For` is honoured only when the TCP
+ * peer is the configured reverse proxy (`MCP_OAUTH_TRUSTED_PROXY`); from anyone
+ * else it is a client-controlled header and is ignored, so a caller cannot dodge
+ * per-address limits by faking it.
  */
 export function clientIp(
-  headers: Record<string, string | string[] | undefined>,
+  headers: IncomingHttpHeaders,
   remoteAddr: string | undefined,
+  trustedProxy?: string,
 ): string {
-  const xff = firstHeader(headers["x-forwarded-for"]);
-  const first = xff.split(",")[0]?.trim();
-  return first || remoteAddr || "unknown";
+  return standaloneClientIp(headers, remoteAddr, trustedProxy);
 }
 
 /**
@@ -184,10 +190,18 @@ export function matchStaticToken(
   return apiKey.length > 0 && tokens.includes(apiKey) ? apiKey : undefined;
 }
 
+/** The token in `Authorization: DPoP <token>` (RFC 9449 §7.1), or "". */
+export function presentedDpopToken(headers: { authorization?: string | string[] }): string {
+  const dpop = /^DPoP\s+(\S+)$/i.exec(firstHeader(headers.authorization));
+  return dpop ? dpop[1] : "";
+}
+
 /**
  * The credential the caller presented as an MCP token — the `x-api-key` value or
- * the `Authorization: Bearer <token>` value (x-api-key wins if both are set).
- * Empty string when neither is present. Used by the forgiving auth fallback.
+ * the `Authorization: Bearer <token>` value (x-api-key wins if both are set), else
+ * a signed Clockchain token under the DPoP scheme (an agent's). Never any other
+ * DPoP value, so the scheme can't reach the bring-your-own-key fallback.
+ * Empty string when none is present. Used by the forgiving auth fallback.
  */
 export function presentedApiKey(
   headers: { authorization?: string | string[]; "x-api-key"?: string | string[] },
@@ -195,7 +209,9 @@ export function presentedApiKey(
   const apiKey = firstHeader(headers["x-api-key"]).trim();
   if (apiKey) return apiKey;
   const bearer = /^Bearer\s+(.+)$/i.exec(firstHeader(headers.authorization));
-  return bearer ? bearer[1].trim() : "";
+  if (bearer) return bearer[1].trim();
+  const dpop = presentedDpopToken(headers);
+  return looksLikeSelfServe(dpop) ? dpop : "";
 }
 
 /**
@@ -383,6 +399,12 @@ export function createRateLimiter(perMin: number, windowMs = 60_000) {
       e.count += cost;
       return { allowed: true, limit: perMin, remaining: perMin - e.count, resetAt: e.resetAt };
     },
+    /** The refusal allow() would give `key` for one unit now, without charging anything; undefined while it has room. */
+    peek(key: string, now: number = Date.now()): RateLimitResult | undefined {
+      const e = hits.get(key);
+      if (perMin <= 0 || !e || now >= e.resetAt || e.count + 1 <= perMin) return undefined;
+      return { allowed: false, limit: perMin, remaining: Math.max(0, perMin - e.count), resetAt: e.resetAt };
+    },
   };
 }
 
@@ -537,11 +559,11 @@ export function writeMcpUnauthorized(res: ServerResponse, challenge?: Record<str
       auth: {
         // Two co-equal credential types — using the wrong header is the #1
         // cause of a 401 here (a Clockchain key sent as x-api-key is rejected).
-        mcpToken: {
+        ...(FREE_TOKENS ? { mcpToken: {
           header: "x-api-key",
           getToken: "POST https://mcp.clockchain.network/token",
-          note: "instant self-serve testnet token (shared pool) — POST /token to mint one",
-        },
+          note: `instant self-serve ${ON_MAINNET ? "trial" : "testnet"} token (shared pool) — POST /token to mint one`,
+        } } : {}),
         bringYourOwnKey: {
           headers: ["x-clockchain-api-key", "x-clockchain-client-id", "x-clockchain-wallet-id"],
           note:
@@ -587,6 +609,10 @@ export async function runHttp(): Promise<Server> {
     );
   }
 
+  let openMcpStreams = 0;
+  const maxStreamsRaw = Number(process.env.MCP_MAX_OPEN_STREAMS ?? "");
+  const maxOpenMcpStreams = Number.isInteger(maxStreamsRaw) && maxStreamsRaw > 0 ? maxStreamsRaw : 200;
+
   const perMin = Number(process.env.MCP_RATE_PER_MIN ?? "0");
   const limiter = createRateLimiter(Number.isFinite(perMin) ? perMin : 0);
 
@@ -598,6 +624,7 @@ export async function runHttp(): Promise<Server> {
   // unauthenticated, so keying on it would let an attacker rotate `sub` to escape
   // the ceiling and drain the shared budget (per-user auth).
   const signingSecret = process.env.MCP_TOKEN_SIGNING_SECRET ?? "";
+  if (NETWORK_PROBLEM) throw new Error(NETWORK_PROBLEM);
   const selfServeEnabled = signingSecret.length > 0;
   const mintPerHour = Number(process.env.MCP_TOKEN_MINT_PER_HOUR ?? "10");
   const mintLimiter = createRateLimiter(
@@ -616,13 +643,28 @@ export async function runHttp(): Promise<Server> {
   // needed" connectors: it connects and lists tools without a token, and its first tool call starts sign-in. A
   // separate path, so /shadow/mcp (ChatGPT, Claude Code, "Sign in now" connectors) is untouched. Off: no such path.
   const shadowAtStart = loadShadowConfig(process.env);
-  const shadowAutoLog = shadowAtStart.enabled && shadowAtStart.autoLog === true;
+  const shadowAutoLog = shadowAtStart.enabled && shadowAtStart.autoLogOnMainPaths === true;
+  const shadowPreview = shadowAtStart.enabled && shadowAtStart.previewAutoLog === true;
   const shadowChatPath = (process.env.SHADOW_LAZY_AUTH ?? "").trim() === "1" && shadowAtStart.enabled && oauthConfig.kind === "ready"
     ? "/shadow/chat/mcp"
     : undefined;
+  // SHADOW_PREVIEW_AUTO_LOG=1: the hand-added endpoints with logging on by default. Nothing else about the server changes.
+  const shadowPreviewChatPath = shadowPreview && shadowChatPath ? PREVIEW_CHAT_PATH : undefined;
   if (oauthConfig.kind === "misconfigured") {
     console.error(`[clockchain-mcp] OAuth misconfigured (routes off): ${oauthConfig.reason}`);
   }
+  if (shadowAutoLog) {
+    console.warn(JSON.stringify({ event: "shadow_auto_log_on_listed_paths", note: "SHADOW_AUTO_LOG=1 puts logging on by default on /shadow/mcp and /shadow/chat/mcp. Directories list those paths: use SHADOW_PREVIEW_AUTO_LOG=1 on a listed server" }));
+  }
+  // A bad agent-keys value leaves OAuth up and only agent keys off; say so as loudly as OAuth's own misconfiguration.
+  if (oauthConfig.kind === "ready" && oauthConfig.agentKeysProblem) {
+    console.error(`[clockchain-mcp] agent keys misconfigured (off): ${oauthConfig.agentKeysProblem}`);
+  }
+  // Agent keys (MCP_AGENT_KEYS=1, with OAuth on): the public book of agents' Ed25519 public keys, one file per key under
+  // ${MCP_STATE_DIR:-/app/state}/agent-keys. One instance for the whole server. Off: no book, and nothing reads one.
+  const agentKeyBook: AgentKeyBook | undefined = oauthConfig.kind === "ready" && oauthConfig.agentKeys?.enabled
+    ? new AgentKeyBook({ dir: oauthConfig.agentKeys.dir, now: () => new Date() })
+    : undefined;
   const oauth: OAuthHandler | undefined = oauthConfig.kind === "ready"
     ? createOAuthHandler({
         signingSecret,
@@ -636,9 +678,18 @@ export async function runHttp(): Promise<Server> {
         cookieName: oauthConfig.cookieName,
         replayDir: oauthConfig.replayDir,
         ...(oauthConfig.trustedProxy ? { trustedProxy: oauthConfig.trustedProxy } : {}),
-        ...(shadowChatPath ? { chatPaths: [shadowChatPath] } : {}),
-        // SHADOW_AUTO_LOG=1: every sign-in page says plainly that logging is on by default once connected.
+        ...(agentKeyBook && oauthConfig.agentKeys
+          ? { agentKeys: { book: agentKeyBook, proof: jwtBearerProof(), newPerIpPerHour: oauthConfig.agentKeys.newPerIpPerHour, newPerHour: oauthConfig.agentKeys.newPerHour, tokenTtlSeconds: oauthConfig.agentKeys.tokenTtl } }
+          : {}),
+        ...(shadowChatPath ? { chatPaths: shadowPreviewChatPath ? [shadowChatPath, shadowPreviewChatPath] : [shadowChatPath] } : {}),
+        ...(shadowPreview ? { extraPaths: [PREVIEW_PATH] } : {}),
+        // Every sign-in page says plainly how logging works for the endpoint it signs in to.
         ...(shadowAutoLog ? { autoLog: true } : {}),
+        autoLogPaths: [
+          ...(shadowAutoLog ? ["/shadow/mcp", ...(shadowChatPath ? [shadowChatPath] : [])] : []),
+          ...(shadowPreview ? [PREVIEW_PATH, ...(shadowPreviewChatPath ? [shadowPreviewChatPath] : [])] : []),
+        ],
+        ...(shadowAtStart.enabled ? { shadowAsked: true } : {}),
         onRateLimited: () => rlEvents.inc({ surface: bounded("oauth", RL_SURFACES) }),
       })
     : undefined;
@@ -815,7 +866,7 @@ export async function runHttp(): Promise<Server> {
     "sign_evidence", "evidence_submitted", "certificate_available",
   ] as const;
   const DEP_NAMES = ["relay_discovery", "relay_result", "gateway_pool", "evm_rpc"] as const;
-  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call", "oauth"] as const;
+  const RL_SURFACES = ["handshake_call", "handshake_invite", "token_mint", "chain_verify", "mcp_call", "contract_call", "oauth", "agent_keys"] as const;
 
   const httpRequests = metrics.counter("clockchain_http_requests_total", "HTTP requests by route class and status class.");
   const httpDuration = metrics.histogram("clockchain_http_request_duration_seconds", "HTTP request duration by route class.");
@@ -831,6 +882,17 @@ export async function runHttp(): Promise<Server> {
   const depDuration = metrics.histogram("clockchain_dependency_probe_seconds", "Dependency probe latency by probe.");
   const rlEvents = metrics.counter("clockchain_rate_limit_events_total", "Rate-limit rejections by surface.");
   const uptimeGauge = metrics.gauge("process_uptime_seconds", "Process uptime in seconds.");
+  // Launch operations (infra/clockchain-mcp/alerts.md). Totals only, with no owner, session or account in a label.
+  const logBudgetUsed = metrics.gauge("clockchain_log_budget_used", "Ledger writes by /mcp tools on our delegated key since this process started (MCP_LOG_BUDGET counts these; a restart resets it). Shadow has its own count.");
+  const logBudgetLimit = metrics.gauge("clockchain_log_budget_limit", "MCP_LOG_BUDGET: delegated-key ledger writes by /mcp tools allowed per process. 0 means no cap.");
+  const shadowLogBudgetUsed = metrics.gauge("clockchain_shadow_log_budget_used", "Hosted Shadow's ledger writes since this process started (its own count at MCP_LOG_BUDGET; a restart resets it).");
+  const shadowLogBudgetLimit = metrics.gauge("clockchain_shadow_log_budget_limit", "MCP_LOG_BUDGET again: hosted Shadow's ledger writes allowed per process. 0 means no cap.");
+  const oauthAccounts = metrics.gauge("clockchain_oauth_accounts", "Clockchain accounts on disk.");
+  const oauthAccountsCap = metrics.gauge("clockchain_oauth_accounts_cap", "The most accounts allowed; new sign-ups are refused at it.");
+  const shadowStateBytes = metrics.gauge("clockchain_shadow_state_bytes", "Bytes hosted Shadow holds on disk, measured at the last retention sweep and kept current by appends.");
+  const shadowStateBytesCap = metrics.gauge("clockchain_shadow_state_bytes_cap", "SHADOW_MAX_BYTES: new sessions are refused at it, new steps at 125% of it.");
+  const shadowAnchorsOwed = metrics.gauge("clockchain_shadow_anchors_owed", "Anchors sessions still owe Clockchain: queued, pending (written, no block yet) or failed (given up).");
+  const shadowSweepAge = metrics.gauge("clockchain_shadow_last_sweep_age_seconds", "Seconds since the last retention sweep finished. Absent while Shadow is off or failed to start: nothing is being deleted then.");
 
   function classifyRoute(method: string | undefined, url: string | undefined, accept: string): string {
     const p = pathOf(url);
@@ -1074,31 +1136,172 @@ export async function runHttp(): Promise<Server> {
   // a v:2 trial token marks the request as an ANONYMOUS TRIAL and carries the
   // ephemeral DID + channel. Returns the verified payload (when that is how auth
   // passed) so the caller can rate-limit on the token's `jti` WITHOUT re-verifying.
+  // An agent-key token (`akf`, from the client_credentials grant) is an agent on the Starter plan, with `agentRoot`
+  // the root key that owns its records; its key must still be active in the book.
+  // A token bound to a key (`cnf`, every agent token) needs the DPoP scheme and a valid, unspent proof from that key;
+  // `dpopRefused` is the reason (never echoing the proof), `dpopScheme` whether the DPoP scheme was used.
   type AuthOutcome =
     | { ok: false }
+    | { ok: false; agentKeyCancelled: true }
+    | { ok: false; dpopRefused: string; dpopScheme: boolean }
+    | { ok: false; unavailable: true; full: boolean }
+    | { ok: false; rateLimited: RateLimitResult }
     | { ok: true; reason: "static_token" }
     | { ok: true; reason: "demo_token_v1"; payload: TokenPayload }
+    | { ok: true; reason: "agent_key"; payload: TokenPayload; agentRoot: string }
     | { ok: true; scope: HandshakeSessionTokenPayload }
     | { ok: true; trial: TrialTokenPayload };
+  // A token's agent key in the public book (MCP_AGENT_KEYS on). A replaced or revoked key's tokens stop at once, since
+  // replacing usually follows a compromise: the agent signs in again with its current key, whose tokens own the same
+  // records through the shared root. A key missing from the book, or a book that can't be read, is refused too.
+  // Agent keys off: no book, and an akf token is an ordinary demo token, as before (undefined here).
+  const agentKeyOf = (payload: Pick<TokenPayload, "akf">): { root: string } | "cancelled" | "unusable" | undefined => {
+    if (!agentKeyBook || payload.akf === undefined) return undefined;
+    let entry: KeyEntry | null;
+    try {
+      entry = agentKeyBook.get(payload.akf);
+    } catch (e) {
+      console.error(JSON.stringify({ event: "agent_key_book_unreadable", error: (e as Error)?.name ?? "error" }));
+      return "unusable";
+    }
+    if (!entry) return "unusable";
+    return entry.status === "active" ? { root: entry.root } : "cancelled";
+  };
+  // RFC 9449 at the resource (D1-c): a token with `cnf`, an agent token, or any token under the DPoP scheme must come as
+  // "Authorization: DPoP <token>" with a proof for this method and URL (MCP_PUBLIC_URL plus the path), signed by the key
+  // in `cnf`, with `ath` for this token, used once. Undefined when that holds (the proof is then spent) or doesn't apply.
+  const dpopRefusal = (req: IncomingMessage, presented: string, payload: Pick<TokenPayload, "cnf" | "akf" | "acct">): AuthOutcome | undefined => {
+    const dpopScheme = presentedDpopToken(req.headers) === presented;
+    if (payload.cnf === undefined && !(agentKeyBook && payload.akf !== undefined) && !dpopScheme) return undefined;
+    const refused = (reason: string): AuthOutcome => {
+      console.error(JSON.stringify({ event: "agent_dpop_refused", path: pathOf(req.url) }));
+      return { ok: false, dpopRefused: reason, dpopScheme };
+    };
+    if (!dpopScheme) return refused('This agent token is bound to your key: send it as "Authorization: DPoP <token>" with a DPoP proof on every request.');
+    if (payload.cnf === undefined || oauthConfig.kind !== "ready") {
+      return refused(payload.akf !== undefined ? "This agent token isn't bound to a key. Sign in again for a new one." : "Only an agent token bound to a key can be sent with DPoP.");
+    }
+    let proof: ReturnType<typeof verifyDpopProof>;
+    try {
+      proof = verifyDpopProof({
+        proof: req.headers.dpop, htm: req.method ?? "", htu: `${oauthConfig.publicUrl}${pathOf(req.url)}`,
+        nowSec: Math.floor(Date.now() / 1000), accessToken: presented,
+      });
+    } catch (e) {
+      if (e instanceof AgentKeyError) return refused(e.message);
+      throw e;
+    }
+    if (proof.jkt !== payload.cnf.jkt) return refused("The DPoP proof is signed by another key than the one this token is bound to.");
+    // The agent's own rate bucket (the one /mcp and /shadow charge) before the proof is spent, so a flood that gets 429
+    // doesn't fill the proof set.
+    const agent = payload.acct === undefined ? agentKeyOf(payload) : undefined;
+    if (typeof agent === "object") {
+      const limited = limiter.peek(callerPrincipalId(req.headers, clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy), `ak:${agent.root}`));
+      if (limited) return { ok: false, rateLimited: limited };
+    }
+    const spent = oauth?.usedDpopProofs;
+    // Agent keys off: no token is taken with a key. On, but the proof set couldn't open: refuse closed.
+    if (!spent) return agentKeyBook ? { ok: false, unavailable: true, full: false } : refused("This server isn't taking agent tokens.");
+    if (spent.has(proof.replayKey)) return refused("This DPoP proof was already used. Send a new one with every request.");
+    try {
+      spent.add(proof.replayKey, proof.replayExp);
+    } catch (e) {
+      const full = e instanceof ReplayStateFullError;
+      console.error(JSON.stringify({ event: full ? "agent_dpop_replay_state_full" : "agent_dpop_replay_state_write_failed" }));
+      return { ok: false, unavailable: true, full };
+    }
+    return undefined;
+  };
+  // Once per request: the 401 paths ask again, and must neither spend a proof twice nor log a second refusal.
+  const authOutcomes = new WeakMap<IncomingMessage, AuthOutcome>();
   const checkAuth = (req: IncomingMessage): AuthOutcome => {
+    let outcome = authOutcomes.get(req);
+    if (!outcome) {
+      outcome = verifyAuth(req);
+      authOutcomes.set(req, outcome);
+    }
+    return outcome;
+  };
+  const verifyAuth = (req: IncomingMessage): AuthOutcome => {
     if (isAuthorized(req.headers, tokens)) return { ok: true, reason: "static_token" };
     if (!selfServeEnabled) return { ok: false };
     const presented = presentedApiKey(req.headers);
     if (!looksLikeSelfServe(presented)) return { ok: false };
     const v1 = verifyToken(signingSecret, presented);
-    if (v1.valid) return { ok: true, reason: "demo_token_v1", payload: v1.payload };
+    // A token is signed and holds no state, so a deleted account's token is refused by name, on every surface.
+    if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
+    // Off with free keys (network.ts): a token with no account behind it spends the server's own credits. Accounts' tokens keep working.
+    if (v1.valid && !FREE_TOKENS && !v1.payload.acct) return { ok: false };
+    if (v1.valid) {
+      const refusal = dpopRefusal(req, presented, v1.payload);
+      if (refusal) return refusal;
+      const agent = agentKeyOf(v1.payload);
+      if (agent === "cancelled") return { ok: false, agentKeyCancelled: true };
+      if (agent === "unusable") return { ok: false };
+      // An account's claim keeps precedence: such a token is the account's, as before.
+      if (agent && !v1.payload.acct) return { ok: true, reason: "agent_key", payload: v1.payload, agentRoot: agent.root };
+      return { ok: true, reason: "demo_token_v1", payload: v1.payload };
+    }
     const v2 = verifyTrialToken(signingSecret, presented);
-    if (v2.valid) return { ok: true, trial: v2.payload };
+    if (v2.valid && !FREE_TOKENS) return { ok: false };
+    // Neither has cnf, so neither may come under the DPoP scheme (refused as an account token is).
+    if (v2.valid) return dpopRefusal(req, presented, {}) ?? { ok: true, trial: v2.payload };
     const v3 = verifyHandshakeSessionToken(signingSecret, presented);
-    if (v3.valid) return { ok: true, scope: v3.payload };
+    if (v3.valid) return dpopRefusal(req, presented, {}) ?? { ok: true, scope: v3.payload };
     return { ok: false };
   };
+
+  // Public by design: OpenAI reads it to confirm we control this hostname. Printable, no spaces, or it stays off.
+  const openaiChallengeRaw = (process.env.OPENAI_APPS_CHALLENGE_TOKEN ?? "").trim();
+  const openaiChallengeToken = /^[\x21-\x7e]{1,1024}$/.test(openaiChallengeRaw) ? openaiChallengeRaw : "";
+  if (openaiChallengeRaw && !openaiChallengeToken) {
+    console.error(JSON.stringify({ event: "openai_challenge_token_ignored", note: "OPENAI_APPS_CHALLENGE_TOKEN must be 1 to 1024 printable characters with no spaces; the route stays off" }));
+  }
+
+  // SHADOW_LEDGER_CLIENT_ID / _WALLET_ID, refused in a caller's x-clockchain-client-id / -wallet-id on every MCP request.
+  // The gateway checks only that a request is signed by this server, so this server is what keeps /mcp callers from
+  // writing under Shadow's name. In any letter case: a look-alike would read the same on the ledger.
+  const shadowLedgerIds = new Set(Object.values(shadowLedgerIdentity() ?? {}).map((v) => v.toLowerCase()));
+  const namesShadowLedgerIdentity = (headers: IncomingMessage["headers"]): boolean =>
+    shadowLedgerIds.size > 0 && ["x-clockchain-client-id", "x-clockchain-wallet-id"].some((h) => shadowLedgerIds.has(firstHeader(headers[h]).trim().toLowerCase()));
 
   // One 401 for /mcp and /shadow/mcp. With OAuth on it adds that path's RFC 9728
   // WWW-Authenticate challenge (plus error="invalid_token" when a credential was
   // presented and refused); with OAuth off it is the original response, byte for byte.
   const mcpUnauthorized = (res: ServerResponse, req?: IncomingMessage): void =>
     writeMcpUnauthorized(res, oauth && req ? oauth.challenge(pathOf(req.url), presentedApiKey(req.headers) !== "") : undefined);
+  // A token whose agent key was replaced or revoked, on /mcp and the /shadow MCP paths: a 401 that says so plainly.
+  const agentKeyCancelledUnauthorized = (res: ServerResponse, req: IncomingMessage): void => {
+    res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store", ...oauth?.challenge(pathOf(req.url), true) });
+    res.end(JSON.stringify({ error: "invalid_token", message: "This agent key was cancelled or replaced. Use a key that is still active." }));
+  };
+  // An agent token without a good DPoP proof (401, RFC 9449 §7.1: a DPoP challenge, then the path's Bearer one), or a
+  // proof set that is full or can't be written (503). In the same places as the cancelled-key 401.
+  const agentDpopRefused = (res: ServerResponse, req: IncomingMessage, auth: AuthOutcome): boolean => {
+    if (auth.ok) return false;
+    if ("rateLimited" in auth) {
+      rlEvents.inc({ surface: bounded("mcp_call", RL_SURFACES) });
+      const headers = rateLimitHeaders(auth.rateLimited);
+      res.writeHead(429, { "content-type": "application/json", ...headers });
+      res.end(JSON.stringify({ error: "rate_limited", retry_after_seconds: Number(headers["Retry-After"]) }));
+      return true;
+    }
+    if ("unavailable" in auth) {
+      res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store", "retry-after": "60" });
+      res.end(JSON.stringify({
+        error: "temporarily_unavailable",
+        message: auth.full ? "Clockchain is taking too many agent requests right now. Try again in a minute." : "Clockchain can't check agent requests right now. Try again shortly.",
+      }));
+      return true;
+    }
+    if (!("dpopRefused" in auth)) return false;
+    const error = auth.dpopScheme ? "invalid_dpop_proof" : "invalid_token";
+    const bearer = oauth?.challenge(pathOf(req.url), true)?.["www-authenticate"];
+    const challenge = `DPoP algs="EdDSA", error="${error}"${bearer ? `, ${bearer}` : ""}`;
+    res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store", "www-authenticate": challenge });
+    res.end(JSON.stringify({ error, message: auth.dpopRefused }));
+    return true;
+  };
 
   // ---- /shadow/* (hosted Shadow) -------------------------------------------
   // Off unless SHADOW_ENABLED=1: then every /shadow path answers 404 and nothing
@@ -1109,6 +1312,8 @@ export async function runHttp(): Promise<Server> {
   // and a handshake session token (scoped to one handshake) is refused.
   let shadowHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined;
   let shadowService: ShadowService | undefined;
+  /** /.well-known/clockchain-witness-key.json: Clockchain's published witness key, set once SHADOW_WITNESS_KEY_FILE loads. */
+  let witnessKeyBody: string | undefined;
   const shadowLinkLimit = keyedWindowLimiter(Number(process.env.SHADOW_LINKS_PER_MINUTE || "60"), 60_000, Date.now);
   // Discovery before sign-in on the chat endpoint, per client (generous: claude.ai calls from shared egress).
   const shadowAnonymousLimit = keyedWindowLimiter(Number(process.env.SHADOW_ANON_PER_MINUTE || "600"), 60_000, Date.now);
@@ -1135,13 +1340,18 @@ export async function runHttp(): Promise<Server> {
   // A 401 on /shadow/*: the same status and challenge as /mcp's, but /mcp's body sends an agent to x-api-key and POST
   // /token, whose key Shadow then refuses. With OAuth on, it says what works here. With OAuth off: /mcp's, unchanged.
   const shadowUnauthorized = (res: ServerResponse, req?: IncomingMessage): void => {
+    if (req && agentKeyBook) {
+      const auth = checkAuth(req);
+      if (!auth.ok && "agentKeyCancelled" in auth) return agentKeyCancelledUnauthorized(res, req);
+      if (agentDpopRefused(res, req, auth)) return;
+    }
     if (!oauth || !req || oauthConfig.kind !== "ready") return mcpUnauthorized(res, req);
     const base = oauthConfig.publicUrl;
     res.writeHead(401, { "content-type": "application/json", ...oauth.challenge(pathOf(req.url), presentedApiKey(req.headers) !== "") });
     res.end(JSON.stringify({
       error: "unauthorized",
       message:
-        "Hosted Shadow needs a signed-in Clockchain account (free, no email). Add this endpoint to your MCP client as a " +
+        `Hosted Shadow needs a signed-in Clockchain account (${ON_MAINNET ? "" : "free, "}no email). Add this endpoint to your MCP client as a ` +
         "connector or remote MCP server with OAuth sign-in; the client starts sign-in from this response's " +
         "WWW-Authenticate header. A key from POST /token or an MCP token does not work here.",
       endpoint: `${base}${pathOf(req.url)}`,
@@ -1153,35 +1363,45 @@ export async function runHttp(): Promise<Server> {
   const shadowAccountRequired = (res: ServerResponse, req: IncomingMessage): void => {
     const base = publicBaseUrl(req.headers);
     const headers: Record<string, string> = { "content-type": "application/json", "cache-control": "no-store" };
-    const challenge = oauth?.challenge(pathOf(req.url) === shadowChatPath ? shadowChatPath : "/shadow/mcp", false)?.["www-authenticate"];
+    // The endpoint the request reached: every /shadow MCP path has its own challenge, so a client signs in to that one.
+    const endpoint = [shadowChatPath, ...(shadowPreview ? [PREVIEW_PATH, shadowPreviewChatPath] : [])].includes(pathOf(req.url)) ? pathOf(req.url) : "/shadow/mcp";
+    const challenge = oauth?.challenge(endpoint, false)?.["www-authenticate"];
     if (challenge) headers["www-authenticate"] = `${challenge}, error="insufficient_scope", error_description="sign in with a Clockchain account"`;
     res.writeHead(403, headers);
     res.end(JSON.stringify({
       error: "account_required",
       message:
-        "Hosted Shadow keeps records for signed-in accounts only. Connect " + `${base}${pathOf(req.url) === shadowChatPath ? shadowChatPath : "/shadow/mcp"}` + " with sign-in " +
+        "Hosted Shadow keeps records for signed-in accounts only. Connect " + `${base}${endpoint}` + " with sign-in " +
         "(OAuth): add it as a connector or remote MCP server in your client and approve the Clockchain sign-in page. " +
         "A token from POST /token or a static MCP token is not accepted here.",
       sign_in_available: oauth !== undefined,
       instructions: `${base}/shadow/connect`,
     }));
   };
+  // An agent's own key (ak:<root fingerprint>, MCP_AGENT_KEYS on) is an owner here like a signed-in account.
+  const AGENT_OWNER = /^ak:[0-9a-f]{64}$/;
   const shadowAuthenticate = (req: IncomingMessage): ShadowAuth => {
     const auth = shadowResolveOwner(req);
-    if (!auth.ok || shadowAllowNonAcct || ACCT_PATTERN.test(auth.ownerId)) return auth;
+    if (!auth.ok || shadowAllowNonAcct || ACCT_PATTERN.test(auth.ownerId) || AGENT_OWNER.test(auth.ownerId)) return auth;
     return { ok: false, accountRequired: true };
   };
   const shadowResolveOwner = (req: IncomingMessage): ShadowAuth => {
-    const ip = clientIp(req.headers, req.socket.remoteAddress);
+    const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
     const presented = presentedApiKey(req.headers);
-    const signed = (claims: { jti?: string; acct?: string }): ShadowAuth => ({
-      ok: true,
-      ownerId: shadowOwnerFromClaims(claims, presented),
-      rateKey: callerPrincipalId(req.headers, ip, signedTokenSubject(claims)),
-    });
+    // An agent's every token shares its root key's rate bucket, as it shares the root's records.
+    // An agent owner's token also names the key it was issued for, which signs the agent's checkpoints.
+    const signed = (claims: { jti?: string; acct?: string; akf?: string }, agentRoot?: string): ShadowAuth => {
+      const ownerId = shadowOwnerFromClaims(claims, presented, agentRoot);
+      return {
+        ok: true,
+        ownerId,
+        rateKey: callerPrincipalId(req.headers, ip, agentRoot ? `ak:${agentRoot}` : signedTokenSubject(claims)),
+        ...(AGENT_OWNER.test(ownerId) && typeof claims.akf === "string" ? { agentKey: claims.akf } : {}),
+      };
+    };
     const auth = checkAuth(req);
     if (!auth.ok || "scope" in auth) return { ok: false };
-    if ("payload" in auth) return signed(auth.payload);
+    if ("payload" in auth) return signed(auth.payload, "agentRoot" in auth ? auth.agentRoot : undefined);
     if ("trial" in auth) return signed(auth.trial);
     const matched = matchStaticToken(req.headers, tokens);
     if (matched) {
@@ -1196,9 +1416,15 @@ export async function runHttp(): Promise<Server> {
     if (!presented) return { ok: false };
     if (looksLikeSelfServe(presented)) {
       const v1 = verifyToken(signingSecret, presented);
-      if (v1.valid) return signed(v1.payload);
+      if (v1.valid && oauth?.accounts?.isDeleted(v1.payload.acct)) return { ok: false };
+      if (v1.valid) {
+        if (dpopRefusal(req, presented, v1.payload)) return { ok: false };
+        const agent = agentKeyOf(v1.payload);
+        if (agent === "cancelled" || agent === "unusable") return { ok: false };
+        return signed(v1.payload, agent && !v1.payload.acct ? agent.root : undefined);
+      }
       const v2 = verifyTrialToken(signingSecret, presented);
-      if (v2.valid) return signed(v2.payload);
+      if (v2.valid) return dpopRefusal(req, presented, {}) ? { ok: false } : signed(v2.payload);
       return { ok: false };
     }
     return { ok: true, ownerId: `open:${createHash("sha256").update(presented).digest("hex")}`, rateKey: callerPrincipalId(req.headers, ip) };
@@ -1209,6 +1435,12 @@ export async function runHttp(): Promise<Server> {
       // SHADOW_LINK_CONCURRENCY). A malformed one, or a global cap above half the state filesystem's free space,
       // keeps Shadow from starting: every /shadow path then answers 503 and the reason is logged.
       if (shadowConfig.problem) throw Object.assign(new Error(shadowConfig.problem), { name: "ShadowConfigError" });
+      // SHADOW_WITNESS_KEY_FILE: an existing PKCS8 Ed25519 private key, provisioned like any other secret. Set, it signs
+      // signed-in accounts' checkpoints; a file that won't load is a ShadowConfigError. Unset: a key per owner, as before.
+      const witnessFile = (process.env.SHADOW_WITNESS_KEY_FILE ?? "").trim();
+      const witness = witnessFile ? loadWitnessKey(witnessFile) : undefined;
+      if (witness) witnessKeyBody = JSON.stringify({ publicKey: witness.publicKey(), fingerprint: fingerprint(witness.publicKey()) }, null, 2);
+      if (!shadowLedgerIdentity()) console.error(JSON.stringify({ event: "shadow_writer_is_delegated", note: "SHADOW_LEDGER_CLIENT_ID and SHADOW_LEDGER_WALLET_ID are unset, so Shadow's ledger entries carry the delegated client and wallet." }));
       const service = new ShadowService({
         stateDir: shadowConfig.stateDir,
         network: shadowConfig.network,
@@ -1217,6 +1449,9 @@ export async function runHttp(): Promise<Server> {
         budget: () => shadowBudget,
         limits: shadowConfig.limits,
         ...(shadowConfig.autoLog ? { autoLog: true } : {}),
+        ...(witness ? { witness } : {}),
+        // The same book the token endpoint admits keys to: an agent's checkpoint signatures are checked against it.
+        ...(agentKeyBook ? { agentKeys: agentKeyBook } : {}),
       });
       const disk = diskBudgetProblem(shadowConfig.stateDir, shadowConfig.limits.maxStateBytes);
       if (disk) throw Object.assign(new Error(disk), { name: "ShadowConfigError" });
@@ -1242,8 +1477,16 @@ export async function runHttp(): Promise<Server> {
         },
         linkClient: shadowLinkClient,
         allowLink: (req) => shadowLinkLimit(`shadowlink:${shadowLinkClient(req)}`),
+        ...(shadowPreview ? { preview: true } : {}),
+        ...(oauth?.accounts ? { accounts: oauth.accounts } : {}),
+        ...(agentKeyBook && oauthConfig.kind === "ready" ? { agentKeysBase: oauthConfig.publicUrl } : {}),
         ...(shadowConfig.autoLog ? {
           autoLog: {
+            // Per endpoint: only these paths get the logging tools and instructions.
+            paths: new Set<string>([
+              ...(shadowAutoLog ? ["/shadow/mcp", ...(shadowChatPath ? [shadowChatPath] : [])] : []),
+              ...(shadowPreview ? [PREVIEW_PATH, ...(shadowPreviewChatPath ? [shadowPreviewChatPath] : [])] : []),
+            ]),
             accounts: oauth?.accounts,
             allowLogStep: (rateKey: string) => shadowLogStepLimit(`shadowlogstep:${rateKey}`),
             stepsPerMinute: shadowLogStepsPerMinute,
@@ -1272,8 +1515,27 @@ export async function runHttp(): Promise<Server> {
   // The discovery files name Shadow only where a person can use it: it started, and sign-in is on (it takes signed-in
   // accounts only). Anything else serves the plain files, byte for byte. URLs come from MCP_PUBLIC_URL, never the Host.
   const shadowPublicUrl = shadowHandler && oauthConfig.kind === "ready" ? oauthConfig.publicUrl : undefined;
-  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : INSTALL_TXT;
+  // With agent keys on (the book exists only then), the Shadow section also says how an agent signs in with its own key.
+  const installBody = shadowPublicUrl ? installTxtWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog, agentKeyBook ? shadowPublicUrl : undefined) : INSTALL_TXT;
   const manifestBody = JSON.stringify(shadowPublicUrl ? manifestWithShadow(shadowPublicUrl, shadowChatPath, shadowAutoLog) : MCP_MANIFEST, null, 2);
+
+  // The public book's routes (MCP_AGENT_KEYS=1): lookups, and replace and revoke signed by the agent's own key, filed on
+  // Clockchain through hosted Shadow's ledger (Shadow off: a change stands and its filing waits). Assertions name each
+  // action's URL under MCP_PUBLIC_URL, as the token grant's name its token_endpoint, and share its spent-assertion set.
+  const agentKeyRoutes = agentKeyBook && oauth && oauthConfig.kind === "ready"
+    ? createAgentKeyRoutes({
+        book: agentKeyBook,
+        proof: jwtBearerProof(),
+        usedAssertions: oauth.usedAssertions,
+        ...(oauth.allowNewAgentKey ? { allowNewKey: oauth.allowNewAgentKey } : {}),
+        publicUrl: oauthConfig.publicUrl,
+        ipOf: (req) => clientBucket(standaloneClientIp(req.headers, req.socket.remoteAddress, oauthConfig.trustedProxy)),
+        readJsonBody,
+        ...(shadowService ? { file: shadowService.fileAgentKeyEvent.bind(shadowService) } : {}),
+        lookupsPerMinute: Number(process.env.SHADOW_ANON_PER_MINUTE || "600"),
+        onRateLimited: () => rlEvents.inc({ surface: bounded("agent_keys", RL_SURFACES) }),
+      })
+    : undefined;
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const requestStarted = Date.now();
@@ -1415,8 +1677,37 @@ export async function runHttp(): Promise<Server> {
       }
       pruneSessions(Date.now()); // refresh inflight even with no new tool calls
       uptimeGauge.set({}, (Date.now() - processStartedAtMs) / 1000);
+      const budget = getSharedLogBudget().usage?.();
+      if (budget) {
+        logBudgetUsed.set({}, budget.used);
+        logBudgetLimit.set({}, budget.limit ?? 0);
+      }
+      if (oauth?.accounts) {
+        oauthAccounts.set({}, oauth.accounts.count());
+        oauthAccountsCap.set({}, oauth.accounts.cap);
+      }
+      if (shadowService) {
+        const shadow = shadowService.stats();
+        const shadowWrites = shadowBudget.usage?.();
+        if (shadowWrites) {
+          shadowLogBudgetUsed.set({}, shadowWrites.used);
+          shadowLogBudgetLimit.set({}, shadowWrites.limit ?? 0);
+        }
+        shadowStateBytes.set({}, shadow.stateBytes);
+        shadowStateBytesCap.set({}, shadow.maxStateBytes);
+        for (const state of ["queued", "pending", "failed"] as const) shadowAnchorsOwed.set({ state }, shadow.anchors[state]);
+        if (shadow.lastSweepMs !== undefined) shadowSweepAge.set({}, (Date.now() - shadow.lastSweepMs) / 1000);
+      }
       res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8", "cache-control": "no-store" });
       res.end(metrics.collect());
+      return;
+    }
+
+    // OpenAI's domain check for a ChatGPT plugin: the exact token as plain text. Off unless OPENAI_APPS_CHALLENGE_TOKEN is
+    // set: this path then falls through to the usual handling, as if this block weren't here.
+    if ((req.method === "GET" || req.method === "HEAD") && openaiChallengeToken && pathOf(req.url) === "/.well-known/openai-apps-challenge") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "content-length": String(Buffer.byteLength(openaiChallengeToken)), "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(req.method === "HEAD" ? undefined : openaiChallengeToken);
       return;
     }
 
@@ -1438,6 +1729,19 @@ export async function runHttp(): Promise<Server> {
         "cache-control": "public, max-age=300",
       });
       res.end(manifestBody);
+      return;
+    }
+
+    // The public half of the witness key that signs signed-in accounts' Shadow checkpoints, for anyone to pin. No auth.
+    // Without SHADOW_WITNESS_KEY_FILE (or when it didn't load) there is none: 404.
+    if (req.method === "GET" && pathOf(req.url) === "/.well-known/clockchain-witness-key.json") {
+      if (witnessKeyBody === undefined) {
+        res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "no_witness_key" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=300" });
+      res.end(witnessKeyBody);
       return;
     }
 
@@ -1486,7 +1790,7 @@ export async function runHttp(): Promise<Server> {
         res.end(JSON.stringify({ error: "bad_request" }));
         return;
       }
-      const ip = clientIp(req.headers, req.socket.remoteAddress);
+      const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
       if (!allowChainVerify(`chainverify:${ip}`)) {
         rlEvents.inc({ surface: bounded("chain_verify", RL_SURFACES) });
         res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
@@ -1512,6 +1816,12 @@ export async function runHttp(): Promise<Server> {
     }
 
     if (pathOf(req.url) === "/connect/mcp") {
+      // Needs no token and writes with the delegated key, so with free keys off it is off too.
+      if (!FREE_TOKENS) {
+        res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ error: "not_enabled_here", message: "Handshake from this path isn't enabled on this network." }));
+        return;
+      }
       try {
         await getStandaloneHandshakeHandler()(req, res);
       } catch {
@@ -1654,6 +1964,17 @@ export async function runHttp(): Promise<Server> {
       return;
     }
 
+    // The public book of agent keys (public; replace and revoke are signed by the key). 404 when MCP_AGENT_KEYS is off.
+    if (pathOf(req.url) === "/agent-keys" || pathOf(req.url).startsWith("/agent-keys/")) {
+      if (agentKeyRoutes) {
+        await agentKeyRoutes(req, res);
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "not_found", error_description: "Agent keys are not on here." }));
+      return;
+    }
+
     // OAuth discovery, registration, consent and token routes (public, before
     // the landing page and auth). Absent when the flag is off.
     if (oauth && (await oauth.handle(req, res))) return;
@@ -1662,7 +1983,7 @@ export async function runHttp(): Promise<Server> {
     // token that grants the shared delegated key, so a brand-new user can connect
     // without their own Clockchain key. Off if no signing secret.
     if (req.method === "POST" && pathOf(req.url) === "/token") {
-      if (!selfServeEnabled) {
+      if (!selfServeEnabled || !FREE_TOKENS) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({
           error: "self_serve_disabled",
@@ -1673,7 +1994,7 @@ export async function runHttp(): Promise<Server> {
         }));
         return;
       }
-      const ip = clientIp(req.headers, req.socket.remoteAddress);
+      const ip = clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy);
       // ALWAYS enforce the per-IP abuse ceiling. This is the only guard on the
       // shared delegated-key budget, so it must be unconditional and never keyed
       // on attacker-controlled input. `sub` is NOT used here: rotating `sub` must
@@ -1774,7 +2095,7 @@ export async function runHttp(): Promise<Server> {
     // secret or allowlist) before production — anyone with a valid claim can flip
     // an account in demo mode. Off entirely when self-serve is disabled.
     if (req.method === "POST" && pathOf(req.url) === "/promote") {
-      if (!selfServeEnabled) {
+      if (!selfServeEnabled || !FREE_TOKENS) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({
           error: "self_serve_disabled",
@@ -1828,10 +2149,21 @@ export async function runHttp(): Promise<Server> {
       return;
     }
     let byo = clockchainOverrides(req.headers);
+    // Hosted Shadow's writer on the ledger belongs to Shadow: a bring-your-own caller may not name it (see below too).
+    if (namesShadowLedgerIdentity(req.headers)) {
+      res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "reserved_ledger_identity", message: "That client or wallet id is reserved for hosted Shadow, so this request was refused and nothing was written. Use your own." }));
+      return;
+    }
     // Verify auth ONCE here; reuse the verified self-serve payload below for the
     // rate-limit key so we don't HMAC-verify the token twice per request.
     const auth: AuthOutcome = byo ? { ok: true, reason: "static_token" } : checkAuth(req);
     if (!byo && !auth.ok) {
+      if ("agentKeyCancelled" in auth) {
+        agentKeyCancelledUnauthorized(res, req);
+        return;
+      }
+      if (agentDpopRefused(res, req, auth)) return;
       const presented = presentedApiKey(req.headers);
       // A malformed or expired signed-token-shaped credential must never fall
       // through as BYO: that would erase its session/role/tool restrictions.
@@ -1846,6 +2178,13 @@ export async function runHttp(): Promise<Server> {
       }
     }
 
+    // With free keys off, /mcp's delegated writes aren't open to free accounts either: they spend the server's credits, with no per-account limit there.
+    if (!FREE_TOKENS && !byo && auth.ok && "reason" in auth && (auth.reason === "demo_token_v1" || auth.reason === "agent_key")) {
+      res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "account_not_enabled_here", message: "On this network a signed-in account works on Shadow (/shadow/mcp), not on these tools." }));
+      return;
+    }
+
     // Per-tester rate limit (after auth so the key is the validated token). For a
     // self-serve token the key is its (already-verified) jti, so distinct tokens
     // get distinct buckets and a shared-egress public app isn't throttled as one
@@ -1856,7 +2195,9 @@ export async function runHttp(): Promise<Server> {
     const selfServeJti = byo || !auth.ok
       ? undefined
       : "payload" in auth
-        ? signedTokenSubject(auth.payload) // an OAuth token's account, else its jti
+        ? "agentRoot" in auth
+          ? `ak:${auth.agentRoot}` // an agent's root key: every token of the agent shares one bucket
+          : signedTokenSubject(auth.payload) // an OAuth token's account, else its jti
         : "trial" in auth
           ? auth.trial.jti
           : "scope" in auth
@@ -1864,7 +2205,7 @@ export async function runHttp(): Promise<Server> {
           : undefined;
     const effectiveCallerId = callerPrincipalId(
       req.headers,
-      clientIp(req.headers, req.socket.remoteAddress),
+      clientIp(req.headers, req.socket.remoteAddress, shadowTrustedProxy),
       selfServeJti,
       byo?.apiKey,
     );
@@ -1914,10 +2255,14 @@ export async function runHttp(): Promise<Server> {
         }
       }
 
-      // Resolve entitlement -> keeper gate (LLD §4.1 A1/A4). Only an anonymous
-      // TRIAL (v:2 trial token) gets a gate; BYO / static-token / v:1-demo
-      // callers are AUTHENTICATED and bypass the trial/keeper layer (LLD §13).
+      // Resolve entitlement -> keeper gate (LLD §4.1 A1/A4). An anonymous TRIAL
+      // (v:2 trial token) and an agent's own key (Starter) get a gate; BYO /
+      // static-token / v:1-demo callers are AUTHENTICATED and bypass the
+      // trial/keeper layer (LLD §13).
       let gate: KeeperGate | undefined;
+      if (!byo && auth.ok && "reason" in auth && auth.reason === "agent_key") {
+        gate = buildKeeperGate({ kind: "authenticated", reason: "agent_key", plan: "starter" });
+      }
       if (!byo && auth.ok && "trial" in auth) {
         const eph = auth.trial.eph;
         const channel = normalizeChannel(auth.trial.ch);
@@ -1957,6 +2302,16 @@ export async function runHttp(): Promise<Server> {
           return token;
         });
       }
+      // A held-open GET costs about 0.5 MB until it closes, so enough of them would exhaust the heap.
+      if (req.method === "GET") {
+        if (openMcpStreams >= maxOpenMcpStreams) {
+          res.writeHead(503, { "content-type": "application/json", "retry-after": "30" });
+          res.end(JSON.stringify({ error: "too_many_streams", message: "Too many open streams right now. Tool calls still work; try the stream again later." }));
+          return;
+        }
+        openMcpStreams += 1;
+        res.on("close", () => { openMcpStreams -= 1; });
+      }
       const server = buildServer(
         byo,
         gate,
@@ -1982,19 +2337,29 @@ export async function runHttp(): Promise<Server> {
     }
   });
 
+  // A reading every 10 minutes, because a crash from a full heap leaves no history of how it got there.
+  const memoryLog = setInterval(() => {
+    const m = process.memoryUsage();
+    console.error(JSON.stringify({ event: "process_memory", heapUsedMb: Math.round(m.heapUsed / 1048576), rssMb: Math.round(m.rss / 1048576), openMcpStreams }));
+  }, 10 * 60_000);
+  memoryLog.unref();
+  httpServer.on("close", () => clearInterval(memoryLog));
   httpServer.on("close", () => shadowService?.stop());
   await new Promise<void>((resolve) => {
     httpServer.listen(port, () => {
       console.error(`[clockchain-mcp] http server listening on :${port}`);
       console.error(
         `[clockchain-mcp] self-serve tokens: ${
-          selfServeEnabled
+          selfServeEnabled && FREE_TOKENS
             ? `ENABLED (POST /token, ${mintPerHour}/hour/IP, ${tokenTtlDays}d TTL)`
             : "DISABLED (set MCP_TOKEN_SIGNING_SECRET to enable POST /token)"
         }`,
       );
       if (oauthConfig.kind === "ready") {
         console.error(`[clockchain-mcp] OAuth sign-in: ENABLED (issuer ${oauthConfig.publicUrl}, ${oauthConfig.approvalsPerHour} approvals/hour/IP)`);
+        if (oauthConfig.agentKeys?.enabled) {
+          console.error(`[clockchain-mcp] agent keys: ENABLED (client_credentials, ${oauthConfig.agentKeys.newPerIpPerHour} new keys/hour/IP)`);
+        }
       }
       resolve();
     });

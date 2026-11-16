@@ -58,6 +58,14 @@ AGENT_HANDSHAKE_ACCEPTANCE_HMAC_PREVIOUS_PARAM="${AGENT_HANDSHAKE_ACCEPTANCE_HMA
 AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM="${AGENT_HANDSHAKE_V2_ENROLLMENT_KEY_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_V2_ENROLLMENT_KEY}"
 AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM="${AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_V2_RELAY_BINDING}"
 AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM="${AGENT_HANDSHAKE_V2_COORDINATOR_KEYS_PARAM:-/clockchain/mcp/AGENT_HANDSHAKE_V2_COORDINATOR_KEYS}"
+# Clockchain's witness key for hosted Shadow (optional SecureString PEM) and where compose-up.sh writes it on the host.
+SHADOW_WITNESS_KEY_PARAM="${SHADOW_WITNESS_KEY_PARAM:-/clockchain/mcp/SHADOW_WITNESS_KEY}"
+CLOCKCHAIN_MCP_WITNESS_DIR="${CLOCKCHAIN_MCP_WITNESS_DIR:-/run/clockchain-mcp-witness}"
+WITNESS_COMPOSE_FILE="${DEPLOY_DIR}/docker-compose.witness.yml"
+COMPOSE_FILES=(-f "$COMPOSE_FILE")
+# Only docker-compose.witness.yml sets SHADOW_WITNESS_KEY_FILE, together with its mount: an inherited value must never
+# point the mcp service at a file that isn't mounted.
+unset SHADOW_WITNESS_KEY_FILE
 SECRET_SENTINEL=$'\001clockchain-mcp-secret-end\001'
 
 fetch_secret() {
@@ -446,6 +454,59 @@ materialize_host_secrets() {
   export CLOCKCHAIN_FUNDING_PASSWORD_FILE=/app/keys/funding.password
 }
 
+# Clockchain's witness key (SHADOW_WITNESS_KEY_FILE in the mcp service). Absent in SSM: nothing is created, a copy left by
+# an earlier start is removed, and compose gets no override, so mcp has no mount and the variable stays "" (a key per
+# account, as before). Present: the PEM must be the Ed25519 PKCS#8 form the enrollment key above must be; it is written to
+# ${CLOCKCHAIN_MCP_WITNESS_DIR}/witness-key.pem (dir 0700, file 0400) and docker-compose.witness.yml is added, which
+# mounts that directory read-only at /app/witness and sets the variable. Runs in both modes, since both recreate mcp.
+# The value only passes through pipes (printf is a builtin) and that file; it is never exported or printed, and
+# refusals name the parameter only.
+materialize_witness_key() {
+  local error_file payload pem der_hex stage
+  # A stage file (a private key) left by a start that died mid-write, whether or not the parameter exists now.
+  rm -f "${CLOCKCHAIN_MCP_WITNESS_DIR}"/.witness-key.*
+  error_file="$(mktemp)"
+  if ! payload="$(fetch_secret "$SHADOW_WITNESS_KEY_PARAM" 2>"$error_file")"; then
+    if grep -q 'ParameterNotFound' "$error_file"; then
+      rm -f "$error_file" "${CLOCKCHAIN_MCP_WITNESS_DIR}/witness-key.pem"
+      return 0
+    fi
+    rm -f "$error_file"
+    printf 'failed to fetch optional SSM parameter: %s\n' "$SHADOW_WITNESS_KEY_PARAM" >&2
+    return 1
+  fi
+  rm -f "$error_file"
+  if [[ "$payload" != *"$SECRET_SENTINEL" ]]; then
+    printf 'missing secret sentinel for optional SSM parameter: %s\n' "$SHADOW_WITNESS_KEY_PARAM" >&2
+    return 1
+  fi
+  pem="${payload%"$SECRET_SENTINEL"}"
+  payload=""
+  if ! der_hex="$(printf '%s' "$pem" |
+         jq -Rsj 'capture("\\A-----BEGIN PRIVATE KEY-----\\n(?<body>[A-Za-z0-9+/]{64})\\n-----END PRIVATE KEY-----\\n?\\z").body' 2>/dev/null |
+         base64 -d 2>/dev/null | od -An -v -tx1 | tr -d ' \n')" ||
+     [[ ! "$der_hex" =~ ^302e020100300506032b657004220420[0-9a-f]{64}$ ]]; then
+    der_hex="" pem=""
+    printf 'invalid SHADOW_WITNESS_KEY configuration: not an Ed25519 PKCS#8 private key (SSM %s)\n' "$SHADOW_WITNESS_KEY_PARAM" >&2
+    return 1
+  fi
+  der_hex=""
+  if [[ ! -f "$WITNESS_COMPOSE_FILE" ]]; then
+    pem=""
+    printf 'SSM %s is set but %s is missing; refusing to deploy\n' "$SHADOW_WITNESS_KEY_PARAM" "$WITNESS_COMPOSE_FILE" >&2
+    return 1
+  fi
+  mkdir -p "$CLOCKCHAIN_MCP_WITNESS_DIR"
+  chmod 0700 "$CLOCKCHAIN_MCP_WITNESS_DIR"
+  stage="$(umask 077; mktemp "${CLOCKCHAIN_MCP_WITNESS_DIR}/.witness-key.XXXXXX")"
+  printf '%s' "$pem" > "$stage"
+  pem=""
+  chmod 0400 "$stage"
+  mv -f "$stage" "${CLOCKCHAIN_MCP_WITNESS_DIR}/witness-key.pem"
+  export CLOCKCHAIN_MCP_WITNESS_DIR
+  COMPOSE_FILES+=(-f "$WITNESS_COMPOSE_FILE")
+}
+
 validate_mcp_runtime_config
 read_secret CLOCKCHAIN_API_KEY /clockchain/mcp/CLOCKCHAIN_API_KEY
 read_secret MCP_AUTH_TOKENS /clockchain/mcp/MCP_AUTH_TOKENS
@@ -538,6 +599,8 @@ read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_FROM /clockchain/mcp/HANDSHAKE_
 read_optional_env HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL /clockchain/mcp/HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL
 read_optional_env HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN /clockchain/mcp/HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN
 read_optional_env HANDSHAKE_V2_RECEIPTS_FILE /clockchain/mcp/HANDSHAKE_V2_RECEIPTS_FILE
+# GET /metrics (absent = the route answers 404). docker-compose.yml already carries it; nothing read it from SSM until now.
+read_optional_secret MCP_METRICS_TOKEN /clockchain/mcp/MCP_METRICS_TOKEN
 # Hosted Shadow (opt-in, off unless SHADOW_ENABLED=1; state defaults to /app/state/shadow). Optional reads, like the
 # contract block above: an absent parameter leaves the variable unset and every /shadow path answers 404.
 read_optional_env SHADOW_ENABLED /clockchain/mcp/SHADOW_ENABLED
@@ -555,6 +618,18 @@ read_optional_env SHADOW_AUTO_LOG /clockchain/mcp/SHADOW_AUTO_LOG
 read_optional_env SHADOW_ANCHORS_PER_DAY /clockchain/mcp/SHADOW_ANCHORS_PER_DAY
 read_optional_env SHADOW_ANCHORS_PER_SESSION /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION
 read_optional_env SHADOW_LOG_STEPS_PER_MIN /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN
+# The hand-added preview endpoints, logging on by default (absent = no such paths; the listed paths never follow it).
+read_optional_env SHADOW_PREVIEW_AUTO_LOG /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG
+# The network (absent = testnet) and how long an open session waits before closing by itself.
+read_optional_env SHADOW_NETWORK /clockchain/mcp/SHADOW_NETWORK
+read_optional_env MCP_MAX_OPEN_STREAMS /clockchain/mcp/MCP_MAX_OPEN_STREAMS
+read_optional_env MCP_MAINNET_FREE_TOKENS /clockchain/mcp/MCP_MAINNET_FREE_TOKENS
+read_optional_env SHADOW_IDLE_CLOSE_HOURS /clockchain/mcp/SHADOW_IDLE_CLOSE_HOURS
+# Shadow's own writer on the ledger (absent = the delegated client below).
+read_optional_env SHADOW_LEDGER_CLIENT_ID /clockchain/mcp/SHADOW_LEDGER_CLIENT_ID
+read_optional_env SHADOW_LEDGER_WALLET_ID /clockchain/mcp/SHADOW_LEDGER_WALLET_ID
+# OpenAI's domain check for a ChatGPT plugin (absent = no such route). Public once served; the portal gives the value.
+read_optional_env OPENAI_APPS_CHALLENGE_TOKEN /clockchain/mcp/OPENAI_APPS_CHALLENGE_TOKEN
 read_optional_env MCP_BYO_WRITES /clockchain/mcp/MCP_BYO_WRITES
 # OAuth 2.1 connector sign-in (off unless MCP_OAUTH=1; needs MCP_TOKEN_SIGNING_SECRET, read above).
 # MCP_OAUTH_APPROVALS_PER_HOUR is the per-IP approval ceiling (default 10, like POST /token).
@@ -564,6 +639,16 @@ read_optional_env MCP_OAUTH_APPROVALS_PER_HOUR /clockchain/mcp/MCP_OAUTH_APPROVA
 read_optional_env MCP_OAUTH_ACCOUNTS_PER_HOUR /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_HOUR
 read_optional_env MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR
 read_optional_env MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR /clockchain/mcp/MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR
+# Agent keys (absent = off; needs MCP_OAUTH=1) and their limits (absent = 10 new keys per IP an hour, 200 in all), then
+# the Starter allowance agents share (absent = 2000 anchors a day, 200 per address). The server reads "" like absent.
+# Read the RUNBOOK's "Turning on agent keys" before setting any of these or the witness key.
+read_optional_env MCP_AGENT_KEYS /clockchain/mcp/MCP_AGENT_KEYS
+read_optional_env MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR /clockchain/mcp/MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR
+read_optional_env MCP_AGENT_KEYS_NEW_PER_HOUR /clockchain/mcp/MCP_AGENT_KEYS_NEW_PER_HOUR
+read_optional_env SHADOW_STARTER_ANCHORS_PER_DAY /clockchain/mcp/SHADOW_STARTER_ANCHORS_PER_DAY
+read_optional_env SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY /clockchain/mcp/SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY
+# Clockchain's witness key (absent = a key per account, as before: no file, no mount, no SHADOW_WITNESS_KEY_FILE).
+materialize_witness_key
 # H-REQ-01 relay binding (host): optional reads; absent = binding off and no key ring
 # (validate_v2_host_relay_binding). The key ring is public JSON.
 read_optional_env AGENT_HANDSHAKE_V2_RELAY_BINDING "$AGENT_HANDSHAKE_V2_RELAY_BINDING_PARAM"
@@ -608,6 +693,6 @@ export ERC8004_REGISTRY_ADDRESS=0x8004A818BFB912233c491871b3d84c89A494BD9e
 cd "$DEPLOY_DIR"
 if [[ "$COMPOSE_UP_MODE" == "mcp-only" ]]; then
   # --no-deps: do not start/recreate caddy (depends_on mcp) or anything else; only mcp.
-  exec docker compose -f "$COMPOSE_FILE" up -d --no-deps --build --wait --wait-timeout 180 mcp
+  exec docker compose "${COMPOSE_FILES[@]}" up -d --no-deps --build --wait --wait-timeout 180 mcp
 fi
-exec docker compose -f "$COMPOSE_FILE" up -d --build --wait --wait-timeout 180
+exec docker compose "${COMPOSE_FILES[@]}" up -d --build --wait --wait-timeout 180

@@ -160,6 +160,7 @@ const expectedContractEnv = {
   HANDSHAKE_V2_RECEIPT_KEY_VALID_UNTIL: "2027-10-01T00:00:00.000Z\n",
   HANDSHAKE_V2_RECEIPT_OBSERVER_TOKEN: "handshake-receipt-feed-token\n",
   HANDSHAKE_V2_RECEIPTS_FILE: "/app/state/handshake-v2-receipts.jsonl\n",
+  MCP_METRICS_TOKEN: "metrics-token\n",
   SHADOW_ENABLED: "shadow-on\n",
   SHADOW_STATE_DIR: "/app/state/shadow-fixture\n",
   SHADOW_MAX_BYTES: "shadow-max-bytes\n",
@@ -172,6 +173,14 @@ const expectedContractEnv = {
   SHADOW_ANCHORS_PER_DAY: "shadow-anchors-per-day\n",
   SHADOW_ANCHORS_PER_SESSION: "shadow-anchors-per-session\n",
   SHADOW_LOG_STEPS_PER_MIN: "shadow-log-steps-per-min\n",
+  SHADOW_PREVIEW_AUTO_LOG: "shadow-preview-auto-log\n",
+  SHADOW_NETWORK: "shadow-network\n",
+  MCP_MAX_OPEN_STREAMS: "mcp-max-open-streams\n",
+  MCP_MAINNET_FREE_TOKENS: "mainnet-free-tokens\n",
+  SHADOW_IDLE_CLOSE_HOURS: "shadow-idle-close-hours\n",
+  SHADOW_LEDGER_CLIENT_ID: "shadow-ledger-client\n",
+  SHADOW_LEDGER_WALLET_ID: "shadow-ledger-wallet\n",
+  OPENAI_APPS_CHALLENGE_TOKEN: "openai-challenge\n",
   MCP_BYO_WRITES: "mcp-byo-writes\n",
   // OAuth connector sign-in (optional reads, after the receipts block).
   MCP_OAUTH: "oauth-flag-on\n",
@@ -179,10 +188,21 @@ const expectedContractEnv = {
   MCP_OAUTH_ACCOUNTS_PER_HOUR: "oauth-accounts\n",
   MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR: "oauth-accounts-per-ip\n",
   MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR: "oauth-key-attempts-per-ip\n",
+  // Agent keys and the Starter allowance (optional reads, after the OAuth block).
+  MCP_AGENT_KEYS: "agent-keys-on\n",
+  MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR: "agent-keys-per-ip\n",
+  MCP_AGENT_KEYS_NEW_PER_HOUR: "agent-keys-per-hour\n",
+  SHADOW_STARTER_ANCHORS_PER_DAY: "starter-anchors-per-day\n",
+  SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY: "starter-anchors-per-source\n",
 };
-const expectedContractParamNames = Object.keys(expectedContractEnv).map(
-  (name) => `/clockchain/mcp/${name}`,
-);
+const agentKeyEnvNames = ["MCP_AGENT_KEYS", "MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR", "MCP_AGENT_KEYS_NEW_PER_HOUR", "SHADOW_STARTER_ANCHORS_PER_DAY", "SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY"];
+// The witness key is read right after them. It is never exported: compose-up writes it to a file and adds the override.
+const witnessKeyParam = "/clockchain/mcp/SHADOW_WITNESS_KEY";
+const expectedContractParamNames = [
+  ...Object.keys(expectedContractEnv).map((name) => `/clockchain/mcp/${name}`),
+  witnessKeyParam,
+];
+const witnessKeyPem = pkcs8Pem(ED25519_PKCS8_HEADER, syntheticSeed("fixture-witness-key-seed-32bytes"));
 
 const expectedHostSecretNames = [
   "/clockchain/host/FUNDING_WALLET_JSON",
@@ -291,6 +311,7 @@ async function createWrapperFixture(options = {}) {
   await writeFile(path.join(temp, "expected-host-secrets.json"), hostSecretsJson, "utf8");
   await writeFile(path.join(fakeHandshakeDir, ".git"), "gitdir: fake\n", "utf8");
   await writeFile(path.join(fakeDeployDir, "docker-compose.yml"), "services:\n  mcp:\n    image: fake\n", "utf8");
+  await writeFile(path.join(fakeDeployDir, "docker-compose.witness.yml"), "services:\n  mcp:\n    environment: {}\n", "utf8");
   await writeFile(path.join(fakeDeployDir, "Caddyfile"), "mcp-aws.clockchain.network { respond ok }\n", "utf8");
   await writeFile(
     path.join(temp, "env-check.mjs"),
@@ -308,6 +329,23 @@ for (const name of (process.env.EXPECTED_UNSET ?? "").split(",").filter(Boolean)
   assert.equal(process.env[name], undefined, name + " must stay unset");
 }
 const expectedHostSecrets = JSON.parse(await readFile(process.env.EXPECTED_HOST_SECRETS_FILE, "utf8"));
+// The witness key: the variable is never exported (the override sets the fixed path), and the PEM never reaches the env.
+assert.equal(process.env.SHADOW_WITNESS_KEY_FILE, undefined, "SHADOW_WITNESS_KEY_FILE is never exported");
+if (process.env.FAKE_WITNESS_KEY) {
+  for (const [name, value] of Object.entries(process.env)) {
+    if (name !== "FAKE_WITNESS_KEY") assert.equal(value.includes(process.env.FAKE_WITNESS_KEY.trim()), false, name + " carries no witness key");
+  }
+}
+const witnessFile = path.join(process.env.EXPECTED_WITNESS_DIR, "witness-key.pem");
+if (process.env.EXPECT_WITNESS_KEY === "1") {
+  assert.equal(process.env.CLOCKCHAIN_MCP_WITNESS_DIR, process.env.EXPECTED_WITNESS_DIR);
+  assert.equal(await readFile(witnessFile, "utf8"), process.env.FAKE_WITNESS_KEY);
+  assert.equal((await stat(witnessFile)).mode & 0o777, 0o400);
+  assert.equal((await stat(process.env.EXPECTED_WITNESS_DIR)).mode & 0o777, 0o700);
+  assert.deepEqual(await readdir(process.env.EXPECTED_WITNESS_DIR), ["witness-key.pem"]);
+} else {
+  await assert.rejects(stat(witnessFile), { code: "ENOENT" }, "no witness key file without the parameter");
+}
 assert.equal(process.env.HANDSHAKE_RELAY, "http://44.249.47.220:8080");
 assert.equal(process.env.MCP_HANDSHAKE_FILE, "/app/state/handshake.json");
 assert.equal(process.env.HANDSHAKE_ALLOW_DEGRADED, process.env.EXPECTED_HANDSHAKE_ALLOW_DEGRADED);
@@ -479,12 +517,33 @@ ${Object.entries(coordinatorKeyRings).map(([name, ring]) => `  /clockchain/mcp/$
   /clockchain/mcp/SHADOW_ANCHORS_PER_DAY) value=$'shadow-anchors-per-day\\n' ;;
   /clockchain/mcp/SHADOW_ANCHORS_PER_SESSION) value=$'shadow-anchors-per-session\\n' ;;
   /clockchain/mcp/SHADOW_LOG_STEPS_PER_MIN) value=$'shadow-log-steps-per-min\\n' ;;
+  /clockchain/mcp/SHADOW_PREVIEW_AUTO_LOG) value=$'shadow-preview-auto-log\\n' ;;
+  /clockchain/mcp/SHADOW_NETWORK) value=$'shadow-network\\n' ;;
+  /clockchain/mcp/MCP_MAX_OPEN_STREAMS) value=$'mcp-max-open-streams\\n' ;;
+  /clockchain/mcp/MCP_MAINNET_FREE_TOKENS) value=$'mainnet-free-tokens\\n' ;;
+  /clockchain/mcp/SHADOW_IDLE_CLOSE_HOURS) value=$'shadow-idle-close-hours\\n' ;;
+  /clockchain/mcp/SHADOW_LEDGER_CLIENT_ID) value=$'shadow-ledger-client\\n' ;;
+  /clockchain/mcp/SHADOW_LEDGER_WALLET_ID) value=$'shadow-ledger-wallet\\n' ;;
+  /clockchain/mcp/OPENAI_APPS_CHALLENGE_TOKEN) value=$'openai-challenge\\n' ;;
+  /clockchain/mcp/MCP_METRICS_TOKEN) value=$'metrics-token\\n' ;;
   /clockchain/mcp/MCP_BYO_WRITES) value=$'mcp-byo-writes\\n' ;;
   /clockchain/mcp/MCP_OAUTH) value=$'oauth-flag-on\\n' ;;
   /clockchain/mcp/MCP_OAUTH_APPROVALS_PER_HOUR) value=$'oauth-approvals\\n' ;;
   /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_HOUR) value=$'oauth-accounts\\n' ;;
   /clockchain/mcp/MCP_OAUTH_ACCOUNTS_PER_IP_PER_HOUR) value=$'oauth-accounts-per-ip\\n' ;;
   /clockchain/mcp/MCP_OAUTH_KEY_ATTEMPTS_PER_IP_PER_HOUR) value=$'oauth-key-attempts-per-ip\\n' ;;
+  /clockchain/mcp/MCP_AGENT_KEYS) value=$'agent-keys-on\\n' ;;
+  /clockchain/mcp/MCP_AGENT_KEYS_NEW_PER_IP_PER_HOUR) value=$'agent-keys-per-ip\\n' ;;
+  /clockchain/mcp/MCP_AGENT_KEYS_NEW_PER_HOUR) value=$'agent-keys-per-hour\\n' ;;
+  /clockchain/mcp/SHADOW_STARTER_ANCHORS_PER_DAY) value=$'starter-anchors-per-day\\n' ;;
+  /clockchain/mcp/SHADOW_STARTER_ANCHORS_PER_SOURCE_PER_DAY) value=$'starter-anchors-per-source\\n' ;;
+  # The witness key: absent unless the test gives FAKE_WITNESS_KEY (synthetic).
+  /clockchain/mcp/SHADOW_WITNESS_KEY)
+    if [[ -z "\${FAKE_WITNESS_KEY:-}" ]]; then
+      echo "An error occurred (ParameterNotFound) when calling the GetParameter operation: Parameter $name not found." >&2
+      exit 254
+    fi
+    value="$FAKE_WITNESS_KEY" ;;
   /clockchain/mcp/BAD_ACCEPTANCE_HMAC_BASE64) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=="}\\n' ;;
   /clockchain/mcp/SHORT_ACCEPTANCE_HMAC) value=$'{"kid":"accept-active","secretBase64":"Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw="}\\n' ;;
   /clockchain/mcp/NEWLINE_KID_HMAC) value=$'{"kid":"accept-fresh\\n","secretBase64":"ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU="}\\n' ;;
@@ -580,6 +639,8 @@ printf 'docker compose invoked\\n'
     EXPECTED_EVM_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com",
     CLOCKCHAIN_MCP_APP_ROOT: temp,
     CLOCKCHAIN_HOST_SECRET_DIR: hostSecretDir,
+    CLOCKCHAIN_MCP_WITNESS_DIR: path.join(temp, "witness"),
+    EXPECTED_WITNESS_DIR: path.join(temp, "witness"),
     HANDSHAKE_APP_ROOT: fakeHandshakeDir,
     HANDSHAKE_RELAY: "http://44.249.47.220:8080",
     HANDSHAKE_KIT_REPO: "https://github.com/thetangstr/clockchain-handshake-v2.git",
@@ -1567,6 +1628,125 @@ test("compose wrapper: MCP_OAUTH absent in SSM stays unset, so the OAuth routes 
     assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
   } finally {
     await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper: the agent-key settings absent in SSM stay unset, so agent keys ship off", async () => {
+  const { temp, callsFile, dockerOkFile, env } = await createWrapperFixture({
+    env: {
+      AWS_PARAMETER_NOT_FOUND: agentKeyEnvNames.map((n) => `/clockchain/mcp/${n}`).join(","),
+      EXPECTED_UNSET: agentKeyEnvNames.join(","),
+    },
+  });
+
+  try {
+    const expectedWithout = Object.fromEntries(Object.entries(expectedEnv).filter(([name]) => !agentKeyEnvNames.includes(name)));
+    await writeFile(env.EXPECTED_ENV_FILE, JSON.stringify(expectedWithout), "utf8");
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    const calls = (await readFile(callsFile, "utf8")).trim().split("\n");
+    assert.deepEqual(
+      calls.map((line) => line.match(/--name ([^ ]+)/)?.[1]),
+      [...expectedSecretNames, ...expectedOptionalSecretNames, ...expectedContractParamNames, ...expectedHostRelayParamNames, ...expectedHostSecretNames],
+    );
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("compose wrapper: witness key absent = no key file, no override, no SHADOW_WITNESS_KEY_FILE (a stale copy and an inherited value are dropped)", async () => {
+  const { temp, dockerOkFile, dockerArgsFile, env } = await createWrapperFixture({
+    env: { SHADOW_WITNESS_KEY_FILE: "/app/witness/witness-key.pem" },
+  });
+  try {
+    // A copy left by an earlier start with the parameter present, and a stage file from a start that died mid-write.
+    await mkdir(env.EXPECTED_WITNESS_DIR, { mode: 0o700 });
+    await writeFile(path.join(env.EXPECTED_WITNESS_DIR, "witness-key.pem"), witnessKeyPem, { mode: 0o400 });
+    await writeFile(path.join(env.EXPECTED_WITNESS_DIR, ".witness-key.Ab12Cd"), witnessKeyPem, { mode: 0o600 });
+
+    const result = await run(wrapper, [], { cwd: temp, env });
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n", "env-check found no key file and no variable");
+    assert.match((await readFile(dockerArgsFile, "utf8")).trim(), /^-f \S+docker-compose\.yml up -d --build --wait --wait-timeout 180$/);
+    assert.equal(await pathExists(path.join(env.EXPECTED_WITNESS_DIR, "witness-key.pem")), false, "the stale copy is removed");
+    assert.deepEqual(await readdir(env.EXPECTED_WITNESS_DIR), [], "the leftover stage file is removed");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+
+  // Never had one: the mount source is not created.
+  const fresh = await createWrapperFixture();
+  try {
+    const result = await run(wrapper, ["--only", "mcp"], { cwd: fresh.temp, env: { ...fresh.env, EXPECT_MCP_ONLY: "1" } });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match((await readFile(fresh.dockerArgsFile, "utf8")).trim(), /^-f \S+docker-compose\.yml up -d --no-deps --build --wait --wait-timeout 180 mcp$/);
+    assert.equal(await pathExists(fresh.env.EXPECTED_WITNESS_DIR), false, "no mount source is created");
+  } finally {
+    await rm(fresh.temp, { recursive: true, force: true });
+  }
+});
+
+for (const onlyArgs of [[], ["--only", "mcp"]]) {
+  test(`compose wrapper ${onlyArgs.join(" ") || "(full)"}: witness key present = a 0400 file in a 0700 dir and the read-only override, never in the env or output`, async () => {
+    const { temp, dockerOkFile, dockerArgsFile, env } = await createWrapperFixture({
+      env: { FAKE_WITNESS_KEY: witnessKeyPem, EXPECT_WITNESS_KEY: "1", ...(onlyArgs.length ? { EXPECT_MCP_ONLY: "1" } : {}) },
+    });
+    try {
+      // A stage file from a start that died mid-write: the env-check sees only witness-key.pem.
+      await mkdir(env.EXPECTED_WITNESS_DIR, { mode: 0o700 });
+      await writeFile(path.join(env.EXPECTED_WITNESS_DIR, ".witness-key.Ab12Cd"), witnessKeyPem, { mode: 0o600 });
+      const result = await run(wrapper, onlyArgs, { cwd: temp, env });
+
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(await readFile(dockerOkFile, "utf8"), "ok\n", "env-check saw the key file and no variable");
+      assert.match(
+        (await readFile(dockerArgsFile, "utf8")).trim(),
+        onlyArgs.length
+          ? /^-f \S+docker-compose\.yml -f \S+docker-compose\.witness\.yml up -d --no-deps --build --wait --wait-timeout 180 mcp$/
+          : /^-f \S+docker-compose\.yml -f \S+docker-compose\.witness\.yml up -d --build --wait --wait-timeout 180$/,
+      );
+      const keyBody = witnessKeyPem.split("\n")[1];
+      assert.equal(result.stdout.includes(keyBody), false);
+      assert.equal(result.stderr.includes(keyBody), false);
+      for (const file of await listFiles(temp)) {
+        if (file.startsWith(`${env.EXPECTED_WITNESS_DIR}${path.sep}`)) continue;
+        assert.equal((await readFile(file, "utf8").catch(() => "")).includes(keyBody), false, `${path.basename(file)} holds no copy of the key`);
+      }
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  });
+}
+
+test("compose wrapper refuses before docker on a witness key that isn't an Ed25519 PKCS#8 PEM, a failed read, or a missing override", async () => {
+  const cases = [
+    { FAKE_WITNESS_KEY: pkcs8Pem(X25519_PKCS8_HEADER, syntheticSeed("fixture-witness-key-seed-32bytes")) },
+    { FAKE_WITNESS_KEY: generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey.export({ type: "pkcs8", format: "pem" }) },
+    { FAKE_WITNESS_KEY: "-----BEGIN PRIVATE KEY-----\nfixture-witness\n-----END PRIVATE KEY-----\n" },
+    { FAKE_WITNESS_KEY: witnessKeyPem, AWS_DENY_PARAMETER: witnessKeyParam },
+    { FAKE_WITNESS_KEY: witnessKeyPem, AWS_TRANSIENT_PARAMETER: witnessKeyParam },
+    { FAKE_WITNESS_KEY: witnessKeyPem, AWS_FAIL_PARAMETER: witnessKeyParam },
+    { FAKE_WITNESS_KEY: witnessKeyPem, REMOVE_OVERRIDE: "1" },
+  ];
+  for (const extra of cases) {
+    const { temp, dockerInvokedFile, env } = await createWrapperFixture({ env: extra });
+    const label = Object.keys(extra).filter((k) => k !== "FAKE_WITNESS_KEY").join(",") || extra.FAKE_WITNESS_KEY.slice(28, 60);
+    try {
+      if (extra.REMOVE_OVERRIDE) await rm(path.join(temp, "infra", "clockchain-mcp", "docker-compose.witness.yml"));
+      const result = await run(wrapper, [], { cwd: temp, env });
+      assert.notEqual(result.code, 0, label);
+      assert.equal(await pathExists(dockerInvokedFile), false, `${label}: docker compose was not invoked`);
+      assert.match(result.stderr, /SHADOW_WITNESS_KEY|docker-compose\.witness\.yml/, label);
+      const body = extra.FAKE_WITNESS_KEY.split("\n")[1];
+      assert.equal(result.stderr.includes(body) || result.stdout.includes(body), false, `${label}: the value is never printed`);
+      assert.equal(await pathExists(path.join(env.EXPECTED_WITNESS_DIR, "witness-key.pem")), false, `${label}: no key file`);
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
   }
 });
 

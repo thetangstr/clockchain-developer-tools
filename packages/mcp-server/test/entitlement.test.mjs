@@ -130,3 +130,39 @@ test("buildAccountRequired / keeperToolError shapes (LLD §6.2)", () => {
   assert.equal(err.isError, true);
   assert.deepEqual(err.structuredContent, body);
 });
+
+// Agent keys (Task 5): an agent's own key gets the Starter plan, which never reaches the keeper tools.
+const STARTER = { kind: "authenticated", reason: "agent_key", plan: "starter" };
+
+test("a Starter (agent key) caller is refused every keeper tool with a plain message, and no claim is minted", async () => {
+  let mints = 0;
+  const gate = buildKeeperGate(STARTER, () => { mints += 1; return "cc_claim.sig"; });
+  for (const tool of KEEPER_TOOLS) {
+    const blocked = await gate.check(tool);
+    assert.ok(blocked, `${tool} is refused on Starter`);
+    assert.equal(blocked.isError, true);
+    assert.equal(blocked.structuredContent.error, "not_on_starter", tool);
+    assert.equal(blocked.structuredContent.tool, tool);
+    assert.match(blocked.structuredContent.message, /Starter/);
+    assert.equal("claim" in blocked.structuredContent, false, "an agent has no trial session to claim");
+    assert.deepEqual(JSON.parse(blocked.content[0].text), blocked.structuredContent);
+  }
+  assert.equal(mints, 0);
+  // No gate needs a claim minter for an agent.
+  assert.ok(await buildKeeperGate(STARTER).check("timer_set"));
+});
+
+test("a Starter caller keeps every free tool", async () => {
+  const gate = buildKeeperGate(STARTER);
+  for (const tool of FREE_TOOLS) assert.equal(await gate.check(tool), undefined, tool);
+  // An unclassified name fails closed, as for a trial.
+  assert.ok(await gate.check("not_a_registered_tool"));
+});
+
+test("account tokens are unchanged: other authenticated callers still bypass the keeper layer", async () => {
+  for (const reason of ["byo_key", "static_token", "demo_token_v1"]) {
+    const gate = buildKeeperGate({ kind: "authenticated", reason, plan: "pro" }, () => "cc_claim.sig");
+    assert.equal(await gate.check("timer_set"), undefined, reason);
+    assert.equal(await gate.check("alarm_set"), undefined, reason);
+  }
+});

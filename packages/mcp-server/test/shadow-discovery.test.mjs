@@ -176,7 +176,7 @@ test("flag on: /llms.txt and /install.txt add one Shadow section and change noth
     assert.match(text, /403\s+account_required/);
     // What is kept where.
     assert.match(text, /deleted 30 days after the session starts/);
-    assert.match(text, /links\s+cannot\s+be\s+revoked/);
+    assert.match(text, /revokes\s+the\s+link/);
     assert.match(text, /Hashes only/);
     assert.match(text, /not that what it says is true or compliant/);
     assert.doesNotMatch(text, /audited|@(?!example)[a-z]+\.[a-z]+/i);
@@ -238,6 +238,31 @@ test("flag on: the discovery files' URLs follow MCP_PUBLIC_URL, not a forged Hos
     assert.ok(text.includes(`${app.url}/shadow/mcp`));
   } finally {
     await app.close();
+  }
+});
+
+test("how an agent signs in with its own key is shown only with agent keys on, in eight lines, under this base", () => {
+  const base = "https://mcp.clockchain.network/staging";
+  for (const [off, on] of [[connectInstructions(base, CHAT), connectInstructions(base, CHAT, false, base)], [installTxtWithShadow(base, CHAT), installTxtWithShadow(base, CHAT, false, base)]]) {
+    assert.ok(!off.includes("Agents that run code") && !off.includes("/oauth/token") && !off.includes("shadow_sign_checkpoint"));
+    const lines = on.split("\n");
+    const at = lines.findIndex((l) => /^ *Agents that run code /.test(l));
+    const block = lines.slice(at, lines.indexOf("", at));
+    assert.ok(at > 0 && block.length <= 8, `${block.length} lines`);
+    for (const u of block.join(" ").match(/https?:\/\/[^\s"{}]+/g)) assert.ok(u.startsWith(`${base}/`), u);
+    const joined = block.join("\n");
+    // Exact enough to follow with no person: the signature's encoding, the fingerprint's bytes, the change URLs' base,
+    // the jti's length, and the counts to compare before signing.
+    for (const fact of ["standard base64, 88 characters ending ==", "including its final newline", "under the issuer from the OAuth metadata",
+      "8 to 128 characters", "sign.count", "sign.head", "check count and head match your own record, and don't sign if they don't"]) {
+      assert.ok(joined.includes(fact), `names ${fact}`);
+    }
+    // The signature is standard base64: base64url is named only for the DPoP proof's ath.
+    assert.doesNotMatch(joined.replace("ath the base64url SHA-256", ""), /base64url/);
+    // A period right after a URL reads as part of it.
+    assert.doesNotMatch(joined, /https?:\/\/\S*\.(?=\s|$)/m);
+    lines.splice(at, block.length + 1);
+    assert.equal(lines.join("\n"), off, "the rest is unchanged");
   }
 });
 

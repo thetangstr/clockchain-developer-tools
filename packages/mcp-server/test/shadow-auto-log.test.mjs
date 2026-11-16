@@ -16,7 +16,7 @@ import test from "node:test";
 import { runHttp } from "../dist/http.js";
 import { __setShadowLedgerForTests } from "../dist/shadow/ledger.js";
 import { ShadowService, ShadowError, loadShadowConfig } from "../dist/shadow/service.js";
-import { SHADOW_INSTRUCTIONS } from "../dist/shadow/mcp.js";
+import { ASKED_INSTRUCTIONS } from "../dist/shadow/mcp.js";
 import { redactSecrets, redactText } from "../dist/shadow/redact.js";
 import { verifyPacket } from "../dist/shadow/lib/verify.js";
 import { summarize, SUMMARY_CSP } from "../dist/shadow/lib/summary.js";
@@ -177,36 +177,24 @@ const BASE = "https://mcp.example.test";
 
 // ---- flag off ---------------------------------------------------------------------------------------------------------
 
-// sha256 of tools/list's tools and of initialize's instructions at 9c81101, the production build before this flag.
-const PINNED = {
-  plainTools: "4c5caf873406afddcc47ed90cfc442342a103af06039cff9ff6c64c2466bdbe7",
-  chatTools: "a6eaea19387338cde6a7469d14bf9ca5fb96fc90b4122ce09066641488ba5bf6",
-  plainInstructions: "320f0b83466b7bec855609559603bdf2cbbbfa5f1004ec980777a6fe2e27aa17",
-  chatInstructions: "ba02d04c7611b0b2c810d1ac2ece24bf0ce10a2713f56fca8abbb47a48a5bbfd",
-  createPageStyleHash: "iOu0RXAqpCZGh0xw5KF5QLpnLtuH+cmZD8P7ebjARtI=",
-};
+// The sign-in page's stylesheet hash at 9c81101, the production build before this flag.
+const PINNED = { createPageStyleHash: "iOu0RXAqpCZGh0xw5KF5QLpnLtuH+cmZD8P7ebjARtI=" };
 const flatten = (s) => s.replace(/\s+/g, " ");
-const sha = (s) => createHash("sha256").update(s).digest("hex");
 const INIT = rpcBody("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "auto-log-test", version: "1" } });
 
-test("flag off (unset, 0 or true): tools, instructions, limits and pages are what they were at 9c81101", async () => {
+test("flag off (unset, 0 or true): no logging tools, the person asks, and the limits and pages are what they were", async () => {
   for (const flag of [undefined, "0", "true"]) {
     const s = await boot(on({ SHADOW_AUTO_LOG: flag }));
     try {
       const a = await signUp(s.url);
-      const plain = await listTools(s.url, PLAIN, a.token);
-      const chat = await listTools(s.url, CHAT, a.token);
-      assert.equal(sha(JSON.stringify(plain)), PINNED.plainTools, "tools on /shadow/mcp");
-      assert.equal(sha(JSON.stringify(chat)), PINNED.chatTools, "tools on /shadow/chat/mcp");
       const init = async (p) => (await rpcResult(await post(s.url, p, INIT, a.token))).result.instructions;
-      assert.equal(await init(PLAIN), SHADOW_INSTRUCTIONS);
-      assert.equal(sha(await init(PLAIN)), PINNED.plainInstructions);
-      assert.equal(sha(await init(CHAT)), PINNED.chatInstructions);
+      assert.equal(await init(PLAIN), ASKED_INSTRUCTIONS);
+      assert.ok((await init(CHAT)).startsWith(`${ASKED_INSTRUCTIONS}\n`));
       // The sign-in page: no logging line, and the same stylesheet hash.
       const page = await openPage(s.url);
-      assert.doesNotMatch(page.html, /logs its chats/);
+      assert.doesNotMatch(page.html, /told to log its chats/);
       assert.match(page.page.headers.get("content-security-policy"), new RegExp(PINNED.createPageStyleHash.replace(/[+/]/g, "\\$&")));
-      assert.doesNotMatch(a.keyHtml, /logs its chats/);
+      assert.doesNotMatch(a.keyHtml, /told to log its chats/);
       // The new tools aren't there, shadow_record ignores any setting, and the limits are the old ones.
       assert.match(await (await post(s.url, PLAIN, rpcBody("tools/call", { name: "shadow_log_step", arguments: { kind: "note", content: "x" } }), a.token)).text(), /Tool shadow_log_step not found/);
       const started = await tool(s.url, PLAIN, a.token, "shadow_start_session", { title: "t" });
@@ -248,25 +236,38 @@ test("flag on: the tool lists and instructions on both endpoints, and the essent
   try {
     const a = await signUp(s.url);
     const names = async (p, token) => (await listTools(s.url, p, token)).map((t) => t.name).sort();
-    const shadow = ["shadow_checkpoint", "shadow_close_session", "shadow_get_session", "shadow_list_sessions", "shadow_log_step", "shadow_log_turn", "shadow_record", "shadow_start_session", "shadow_verify"];
-    assert.deepEqual(await names(PLAIN, a.token), ["clockchain_logging", "clockchain_whoami", ...shadow]);
-    assert.deepEqual(await names(CHAT, a.token), ["clockchain_create_account", "clockchain_logging", "clockchain_signup_help", "clockchain_whoami", ...shadow]);
+    const shadow = ["shadow_checkpoint", "shadow_close_session", "shadow_delete_session", "shadow_get_session", "shadow_list_sessions", "shadow_log_step", "shadow_log_turn", "shadow_record", "shadow_revoke_links", "shadow_start_session", "shadow_verify"];
+    assert.deepEqual(await names(PLAIN, a.token), ["clockchain_delete_account", "clockchain_log_level", "clockchain_logging", "clockchain_whoami", ...shadow]);
+    assert.deepEqual(await names(CHAT, a.token), ["clockchain_create_account", "clockchain_delete_account", "clockchain_log_level", "clockchain_logging", "clockchain_signup_help", "clockchain_whoami", ...shadow]);
     assert.deepEqual(await names(CHAT), await names(CHAT, a.token), "the chat endpoint lists them before sign-in too");
     for (const p of [PLAIN, CHAT]) {
       const { instructions } = (await rpcResult(await post(s.url, p, INIT, a.token))).result;
-      assert.match(instructions, /^Logging is ON by default in every conversation once this connector is connected/);
-      assert.match(instructions, /Call shadow_log_step right after each step happens/);
-      assert.match(instructions, /Never wait until\s+the end of the reply/);
+      assert.match(flatten(instructions), /^The person connected this connector, which keeps a record of the conversation on Clockchain Shadow\. Logging is on by default in every conversation once it is connected, until the person turns it off\./);
+      assert.match(flatten(instructions), /shadow_log_step only appends to the person's own record: it can't change or delete anything\. It adds one step, as the step happens, one call per step/);
+      // The softer wording: it describes logging rather than ordering it. Whether this helps in ChatGPT is a staging test.
+      assert.doesNotMatch(instructions, /without being asked|verbatim|never leave it out|End every reply/i);
       assert.match(instructions, /Replace passwords, API keys and other secrets with \[redacted\]/);
       assert.match(instructions, /Never record hidden reasoning/);
       assert.match(instructions, /reads "indeterminate" until the session is closed/);
-      assert.match(instructions, /only when the person asks to finish or verify/);
+      assert.match(flatten(instructions), /for when the person asks to finish or verify the record, and only then/);
+      assert.match(flatten(instructions), /If a log call returns an error or is blocked, say plainly in your reply that the step was not logged, and invent nothing/);
+      assert.match(flatten(instructions), /person_messages, how many messages the person sent before the one asking to close/);
       const d = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").description;
-      assert.match(d, /End every reply with show_user, verbatim: log your reply as a message step last/);
+      assert.match(d, /show_user, a table of this turn's steps for the person/);
       const turnTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_turn").description;
-      assert.match(turnTool, /end every reply with show_user, verbatim/);
-      assert.match(instructions, /end every reply with show_user/);
-      for (const must of [/ON by default/, /without being asked/, /never wait until the end/, /session_id/, /show_user/, /hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/, /stop logging/, /indeterminate/]) assert.match(d, must);
+      assert.match(turnTool, /show_user, a table of these steps for the person/);
+      for (const text of [d, turnTool]) assert.match(text, /only appends: it can't change or delete anything/);
+      assert.doesNotMatch(turnTool, /ONE block/);
+      // ChatGPT's reviewer flags rules for the model in a tool description ("Suspicious Instruction"), so they live in the instructions, and the server enforces them.
+      for (const text of [d, turnTool]) assert.doesNotMatch(text, /Never record|Never include|do not log|do not show|replace (passwords|secrets)|LOGGING_OFF/i);
+      for (const text of [d, turnTool]) assert.match(text, /server redacts common secret formats and refuses steps that contain hidden reasoning/);
+      for (const must of [/Never record hidden reasoning/, /\[redacted\]/, /LOGGING_OFF/]) assert.match(flatten(instructions), must);
+      const stepParams = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_log_step").inputSchema.properties;
+      assert.doesNotMatch(JSON.stringify(stepParams), /Never include|\[redacted\]/);
+      for (const text of [d, turnTool]) assert.doesNotMatch(text, /without being asked|verbatim|never leave it out|End every reply/i);
+      const closeTool = (await listTools(s.url, p, a.token)).find((t) => t.name === "shadow_close_session");
+      assert.equal(closeTool.inputSchema.properties.person_messages.type, "integer");
+      for (const must of [/on by default/, /session_id/, /show_user/, /stop logging|clockchain_logging/]) assert.match(d, must);
     }
     // Before sign-in, a log call gets the 401 that starts the connect flow; so does the plain endpoint.
     for (const p of [CHAT, PLAIN]) {
@@ -319,7 +320,7 @@ for (const p of [PLAIN, CHAT]) {
       // The footer: steps so far, first and last block, latest ledger id, viewer, and the off switch.
       const last = results.at(-1);
       const firstBlock = String(Number(results[0].block_height) - 1);
-      assert.equal(last.show_user.replace(/(\d+ earlier steps[^\n]*\n\n)?\| What happened[^]*?It covers every step up to and including that one\.\n\n/, ""), `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Say 'stop logging' to turn it off.`);
+      assert.equal(last.show_user.replace(/(\d+ earlier steps[^\n]*\n\n)?\| What happened[^]*?It covers every step up to and including that one\.\n\n/, ""), `---\n\n**Clockchain Shadow:** 50 steps logged so far. First block ${firstBlock}, last block ${last.block_height}. Latest ledger ID: \`${last.ledger_id}\`. Viewer: ${last.viewer}\n\nLogging is on. Saying 'stop logging' turns it off.`);
       assert.match(results[0].note, /reads "indeterminate" until the session is closed/);
       assert.equal(results[1].note, undefined);
 
@@ -407,7 +408,7 @@ test("shadow_log_turn, the fallback: three replies make one session and three sh
       assert.ok(r.evidence.logged.every((l) => /^[0-9a-f]{64}$/.test(l.hash.replace(/^sha256:/, "")) && l.summary.length <= 80));
       assert.match(r.show_user, /4 steps logged in this reply under one shared anchor, not one per step/);
       assert.match(r.show_user, new RegExp(`Shared anchor: block ${r.evidence.block_height}, ledger ID \`${r.evidence.ledger_id}\`\\.`));
-      assert.match(r.show_user, /Logging is on\. Say 'stop logging' to turn it off\.$/);
+      assert.match(r.show_user, /Logging is on\. Saying 'stop logging' turns it off\.$/);
     }
     assert.match(results[0].show_user, /\(4 steps so far\)/);
     assert.match(results[2].show_user, /\(12 steps so far\)/);
@@ -505,7 +506,7 @@ test("anchor pending, failed or over its limit: the step is recorded, block and 
     stepNulls(r);
     assert.ok(r.hash && r.seq);
     assert.match(r.show_user, /The latest step is recorded, but its anchor is still pending, so it has no block or ledger ID\./);
-    assert.match(r.show_user, /Logging is on\. Say 'stop logging' to turn it off\.$/);
+    assert.match(r.show_user, /Logging is on\. Saying 'stop logging' turns it off\.$/);
     assert.equal((await svc.getSession(O, { session_id: first.session_id }, BASE)).recorded_steps, 2);
     // It lands with the next step: nothing was lost.
     fake.confirm = true;
@@ -735,7 +736,7 @@ test("secrets: well-known credentials are replaced before they are recorded, and
   }
 });
 
-test("with the flag on, shadow_record and shadow_start_session redact too, and an agent id can't hold a key", async () => {
+test("shadow_record and shadow_start_session redact too, and an agent id can't hold a key", async () => {
   const key = `cck_${"K".repeat(32)}`;
   const { svc } = service();
   const s = await svc.startSession(O, { title: `Using ${key}`, agents: [{ id: "agent", role: `holds ${key}` }] }, BASE);
@@ -748,13 +749,16 @@ test("with the flag on, shadow_record and shadow_start_session redact too, and a
   await assert.rejects(svc.startSession(O, { title: "t", agents: [{ id: `cck_${"A".repeat(32)}` }] }, BASE), code);
   await assert.rejects(svc.logStep(O, { kind: "task", content: "x", agent: `cck_${"A".repeat(32)}` }, BASE), code);
   await assert.rejects(svc.logTurn(O, { steps: [{ kind: "task", content: "x", agent: `AKIAABCDEFGHIJKLMNOP` }] }, BASE), (e) => /agent id can't hold a key/.test(e.message));
-  // Without the flag, the record is what it was given.
+  // Without the flag (a server where the person asks per chat), the same filter runs: a record's link can still be shared.
   const fake = new FakeLedger();
   const plain = new ShadowService({ stateDir: tmp("noflag2"), ledger: () => fake, budget: () => createLogBudget({}), sleep: async () => {}, log: () => {} });
   plain.sweep();
-  const p = await plain.startSession(O, { title: "t" }, BASE);
-  await plain.record(O, { session_id: p.session_id, agent: "agent", kind: "note", content: "password=hunter2" });
-  assert.ok((await plain.packetForCap(new URL(p.links.packet).pathname.split("/").pop().replace(/\.json$/, ""))).includes("password=hunter2"));
+  const p = await plain.startSession(O, { title: `Using ${key}`, agents: [{ id: "agent", role: `holds ${key}` }] }, BASE);
+  await plain.record(O, { session_id: p.session_id, agent: "agent", kind: "note", content: { text: "password=hunter2", note: `key ${key} and sk_live_abcdefghijklmnop` } });
+  const plainDoc = await plain.packetForCap(new URL(p.links.packet).pathname.split("/").pop().replace(/\.json$/, ""));
+  for (const leak of [key, "hunter2", "sk_live_abcdefghijklmnop"]) assert.equal(plainDoc.includes(leak), false, leak);
+  assert.ok(plainDoc.includes("[redacted]"));
+  await assert.rejects(plain.startSession(O, { title: "t", agents: [{ id: `cck_${"A".repeat(32)}` }] }, BASE), code);
 });
 
 test("owner isolation: a session_id from another account is SHADOW_NOT_FOUND, and leaves that session as it was", async () => {
@@ -781,7 +785,7 @@ test("owner isolation: a session_id from another account is SHADOW_NOT_FOUND, an
 });
 
 test("consent: with the flag on, every sign-in page says it in the open and in What this allows; the style hash holds", async () => {
-  const LINE = /<strong>Once connected, Claude logs its chats and tool activity to Clockchain Shadow by default, until you turn it off\.<\/strong> Records are kept 30 days, and anyone holding a record’s link can read them\./;
+  const LINE = /<strong>Once connected, Claude is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off\. Some apps only start when you ask\.<\/strong> Records are kept 30 days, and anyone holding a record’s link can read them\./;
   const s = await boot(on());
   try {
     const visible = (html) => html.slice(0, html.indexOf('<details class="more">'));
@@ -796,7 +800,7 @@ test("consent: with the flag on, every sign-in page says it in the open and in W
     assert.ok(signedIn.grant, "the signed-in page");
     for (const [label, page] of [["create", create], ["one-click", oneClick], ["signed in", signedIn]]) {
       assert.match(visible(page.html), LINE, `${label}: visible without opening anything`);
-      assert.match(page.html, /<li>Once connected, Claude logs its chats and tool activity to Clockchain Shadow by default, until you turn it off\. Records are kept 30 days, and anyone holding a record’s link can read them\.<\/li>/, `${label}: in What this allows`);
+      assert.match(page.html, /<li>Once connected, Claude is told to log its chats and tool activity to Clockchain Shadow by default, until you turn it off\. Some apps only start when you ask\. Records are kept 30 days, and anyone holding a record’s link can read them\.<\/li>/, `${label}: in What this allows`);
       styleOk(page.page, page.html);
     }
     assert.doesNotMatch(oneClick.html, /<details[^>]*>[\s\S]*<strong>Once connected/, "the visible line isn't inside a fold");
@@ -806,7 +810,7 @@ test("consent: with the flag on, every sign-in page says it in the open and in W
     const c = await evil.json();
     const q = new URLSearchParams({ response_type: "code", client_id: c.client_id, redirect_uri: CLAUDE_CB, code_challenge: "a".repeat(43), code_challenge_method: "S256" });
     const html = await (await fetch(`${s.url}/oauth/authorize?${q}`)).text();
-    assert.ok(html.includes("Once connected, &lt;b&gt;Evil&lt;/b&gt; logs its chats"));
+    assert.ok(html.includes("Once connected, &lt;b&gt;Evil&lt;/b&gt; is told to log its chats"));
     assert.equal(html.includes("<b>Evil"), false);
   } finally {
     await s.close();
@@ -885,7 +889,7 @@ test("the hosted viewer says the pin is the server's own, not Proven, and the li
 });
 
 test("discovery says logging is on by default only with the flag on, on all of its pages", async () => {
-  const line = /Logging is on by default once connected: the agent is told to log its chat and tool activity here without being asked\.\s+To turn it off, say "stop logging" \(clockchain_logging\), which holds for\s+the whole account; a chat can also stop by turning the connector off in\s+the app\./;
+  const line = /Logging is on by default once connected: the connector asks the agent to log its chat and tool activity here as it goes\.\s+To turn it off, say "stop logging" \(clockchain_logging\), which holds for\s+the whole account; a chat can also stop by turning the connector off in\s+the app\./;
   const flat = (s) => s.replace(/\s+/g, " ");
   for (const [flag, shown] of [["1", true], [undefined, false]]) {
     const s = await boot(on({ SHADOW_AUTO_LOG: flag }));

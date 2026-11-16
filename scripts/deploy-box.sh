@@ -15,8 +15,9 @@
 #     systemd unit does and then `docker compose up -d --no-deps --build --wait --wait-timeout 180 mcp`.
 #     Beforehand it refreshes the installed wrapper + unit WITHOUT restarting
 #     (install-clockchain-mcp-deploy-assets.sh --no-restart), so a later reboot or full restart runs
-#     the same compose-up.sh that just deployed mcp. In-memory mcp state (ccra_/csha_ handles) is
-#     still lost: the notice/freeze rule still applies (spec, "Deploy blast radius").
+#     the same compose-up.sh that just deployed mcp. Role handles (ccra_/csha_) and handshake state survive on the
+#     mcp_state volume; in-flight calls, long-polls and in-memory counters don't, so the notice/freeze rule still
+#     applies (spec, "Deploy blast radius"; RUNBOOK, "What a restart loses").
 #     Before checking anything out it REFUSES (box untouched) when
 #       - the target's installer/compose-up.sh predate code-only deploys (a rollback to a pre-code-only
 #         SHA would otherwise silently become a full restart): exit 4, use --full-restart;
@@ -86,7 +87,7 @@ else
 ==============================================================================
  MODE: CODE-ONLY (default)
  Recreates ONLY the mcp container (compose up --no-deps mcp). caddy and host keep running.
- mcp in-memory state (ccra_/csha_ handles) is still lost: the notice/freeze rule still applies.
+ In-flight calls and long-polls drop; ccra_/csha_ handles survive. The notice/freeze rule still applies.
  Refuses if the deploy changes infra files (Caddyfile, compose file, unit, installer,
  compose-up.sh) or the target predates code-only deploys: use --full-restart.
 ==============================================================================

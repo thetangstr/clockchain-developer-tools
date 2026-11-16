@@ -1,4 +1,4 @@
-// Vendored from clockchain-shadow/ts/src/summary.ts (source sha256 d65aa9d8c498d83ad1612a8fbb260270e5727c2d8abb855272de9a60b076ec64) by scripts/sync-shadow-lib.mjs.
+// Vendored from clockchain-shadow/ts/src/summary.ts (source sha256 279dacd47813b71b4def95b35462c59ec562a435025381771d68fd9db9f2bb1b) by scripts/sync-shadow-lib.mjs.
 // Do not edit here: change the library, then re-run the script.
 // Evidence summary (spec §9): a static HTML page (no scripts, no network) and Markdown, generated from a packet and its
 // verification report. Every statement carries one tag: proven, not verified, failed, recorded as reported, or not
@@ -44,6 +44,14 @@ function describe(e: Packet['events'][number]): string {
     case 'session.closed': return 'Session closed';
   }
   return String(e.body.kind);
+}
+
+// What the agent declared about a step (spec §3.6). It is the agent's own claim, so a row showing it is never tagged proven.
+function declared(e: Packet['events'][number]): string {
+  const d = (e.body.payload as any)?.declared;
+  if (!d || typeof d !== 'object') return '';
+  const parts = [...(typeof d.actionType === 'string' ? ['action ' + d.actionType] : []), ...(typeof d.intentType === 'string' ? ['intent ' + d.intentType] : [])];
+  return parts.length ? ` (declared: ${parts.join(', ')})` : '';
 }
 
 export type Summary = { html: string; markdown: string };
@@ -93,9 +101,10 @@ export function summarize(packet: Packet, report: Report, o: { packetFile?: stri
   };
   const rows = events.map((e, i) => {
     const kind = e.body.kind, receipt = kind === 'clockchain.anchored' || (kind === 'session.opened' && !!(e.body.payload as any)?.receipt);
-    const tag: Tag = e.body.source?.boundary === 'transcript' || kind === 'execution.receipt' || kind === 'artifact.created' ? 'reported'
+    const claim = declared(e);
+    const tag: Tag = claim || e.body.source?.boundary === 'transcript' || kind === 'execution.receipt' || kind === 'artifact.created' ? 'reported'
       : failed ? 'failed' : pinned && (!receipt || witnessed) ? 'proven' : 'unverified';
-    return { seq: e.body.seq, actor: e.body.actor, what: describe(e), when: windowText(i), tag };
+    return { seq: e.body.seq, actor: e.body.actor, what: describe(e) + claim, when: windowText(i), tag };
   });
   const anchors = events.filter((e) => e.body.kind === 'clockchain.anchored' || (e.body.kind === 'session.opened' && (e.body.payload as any)?.receipt));
   const receiptOf = (e: Packet['events'][number]) => {

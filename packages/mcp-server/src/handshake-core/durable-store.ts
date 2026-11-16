@@ -143,6 +143,46 @@ function ensurePrivateDirectory(path: string): void {
   if (!stat.isDirectory()) throw new DurableStateError(`${path} is not a directory`);
 }
 
+/**
+ * Reads and validates one durable file, with no side effect: nothing is quarantined, logged or restored. Throws when the
+ * file is not a private regular file within `maxBytes`, or does not parse or validate. For a reader that must not touch a
+ * bad file each time it looks (agent-keys/book.ts's sweep).
+ */
+/** The file's type or permissions are wrong, not its bytes: an operator can fix it (chmod), so it is never "damaged". */
+class DurableFileShapeError extends Error {}
+
+export function readDurableFile<T>(file: string, schema: string, maxBytes: number, validate: (value: unknown) => T): T {
+  const link = lstatSync(file);
+  if (!link.isFile() || link.isSymbolicLink()) throw new DurableFileShapeError("not a regular file");
+  if ((link.mode & 0o077) !== 0) throw new DurableFileShapeError("file is readable by others");
+  if (link.size > maxBytes) throw new Error("file exceeds the size bound");
+  const parsed = JSON.parse(readFileSync(file, "utf8")) as { schema?: unknown; value?: unknown };
+  if (parsed === null || typeof parsed !== "object" || parsed.schema !== schema) throw new Error("unknown schema");
+  return validate(parsed.value);
+}
+
+/**
+ * For a caller that acts on damage (removes the file, or stops rereading it) after load() threw: true only when neither
+ * `path` nor its .bak is valid and at least one holds bytes that were read and fail readDurableFile's checks. A copy
+ * that couldn't be read at all (EACCES, EMFILE, EIO) may be fine a moment later, and one that isn't a private regular
+ * file is fixed with chmod: those errors are thrown. Opt-in; load() is unchanged.
+ */
+export function durableFileDamaged(path: string, schema: string, maxBytes: number, validate: (value: unknown) => unknown): boolean {
+  let bad = false;
+  for (const file of [path, `${path}.bak`]) {
+    try {
+      readDurableFile(file, schema, maxBytes, validate);
+      return false;
+    } catch (error) {
+      const { code, syscall } = error as NodeJS.ErrnoException;
+      if (code === "ENOENT") continue;
+      if (syscall !== undefined || error instanceof DurableFileShapeError) throw error;
+      bad = true;
+    }
+  }
+  return bad;
+}
+
 export interface DurableJsonFile<T> {
   /** The stored value, or undefined when no file exists yet. Throws DurableStateError on unrecoverable corruption. */
   load(): T | undefined;
@@ -166,6 +206,11 @@ export function createDurableJsonFile<T>(options: {
   validate: (value: unknown) => T;
   maxBytes: number;
   coalesceMs?: number;
+  /**
+   * A corrupt file is logged by its error's name or code only, never the message, which can quote the file's bytes (a
+   * JSON parse error does). For files that hold keys. Off by default, so other callers' log lines are unchanged.
+   */
+  redactReasons?: boolean;
 }): DurableJsonFile<T> {
   const { path, schema, maxBytes } = options;
   const backup = `${path}.bak`;
@@ -175,15 +220,9 @@ export function createDurableJsonFile<T>(options: {
   let mainCorrupt = false;
   let unregister: (() => void) | undefined;
 
-  function readValid(file: string): T {
-    const link = lstatSync(file);
-    if (!link.isFile() || link.isSymbolicLink()) throw new Error("not a regular file");
-    if ((link.mode & 0o077) !== 0) throw new Error("file is readable by others");
-    if (link.size > maxBytes) throw new Error("file exceeds the size bound");
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { schema?: unknown; value?: unknown };
-    if (parsed === null || typeof parsed !== "object" || parsed.schema !== schema) throw new Error("unknown schema");
-    return options.validate(parsed.value);
-  }
+  const readValid = (file: string): T => readDurableFile(file, schema, maxBytes, options.validate);
+  const reason = (error: unknown): string =>
+    options.redactReasons ? String((error as NodeJS.ErrnoException)?.code ?? (error as Error)?.name ?? "error") : (error as Error).message;
 
   function write(): void {
     if (timer) {
@@ -224,7 +263,7 @@ export function createDurableJsonFile<T>(options: {
         } catch (error) {
           const quarantine = `${path}.corrupt-${Date.now()}`;
           try { copyFileSync(path, quarantine); } catch { /* best effort */ }
-          log("handshake_state_corrupt", { path, quarantine, reason: (error as Error).message });
+          log("handshake_state_corrupt", { path, quarantine, reason: reason(error) });
           mainCorrupt = true;
         }
       }
@@ -234,7 +273,7 @@ export function createDurableJsonFile<T>(options: {
           log("handshake_state_restored_from_backup", { path, backup });
           return value;
         } catch (error) {
-          log("handshake_state_corrupt", { path: backup, reason: (error as Error).message });
+          log("handshake_state_corrupt", { path: backup, reason: reason(error) });
         }
       }
       throw new DurableStateError(`${path} is unreadable and has no valid backup; see RUNBOOK "Handshake state"`);

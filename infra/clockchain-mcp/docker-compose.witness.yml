@@ -1,0 +1,17 @@
+# Clockchain's witness key for hosted Shadow (SHADOW_WITNESS_KEY_FILE). An OVERRIDE, applied ONLY by compose-up.sh
+# (both modes) when the SecureString /clockchain/mcp/SHADOW_WITNESS_KEY exists:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.witness.yml up ...
+#
+# It is a separate file so that, with the parameter absent, compose neither creates the mount source nor sets the
+# variable (the base file passes it as "", which the server reads as unset: a key per account, as before).
+#
+# compose-up.sh writes the key to ${CLOCKCHAIN_MCP_WITNESS_DIR}/witness-key.pem (dir 0700, file 0400) from SSM on every
+# start, mirroring how the host service gets /app/keys. Turning it on deletes every account's key.json and can't be
+# undone: read "Turning on agent keys" in RUNBOOK.md first.
+services:
+  mcp:
+    environment:
+      SHADOW_WITNESS_KEY_FILE: /app/witness/witness-key.pem
+    volumes:
+      - ${CLOCKCHAIN_MCP_WITNESS_DIR:-/run/clockchain-mcp-witness}:/app/witness:ro
