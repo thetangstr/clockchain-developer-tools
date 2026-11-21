@@ -595,6 +595,18 @@ test("the normal close isn't called a gap: the closing message unlogged, or logg
   assert.deepEqual(c3.capture, { person_messages_reported: 0, person_messages_logged: 1, missing: 0 });
 });
 
+test("the signed count step says message for one and messages for more", async () => {
+  for (const [n, word] of [[1, "message"], [2, "messages"]]) {
+    const { svc } = service();
+    const s = await chat(svc, n);
+    const closed = await svc.close(O, { ...s, status: "succeeded", person_messages: n }, BASE);
+    const { packet } = JSON.parse((await svc.linkBody(capOf(closed), "packet")).toString("utf8"));
+    const note = JSON.stringify(packet.events.find((e) => e.body.payload?.capture).body.payload);
+    assert.ok(note.includes(`The assistant counted ${n} ${word} from the person before the one asking to close`), note.slice(0, 400));
+    assert.doesNotMatch(note, /counted 1 messages/);
+  }
+});
+
 test("no count, or a session still open, says nothing is known about missing turns, and adds no step", async () => {
   const { svc } = service();
   const s = await chat(svc, 0);
