@@ -21,8 +21,11 @@ const ABOUT = [
 const KEPT_RECORD = "On this server, deleted 30 days after the session starts. Until then anyone with a viewer or packet link can read all of it, unless the person revokes the link. The person can delete a record, or the whole account, at any time, through tools.";
 const KEPT_LEDGER = `Hashes only, on the ${SUBSTRATE_LABEL}. They stay after the record is deleted. ${ON_MAINNET ? "Writes come from a shared Clockchain client and wallet, so ledger entries show those, not yours." : "Writes come from a shared testnet pool, so ledger entries show the pool's client and wallet, not yours."}`;
 const KEPT_ACCOUNT = "No email. A lost account key plus cleared cookies loses the account.";
-const CHATGPT_NOTE = "Not yet confirmed in a real ChatGPT account. Some plans may block write tools.";
-const CLAUDE_CODE_NOTE = "Not yet confirmed with a real Claude Code sign-up.";
+const TESTED = "Tested 21 Nov 2026.";
+const CHATGPT_NOTE = `${TESTED} ChatGPT asks once before it starts a session. Some plans may block tools that write.`;
+const CLAUDE_CODE_NOTE = TESTED;
+const CODEX_NOTE = TESTED;
+const CODEX_UNATTENDED = `-c 'mcp_servers.shadow.default_tools_approval_mode="approve"'`;
 
 const LOGGING_ON = "Logging is on by default once connected: the connector asks the agent to log its chat and tool activity here as it goes. To turn it off, say \"stop logging\" (clockchain_logging), which holds for the whole account; a chat can also stop by turning the connector off in the app.";
 
@@ -61,7 +64,7 @@ function guideLines(base: string, chatPath: string | undefined, autoLog: boolean
     "",
     "Endpoints (streamable HTTP, OAuth sign-in):",
     ...(chat
-      ? [`  ${shadow}`, "    for ChatGPT and Claude Code", `  ${chat}`, "    for claude.ai: the same tools, plus sign-up from the chat"]
+      ? [`  ${shadow}`, "    for ChatGPT, Claude Code and Codex", `  ${chat}`, "    for claude.ai: the same tools, plus sign-up from the chat"]
       : [`  ${shadow}`]),
     "",
     ...wrap(autoLog ? LOGGING_ON : LOGGING_ASKED).map((l) => l.replace(/^ {2}/, "")),
@@ -79,9 +82,9 @@ function guideLines(base: string, chatPath: string | undefined, autoLog: boolean
           "claude.ai: add a custom connector with the claude.ai URL above. claude.ai",
           'guesses wrong, so choose both settings by hand: "Sign in when needed" (it',
           'guesses "No sign-in") and "Register automatically" (it defaults to "Use',
-          "Claude's published identity\"). The first tool call shows a Connect card in",
-          "the chat. A popup creates the account and shows the account key once, with a",
-          "download. The key never enters the chat.",
+          "Claude's published identity\"). Click Add: the sign-in opens right away.",
+          "Create the account there; it shows the account key once, with a download.",
+          `The key never enters the chat. ${TESTED}`,
         ]
       : [
           "claude.ai: add a custom connector with the URL above. Choose both settings by",
@@ -93,16 +96,27 @@ function guideLines(base: string, chatPath: string | undefined, autoLog: boolean
     `  claude mcp add --transport http shadow ${shadow}`,
     CLAUDE_CODE_NOTE,
     "",
-    "ChatGPT: with Developer Mode on, add a custom connector with this URL and",
-    "authentication OAuth.",
+    'ChatGPT: Settings, then Plugins, then Browse directory, then Add, then "Add',
+    'custom MCP server". Paste this URL and choose authentication OAuth; ChatGPT',
+    "finds the rest. Tick the risk notice, choose Create as a plugin, then",
+    "Continue and sign in. In a chat, choose + and pick the connector.",
     `  ${shadow}`,
-    CHATGPT_NOTE,
+    ...wrap(CHATGPT_NOTE).map((l) => l.replace(/^ {2}/, "")),
+    "",
+    "Codex: run this. Codex opens the sign-in page in your browser; if it doesn't,",
+    "run codex mcp login shadow.",
+    `  codex mcp add shadow --url ${shadow}`,
+    "Unattended runs (codex exec) refuse Shadow's tools unless you allow them:",
+    `  codex exec ${CODEX_UNATTENDED} "<task>"`,
+    CODEX_NOTE,
     "",
     "What is kept where:",
     ...wrap(`Record: ${KEPT_RECORD}`),
     ...wrap(`Ledger: ${KEPT_LEDGER}`),
     ...wrap(`Account: ${KEPT_ACCOUNT}`),
-    '  The viewer shows "indeterminate" until the session is closed.',
+    '  The viewer shows "indeterminate" until the session is closed. Right after',
+    "  the close, verify can still say indeterminate for about a minute, until the",
+    "  ledger receipts arrive: check again, or open the viewer.",
   ];
 }
 
@@ -171,7 +185,7 @@ export function manifestWithShadow(base: string, chatPath?: string, autoLog = fa
           ? {
               endpoint: chat,
               settings: ["Sign in when needed", "Register automatically"],
-              note: "Choose both settings by hand: claude.ai guesses \"No sign-in\" and defaults to \"Use Claude's published identity\". The first tool call shows a Connect card in the chat; the account key never enters the chat.",
+              note: `Choose both settings by hand: claude.ai guesses \"No sign-in\" and defaults to \"Use Claude's published identity\". The sign-in opens as soon as you add it; the account key never enters the chat. ${TESTED}`,
             }
           : { endpoint: shadow, settings: ["Sign in now", "Register automatically"], note: "Choose both settings by hand." },
         claudeCode: {
@@ -182,8 +196,15 @@ export function manifestWithShadow(base: string, chatPath?: string, autoLog = fa
         },
         chatgpt: {
           endpoint: shadow,
-          settings: ["Developer Mode on", "Authentication: OAuth"],
+          settings: ["Settings → Plugins → Browse directory → Add → Add custom MCP server", "Authentication: OAuth"],
           note: CHATGPT_NOTE,
+        },
+        codex: {
+          endpoint: shadow,
+          command: `codex mcp add shadow --url ${shadow}`,
+          then: "Codex opens the sign-in page in the browser; if it doesn't, run codex mcp login shadow.",
+          unattended: CODEX_UNATTENDED,
+          note: CODEX_NOTE,
         },
       },
       keptWhere: { record: KEPT_RECORD, ledger: KEPT_LEDGER, account: KEPT_ACCOUNT },

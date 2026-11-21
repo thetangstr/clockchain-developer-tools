@@ -2244,7 +2244,7 @@ export class ShadowService {
   private recordCapture(meta: SessionMeta, reported: number): void {
     const logged = this.store.readEvents(meta).filter((e) => e.body.kind === "task.assigned" || e.body.kind === "agent.prompt").length;
     const capture = { person_messages_reported: reported, person_messages_logged: logged, missing: Math.max(0, reported - logged) };
-    const { payload } = stepFor("note", `The assistant counted ${reported} messages from the person before the one asking to close; ${logged} are logged. This is the assistant's own count.`);
+    const { payload } = stepFor("note", `The assistant counted ${reported} ${reported === 1 ? "message" : "messages"} from the person before the one asking to close; ${logged} are logged. This is the assistant's own count.`);
     this.appendStep(meta, "agent.message", meta.agents[0].id, { ...payload, capture }, { boundary: "transcript", agentRunId: null }, false);
     meta.capture = capture;
   }

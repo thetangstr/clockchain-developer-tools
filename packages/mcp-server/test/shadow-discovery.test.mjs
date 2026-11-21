@@ -159,17 +159,24 @@ test("flag on: /llms.txt and /install.txt add one Shadow section and change noth
 
     // What it is, and the two endpoints.
     assert.match(text, /flight recorder for AI agents/);
-    assert.ok(text.includes(`${app.url}/shadow/mcp\n      for ChatGPT and Claude Code`));
+    assert.ok(text.includes(`${app.url}/shadow/mcp\n      for ChatGPT, Claude Code and Codex`));
     assert.ok(text.includes(`${app.url}${CHAT}\n      for claude.ai`));
     // claude.ai, with the two settings to pick by hand.
     assert.match(text, /"Sign in when needed" \(it\s+guesses "No sign-in"\)/);
     assert.match(text, /"Register automatically" \(it defaults to "Use\s+Claude's published identity"\)/);
     assert.match(text, /The key never enters the chat/);
-    // Claude Code and ChatGPT, with what is not confirmed marked as such.
+    // claude.ai signs in as soon as the connector is added, not on a first tool call.
+    assert.match(text, /Click Add: the sign-in opens\s+right away/);
+    assert.doesNotMatch(text, /Connect card|first tool call/);
+    // Claude Code, ChatGPT and Codex, as tested on 21 Nov 2026.
     assert.ok(text.includes(`claude mcp add --transport http shadow ${app.url}/shadow/mcp`));
-    assert.match(text, /Developer Mode/);
-    assert.match(text, /Not yet confirmed in a real ChatGPT account/);
-    assert.match(text, /Not yet confirmed with a real Claude Code sign-up/);
+    assert.doesNotMatch(text, /Not yet confirmed|Developer Mode/);
+    assert.match(text, /Plugins, then Browse directory, then Add, then "Add\s+custom MCP server"/);
+    assert.match(text, /Tested 21 Nov 2026\. ChatGPT asks once before it starts a\s+session/);
+    assert.match(text, /verify can still say indeterminate for about a minute/);
+    assert.ok(text.includes(`codex mcp add shadow --url ${app.url}/shadow/mcp`));
+    assert.match(text, /codex mcp login shadow/);
+    assert.ok(text.includes(`-c 'mcp_servers.shadow.default_tools_approval_mode="approve"'`));
     // The free key, and that an account is required.
     assert.ok(text.includes(`curl -X POST ${app.url}/token`));
     assert.match(text, /An account is required/);
@@ -202,7 +209,15 @@ test("flag on: /.well-known/mcp.json adds one shadow block and changes nothing e
     assert.deepEqual(shadow.clients.claudeAi.settings, ["Sign in when needed", "Register automatically"]);
     assert.equal(shadow.clients.claudeCode.endpoint, `${app.url}/shadow/mcp`);
     assert.equal(shadow.clients.chatgpt.endpoint, `${app.url}/shadow/mcp`);
-    assert.match(shadow.clients.chatgpt.note, /Not yet confirmed/);
+    assert.deepEqual(shadow.clients.chatgpt.settings, ["Settings → Plugins → Browse directory → Add → Add custom MCP server", "Authentication: OAuth"]);
+    assert.match(shadow.clients.chatgpt.note, /Tested 21 Nov 2026/);
+    assert.match(shadow.clients.claudeCode.note, /Tested 21 Nov 2026/);
+    assert.match(shadow.clients.claudeAi.note, /sign-in opens as soon as you add it/);
+    assert.equal(shadow.clients.codex.endpoint, `${app.url}/shadow/mcp`);
+    assert.equal(shadow.clients.codex.command, `codex mcp add shadow --url ${app.url}/shadow/mcp`);
+    assert.equal(shadow.clients.codex.note, "Tested 21 Nov 2026.");
+    assert.match(shadow.clients.codex.then, /codex mcp login shadow/);
+    assert.equal(shadow.clients.codex.unattended, `-c 'mcp_servers.shadow.default_tools_approval_mode="approve"'`);
     assert.match(shadow.keptWhere.record, /30 days/);
     assert.match(shadow.keptWhere.ledger, /Hashes only/);
   } finally {
