@@ -252,9 +252,13 @@ test("how an agent signs in with its own key is shown only with agent keys on, i
     for (const u of block.join(" ").match(/https?:\/\/[^\s"{}]+/g)) assert.ok(u.startsWith(`${base}/`), u);
     const joined = block.join("\n");
     // Exact enough to follow with no person: the signature's encoding, the fingerprint's bytes, the change URLs' base,
-    // the jti's length, and the counts to compare before signing.
+    // the jti's length, the order to sign in, what count and head are (the server's own steps included, so an agent
+    // comparing them with only its own steps refuses to sign), and how to get back a hash it lost.
     for (const fact of ["standard base64, 88 characters ending ==", "including its final newline", "under the issuer from the OAuth metadata",
-      "8 to 128 characters", "sign.count", "sign.head", "check count and head match your own record, and don't sign if they don't"]) {
+      "8 to 128 characters", "sign.count", "sign.head",
+      "record your steps, shadow_checkpoint, shadow_sign_checkpoint, shadow_close_session, shadow_sign_checkpoint",
+      "count is the seq of your last step and head is its hash", "don't sign if they differ",
+      "shadow_checkpoint returns the hash still waiting, even after the close"]) {
       assert.ok(joined.includes(fact), `names ${fact}`);
     }
     // The signature is standard base64: base64url is named only for the DPoP proof's ath.
