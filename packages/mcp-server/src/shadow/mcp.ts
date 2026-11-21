@@ -655,7 +655,7 @@ function registerAccountTools(server: McpServer, accounts: AccountStore, ownerId
     status: "help",
     message: [
       ON_MAINNET ? "Clockchain accounts need no email." : service ? "Clockchain accounts are free (testnet) and need no email." : "Clockchain accounts are on testnet and need no email.",
-      "To get one from this chat: ask for it (for example \"create a Clockchain account for Acme\"). A Connect button appears; in the Clockchain window that opens, click Create account. The window shows the account key once, with a Download key file link: save it there. Then the chat carries on and names the account.",
+      "To get one from this chat: ask for it (for example \"create a Clockchain account for Acme\"). If this connection isn't signed in yet, a Connect button appears; in the Clockchain window that opens, click Create account. The window shows the account key once, with a Download key file link: save it there. Then the chat carries on and names the account.",
       "The account key is shown only in that window. It never appears in this chat, and nobody should ask for it here. It signs you in on another device or app: choose \"I have an account key\" in the Clockchain window.",
       "Already have an account? When the Clockchain window opens, choose \"I have an account key\", or click Allow if it shows your account.",
       ...(service ? [] : ["Shadow records a task only when you ask for it, in that chat. Records are kept 30 days and anyone holding a record's link can read them."]),

@@ -172,7 +172,8 @@ test("flag on: /llms.txt and /install.txt add one Shadow section and change noth
     assert.ok(text.includes(`claude mcp add --transport http shadow ${app.url}/shadow/mcp`));
     assert.doesNotMatch(text, /Not yet confirmed|Developer Mode/);
     assert.match(text, /Plugins, then Browse directory, then Add, then "Add\s+custom MCP server"/);
-    assert.match(text, /Tested 21 Nov 2026/);
+    assert.match(text, /Tested 21 Nov 2026\. ChatGPT asks once before it starts a\s+session/);
+    assert.match(text, /verify can still say indeterminate for about a minute/);
     assert.ok(text.includes(`codex mcp add shadow --url ${app.url}/shadow/mcp`));
     assert.match(text, /codex mcp login shadow/);
     assert.ok(text.includes(`-c 'mcp_servers.shadow.default_tools_approval_mode="approve"'`));
@@ -208,12 +209,14 @@ test("flag on: /.well-known/mcp.json adds one shadow block and changes nothing e
     assert.deepEqual(shadow.clients.claudeAi.settings, ["Sign in when needed", "Register automatically"]);
     assert.equal(shadow.clients.claudeCode.endpoint, `${app.url}/shadow/mcp`);
     assert.equal(shadow.clients.chatgpt.endpoint, `${app.url}/shadow/mcp`);
-    assert.deepEqual(shadow.clients.chatgpt.settings, ["Plugins → Browse directory → Add → Add custom MCP server", "Authentication: OAuth"]);
+    assert.deepEqual(shadow.clients.chatgpt.settings, ["Settings → Plugins → Browse directory → Add → Add custom MCP server", "Authentication: OAuth"]);
     assert.match(shadow.clients.chatgpt.note, /Tested 21 Nov 2026/);
     assert.match(shadow.clients.claudeCode.note, /Tested 21 Nov 2026/);
     assert.match(shadow.clients.claudeAi.note, /sign-in opens as soon as you add it/);
     assert.equal(shadow.clients.codex.endpoint, `${app.url}/shadow/mcp`);
     assert.equal(shadow.clients.codex.command, `codex mcp add shadow --url ${app.url}/shadow/mcp`);
+    assert.equal(shadow.clients.codex.note, "Tested 21 Nov 2026.");
+    assert.match(shadow.clients.codex.then, /codex mcp login shadow/);
     assert.equal(shadow.clients.codex.unattended, `-c 'mcp_servers.shadow.default_tools_approval_mode="approve"'`);
     assert.match(shadow.keptWhere.record, /30 days/);
     assert.match(shadow.keptWhere.ledger, /Hashes only/);
