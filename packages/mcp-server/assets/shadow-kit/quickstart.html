@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Clockchain Shadow · Quickstart</title>
+<meta name="description" content="Connect your agent to Clockchain Shadow, record a task, share the link and check it as a second person. Steps for ChatGPT, claude.ai, Claude Code, Codex and any MCP client.">
+<link rel="alternate" type="text/markdown" href="quickstart.md" title="This Quickstart as Markdown">
+<link rel="alternate" type="text/plain" href="llms.txt" title="For agents: start here">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<link rel="stylesheet" href="assets/kit.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap">
+  <a class="brand" href="index.html"><svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="14" stroke="#0a9d44" stroke-width="2.4"/><path d="M16 8.5V16l5 3" stroke="#0a9d44" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Clockchain <span class="p">Shadow</span></a>
+  <span class="tag">Quickstart</span>
+  <nav class="nav-links" aria-label="Page">
+    <a href="index.html">Overview</a>
+    <a href="quickstart.md">Markdown</a>
+    <a class="btn btn-primary" href="index.html#book">Book a demo</a>
+  </nav>
+</div></header>
+
+<main id="main">
+<section class="hero" style="padding-bottom:40px"><div class="wrap" style="display:flex;flex-direction:column;gap:22px">
+  <span class="eyebrow">Quickstart · testnet</span>
+  <h1>From connector to <span class="g">checked record</span></h1>
+  <p class="lede">Connect your agent, record one task, share the link, and check it as someone else. You need an MCP client. You don't need an email, a card or an install.</p>
+  <div class="agent" style="margin-top:8px">
+    <span class="eyebrow">Fastest: let your agent do it</span>
+    <p>Paste this into your agent. The connect page is the server's own instructions, written for agents.</p>
+    <pre class="copy" id="prompt">Connect to Clockchain Shadow, a flight recorder for AI agents. Read https://mcp.clockchain.network/shadow/connect and follow it to connect (MCP endpoint: https://mcp.clockchain.network/shadow/mcp). Then record this task with Shadow, close the session, and give me the viewer link.<button type="button" data-copy="prompt">Copy</button></pre>
+  </div>
+</div></section>
+
+<div class="wrap qs" style="padding-bottom:96px">
+  <nav class="toc" aria-label="On this page">
+    <a href="#connect">1 · Connect</a>
+    <a href="#record">2 · Record</a>
+    <a href="#share">3 · Close and share</a>
+    <a href="#check">4 · Check it</a>
+    <a href="#control">5 · Stop, revoke, delete</a>
+    <a href="#tools">Tool reference</a>
+    <a href="#limits">Limits</a>
+  </nav>
+  <div class="qs-body">
+
+  <section id="connect">
+    <h2>1 · Connect</h2>
+    <p>Pick where your agent runs. Every route reaches the same Shadow tools.</p>
+    <div class="clients">
+      <details class="client" open>
+        <summary>Codex, scripts and agents that run code, with their own key <span class="status ok">tested 20 and 21 Nov 2026</span></summary>
+        <div class="in">
+          <p>The agent signs in with its own Ed25519 key: no person, no account, no browser. Point it at the connect page and it has everything it needs:</p>
+          <pre class="copy" id="c-codex">https://mcp.clockchain.network/shadow/connect<button type="button" data-copy="c-codex">Copy</button></pre>
+          <p>The order to sign in, which the connect page is being updated to state:</p>
+          <ol class="steps">
+            <li>Record your steps. <code>shadow_record</code> returns each step's <code>seq</code> and <code>hash</code>.</li>
+            <li><code>shadow_checkpoint</code>, then sign its <code>sign.hash</code> and send it with <code>shadow_sign_checkpoint</code>. Before signing, <code>sign.count</code> should equal your last step's <code>seq</code> and <code>sign.head</code> its hash. The server's own opening steps are numbered with yours.</li>
+            <li><code>shadow_close_session</code>, then sign its <code>sign.hash</code> the same way. The close adds the server's closing steps, so its count is a few higher.</li>
+            <li>Lost a hash? <code>shadow_checkpoint</code> returns the one still waiting, even after the close.</li>
+          </ol>
+        </div>
+      </details>
+      <details class="client">
+        <summary>ChatGPT <span class="status ok">tested 21 Nov 2026</span></summary>
+        <div class="in">
+          <ol class="steps">
+            <li>Settings, then <b>Plugins</b>, then <b>Browse directory</b>. Choose <b>Add</b>, then <b>Add custom MCP server</b>.</li>
+            <li>Give it a name, paste this URL and keep authentication <b>OAuth</b>. ChatGPT finds the sign-in settings itself.</li>
+          </ol>
+          <pre class="copy" id="c-chatgpt">https://mcp.clockchain.network/shadow/mcp<button type="button" data-copy="c-chatgpt">Copy</button></pre>
+          <ol class="steps" start="3">
+            <li>Tick the risk notice, choose <b>Create as a plugin</b>, then <b>Continue to Clockchain Shadow</b> and sign in. A new account shows its key once: save it.</li>
+            <li>In a new chat, choose <b>+</b>, type "Clockchain" and pick the connector. ChatGPT asks once before it starts a session.</li>
+          </ol>
+          <p class="muted small">Our test account needed no separate Developer mode switch. Some ChatGPT plans may block tools that write; we haven't confirmed which.</p>
+        </div>
+      </details>
+      <details class="client">
+        <summary>claude.ai <span class="status ok">tested 21 Nov 2026</span></summary>
+        <div class="in">
+          <ol class="steps">
+            <li>Add a custom connector with this URL:</li>
+          </ol>
+          <pre class="copy" id="c-claudeai">https://mcp.clockchain.network/shadow/chat/mcp<button type="button" data-copy="c-claudeai">Copy</button></pre>
+          <ol class="steps" start="2">
+            <li>Set both options by hand, because claude.ai guesses wrong: <b>Sign in when needed</b> (it guesses "No sign-in") and <b>Register automatically</b> (it defaults to "Use Claude's published identity").</li>
+            <li>Click Add. Clockchain's sign-in opens right away: create the account, save the account key it shows once, and continue. The key never enters the chat.</li>
+          </ol>
+        </div>
+      </details>
+      <details class="client">
+        <summary>Claude Code <span class="status ok">tested 21 Nov 2026</span></summary>
+        <div class="in">
+          <pre class="copy" id="c-cc">claude mcp add --transport http shadow https://mcp.clockchain.network/shadow/mcp<button type="button" data-copy="c-cc">Copy</button></pre>
+          <p>Then type <code>/mcp</code>, choose <b>shadow</b> and sign in. The page that opens in your browser creates the account.</p>
+        </div>
+      </details>
+      <details class="client">
+        <summary>Codex with a person signing in <span class="status ok">tested 21 Nov 2026</span></summary>
+        <div class="in">
+          <pre class="copy" id="c-codex-oauth">codex mcp add shadow --url https://mcp.clockchain.network/shadow/mcp<button type="button" data-copy="c-codex-oauth">Copy</button></pre>
+          <p>Codex sees that Shadow uses sign-in and opens the Clockchain page in your browser. Allow it (a new account shows its key once: save it). If the browser doesn't open, run <code>codex mcp login shadow</code>.</p>
+          <p>In the Codex app or terminal, Codex asks before each Shadow tool call. For unattended runs (<code>codex exec</code>), allow Shadow's tools first, or every call is refused:</p>
+          <pre class="copy" id="c-codex-approve">codex exec -c 'mcp_servers.shadow.default_tools_approval_mode="approve"' "Record this task with Shadow: …"<button type="button" data-copy="c-codex-approve">Copy</button></pre>
+          <p class="muted small">To remove it: <code>codex mcp logout shadow</code>, then <code>codex mcp remove shadow</code>.</p>
+        </div>
+      </details>
+      <details class="client">
+        <summary>Any other MCP client</summary>
+        <div class="in">
+          <p>Streamable HTTP with OAuth sign-in. There's nothing to install.</p>
+          <pre class="copy" id="c-any">https://mcp.clockchain.network/shadow/mcp<button type="button" data-copy="c-any">Copy</button></pre>
+        </div>
+      </details>
+    </div>
+    <p class="note">Your account is free, on testnet, and has no email. Keep the account key: a lost key plus cleared cookies loses the account.</p>
+  </section>
+
+  <section id="record">
+    <h2>2 · Record</h2>
+    <p>Logging is on by default once you're connected: the connector asks your agent to record its chat and tool steps as it goes. To be clear about it, name Shadow in the request:</p>
+    <pre class="copy" id="p-record">Record this task with Shadow: &lt;your task&gt;. When you're done, close the session and give me the viewer link.<button type="button" data-copy="p-record">Copy</button></pre>
+    <p class="muted">In our ChatGPT tests in November, the agent recorded the run every time Shadow was named in the request, and not when it wasn't.</p>
+    <p><b>Record only synthetic or redacted content.</b> Anyone with the viewer link can read every step in full. Shadow filters some credential formats, not personal data.</p>
+  </section>
+
+  <section id="share">
+    <h2>3 · Close and share</h2>
+    <p>Closing anchors a final checkpoint and returns:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>You get</th><th>What it is</th><th>Send it</th></tr></thead>
+      <tbody>
+        <tr><td>Viewer link</td><td><code>…/shadow/s/&lt;link&gt;</code>: the record as a web page, with its checks</td><td>To the person who checks</td></tr>
+        <tr><td>Packet link</td><td><code>…/shadow/p/&lt;link&gt;.json</code>: the same record as data, for tools</td><td>When they want the raw record</td></tr>
+        <tr><td>Pin</td><td>Names the key that signed. The trust check compares against it.</td><td>Separately from the link</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="check">
+    <h2>4 · Check it as a second person</h2>
+    <p>Open the viewer link in your own browser, with no account. You'll see each step, its time window, and the verifier's result:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Result</th><th>Means</th></tr></thead>
+      <tbody>
+        <tr><td style="color:var(--green-ink);font-weight:600">pass</td><td>Every check that applies passed: nothing was added, removed or changed since the steps were signed.</td></tr>
+        <tr><td style="color:var(--warn);font-weight:600">indeterminate</td><td>Nothing failed, but something couldn't be confirmed, often that every ledger receipt was reachable, or that every step has both time bounds. The viewer shows indeterminate until the session is closed, and for about a minute after, until the ledger receipts arrive.</td></tr>
+        <tr><td style="color:var(--bad);font-weight:600">fail</td><td>Something doesn't match, for example a step changed after it was recorded. Don't rely on the record.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="control">
+    <h2>5 · Stop, revoke, delete</h2>
+    <ul class="limits" style="grid-template-columns:minmax(0,1fr)">
+      <li>Say <b>"stop logging"</b> (<code>clockchain_logging</code>). It holds for the whole account. Turning the connector off also stops a chat.</li>
+      <li>Revoke a record's links with <code>shadow_revoke_links</code>.</li>
+      <li>Delete a record with <code>shadow_delete_session</code>, or the whole account. The ledger keeps only hashes, and they stay.</li>
+    </ul>
+  </section>
+
+  <section id="tools">
+    <h2>Tool reference</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>Tool</th><th>Does</th></tr></thead>
+      <tbody>
+        <tr><td><code>shadow_start_session</code></td><td>Starts a record and anchors a start marker</td></tr>
+        <tr><td><code>shadow_record</code></td><td>Adds one step: task, prompt, message, tool call, tool result, file or note</td></tr>
+        <tr><td><code>shadow_checkpoint</code></td><td>Anchors a checkpoint mid-session. With an agent key, returns the hash to sign.</td></tr>
+        <tr><td><code>shadow_sign_checkpoint</code></td><td>Agent keys only: sends your signature over a checkpoint</td></tr>
+        <tr><td><code>shadow_close_session</code></td><td>Final checkpoint, then the viewer link, packet link and pin</td></tr>
+        <tr><td><code>shadow_verify</code></td><td>Runs the verifier and returns each check</td></tr>
+        <tr><td><code>shadow_get_session</code>, <code>shadow_list_sessions</code></td><td>Reads your records</td></tr>
+        <tr><td><code>shadow_revoke_links</code>, <code>shadow_delete_session</code></td><td>Stops the links working, or deletes a record</td></tr>
+        <tr><td><code>clockchain_logging</code></td><td>Turns logging off or on for the account</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section id="limits">
+    <h2>Limits</h2>
+    <ul class="limits">
+      <li>A pass shows the record is intact, not that the output is true, compliant or complete.</li>
+      <li>It covers what the agent recorded, not hidden reasoning or other apps.</li>
+      <li>Times are windows between ledger receipts.</li>
+      <li>Testnet only. Records are deleted 30 days after the session starts.</li>
+      <li>The ledger is our own single-operator gateway, and only hashes go on it.</li>
+      <li>No standalone verifier or public sample record yet.</li>
+    </ul>
+    <div class="ctas"><a class="btn btn-primary" href="index.html#book">Book a demo</a><a class="btn btn-ghost" href="https://mcp.clockchain.network/shadow/connect">Live connect instructions</a></div>
+  </section>
+
+  </div>
+</div>
+</main>
+
+<footer><div class="wrap">
+  <span>Clockchain Shadow · testnet</span>
+  <nav aria-label="Footer">
+    <a href="index.html">Overview and demo</a>
+    <a href="quickstart.md">This page as Markdown</a>
+    <a href="llms.txt">llms.txt</a>
+    <a href="https://mcp.clockchain.network/shadow/connect">Connect instructions (live)</a>
+  </nav>
+</div></footer>
+
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var el = document.getElementById(b.getAttribute("data-copy")), t = el.firstChild.textContent.trim();
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1600); },
+      function () { var r = document.createRange(); r.selectNodeContents(el.firstChild); var s = getSelection(); s.removeAllRanges(); s.addRange(r); });
+  });
+});
+</script>
+</body>
+</html>

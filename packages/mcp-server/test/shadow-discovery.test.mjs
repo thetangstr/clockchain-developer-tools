@@ -410,3 +410,76 @@ test("script: --write against a local server signs up and takes one record throu
     __setShadowLedgerForTests(undefined);
   }
 });
+
+const KIT_DIR = fileURLToPath(new URL("../assets/shadow-kit/", import.meta.url));
+
+test("the design-partner kit is served at /shadow/kit/ while Shadow is on: exact bytes, every link resolves, video plays in Safari", async () => {
+  const app = await boot(SHADOW_ON());
+  const kit = `${app.url}/shadow/kit/`;
+  try {
+    const bare = await fetch(`${app.url}/shadow/kit`, { redirect: "manual" });
+    assert.equal(bare.status, 301);
+    assert.equal(bare.headers.get("location"), "/shadow/kit/");
+
+    const { readFileSync } = await import("node:fs");
+    const pages = { "": "index.html", "index.html": "index.html", "quickstart.html": "quickstart.html", "index.md": "index.md", "quickstart.md": "quickstart.md", "llms.txt": "llms.txt", "assets/kit.css": "assets/kit.css", "assets/shadow-promo-poster.jpg": "assets/shadow-promo-poster.jpg" };
+    const types = { html: "text/html; charset=utf-8", md: "text/markdown; charset=utf-8", txt: "text/plain; charset=utf-8", css: "text/css; charset=utf-8", jpg: "image/jpeg" };
+    for (const [served, file] of Object.entries(pages)) {
+      const r = await fetch(`${kit}${served}`);
+      assert.equal(r.status, 200, served);
+      assert.equal(r.headers.get("content-type"), types[file.split(".").pop()], served);
+      assert.equal(r.headers.get("x-content-type-options"), "nosniff", served);
+      assert.ok(Buffer.from(await r.arrayBuffer()).equals(readFileSync(path.join(KIT_DIR, file))), `${served} is ${file}, byte for byte`);
+      if (file.endsWith(".html")) assert.match(r.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/, served);
+    }
+
+    // Every relative link and asset in both pages resolves here.
+    for (const page of ["index.html", "quickstart.html"]) {
+      const html = readFileSync(path.join(KIT_DIR, page), "utf8");
+      const refs = [...html.matchAll(/(?:href|src)="([^"#:]+)(?:#[^"]*)?"/g)].map((m) => m[1]).filter((u) => u !== "CALENDLY_URL");
+      assert.ok(refs.length >= 5, page);
+      for (const ref of new Set(refs)) {
+        const r = await fetch(`${kit}${ref}`, { method: "HEAD" });
+        assert.equal(r.status, 200, `${page} -> ${ref}`);
+      }
+    }
+
+    const video = `${kit}assets/shadow-promo.mp4`;
+    const head = await fetch(video, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get("content-type"), "video/mp4");
+    assert.equal(head.headers.get("accept-ranges"), "bytes");
+    const size = Number(head.headers.get("content-length"));
+    assert.equal(size, readFileSync(path.join(KIT_DIR, "assets/shadow-promo.mp4")).length);
+    const part = await fetch(video, { headers: { range: "bytes=0-1" } });
+    assert.equal(part.status, 206);
+    assert.equal(part.headers.get("content-range"), `bytes 0-1/${size}`);
+    assert.equal((await part.arrayBuffer()).byteLength, 2);
+    const past = await fetch(video, { headers: { range: `bytes=${size}-` } });
+    assert.equal(past.status, 416);
+    await past.arrayBuffer();
+
+    // Only the listed files: not the folder's README, not anything outside it, not a POST.
+    for (const p of ["README.md", "assets/", "../mcp-demo.mp4", "%2e%2e/mcp-demo.mp4", "nope.html"]) {
+      const r = await fetch(`${kit}${p}`);
+      assert.equal(r.status, 404, p);
+      await r.arrayBuffer();
+    }
+    const post = await fetch(kit, { method: "POST" });
+    assert.notEqual(post.status, 200);
+    await post.arrayBuffer();
+  } finally {
+    await app.close();
+  }
+});
+
+test("with Shadow off, /shadow/kit/ is not served", async () => {
+  const app = await boot();
+  try {
+    const r = await fetch(`${app.url}/shadow/kit/`);
+    assert.notEqual(r.status, 200);
+    await r.arrayBuffer();
+  } finally {
+    await app.close();
+  }
+});

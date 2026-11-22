@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Clockchain Shadow · Book a demo</title>
+<meta name="description" content="Shadow is a flight recorder for AI agents. Record what your agent did, share one link, and let someone else check the record hasn't changed. Book a demo or start with the Quickstart.">
+<!-- For agents: the same page as Markdown, the Quickstart, and the live connect instructions. -->
+<link rel="alternate" type="text/markdown" href="index.md" title="This page as Markdown">
+<link rel="alternate" type="text/plain" href="llms.txt" title="For agents: start here">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<link rel="stylesheet" href="assets/kit.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="nav"><div class="wrap">
+  <a class="brand" href="index.html"><svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="14" stroke="#0a9d44" stroke-width="2.4"/><path d="M16 8.5V16l5 3" stroke="#0a9d44" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Clockchain <span class="p">Shadow</span></a>
+  <span class="tag">Testnet</span>
+  <nav class="nav-links" aria-label="Page">
+    <a href="#what">What it does</a>
+    <a href="#how">How it works</a>
+    <a href="quickstart.html">Quickstart</a>
+    <a href="#agents">For agents</a>
+    <a class="btn btn-primary" href="#book">Book a demo</a>
+  </nav>
+</div></header>
+
+<main id="main">
+<section class="hero"><div class="wrap hero-grid">
+  <div class="hero-copy">
+    <span class="eyebrow">Design partners · Flight recorder for AI agents</span>
+    <h1>Record what your agent did. <span class="g">Let someone else check it.</span></h1>
+    <p class="lede">Your agent records each step as it works. Shadow signs the steps and anchors their fingerprints on a ledger. You share one link, and whoever opens it can see whether anything changed afterwards.</p>
+    <div class="ctas">
+      <a class="btn btn-primary" href="#book">Book a demo</a>
+      <a class="btn btn-ghost" href="quickstart.html">Start with the Quickstart</a>
+    </div>
+    <div class="facts"><span><b>Free</b> testnet account</span><span><b>No email</b> to sign up</span><span><b>Any MCP client</b></span></div>
+  </div>
+  <figure style="margin:0">
+    <div class="media">
+      <video id="promo" src="assets/shadow-promo.mp4" poster="assets/shadow-promo-poster.jpg" muted playsinline loop preload="metadata" aria-label="17-second film: Codex records a run with Shadow, a second person opens the record, and a one-character change makes the check fail."></video>
+    </div>
+    <figcaption class="media-cap">A real run on testnet: Codex records a synthetic task, the record is opened by link, and a copy with one character changed fails the check. 17 seconds, no sound.</figcaption>
+  </figure>
+</div></section>
+
+<section id="what" class="tint"><div class="wrap">
+  <div class="head">
+    <span class="eyebrow">What it does for you</span>
+    <h2>Something to check, instead of a screenshot</h2>
+    <p class="lede">If people have to trust work your agents did (a client, a reviewer, your own team next quarter), Shadow gives them a record they can check themselves.</p>
+  </div>
+  <div class="feats">
+    <div class="feat"><span class="n">01</span><h3>Every step, in order</h3><p>The task, each tool call and result, each message. Steps are numbered and chained, so a missing or reordered step shows up.</p></div>
+    <div class="feat"><span class="n">02</span><h3>One link to share</h3><p>Close the session and you get a viewer link. The person you send it to opens it in their own browser. No account, no install.</p></div>
+    <div class="feat"><span class="n">03</span><h3>Changes show up</h3><p>Change one character in a recorded step and the verifier's content check fails. The film above shows a real case.</p></div>
+    <div class="feat"><span class="n">04</span><h3>Works with the agent you have</h3><p>ChatGPT, Claude, Claude Code, Codex or any MCP client. Agents that run code can sign in with their own key, with no person and no account.</p></div>
+    <div class="feat"><span class="n">05</span><h3>Fingerprints on a ledger, not your content</h3><p>The full record stays on the Shadow server. Only hashes go to the ledger, so the ledger holds no step content.</p></div>
+    <div class="feat"><span class="n">06</span><h3>You stay in control</h3><p>Say "stop logging" to stop. Revoke a link, delete a record or delete the whole account at any time, through the same tools.</p></div>
+  </div>
+</div></section>
+
+<section id="how"><div class="wrap">
+  <div class="head">
+    <span class="eyebrow">What happens when you connect</span>
+    <h2>From connector to checked record</h2>
+  </div>
+  <ol class="flow">
+    <li><div><h3>Add the connector</h3><p>Point your client at <code>https://mcp.clockchain.network/shadow/mcp</code>, or at <code>/shadow/chat/mcp</code> on claude.ai. Sign-in creates a free testnet account with no email. The account key is shown once.</p></div></li>
+    <li><div><h3>Work as usual</h3><p>Logging is on by default once you're connected: the connector asks your agent to record its chat and tool steps as it goes. Naming Shadow in your request ("record this with Shadow") makes it far more likely to.</p></div></li>
+    <li><div><h3>Close the session</h3><p>Shadow anchors a final checkpoint and returns a viewer link and a pin. Send the pin separately: it lets the other person check who signed.</p></div></li>
+    <li><div><h3>Someone else checks it</h3><p>They open the link and see each step, its time window and the verifier's checks: pass, indeterminate or fail.</p></div></li>
+  </ol>
+  <div class="ctas" style="margin-top:32px"><a class="btn btn-ghost" href="quickstart.html">Step-by-step Quickstart</a></div>
+</div></section>
+
+<section class="tint"><div class="wrap">
+  <div class="head">
+    <span class="eyebrow">The honest version</span>
+    <h2>What a pass does and doesn't tell you</h2>
+    <p class="lede">A pass means the record is intact: nothing added, removed or changed since it was signed. It does not mean the agent was right.</p>
+  </div>
+  <ul class="limits">
+    <li>It doesn't show the agent's output is true, or that anything is compliant.</li>
+    <li>It covers what the agent recorded. Hidden reasoning and other apps aren't captured.</li>
+    <li>Times are windows between ledger receipts, not exact moments.</li>
+    <li>Testnet only. Records are deleted after 30 days.</li>
+    <li>Anyone with a viewer link can read the whole record, so record synthetic or redacted content.</li>
+    <li>The ledger is our own single-operator gateway on testnet, not a public network yet.</li>
+    <li>Sign-up was tested in real accounts with ChatGPT, claude.ai, Claude Code and Codex on 20–21 Nov. Other clients and some ChatGPT plans aren't confirmed.</li>
+    <li>A standalone verifier you can run yourself isn't published yet.</li>
+  </ul>
+</div></section>
+
+<section id="partners"><div class="wrap">
+  <div class="head">
+    <span class="eyebrow">Design partner program</span>
+    <h2>Shape Shadow with us</h2>
+  </div>
+  <div class="terms">
+    <div><h3>What you get</h3><ul>
+      <li>A direct line to the team building Shadow</li>
+      <li>Help setting up your first recorded workflow</li>
+      <li>Early access as we ship: sharing a record without its content, and a verifier you can run yourself</li>
+      <li>A say in what we build next</li>
+    </ul></div>
+    <div><h3>What we ask</h3><ul>
+      <li>Try Shadow on one real agent workflow, with synthetic or redacted content</li>
+      <li>Tell us what's missing and what gets in the way</li>
+      <li>A short check-in while you try it</li>
+    </ul></div>
+  </div>
+</div></section>
+
+<section id="book" class="tint"><div class="wrap book">
+  <div class="head" style="margin:0">
+    <span class="eyebrow">Book a demo</span>
+    <h2>See it on your workflow</h2>
+    <p class="lede">We'll record one of your agent's tasks live, open the record as a second person, and show you what the checks mean.</p>
+    <p class="muted small">Prefer to start alone? The <a href="quickstart.html">Quickstart</a> takes you from connector to checked record.</p>
+  </div>
+  <div class="cal" id="cal" data-calendly="CALENDLY_URL">
+    <div class="cal-fallback">
+      <h3>Pick a time</h3>
+      <p class="muted">The booking calendar loads here.</p>
+      <a class="btn btn-primary" id="cal-link" href="CALENDLY_URL">Open the booking page</a>
+    </div>
+  </div>
+</div></section>
+
+<section id="agents"><div class="wrap">
+  <div class="agent">
+    <span class="eyebrow">For agents</span>
+    <h3>Hand this page to your agent</h3>
+    <p>Everything an agent needs is in plain text: this page as <a href="index.md">Markdown</a>, the <a href="quickstart.md">Quickstart as Markdown</a>, an <a href="llms.txt">llms.txt</a>, and the server's own live instructions. Paste this into your agent:</p>
+    <pre class="copy" id="prompt">Connect to Clockchain Shadow, a flight recorder for AI agents. Read https://mcp.clockchain.network/shadow/connect and follow it to connect (MCP endpoint: https://mcp.clockchain.network/shadow/mcp). Then record this task with Shadow, close the session, and give me the viewer link.<button type="button" data-copy="prompt">Copy</button></pre>
+  </div>
+</div></section>
+</main>
+
+<footer><div class="wrap">
+  <span>Clockchain Shadow · testnet</span>
+  <nav aria-label="Footer">
+    <a href="quickstart.html">Quickstart</a>
+    <a href="index.md">This page as Markdown</a>
+    <a href="llms.txt">llms.txt</a>
+    <a href="https://mcp.clockchain.network/shadow/connect">Connect instructions (live)</a>
+    <a href="https://mcp.clockchain.network/status">Status</a>
+  </nav>
+</div></footer>
+
+<script>
+(function () {
+  // Calendly: replace CALENDLY_URL above with the booking link. Until then the fallback box stays.
+  var cal = document.getElementById("cal"), url = cal.getAttribute("data-calendly");
+  if (/^https:\/\/calendly\.com\//.test(url)) {
+    cal.innerHTML = '<div class="calendly-inline-widget" data-url="' + url + '?hide_gdpr_banner=1" style="min-width:320px;height:700px"></div>';
+    var s = document.createElement("script"); s.src = "https://assets.calendly.com/assets/external/widget.js"; s.async = true; document.body.appendChild(s);
+  } else {
+    var a = document.getElementById("cal-link"); a.removeAttribute("href"); a.setAttribute("aria-disabled", "true");
+    a.textContent = "Booking link not set yet"; a.style.opacity = ".55"; a.style.cursor = "default";
+  }
+  // The film plays only when the viewer allows motion; otherwise it shows its poster with controls.
+  var v = document.getElementById("promo");
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { v.controls = true; }
+  else { v.autoplay = true; v.play && v.play().catch(function () { v.controls = true; }); }
+  // Copy buttons.
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var el = document.getElementById(b.getAttribute("data-copy")), t = el.firstChild.textContent.trim();
+      (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1600); },
+        function () { var r = document.createRange(); r.selectNodeContents(el.firstChild); var s = getSelection(); s.removeAllRanges(); s.addRange(r); });
+    });
+  });
+})();
+</script>
+</body>
+</html>

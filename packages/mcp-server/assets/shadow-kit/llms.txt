@@ -1,0 +1,29 @@
+# Clockchain Shadow
+
+> A flight recorder for AI agents. An agent records each step of a task, Shadow signs the steps and anchors their fingerprints (hashes) on a ledger, and anyone with the record's link can check that nothing changed afterwards. Testnet only. This is a hosted MCP server, so there is nothing to install.
+
+To connect and record a task, do this:
+
+1. Read the server's own instructions: https://mcp.clockchain.network/shadow/connect
+2. Connect over streamable HTTP to https://mcp.clockchain.network/shadow/mcp. On claude.ai, use https://mcp.clockchain.network/shadow/chat/mcp instead.
+3. Sign in with OAuth (a free testnet account, no email). Or, if you run code, sign in with your own Ed25519 key and DPoP. The connect page gives the fields.
+4. Record:
+   - start with shadow_start_session;
+   - add each step with shadow_record;
+   - finish with shadow_close_session;
+   - give the person the viewer link.
+5. Signed in with your own key? Sign in this order:
+   1. record your steps;
+   2. call shadow_checkpoint (count is your last step's seq; head is its hash);
+   3. call shadow_sign_checkpoint;
+   4. call shadow_close_session;
+   5. call shadow_sign_checkpoint again.
+   If you lose a hash, shadow_checkpoint returns the one still waiting, even after the close.
+6. Record only synthetic or redacted content. Anyone with the viewer link can read every step.
+
+## Docs
+
+- [Quickstart](quickstart.md): connect, record, share and check, for every client.
+- [Overview](index.md): what Shadow does, its limits, and the design partner program.
+- [Connect instructions (live)](https://mcp.clockchain.network/shadow/connect): plain text from the server.
+- [Clockchain MCP llms.txt](https://mcp.clockchain.network/llms.txt): the whole MCP host.
