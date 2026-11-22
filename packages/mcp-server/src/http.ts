@@ -30,7 +30,7 @@ const PUBLIC_ASSETS: Record<string, { type: string; body: Buffer | null }> = Obj
 // The Shadow design-partner kit (assets/shadow-kit), served at /shadow/kit/ while Shadow is on. A fixed list, read
 // once at boot like the landing media; nothing else under that folder is reachable.
 const KIT_PREFIX = "/shadow/kit/";
-const KIT_HTML_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' https://assets.calendly.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://assets.calendly.com; font-src https://fonts.gstatic.com; img-src 'self' data:; media-src 'self'; frame-src https://calendly.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const KIT_HTML_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' https://assets.calendly.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; media-src 'self'; frame-src https://calendly.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const KIT_FILES: Record<string, { type: string; body: Buffer | null }> = Object.fromEntries(
   ([
     ["index.html", "text/html; charset=utf-8"], ["quickstart.html", "text/html; charset=utf-8"],
@@ -889,6 +889,8 @@ export async function runHttp(): Promise<Server> {
   // and raw error text are never labels.
   // Hosted Shadow's switch, read once at start-up (the /shadow/* mount is set up further down).
   const shadowConfig = loadShadowConfig(process.env);
+  const missingKit = Object.keys(KIT_FILES).filter((k) => !KIT_FILES[k].body);
+  if (shadowConfig.enabled && missingKit.length) console.warn(JSON.stringify({ event: "shadow_kit_files_missing", paths: missingKit }));
   const metrics = new MetricsRegistry();
   const ROUTE_CLASSES = [
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
