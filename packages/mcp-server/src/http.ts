@@ -26,6 +26,24 @@ const PUBLIC_ASSETS: Record<string, { type: string; body: Buffer | null }> = Obj
     return [`/assets/${name}`, { type, body }];
   }),
 );
+
+// The Shadow design-partner kit (assets/shadow-kit), served at /shadow/kit/ while Shadow is on. A fixed list, read
+// once at boot like the landing media; nothing else under that folder is reachable.
+const KIT_PREFIX = "/shadow/kit/";
+const KIT_HTML_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' https://assets.calendly.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; media-src 'self'; frame-src https://calendly.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const KIT_FILES: Record<string, { type: string; body: Buffer | null }> = Object.fromEntries(
+  ([
+    ["index.html", "text/html; charset=utf-8"], ["quickstart.html", "text/html; charset=utf-8"],
+    ["index.md", "text/markdown; charset=utf-8"], ["quickstart.md", "text/markdown; charset=utf-8"],
+    ["llms.txt", "text/plain; charset=utf-8"], ["assets/kit.css", "text/css; charset=utf-8"],
+    ["assets/shadow-promo.mp4", "video/mp4"], ["assets/shadow-promo-poster.jpg", "image/jpeg"],
+  ] as const).map(([name, type]) => {
+    let body: Buffer | null = null;
+    try { body = readFileSync(new URL(`../assets/shadow-kit/${name}`, import.meta.url)); } catch { body = null; }
+    return [`${KIT_PREFIX}${name}`, { type, body }];
+  }),
+);
+KIT_FILES[KIT_PREFIX] = KIT_FILES[`${KIT_PREFIX}index.html`];
 import { CLOCK_TOOLS_HTML, CLOCK_TOOLS_TXT } from "./clock-tools-page.js";
 import { HANDSHAKE_SOP_HTML, HANDSHAKE_SOP_TXT } from "./handshake-sop-page.js";
 import {
@@ -116,6 +134,32 @@ export function parseTokens(raw: string | undefined): string[] {
 
 const firstHeader = (h: string | string[] | undefined): string =>
   (Array.isArray(h) ? h[0] : h) ?? "";
+
+/** A public file read at boot: 404 when missing, and Range-aware (Safari will not play an MP4 that ignores Range). */
+function sendPublicBytes(req: IncomingMessage, res: ServerResponse, file: { type: string; body: Buffer | null } | undefined, extra: Record<string, string>): void {
+  if (!file?.body) {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("not found");
+    return;
+  }
+  const body = file.body;
+  const headers = { "content-type": file.type, "accept-ranges": "bytes", ...extra };
+  const m = /^bytes=(\d*)-(\d*)$/.exec(firstHeader(req.headers.range));
+  if (m && (m[1] || m[2])) {
+    const start = m[1] ? Number(m[1]) : Math.max(0, body.length - Number(m[2]));
+    const end = m[1] && m[2] ? Math.min(Number(m[2]), body.length - 1) : body.length - 1;
+    if (start > end || start >= body.length) {
+      res.writeHead(416, { ...headers, "content-range": `bytes */${body.length}` });
+      res.end();
+      return;
+    }
+    res.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${body.length}`, "content-length": end - start + 1 });
+    res.end(req.method === "HEAD" ? undefined : body.subarray(start, end + 1));
+    return;
+  }
+  res.writeHead(200, { ...headers, "content-length": body.length });
+  res.end(req.method === "HEAD" ? undefined : body);
+}
 
 /** Path portion of a request URL, without the query string. */
 export const pathOf = (url: string | undefined): string => (url ?? "").split("?")[0];
@@ -845,6 +889,8 @@ export async function runHttp(): Promise<Server> {
   // and raw error text are never labels.
   // Hosted Shadow's switch, read once at start-up (the /shadow/* mount is set up further down).
   const shadowConfig = loadShadowConfig(process.env);
+  const missingKit = Object.keys(KIT_FILES).filter((k) => !KIT_FILES[k].body);
+  if (shadowConfig.enabled && missingKit.length) console.warn(JSON.stringify({ event: "shadow_kit_files_missing", paths: missingKit }));
   const metrics = new MetricsRegistry();
   const ROUTE_CLASSES = [
     "health", "status", "status_json", "readyz", "metrics", "clock_tools", "sop",
@@ -1566,31 +1612,24 @@ export async function runHttp(): Promise<Server> {
     // always text. Public, like the landing page.
     // Landing-page media. Public, cacheable, and Range-aware (Safari will not play
     // an MP4 that ignores Range).
+    // The design-partner kit: the same Range-aware serving, only while Shadow is on (off, /shadow/* keeps its old handling).
+    const kitPath = pathOf(req.url);
+    if (shadowConfig.enabled && (req.method === "GET" || req.method === "HEAD") && (kitPath === "/shadow/kit" || kitPath.startsWith(KIT_PREFIX))) {
+      if (kitPath === "/shadow/kit") {
+        res.writeHead(301, { location: KIT_PREFIX, "cache-control": "public, max-age=300" });
+        res.end();
+        return;
+      }
+      const file = KIT_FILES[kitPath];
+      const media = file?.type === "video/mp4" || file?.type === "image/jpeg";
+      return sendPublicBytes(req, res, file, {
+        "cache-control": media ? "public, max-age=86400" : "public, max-age=300",
+        "x-content-type-options": "nosniff",
+        ...(file?.type.startsWith("text/html") ? { "content-security-policy": KIT_HTML_CSP } : {}),
+      });
+    }
     if ((req.method === "GET" || req.method === "HEAD") && pathOf(req.url).startsWith("/assets/")) {
-      const asset = PUBLIC_ASSETS[pathOf(req.url)];
-      if (!asset?.body) {
-        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-        res.end("not found");
-        return;
-      }
-      const body = asset.body;
-      const headers = { "content-type": asset.type, "accept-ranges": "bytes", "cache-control": "public, max-age=86400" };
-      const m = /^bytes=(\d*)-(\d*)$/.exec(firstHeader(req.headers.range));
-      if (m && (m[1] || m[2])) {
-        const start = m[1] ? Number(m[1]) : Math.max(0, body.length - Number(m[2]));
-        const end = m[1] && m[2] ? Math.min(Number(m[2]), body.length - 1) : body.length - 1;
-        if (start > end || start >= body.length) {
-          res.writeHead(416, { ...headers, "content-range": `bytes */${body.length}` });
-          res.end();
-          return;
-        }
-        res.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${body.length}`, "content-length": end - start + 1 });
-        res.end(req.method === "HEAD" ? undefined : body.subarray(start, end + 1));
-        return;
-      }
-      res.writeHead(200, { ...headers, "content-length": body.length });
-      res.end(req.method === "HEAD" ? undefined : body);
-      return;
+      return sendPublicBytes(req, res, PUBLIC_ASSETS[pathOf(req.url)], { "cache-control": "public, max-age=86400" });
     }
     if (req.method === "GET" && (pathOf(req.url) === "/clock-tools" || pathOf(req.url) === "/clock-tools.txt")) {
       const wantsHtml = pathOf(req.url) === "/clock-tools" && firstHeader(req.headers.accept).includes("text/html");
